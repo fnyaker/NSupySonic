@@ -3,7 +3,7 @@ import binascii
 import hashlib
 import logging
 
-import deezer
+import deezerpy
 from Cryptodome.Cipher import AES
 
 from ..config import Config
@@ -36,7 +36,7 @@ class DeezerClient(Client):
 
     def __init__(self, config: Config):
         self.global_config = config
-        self.client = deezer.Deezer()
+        self.client = deezerpy.Deezer()
         self.logged_in = False
         self.config = config.session.deezer
 
