@@ -27,6 +27,7 @@ class API:
         self.access_token = None
 
     def api_call(self, method, args=None):
+        print(f"API CALL: {method} with args {args}")
         if args is None:
             args = {}
         if self.access_token: args['access_token'] = self.access_token
@@ -262,7 +263,7 @@ class API:
     def get_user_radios(self, user_id, index=0, limit=25):
         return self.api_call(f'user/{str(user_id)}/radios', {'index': index, 'limit': limit})
 
-    def get_user_tracks(self, user_id, index=0, limit=25):
+    def get_user_tracks(self, user_id, index=0, limit=25): # get user's favorite tracks
         return self.api_call(f'user/{str(user_id)}/tracks', {'index': index, 'limit': limit})
 
     # Extra calls
@@ -292,3 +293,5 @@ class API:
             resp = self.advanced_search(artist=artist, track=track[:track.find(" - ")], limit=1)
             if len(resp['data']) > 0: return resp['data'][0]['id']
         return "0"
+
+print("deezerpy api.py loaded")
