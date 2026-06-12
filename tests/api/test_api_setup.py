@@ -87,6 +87,31 @@ class ApiSetupTestCase(TestBase):
         self.__test_auth(self.__form_auth_post)
         self.__test_auth(self.__form_auth_enc_post)
 
+    def __token_auth_get(self, username, token, salt):
+        return self.client.get(
+            "/rest/ping.view",
+            query_string={"c": "tests", "u": username, "t": token, "s": salt},
+        )
+
+    def test_auth_token(self):
+        import hashlib
+
+        salt = "abc123"
+        good = hashlib.md5(("Alic3" + salt).encode("utf-8")).hexdigest()
+
+        # valid token authentication (t = md5(password + s))
+        rv = self.__token_auth_get("alice", good, salt)
+        self.assertIn('status="ok"', rv.data)
+
+        # wrong token
+        rv = self.__token_auth_get("alice", "deadbeef", salt)
+        self.assertIn('status="failed"', rv.data)
+        self.assertIn('code="40"', rv.data)
+
+        # unknown user
+        rv = self.__token_auth_get("null", good, salt)
+        self.assertIn('code="40"', rv.data)
+
     def test_required_client(self):
         rv = self.client.get(
             "/rest/ping.view", query_string={"u": "alice", "p": "Alic3"}

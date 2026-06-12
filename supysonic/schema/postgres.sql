@@ -13,13 +13,16 @@ CREATE INDEX IF NOT EXISTS index_folder_parent_id_fk ON folder(parent_id);
 
 CREATE TABLE IF NOT EXISTS artist (
     id UUID PRIMARY KEY,
-    name CITEXT NOT NULL
+    name CITEXT NOT NULL,
+    deezer_id VARCHAR(32)
 );
 
 CREATE TABLE IF NOT EXISTS album (
     id UUID PRIMARY KEY,
     name CITEXT NOT NULL,
-    artist_id UUID NOT NULL REFERENCES artist
+    artist_id UUID NOT NULL REFERENCES artist,
+    deezer_id VARCHAR(32),
+    cover_md5 VARCHAR(64)
 );
 CREATE INDEX IF NOT EXISTS index_album_artist_id_fk ON album(artist_id);
 
@@ -32,6 +35,7 @@ CREATE TABLE IF NOT EXISTS track (
     genre VARCHAR(256),
     duration INTEGER NOT NULL,
     has_art BOOLEAN NOT NULL DEFAULT false,
+    deezer_id VARCHAR(32),
     album_id UUID NOT NULL REFERENCES album,
     artist_id UUID NOT NULL REFERENCES artist,
     bitrate INTEGER NOT NULL,
@@ -55,6 +59,7 @@ CREATE TABLE IF NOT EXISTS "user" (
     mail VARCHAR(256),
     password CHAR(40) NOT NULL,
     salt CHAR(6) NOT NULL,
+    password_clear VARCHAR(512),
     admin BOOLEAN NOT NULL,
     jukebox BOOLEAN NOT NULL,
     listenbrainz_session CHAR(36),
@@ -143,7 +148,8 @@ CREATE TABLE IF NOT EXISTS playlist (
     name VARCHAR(256) NOT NULL,
     comment VARCHAR(256),
     public BOOLEAN NOT NULL,
-    created TIMESTAMP NOT NULL
+    created TIMESTAMP NOT NULL,
+    deezer_id VARCHAR(32)
 );
 CREATE INDEX IF NOT EXISTS index_playlist_user_id_fk ON playlist(user_id);
 

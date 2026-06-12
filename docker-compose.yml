@@ -1,0 +1,50 @@
+services:
+  supysonic:
+    # Build the image locally (includes the Svelte web UI build):
+    build: .
+    # …or pull a prebuilt image instead of building, by commenting out `build:`
+    # above and uncommenting this:
+    # image: ghcr.io/fnyaker/nsupysonic-deezer:latest
+    container_name: supysonic
+    restart: unless-stopped
+    ports:
+      - "5722:5722"
+    environment:
+      # First-run admin, auto-created on boot (also the Subsonic/web UI login).
+      SUPYSONIC_ADMIN_USER: ${SUPYSONIC_ADMIN_USER:-admin}
+      SUPYSONIC_ADMIN_PASSWORD: ${SUPYSONIC_ADMIN_PASSWORD:-changeme}
+      # Deezer proxy: set DEEZER_ARL to enable it (empty = Deezer disabled).
+      DEEZER_ARL: ${DEEZER_ARL:-}
+      DEEZER_SYNC_USER: ${SUPYSONIC_ADMIN_USER:-admin}
+      DEEZER_QUALITY: ${DEEZER_QUALITY:-FLAC}
+      # Auto-sync runs on startup + daily at 04:00 by default; override the time here.
+      DEEZER_SYNC_AT: ${DEEZER_SYNC_AT:-}
+      # Report what you play back to Deezer so recommendations/Flow keep learning.
+      # Off by default (opt-in). Set to "yes" to enable.
+      DEEZER_REPORT_LISTENS: ${DEEZER_REPORT_LISTENS:-}
+    volumes:
+      # Persistent state: sqlite db, caches and the Deezer FLAC archive.
+      - supysonic-data:/data
+      # Optional: an existing local music library (hybrid with Deezer).
+      # - /path/to/your/music:/data/music:ro
+      # Optional: a full hand-written config instead of the env vars above.
+      # Copy config/supysonic.conf.example to config/supysonic.conf, edit it
+      # (it's gitignored — it holds your ARL), then uncomment:
+      # - ./config/supysonic.conf:/etc/supysonic:ro
+
+  # Optional background daemon: folder watcher + jukebox. Shares the same env,
+  # config and /data volume. Uncomment to enable.
+  # supysonic-daemon:
+  #   build: .
+  #   # image: ghcr.io/fnyaker/nsupysonic-deezer:latest
+  #   container_name: supysonic-daemon
+  #   restart: unless-stopped
+  #   command: ["supysonic-daemon"]
+  #   environment:
+  #     DEEZER_ARL: ${DEEZER_ARL:-}
+  #     DEEZER_SYNC_USER: ${SUPYSONIC_ADMIN_USER:-admin}
+  #   volumes:
+  #     - supysonic-data:/data
+
+volumes:
+  supysonic-data:

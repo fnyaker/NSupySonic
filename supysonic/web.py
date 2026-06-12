@@ -72,6 +72,22 @@ def create_application(config=None):
     app.cache = Cache(path.join(cache_dir, "cache"), max_size_cache)
     app.transcode_cache = Cache(path.join(cache_dir, "transcodes"), max_size_transcodes)
 
+    # Initialize the optional Deezer proxy (lazy login on first use)
+    from .deezer import get_provider
+
+    app.deezer = get_provider(app.config)
+    app.deezer_prefetch = None
+    if app.deezer is not None and app.config["DEEZER"].get("preload"):
+        from .deezer.prefetch import DeezerPrefetcher
+
+        count = int(app.config["DEEZER"].get("preload_count") or 2)
+        app.deezer_prefetch = DeezerPrefetcher(app.deezer, workers=min(max(1, count), 4))
+
+    if app.deezer is not None and not app.testing:
+        from .deezer.scheduler import maybe_start
+
+        maybe_start(app)
+
     # Test for the cache directory
     cache_path = app.config["WEBAPP"]["cache_dir"]
     if not path.exists(cache_path):
@@ -79,6 +95,12 @@ def create_application(config=None):
 
     # Read or create secret key
     app.secret_key = get_secret_key("cookies_secret")
+
+    # Harden the web UI session cookie (the Subsonic API uses its own per-request
+    # auth, so this only affects the /api + /app session). SameSite=Lax blocks the
+    # cookie on cross-site POSTs, mitigating CSRF on the mutating /api endpoints.
+    app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
+    app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
 
     # Import app sections
     if app.config["WEBAPP"]["mount_webui"]:
@@ -89,6 +111,18 @@ def create_application(config=None):
         from .api import api
 
         app.register_blueprint(api, url_prefix="/rest")
+
+    if app.config["WEBAPP"]["mount_webui"]:
+        # Custom Deezer-native JSON API for the bundled discovery web UI.
+        from .webui import webapi
+
+        app.register_blueprint(webapi, url_prefix="/api")
+
+        if app.config["WEBAPP"].get("mount_spa", True):
+            # Bundled Svelte discovery app, served at /app (hash-routed).
+            from .webui.spa import spa
+
+            app.register_blueprint(spa)
 
     if not app.testing:
         close_connection()

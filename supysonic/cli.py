@@ -361,6 +361,139 @@ def user_rename(name, newname):
     click.echo(f"User '{name}' renamed to '{newname}'")
 
 
+@cli.group("deezer")
+def deezer():
+    """Deezer proxy management commands"""
+    pass
+
+
+def _require_provider(config):
+    from .deezer import get_provider
+
+    provider = get_provider(config)
+    if provider is None:
+        raise ClickException(
+            "Deezer proxy is disabled or misconfigured (check the [deezer] "
+            "section: 'enabled', 'arl' and 'archive_dir')."
+        )
+    return provider
+
+
+@deezer.command("login-test")
+@click.pass_obj
+def deezer_login_test(config):
+    """Check that the configured ARL can log in to Deezer."""
+
+    provider = _require_provider(config)
+    try:
+        provider.dz  # triggers the lazy login
+    except Exception as e:
+        raise ClickException(f"Login failed: {e}") from e
+
+    click.echo(f"Logged in as '{provider.dz.current_user.get('name')}' (id {provider.user_id})")
+    click.echo(f"Lossless (FLAC) available: {'yes' if provider.can_lossless else 'no'}")
+    click.echo(f"Archive dir: {provider.archive_dir}")
+    click.echo(f"Default quality: {provider.default_quality}")
+
+
+@deezer.command("import")
+@click.argument("ref")
+@click.pass_obj
+def deezer_import(config, ref):
+    """Import a Deezer TRACK, ALBUM or PLAYLIST into the library.
+
+    REF is a deezer.com URL or a 'track|album|playlist <id>' reference. The
+    audio is fetched lazily on first play; this only imports the metadata.
+    """
+
+    provider = _require_provider(config)
+    from .deezer.archive import (
+        parse_deezer_ref,
+        import_track,
+        import_album,
+        import_playlist_tracks,
+    )
+
+    try:
+        kind, did = parse_deezer_ref(ref)
+    except ValueError as e:
+        raise ClickException(str(e)) from e
+
+    try:
+        if kind == "track":
+            import_track(provider, did)
+            click.echo(f"Imported track {did}")
+        elif kind == "album":
+            tracks = import_album(provider, did)
+            click.echo(f"Imported album {did}: {len(tracks)} tracks")
+        elif kind == "playlist":
+            tracks = import_playlist_tracks(provider, did)
+            click.echo(f"Imported playlist {did}: {len(tracks)} tracks")
+        else:
+            raise ClickException(f"Cannot import a Deezer {kind}")
+    except Exception as e:
+        raise ClickException(str(e)) from e
+
+
+@deezer.command("sync")
+@click.pass_obj
+def deezer_sync(config):
+    """Import Deezer playlists, favorites and recommendations into supysonic."""
+
+    provider = _require_provider(config)
+    cfg = config.DEEZER
+    sync_user = cfg.get("sync_user")
+    if not sync_user:
+        raise ClickException("Set 'sync_user' in the [deezer] config to a supysonic username.")
+
+    from .deezer.importer import DeezerImporter
+
+    try:
+        importer = DeezerImporter(provider, sync_user, progress=click.echo)
+    except User.DoesNotExist as e:
+        raise ClickException(
+            f"sync_user '{sync_user}' does not exist (create it with 'supysonic-cli user add')."
+        ) from e
+
+    click.echo("Logging in to Deezer...")
+    try:
+        provider.dz  # trigger login now so failures surface immediately
+    except Exception as e:
+        raise ClickException(f"Deezer login failed: {e}") from e
+    click.echo(f"Logged in as '{provider.dz.current_user.get('name')}'.")
+
+    try:
+        out = importer.sync(cfg)
+    except Exception as e:
+        raise ClickException(str(e)) from e
+
+    if "playlists" in out:
+        click.echo(f"Playlists synced: {out['playlists']}")
+    if "favorites" in out:
+        click.echo(f"Favorite tracks: {out['favorites']}")
+    if "recommendations" in out:
+        click.echo(f"Recommendations: {out['recommendations']}")
+
+
+@deezer.command("scan-local")
+@click.pass_obj
+def deezer_scan_local(config):
+    """Import user-dropped audio files from the archive dir as local tracks.
+
+    Any audio file you copy into archive_dir becomes a normal library track
+    (searchable, playlistable, streamable) tagged as local — the Deezer sync
+    leaves it alone. Runs automatically on each sync too.
+    """
+    cfg = config.DEEZER
+    archive = cfg.get("archive_dir")
+    if not archive:
+        raise ClickException("Set 'archive_dir' in the [deezer] config.")
+    from .deezer import local
+
+    out = local.scan_local(archive)
+    click.echo(f"Local scan: {out['added']} added, {out['removed']} removed.")
+
+
 def main():
     config = IniConfig.from_common_locations()
     init_database(config.BASE["database_uri"])

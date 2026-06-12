@@ -4,6 +4,7 @@ from time import sleep
 import json
 from deezerpy.utils import map_artist_album, map_user_track, map_user_artist, map_user_album, map_user_playlist
 from deezerpy.errors import GWAPIError
+from deezerpy._throttle import limiter
 
 class PlaylistStatus():
     PUBLIC = 0
@@ -29,7 +30,7 @@ class GW:
         self.session = session
         self.api_token = None
 
-    def api_call(self, method, args=None, params=None):
+    def api_call(self, method, args=None, params=None, _net_retries=2):
         if args is None: args = {}
         if params is None: params = {}
         if not self.api_token and method != 'deezer.getUserData': self.api_token = self._get_token()
@@ -38,6 +39,7 @@ class GW:
              'input': '3',
              'method': method}
         p.update(params)
+        limiter.acquire()
         try:
             result_json = self.session.post(
                 "http://www.deezer.com/ajax/gw-light.php",
@@ -47,8 +49,11 @@ class GW:
                 headers=self.http_headers
             ).json()
         except (requests.ConnectionError, requests.Timeout):
+            # Bounded retry so a network outage surfaces instead of hanging forever.
+            if _net_retries <= 0:
+                raise
             sleep(2)
-            return self.api_call(method, args, params)
+            return self.api_call(method, args, params, _net_retries=_net_retries - 1)
         if len(result_json['error']):
             if (
                 result_json['error'] == {"GATEWAY_ERROR": "invalid api token"} or
@@ -242,6 +247,10 @@ class GW:
     def remove_playlist_from_favorites(self, playlist_id):
         return self.api_call('playlist.deleteFavorite', {'PLAYLIST_ID': playlist_id})
 
+    def get_smart_tracklist(self, smarttracklist_id):
+        """Personalized smart tracklist (e.g. "new-releases"); SONGS.data holds the tracks."""
+        return self.api_call('deezer.pageSmartTracklist', {'SMARTTRACKLIST_ID': smarttracklist_id})
+
     def get_page(self, page):
         params = {
             'gateway_input': json.dumps({
@@ -379,3 +388,65 @@ class GW:
             track = dict(track, **ids_raw['data'][i])
             result.append(map_user_track(track))
         return result
+
+    def log_listen(self, sng_id, listened=0, next_id=None, fmt="MP3_MISC",
+                   context=None, is_shuffle=False, stream_id="", ts_listen=None):
+        """Report a track play to Deezer (``log.listen``).
+
+        This is the same signal the web player sends; it feeds Deezer's
+        recommendation engine and Flow. ``listened`` is the number of seconds
+        actually played. Opt-in only — callers gate it behind a config flag.
+        Best-effort: returns the gateway result or raises on a hard error.
+        """
+        from time import time as _now
+        now = int(_now())
+        if ts_listen is None:
+            ts_listen = now - int(listened or 0)
+        ctxt = context or {}
+        body = {
+            "next_media": {"media": {"id": str(next_id or sng_id), "type": "song"}},
+            "params": {
+                "ts_listen": int(ts_listen),
+                "type": 0,
+                "stat": {"seek": 0, "pause": 0, "sync": 1},
+                "media": {"id": str(sng_id), "type": "song", "format": fmt},
+                "ctxt": {"id": str(ctxt.get("id", "")), "t": str(ctxt.get("t", ""))},
+                "dev": {"t": 0, "v": "web"},
+                "is_shuffle": bool(is_shuffle),
+                "ls": 0,
+                "lt": int(listened or 0),
+                "stream_id": str(stream_id or ""),
+                "timestamp": now,
+            },
+        }
+        return self.api_call("log.listen", body)
+
+    # -- Flow / radio / mixes --------------------------------------------
+
+    def get_user_radio(self, user_id=None):
+        """The user's Flow: an endless personalized stream. ``data`` holds tracks."""
+        params = {}
+        if user_id is not None:
+            params['user_id'] = user_id
+        return self.api_call('radio.getUserRadio', params)
+
+    def get_track_mix(self, sng_id, start_with_input_track=True):
+        """A radio/mix seeded from a single track (endless queue). ``data`` = tracks."""
+        return self.api_call('song.getSearchTrackMix', {
+            'sng_id': sng_id,
+            'start_with_input_track': start_with_input_track,
+        })
+
+    def get_artist_radio(self, art_id, limit=25):
+        """A radio/mix seeded from an artist. ``data`` holds tracks."""
+        return self.api_call('smart.getSmartRadio', {'ART_ID': art_id, 'nb': limit})
+
+    # -- Channels / genres ------------------------------------------------
+
+    def get_channels(self):
+        """The "channels" landing page (genres, moods, charts entry points)."""
+        return self.get_page('channels')
+
+    def get_channel(self, channel_name):
+        """A specific channel page, e.g. ``channels/rock``."""
+        return self.get_page(channel_name)

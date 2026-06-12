@@ -71,10 +71,15 @@ def authorize():
         raise Unauthorized()
 
     username = request.values["u"]
-    password = request.values["p"]
-    password = decode_password(password)
 
-    user = UserManager.try_auth(username, password)
+    token, salt = map(request.values.get, ("t", "s"))
+    if token and salt and "p" not in request.values:
+        # Subsonic token authentication (t = md5(password + s))
+        user = UserManager.try_auth_token(username, token, salt)
+    else:
+        password = decode_password(request.values["p"])
+        user = UserManager.try_auth(username, password)
+
     if user is None:
         logger.error(
             "Failed login attempt for user %s (IP: %s)", username, request.remote_addr

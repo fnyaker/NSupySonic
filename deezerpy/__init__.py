@@ -3,6 +3,7 @@ import requests
 import json
 from deezerpy.gw import GW
 from deezerpy.api import API
+from deezerpy.graphql import GraphQL
 from deezerpy.errors import DeezerError, WrongLicense, WrongGeolocation
 
 __version__ = "1.3.7"
@@ -33,6 +34,7 @@ class Deezer:
 
         self.api = API(self.session, self.http_headers)
         self.gw = GW(self.session, self.http_headers)
+        self.gql = GraphQL(self.session, self.http_headers)
 
     def get_session(self):
         return {

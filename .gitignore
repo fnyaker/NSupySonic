@@ -67,3 +67,22 @@ target/
 
 *.orig
 .vscode
+.claude
+sourceproj
+
+# Deezer API exploration captures (contain session tokens!)
+tools/deezer_explore/*.har
+tools/deezer_explore/*.catalog.json
+tools/deezer_explore/*.catalog.md
+tools/deezer_explore/probe.json
+tools/deezer_explore/probe.md
+
+# Local runtime config — contains your Deezer ARL. NEVER commit it.
+# A sanitized template is tracked as config/supysonic.conf.example.
+config/supysonic.conf
+config/*.local.conf
+
+# Svelte web UI build artifacts
+webapp/node_modules/
+webapp/dist/
+supysonic/webui/dist/

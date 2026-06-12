@@ -1,0 +1,72 @@
+; Example NSupySonic-Deezer config for the Docker image.
+;
+; Use this ONLY if you prefer a hand-written file over the environment variables
+; in docker-compose.yml / .env. Copy it to "config/supysonic.conf", fill in the
+; [deezer] section (at least: arl, sync_user), then uncomment the matching
+; volume line in docker-compose.yml:
+;     - ./config/supysonic.conf:/etc/supysonic:ro
+;
+; config/supysonic.conf is gitignored because it holds your ARL — never commit it.
+; All paths point inside the /data volume.
+
+[base]
+database_uri = sqlite:////data/db/supysonic.db
+; For heavier/multi-user use, prefer Postgres:
+;database_uri = postgres://supysonic:supysonic@db/supysonic
+
+[webapp]
+cache_dir = /data/cache
+cache_size = 512
+; Transcoded (lower-quality) outputs live here; raise it if you stream a lot.
+transcode_cache_size = 2048
+log_level = INFO
+log_rotate = no
+
+[transcoding]
+; ffmpeg (installed in the image) transcodes the archived FLAC to Opus on the
+; fly. In your Subsonic client, request lossless for the original FLAC, or set a
+; bitrate (e.g. 320 / 128 / 64) to get Opus at that rate.
+transcoder_flac_opus = ffmpeg -i %srcpath -v 0 -map 0:a:0 -c:a libopus -b:a %outratek -vbr on -f ogg -
+transcoder_mp3_opus = ffmpeg -i %srcpath -v 0 -map 0:a:0 -c:a libopus -b:a %outratek -vbr on -f ogg -
+transcoder = ffmpeg -i %srcpath -ab %outratek -v 0 -f %outfmt -
+default_transcode_target = opus
+
+[mimetypes]
+opus = audio/ogg
+
+[daemon]
+; If you also run the supysonic-daemon service, keep the socket on the shared
+; /data volume so the web container can reach it.
+socket = /data/supysonic.sock
+log_level = INFO
+log_rotate = no
+
+[deezer]
+enabled = yes
+; Your Deezer ARL cookie (deezer.com -> cookies -> "arl"). Treat it like a
+; password: it grants full access to your account.
+arl = PUT-YOUR-ARL-HERE
+archive_dir = /data/archive
+default_quality = FLAC
+; supysonic username that owns imported playlists/favorites (create it with
+; `supysonic-cli user add <name>`).
+sync_user = admin
+sync_playlists = yes
+sync_favorites = yes
+import_new_releases = yes
+import_flow = yes
+; Smart tracklists -> "Deezer · <title>" playlists. Unset = default set
+; (new-releases discovery monthly-top inspired-by-1..5).
+;smart_tracklists = new-releases discovery monthly-top inspired-by-1 inspired-by-2 inspired-by-3 inspired-by-4 inspired-by-5
+push_to_deezer = yes
+; Report what you play here back to Deezer (recommendations/Flow). Default: no
+report_listens = no
+; Import audio files dropped into archive_dir as local library tracks. Default: yes
+scan_local = yes
+preload = yes
+preload_count = 2
+; Auto-sync: runs on startup and then automatically. Daily at this time…
+sync_on_start = yes
+sync_at = 04:00
+; …or every N minutes instead (overrides sync_at when > 0):
+;sync_interval = 360

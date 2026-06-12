@@ -1,0 +1,537 @@
+<script>
+  // Desktop now-playing: two panes — a large cover with controls and a bar
+  // visualizer on the left, the up-next queue / lyrics on the right.
+  import { onDestroy } from "svelte";
+  import { push } from "svelte-spa-router";
+  import { fade } from "svelte/transition";
+  import {
+    player,
+    current,
+    playing,
+    favorites,
+    quality,
+    immersiveOpen,
+    seekTo,
+  } from "../lib/stores.js";
+  import { toggleFavorite } from "../lib/actions.js";
+  import { duration as fmtDuration } from "../lib/format.js";
+  import { getAnalyser } from "../lib/visualizer.js";
+  import Cover from "./Cover.svelte";
+  import Lyrics from "./Lyrics.svelte";
+  import Icon from "./Icon.svelte";
+
+  const QUALITIES = ["FLAC", "OPUS_320", "OPUS_128", "OPUS_64"];
+  const QLABEL = { FLAC: "FLAC", OPUS_320: "320", OPUS_128: "128", OPUS_64: "64" };
+
+  let tab = "queue";
+
+  $: q = $player.queue;
+  $: idx = $player.index;
+  $: fav = $current && $favorites.has(String($current.deezer_id));
+  $: progress = $player.duration ? ($player.currentTime / $player.duration) * 100 : 0;
+  $: repeatIcon = $player.repeat === "one" ? "repeat1" : "repeat";
+
+  function close() {
+    immersiveOpen.set(false);
+  }
+  function go(p) {
+    close();
+    push(p);
+  }
+  function seek(e) {
+    const t = +e.target.value;
+    player.setProgress(t, $player.duration);
+    seekTo.set(t);
+  }
+
+  // -- bar visualizer --------------------------------------------------------
+  let canvas;
+  let rafId = null;
+  let freq = null;
+  let agc = 0.18; // slow-moving average level, for automatic gain control
+
+  function draw() {
+    rafId = requestAnimationFrame(draw);
+    const an = getAnalyser();
+    if (!an || !canvas) return;
+    if (!freq || freq.length !== an.frequencyBinCount)
+      freq = new Uint8Array(an.frequencyBinCount);
+    an.getByteFrequencyData(freq);
+    const cw = canvas.clientWidth,
+      ch = canvas.clientHeight;
+    if (!cw || !ch) return;
+    if (canvas.width !== cw) canvas.width = cw;
+    if (canvas.height !== ch) canvas.height = ch;
+    const g = canvas.getContext("2d");
+    g.clearRect(0, 0, cw, ch);
+
+    const bars = Math.max(28, Math.min(64, Math.floor(cw / 9)));
+    const bins = freq.length;
+    const minBin = 1;
+    const maxBin = Math.floor(bins * 0.9);
+
+    // Pass 1: log-spaced bands + a gentle high-frequency tilt (raw 0..1).
+    const raw = new Array(bars);
+    let frameSum = 0;
+    for (let i = 0; i < bars; i++) {
+      const lo = Math.floor(minBin * Math.pow(maxBin / minBin, i / bars));
+      const hi = Math.max(lo + 1, Math.floor(minBin * Math.pow(maxBin / minBin, (i + 1) / bars)));
+      let sum = 0,
+        n = 0;
+      for (let b = lo; b < hi && b < bins; b++) {
+        sum += freq[b];
+        n++;
+      }
+      const r = Math.min(1, (n ? sum / n : 0) / 255) * (0.85 + 0.4 * (i / bars));
+      raw[i] = r;
+      frameSum += r;
+    }
+
+    // Automatic gain: adapt to the running average so loud tracks don't peg the
+    // meter and quiet ones still move — heavily smoothed, low base sensitivity.
+    agc = agc * 0.94 + (frameSum / bars) * 0.06;
+    const gain = 0.55 / Math.max(0.15, agc);
+
+    const bw = cw / bars;
+    for (let i = 0; i < bars; i++) {
+      let v = Math.min(1, raw[i] * gain);
+      v = Math.pow(v, 1.25); // mild contrast, no hard ceiling slam
+      const bh = Math.max(2, v * ch);
+      g.fillStyle = `rgba(255,255,255,${0.14 + 0.55 * v})`;
+      g.fillRect(i * bw + bw * 0.16, (ch - bh) / 2, bw * 0.68, bh);
+    }
+  }
+  function start() {
+    if (rafId || (typeof document !== "undefined" && document.hidden)) return;
+    draw();
+  }
+  function stop() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+  function onVisibility() {
+    document.hidden ? stop() : start();
+  }
+  $: if ($immersiveOpen) start();
+  else stop();
+  if (typeof document !== "undefined")
+    document.addEventListener("visibilitychange", onVisibility);
+  onDestroy(() => {
+    stop();
+    if (typeof document !== "undefined")
+      document.removeEventListener("visibilitychange", onVisibility);
+  });
+</script>
+
+<div class="d" transition:fade={{ duration: 150 }}>
+  <div class="bg" style={`background-image:url(${$current.album?.cover || ""})`}></div>
+  <div class="scrim"></div>
+
+  <header>
+    <button class="ic" on:click={close} aria-label="Réduire"><Icon name="chevronDown" size={26} /></button>
+    <span class="ctx">{$player.context?.kind === "flow" ? "Flow" : "En lecture"}</span>
+    <span class="spacer"></span>
+  </header>
+
+  <div class="stage">
+    <section class="main">
+      <div class="cover">
+        <div class="glow" style={`background-image:url(${$current.album?.cover || ""})`}></div>
+        {#key $current.deezer_id}
+          <div class="cover-fade" in:fade={{ duration: 260 }} out:fade={{ duration: 260 }}>
+            <Cover src={$current.album?.cover} alt={$current.title} />
+          </div>
+        {/key}
+      </div>
+
+      <div class="info">
+        <div class="txt">
+          <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
+          <button class="a" on:click={() => $current.artist && go("/artist/" + $current.artist.deezer_id)}>{$current.artist?.name}</button>
+        </div>
+        <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
+          <Icon name={fav ? "heartFilled" : "heart"} size={24} />
+        </button>
+      </div>
+
+      <div class="seek">
+        <span class="time">{fmtDuration($player.currentTime)}</span>
+        <input type="range" min="0" max={$player.duration || 0} value={$player.currentTime} on:input={seek} style={`--p:${progress}%`} />
+        <span class="time">{fmtDuration($player.duration)}</span>
+      </div>
+
+      <div class="controls">
+        <button class="sm" class:on={$player.shuffle} on:click={() => player.toggleShuffle()} aria-label="Aléatoire"><Icon name="shuffle" size={22} /></button>
+        <button on:click={() => player.prev()} aria-label="Précédent"><Icon name="prev" size={30} /></button>
+        <button class="pp" on:click={() => player.toggle()} aria-label="Lecture/Pause"><Icon name={$playing ? "pause" : "play"} size={28} /></button>
+        <button on:click={() => player.next()} aria-label="Suivant"><Icon name="next" size={30} /></button>
+        <button class="sm" class:on={$player.repeat !== "off"} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
+      </div>
+
+      <canvas class="viz" bind:this={canvas} aria-hidden="true"></canvas>
+
+      <div class="footer">
+        <div class="left">
+          <button class="sm" class:on={$player.autoplay} on:click={() => player.toggleAutoplay()} aria-label="Lecture auto"><Icon name="infinity" size={20} /></button>
+          <div class="vol">
+            <button class="sm" on:click={() => player.toggleMute()} aria-label="Muet"><Icon name={$player.muted || $player.volume === 0 ? "mute" : "volume"} size={19} /></button>
+            <input class="vol-range" type="range" min="0" max="1" step="0.01" value={$player.muted ? 0 : $player.volume} on:input={(e) => player.setVolume(+e.target.value)} style={`--p:${($player.muted ? 0 : $player.volume) * 100}%`} aria-label="Volume" />
+          </div>
+        </div>
+        <div class="quality" role="group" aria-label="Qualité">
+          {#each QUALITIES as qq}
+            <button class:sel={$quality === qq} on:click={() => quality.set(qq)}>{QLABEL[qq]}</button>
+          {/each}
+        </div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="tabs">
+        <button class:active={tab === "queue"} on:click={() => (tab = "queue")}>File d'attente</button>
+        <button class:active={tab === "lyrics"} on:click={() => (tab = "lyrics")}>Paroles</button>
+      </div>
+      <div class="side-body">
+        {#if tab === "queue"}
+          <ol class="queue">
+            {#each q as t, i (t.deezer_id + ":" + i)}
+              <li class:now={i === idx} class:past={i < idx}>
+                <button on:click={() => player.jump(i)}>
+                  <Cover src={t.album?.cover} alt="" size={42} />
+                  <span class="qm"><span class="qt">{t.title}</span><span class="qa">{t.artist?.name}</span></span>
+                  <span class="qd">{fmtDuration(t.duration)}</span>
+                </button>
+              </li>
+            {/each}
+          </ol>
+        {:else}
+          <Lyrics />
+        {/if}
+      </div>
+    </aside>
+  </div>
+</div>
+
+<style>
+  .d {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    color: #fff;
+    overflow: hidden;
+  }
+  .bg {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    filter: blur(64px) saturate(1.5) brightness(0.62);
+    transform: scale(1.25);
+  }
+  .scrim {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 85% 75% at 50% 45%, transparent 0%, rgba(8, 6, 12, 0.55) 100%),
+      linear-gradient(180deg, rgba(8, 6, 12, 0.18) 0%, rgba(8, 6, 12, 0.5) 100%);
+  }
+  header,
+  .stage {
+    position: relative;
+    z-index: 1;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+  }
+  .ctx {
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.7);
+  }
+  .spacer {
+    width: 26px;
+  }
+  .ic {
+    color: rgba(255, 255, 255, 0.85);
+    display: grid;
+    place-items: center;
+  }
+
+  .stage {
+    height: calc(100% - 64px);
+    display: flex;
+    align-items: stretch;
+    gap: 28px;
+    padding: 0 24px 28px;
+    max-width: 1240px;
+    margin: 0 auto;
+  }
+  .main {
+    flex: 1;
+    min-width: 0;
+    max-width: 520px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 22px;
+  }
+
+  .cover {
+    position: relative;
+    width: min(46vh, 100%);
+    aspect-ratio: 1 / 1;
+    margin: 0 auto;
+  }
+  .glow {
+    position: absolute;
+    inset: -6%;
+    background-size: cover;
+    background-position: center;
+    filter: blur(40px) saturate(1.6);
+    opacity: 0.7;
+    border-radius: 28%;
+    z-index: -1;
+  }
+  /* keyed crossfade: old + new overlap during the transition */
+  .cover-fade {
+    position: absolute;
+    inset: 0;
+  }
+  .cover :global(.cover) {
+    box-shadow: 0 30px 70px rgba(0, 0, 0, 0.55);
+  }
+
+  .info {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .txt {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .t {
+    font-size: 1.5rem;
+    font-weight: 800;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .a {
+    font-size: 1.05rem;
+    text-align: left;
+    color: rgba(255, 255, 255, 0.75);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .t:hover,
+  .a:hover {
+    text-decoration: underline;
+  }
+  .fav {
+    color: rgba(255, 255, 255, 0.8);
+    flex: none;
+  }
+  .fav.on {
+    color: var(--accent-2);
+  }
+
+  .seek {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .time {
+    font-size: 0.72rem;
+    color: rgba(255, 255, 255, 0.7);
+    width: 38px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 5px;
+    border-radius: 3px;
+    flex: 1;
+    background: linear-gradient(90deg, #fff var(--p, 0%), rgba(255, 255, 255, 0.25) var(--p, 0%));
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 26px;
+  }
+  .controls button {
+    color: #fff;
+  }
+  .controls .sm {
+    color: rgba(255, 255, 255, 0.7);
+  }
+  .controls .sm.on {
+    color: var(--accent);
+  }
+  .controls .pp {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: #fff;
+    color: #111;
+    display: grid;
+    place-items: center;
+  }
+  .controls .pp:hover {
+    transform: scale(1.05);
+  }
+
+  .viz {
+    width: 100%;
+    height: 48px;
+    opacity: 0.9;
+  }
+
+  .footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .footer .left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .footer .sm {
+    color: rgba(255, 255, 255, 0.7);
+  }
+  .footer .sm.on {
+    color: var(--accent);
+  }
+  .vol {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .vol-range {
+    width: 110px;
+    flex: none;
+  }
+  .quality {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+  }
+  .quality button {
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.75);
+  }
+  .quality button.sel {
+    background: #fff;
+    color: #111;
+  }
+
+  .side {
+    width: 360px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+  .tabs {
+    display: flex;
+    gap: 6px;
+    padding: 12px 12px 6px;
+  }
+  .tabs button {
+    padding: 7px 12px;
+    border-radius: 999px;
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .tabs button.active {
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+  }
+  .side-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 10px 14px;
+  }
+  .queue {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .queue li button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 6px;
+    border-radius: 8px;
+    text-align: left;
+    color: #fff;
+  }
+  .queue li button:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .queue li.now .qt {
+    color: var(--accent);
+  }
+  .queue li.past {
+    opacity: 0.5;
+  }
+  .qm {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+  .qt,
+  .qa {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .qt {
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .qa {
+    font-size: 0.78rem;
+    color: rgba(255, 255, 255, 0.6);
+  }
+  .qd {
+    font-size: 0.78rem;
+    color: rgba(255, 255, 255, 0.6);
+    font-variant-numeric: tabular-nums;
+  }
+</style>

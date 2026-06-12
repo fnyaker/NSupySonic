@@ -195,10 +195,15 @@ def artist_info():
 def album_info():
     res = get_entity(Album)
     info = res.as_subsonic_album(request.user)
+    tracks = sorted(res.tracks, key=lambda t: t.sort_key())
     info["song"] = [
-        t.as_subsonic_child(request.user, request.client)
-        for t in sorted(res.tracks, key=lambda t: t.sort_key())
+        t.as_subsonic_child(request.user, request.client) for t in tracks
     ]
+
+    pf = getattr(current_app, "deezer_prefetch", None)
+    if pf is not None:
+        count = int(current_app.config["DEEZER"].get("preload_count") or 2)
+        pf.enqueue_many((t for t in tracks if t.deezer_id), count)
 
     return request.formatter("album", info)
 

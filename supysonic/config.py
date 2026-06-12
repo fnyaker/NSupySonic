@@ -37,6 +37,7 @@ class DefaultConfig:
         "log_rotate": True,
         "mount_webui": True,
         "mount_api": True,
+        "mount_spa": True,
         "index_ignored_prefixes": "El La Le Las Les Los The",
         "online_lyrics": False,
     }
@@ -57,6 +58,36 @@ class DefaultConfig:
     LISTENBRAINZ = {"api_url": "https://api.listenbrainz.org"}
     TRANSCODING = {}
     MIMETYPES = {}
+    DEEZER = {
+        "enabled": False,
+        "arl": None,
+        "archive_dir": None,
+        "default_quality": "FLAC",  # FLAC | MP3_320 | MP3_128
+        "sync_user": None,  # supysonic user owning imported playlists/favorites
+        "sync_playlists": True,
+        "sync_favorites": True,
+        "import_new_releases": True,  # import the smart tracklists below
+        "import_flow": True,
+        # Smart tracklists to expose as "Deezer · ..." playlists (None = default
+        # set: new-releases, discovery, monthly-top, inspired-by-1..5).
+        "smart_tracklists": None,
+        "push_to_deezer": True,  # mirror Subsonic playlist/favorite changes to Deezer
+        # Import user-dropped audio files in archive_dir as local library tracks
+        # (deezer_id NULL). They're searchable/playlistable like Deezer tracks but
+        # the Deezer sync never touches them. Scanned on each sync run.
+        "scan_local": True,
+        # Report played tracks to Deezer (log.listen) so your recommendations and
+        # Flow keep learning from what you play here. Off by default (opt-in).
+        "report_listens": False,
+        "preload": True,
+        "preload_count": 2,
+        # Auto-sync: on by default once a sync_user is set. Daily at sync_at
+        # (default 04:00) unless sync_interval (minutes) is set, plus a run on
+        # startup. The web app drives this; no cron/manual step needed.
+        "sync_on_start": True,
+        "sync_at": "04:00",  # daily auto-sync time "HH:MM"
+        "sync_interval": 0,  # minutes; >0 overrides sync_at
+    }
 
     def __init__(self):
         current_config = self

@@ -38,6 +38,46 @@ from .exceptions import (
 logger = logging.getLogger(__name__)
 
 
+def _ensure_deezer_archived(res):
+    """Lazily fetch+archive a Deezer-backed track's FLAC on first access.
+
+    No-op (and no Deezer imports) when the proxy is disabled or the track is a
+    regular local file already on disk.
+    """
+    provider = getattr(current_app, "deezer", None)
+    if provider is None or not getattr(res, "deezer_id", None):
+        return
+    if os.path.isfile(res.path):
+        return
+    from ..deezer.archive import ensure_archived
+
+    try:
+        ensure_archived(provider, res)
+    except Exception as e:
+        logger.warning("Deezer archiving failed for track %s: %s", res.id, e)
+        raise ServerError("Could not fetch track from Deezer")
+
+
+def _prefetch_next(res):
+    """Queue the next not-yet-archived Deezer tracks of the same album."""
+    pf = getattr(current_app, "deezer_prefetch", None)
+    if pf is None or not getattr(res, "deezer_id", None):
+        return
+    count = int(current_app.config["DEEZER"].get("preload_count") or 2)
+    siblings = (
+        Track.select()
+        .where(
+            Track.album == res.album,
+            Track.deezer_id.is_null(False),
+            (Track.disc > res.disc)
+            | ((Track.disc == res.disc) & (Track.number > res.number)),
+        )
+        .order_by(Track.disc, Track.number)
+        .limit(count)
+    )
+    pf.enqueue_many(siblings, count)
+
+
 def prepare_transcoding_cmdline(
     base_cmdline, res, input_format, output_format, output_bitrate
 ):
@@ -65,6 +105,7 @@ def prepare_transcoding_cmdline(
 @api_routing("/stream")
 def stream_media():
     res = get_entity(Track)
+    _ensure_deezer_archived(res)
 
     if "timeOffset" in request.values:
         raise UnsupportedParameter("timeOffset")
@@ -217,6 +258,8 @@ def stream_media():
     user.last_play_date = now()
     user.save()
 
+    _prefetch_next(res)
+
     return response
 
 
@@ -239,6 +282,7 @@ def download_media():
     if uid is not None:
         try:
             rv = Track[uid]
+            _ensure_deezer_archived(rv)
             return send_file(rv.path, mimetype=rv.mimetype, conditional=True)
         except Track.DoesNotExist:
             try:  # Album -> stream zipped tracks
@@ -368,7 +412,17 @@ def cover_art():
     cache = current_app.cache
 
     eid = request.values["id"]
-    cover_path = _get_cover_path(eid)
+    try:
+        cover_path = _get_cover_path(eid)
+    except NotFound:
+        cover_path = None
+
+    if not cover_path:
+        provider = getattr(current_app, "deezer", None)
+        if provider is not None:
+            from ..deezer.archive import deezer_cover_path
+
+            cover_path = deezer_cover_path(provider, cache, eid)
 
     if not cover_path:
         raise NotFound("Cover art")

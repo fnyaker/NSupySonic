@@ -19,6 +19,18 @@ from . import get_entity, get_entity_id, api_routing
 from .exceptions import AggregateException, GenericError, MissingParameter, NotFound
 
 
+def _deezer_favorite(cls, entity, add):
+    """Mirror a star/unstar to the user's Deezer favorites (best-effort)."""
+    provider = getattr(current_app, "deezer", None)
+    if provider is None or not current_app.config["DEEZER"].get("push_to_deezer"):
+        return
+    if not getattr(entity, "deezer_id", None):
+        return
+    from ..deezer import push
+
+    push.push_favorite(provider, cls.__name__, entity.deezer_id, add)
+
+
 def star_single(cls, starcls, eid):
     """Stars an entity
 
@@ -39,6 +51,7 @@ def star_single(cls, starcls, eid):
         pass
 
     starcls.create(user=request.user, starred=e)
+    _deezer_favorite(cls, e, True)
 
 
 def unstar_single(cls, starcls, eid):
@@ -49,9 +62,17 @@ def unstar_single(cls, starcls, eid):
     :param eid: id of the entity to unstar
     """
 
+    try:
+        entity = cls[eid]
+    except cls.DoesNotExist:
+        entity = None
+
     starcls.delete().where(
         starcls.user == request.user, starcls.starred == eid
     ).execute()
+
+    if entity is not None:
+        _deezer_favorite(cls, entity, False)
 
 
 def handle_star_request(func):

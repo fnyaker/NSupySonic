@@ -5,6 +5,7 @@ import json
 from deezerpy.errors import ItemsLimitExceededException, PermissionException, InvalidTokenException, \
 WrongParameterException, MissingParameterException, InvalidQueryException, DataException, \
 IndividualAccountChangedNotAllowedException, APIError
+from deezerpy._throttle import limiter
 
 class SearchOrder():
     """Possible values for order parameter in search"""
@@ -26,11 +27,11 @@ class API:
         self.session = session
         self.access_token = None
 
-    def api_call(self, method, args=None):
-        print(f"API CALL: {method} with args {args}")
+    def api_call(self, method, args=None, _net_retries=2, _quota_retries=4):
         if args is None:
             args = {}
         if self.access_token: args['access_token'] = self.access_token
+        limiter.acquire()
         try:
             result_json = self.session.get(
                 "https://api.deezer.com/" + method,
@@ -39,13 +40,19 @@ class API:
                 timeout=30
             ).json()
         except (requests.ConnectionError, requests.Timeout):
+            # Bounded retry so a network outage surfaces instead of hanging.
+            if _net_retries <= 0:
+                raise
             sleep(2)
-            return self.api_call(method, args)
+            return self.api_call(method, args, _net_retries=_net_retries - 1, _quota_retries=_quota_retries)
         if 'error' in result_json.keys():
             if 'code' in result_json['error']:
                 if result_json['error']['code'] in [4, 700]:
+                    # Quota limit exceeded: back off and retry, but bounded.
+                    if _quota_retries <= 0:
+                        raise APIError(json.dumps(result_json['error']))
                     sleep(5)
-                    return self.api_call(method, args)
+                    return self.api_call(method, args, _net_retries=_net_retries, _quota_retries=_quota_retries - 1)
                 if result_json['error']['code'] == 100: raise ItemsLimitExceededException(f"ItemsLimitExceededException: {method} {result_json['error']['message'] if 'message' in result_json['error'] else ''}")
                 if result_json['error']['code'] == 200: raise PermissionException(f"PermissionException: {method} {result_json['error']['message'] if 'message' in result_json['error'] else ''}")
                 if result_json['error']['code'] == 300: raise InvalidTokenException(f"InvalidTokenException: {method} {result_json['error']['message'] if 'message' in result_json['error'] else ''}")
@@ -293,5 +300,3 @@ class API:
             resp = self.advanced_search(artist=artist, track=track[:track.find(" - ")], limit=1)
             if len(resp['data']) > 0: return resp['data'][0]['id']
         return "0"
-
-print("deezerpy api.py loaded")

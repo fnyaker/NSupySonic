@@ -7,12 +7,20 @@
 
 import uuid
 
-from flask import request
+from flask import current_app, request
 
 from ..db import Playlist, PlaylistTrack, User, Track, db
 
 from . import get_entity, api_routing
 from .exceptions import Forbidden, MissingParameter
+
+
+def _deezer_provider():
+    """Return the Deezer provider if push-to-Deezer is enabled, else None."""
+    provider = getattr(current_app, "deezer", None)
+    if provider is None or not current_app.config["DEEZER"].get("push_to_deezer"):
+        return None
+    return provider
 
 
 @api_routing("/getPlaylists")
@@ -45,10 +53,17 @@ def show_playlist():
     if res.user != request.user and not res.public and not request.user.admin:
         raise Forbidden()
 
+    tracks = res.get_tracks()
     info = res.as_subsonic_playlist(request.user)
     info["entry"] = [
-        t.as_subsonic_child(request.user, request.client) for t in res.get_tracks()
+        t.as_subsonic_child(request.user, request.client) for t in tracks
     ]
+
+    pf = getattr(current_app, "deezer_prefetch", None)
+    if pf is not None:
+        count = int(current_app.config["DEEZER"].get("preload_count") or 2)
+        pf.enqueue_many((t for t in tracks if t.deezer_id), count)
+
     return request.formatter("playlist", info)
 
 
@@ -80,6 +95,12 @@ def create_playlist():
         playlist.add(track)
     playlist.save()
 
+    provider = _deezer_provider()
+    if provider is not None:
+        from ..deezer import push
+
+        push.reconcile_playlist(provider, playlist)
+
     return request.formatter.empty
 
 
@@ -89,8 +110,16 @@ def delete_playlist():
     if res.user != request.user and not request.user.admin:
         raise Forbidden()
 
+    deezer_id = res.deezer_id
     PlaylistTrack.delete().where(PlaylistTrack.playlist == res).execute()
     res.delete_instance()
+
+    provider = _deezer_provider()
+    if provider is not None:
+        from ..deezer import push
+
+        push.delete_playlist(provider, deezer_id)
+
     return request.formatter.empty
 
 
@@ -122,5 +151,11 @@ def update_playlist():
 
     playlist.remove_at_indexes(to_remove)
     playlist.save()
+
+    provider = _deezer_provider()
+    if provider is not None:
+        from ..deezer import push
+
+        push.reconcile_playlist(provider, playlist)
 
     return request.formatter.empty

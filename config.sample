@@ -17,7 +17,7 @@ follow_symlinks = no
 cache_dir = /var/supysonic/cache
 
 ; Main cache max size in MB. Default: 512
-cache_size = 512
+cache_size = 1024
 
 ; Transcode cache max size in MB. Default: 1024 (1GB)
 transcode_cache_size = 1024
@@ -38,6 +38,11 @@ log_rotate = yes
 
 ; Enable the administrative web interface. Default: on
 ;mount_webui = on
+
+; Serve the bundled Deezer discovery SPA at /app (requires mount_webui).
+; Build it with `cd webapp && npm run build` (the Docker image does this for
+; you). Default: on
+;mount_spa = on
 
 ; Space separated list of prefixes that should be ignored on index endpoints
 ; Default: El La Le Las Les Los The
@@ -81,6 +86,10 @@ log_rotate = yes
 
 [transcoding]
 ; Programs used to convert from one format/bitrate to another. Defaults: none
+; Opus transcoders for the Deezer proxy: a client requesting a bitrate gets Opus
+; at that rate; requesting lossless gets the original archived FLAC.
+transcoder_flac_opus = ffmpeg -i %srcpath -v 0 -map 0:a:0 -c:a libopus -b:a %outratek -vbr on -f ogg -
+transcoder_mp3_opus = ffmpeg -i %srcpath -v 0 -map 0:a:0 -c:a libopus -b:a %outratek -vbr on -f ogg -
 transcoder_mp3_mp3 = lame --quiet --mp3input -b %outrate %srcpath -
 transcoder = ffmpeg -i %srcpath -ab %outratek -v 0 -f %outfmt -
 decoder_mp3 = mpg123 --quiet -w - %srcpath
@@ -91,11 +100,73 @@ encoder_ogg = oggenc2 -Q -M %outrate -
 
 ; Default format, used when a client requests a bitrate lower than the original
 ; file and no specific format
-default_transcode_target = mp3
+default_transcode_target = opus
 
 [mimetypes]
 ; Extension to mimetype mappings in case your system has some trouble guessing
 ; Default: none
+opus = audio/ogg
 ;mp3 = audio/mpeg
 ;ogg = audio/vorbis
+
+[deezer]
+; Turns the Deezer proxy on/off. Default: off
+enabled = no
+
+; Deezer ARL cookie of the account to proxy. Required when enabled.
+; Get it from your browser cookies on deezer.com (cookie named "arl").
+;arl =
+
+; Folder where fetched FLAC files are permanently archived. Required when
+; enabled. Registered as an additional "Deezer" root library folder.
+;archive_dir = /var/supysonic/deezer-archive
+
+; Quality fetched from Deezer and archived. FLAC | MP3_320 | MP3_128.
+; Lower qualities requested by clients are produced by the existing transcoder
+; from the archived file. FLAC requires a Deezer HiFi/Premium account.
+; Default: FLAC
+default_quality = FLAC
+
+; supysonic username that owns imported Deezer playlists/favorites. Required
+; for sync. Imported playlists appear under this user.
+;sync_user = MyUserName
+
+; What to import from Deezer on each sync.
+sync_playlists = yes
+sync_favorites = yes
+import_new_releases = yes
+import_flow = yes
+
+; Personalized "smart tracklists" exposed as "Deezer · <title>" playlists
+; (requires import_new_releases). Space/comma separated ids. Leave unset for the
+; default set. Known ids: new-releases, discovery, monthly-top, inspired-by-1
+; ... inspired-by-5, flow.
+;smart_tracklists = new-releases discovery monthly-top inspired-by-1 inspired-by-2 inspired-by-3 inspired-by-4 inspired-by-5
+
+; Mirror Subsonic-side changes back to Deezer (create/edit playlists,
+; star/unstar -> Deezer favorites). Default: yes
+push_to_deezer = yes
+
+; Report the tracks you play here back to Deezer (log.listen) so your Deezer
+; recommendations and Flow keep learning from what you listen to. Default: no
+report_listens = no
+
+; Import audio files you drop into archive_dir (any format) as local library
+; tracks (searchable/playlistable like Deezer tracks, but the Deezer sync never
+; touches them). Scanned on each sync. Default: yes
+scan_local = yes
+
+; Pre-fetch & archive upcoming tracks (playlist/album in progress).
+preload = yes
+preload_count = 2
+
+; Auto-sync (runs from the web app — no cron needed). When a sync_user is set,
+; a full sync runs on startup and then automatically; it refreshes playlists,
+; favorites and the Nouveautés/Découverte smart-tracklist playlists.
+; Run once on startup. Default: yes
+sync_on_start = yes
+; Daily sync time (HH:MM). Default: 04:00
+sync_at = 04:00
+; Or sync every N minutes instead (overrides sync_at when > 0). Default: 0
+sync_interval = 0
 

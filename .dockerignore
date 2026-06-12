@@ -1,0 +1,39 @@
+# VCS / CI
+.git
+.github
+
+# Secrets / local runtime config — must never enter the build context
+.env
+.env.*
+config
+tools
+
+# Local virtualenvs
+.venv
+venv
+env
+
+# Not needed to build/run the image (only supysonic* and deezerpy* are packaged)
+sourceproj
+tests
+docs
+
+# Python build/cache artifacts
+**/__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+.eggs
+
+# Node / SPA build artifacts (rebuilt in the webbuilder stage)
+webapp/node_modules
+webapp/dist
+supysonic/webui/dist
+
+# Coverage / editor
+.coverage
+.coverage.*
+htmlcov
+.vscode
+*~

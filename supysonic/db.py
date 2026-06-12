@@ -30,7 +30,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20251030"
+SCHEMA_VERSION = "20260606"
 
 
 def now():
@@ -216,14 +216,18 @@ class Folder(PathMixin, _Model):
 class Artist(_Model):
     id = PrimaryKeyField()
     name = CharField()
+    deezer_id = CharField(null=True)
 
     def as_subsonic_artist(self, user):
         info = {
             "id": str(self.id),
             "name": self.name,
-            # coverArt
             "albumCount": self.albums.count(),
         }
+
+        if self.deezer_id:
+            # getCoverArt fetches the artist image from Deezer on demand.
+            info["coverArt"] = str(self.id)
 
         try:
             starred = StarredArtist[user.id, self.id]
@@ -257,6 +261,8 @@ class Album(_Model):
     id = PrimaryKeyField()
     name = CharField()
     artist = ForeignKeyField(Artist, backref="albums")
+    deezer_id = CharField(null=True)
+    cover_md5 = CharField(null=True)
 
     def as_subsonic_album(self, user):  # "AlbumID3" type in XSD
         duration, created, year = self.tracks.select(
@@ -282,6 +288,10 @@ class Album(_Model):
             track_with_cover = self.tracks.where(Track.has_art).first()
             if track_with_cover is not None:
                 info["coverArt"] = str(track_with_cover.id)
+
+        if "coverArt" not in info and self.cover_md5:
+            # Deezer album with no local art yet: getCoverArt fetches it.
+            info["coverArt"] = str(self.id)
 
         if year:
             info["year"] = year
@@ -324,6 +334,7 @@ class Track(PathMixin, _Model):
     genre = CharField(null=True)
     duration = IntegerField()
     has_art = BooleanField(default=False)
+    deezer_id = CharField(null=True)
 
     album = ForeignKeyField(Album, backref="tracks")
     artist = ForeignKeyField(Artist, backref="tracks")
@@ -372,6 +383,10 @@ class Track(PathMixin, _Model):
             info["coverArt"] = str(self.id)
         elif self.folder.cover_art:
             info["coverArt"] = str(self.folder.id)
+        elif self.deezer_id:
+            # Deezer track not archived yet: point at the album cover, which
+            # getCoverArt fetches from Deezer on demand.
+            info["coverArt"] = str(self.album_id)
 
         try:
             starred = StarredTrack[user.id, self.id]
@@ -431,6 +446,8 @@ class User(_Model):
     mail = CharField(null=True)
     password = FixedCharField(40)
     salt = FixedCharField(6)
+    # Reversibly-encrypted password, enabling Subsonic token auth (t+s).
+    password_clear = CharField(null=True)
 
     admin = BooleanField(default=False)
     jukebox = BooleanField(default=False)
@@ -534,6 +551,7 @@ class Playlist(_Model):
     comment = CharField(null=True)
     public = BooleanField(default=False)
     created = DateTimeField(default=now)
+    deezer_id = CharField(null=True)
 
     def as_subsonic_playlist(self, user):
         tracks, duration = self.__tracks_query(
@@ -554,6 +572,8 @@ class Playlist(_Model):
         }
         if self.comment:
             info["comment"] = self.comment
+        if self.deezer_id:
+            info["coverArt"] = str(self.id)
         return info
 
     def get_tracks(self):
@@ -672,7 +692,15 @@ def init_database(database_uri):
         provider = "postgres"
     elif uri.scheme.startswith("sqlite"):
         provider = "sqlite"
-        args["pragmas"] = {"foreign_keys": 1}
+        # WAL + relaxed sync make writes (bulk Deezer imports) and concurrent
+        # readers (web + prefetch worker) much faster while staying crash-safe.
+        args["pragmas"] = {
+            "foreign_keys": 1,
+            "journal_mode": "wal",
+            "synchronous": "normal",
+            "cache_size": -16000,  # ~16 MB page cache
+            "busy_timeout": 5000,  # wait up to 5s on a locked db instead of erroring
+        }
     else:
         raise RuntimeError(f"Unsupported database: {uri.scheme}")
 
