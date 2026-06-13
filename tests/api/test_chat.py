@@ -28,6 +28,8 @@ class ChatTestCase(ApiTestBase):
 
     def test_get_messages(self):
         self._make_request("addChatMessage", {"message": "Hello"}, skip_post=True)
+        # ChatMessage.time has 1-second resolution, so space the two messages
+        # into distinct seconds; that makes their stored timestamps differ.
         time.sleep(1)
         self._make_request(
             "addChatMessage", {"message": "Is someone there?"}, skip_post=True
@@ -36,9 +38,14 @@ class ChatTestCase(ApiTestBase):
         rv, child = self._make_request("getChatMessages", tag="chatMessages")
         self.assertEqual(len(child), 2)
 
+        # Derive the `since` cutoff from the second message's stored timestamp
+        # (returned in ms) rather than from wall-clock time at query time: with
+        # 1s timestamp resolution, a sub-second wall-clock cutoff lands on either
+        # side of the message depending on fractional timing and flakes on CI.
+        since = int(child[1].get("time")) - 1
         rv, child = self._make_request(
             "getChatMessages",
-            {"since": int(time.time()) * 1000 - 500},
+            {"since": since},
             tag="chatMessages",
         )
         self.assertEqual(len(child), 1)
