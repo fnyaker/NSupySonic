@@ -45,9 +45,9 @@ RUN pip install --upgrade pip setuptools wheel \
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim AS runtime
 
-LABEL org.opencontainers.image.title="NSupySonic-Deezer" \
+LABEL org.opencontainers.image.title="NSupySonic" \
       org.opencontainers.image.description="Supysonic Subsonic server with a Deezer proxy (archive + on-the-fly transcoding, two-way playlist/favorite sync)" \
-      org.opencontainers.image.source="https://github.com/fnyaker/NSupySonic-Deezer" \
+      org.opencontainers.image.source="https://github.com/fnyaker/NSupySonic" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # Transcoders used by the streaming endpoint (ffmpeg covers the generic

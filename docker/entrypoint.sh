@@ -1,5 +1,5 @@
 #!/bin/sh
-# Entrypoint for the NSupySonic-Deezer image.
+# Entrypoint for the NSupySonic image.
 #
 # Two ways to configure the container:
 #   1. Env vars (great for docker compose / .env) — this script renders

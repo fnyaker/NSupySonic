@@ -1,16 +1,16 @@
-# NSupySonic-Deezer
+# NSupySonic
 
 > A self-hosted **Subsonic server that proxies Deezer**. Your Deezer playlists,
 > favorites, Flow and new releases show up in any Subsonic client, and there's a
 > built-in web player too. Tracks are fetched in **FLAC**, archived once, and
 > **transcoded to Opus** on demand.
 
-[![Docker](https://github.com/fnyaker/NSupySonic-Deezer/actions/workflows/docker.yaml/badge.svg)](https://github.com/fnyaker/NSupySonic-Deezer/actions/workflows/docker.yaml)
+[![Docker](https://github.com/fnyaker/NSupySonic/actions/workflows/docker.yaml/badge.svg)](https://github.com/fnyaker/NSupySonic/actions/workflows/docker.yaml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)
 ![Subsonic API](https://img.shields.io/badge/Subsonic%20API-1.12.0-orange.svg)
 
-NSupySonic-Deezer is a fork of [supysonic][] wired to Deezer. It keeps
+NSupySonic is a fork of [supysonic][] wired to Deezer. It keeps
 everything supysonic does — a full [Subsonic][] API server for your local music
 — and adds a Deezer proxy plus a custom web UI, so you can browse and stream
 your whole Deezer library (and your local files) from one place, in any Subsonic
@@ -72,8 +72,8 @@ is no separate "Deezer mode", it's just your library.
 FLAC), and your Deezer `arl` cookie.
 
 ```sh
-git clone https://github.com/fnyaker/NSupySonic-Deezer.git
-cd NSupySonic-Deezer
+git clone https://github.com/fnyaker/NSupySonic.git
+cd NSupySonic
 cp .env.example .env
 # edit .env: set SUPYSONIC_ADMIN_PASSWORD and DEEZER_ARL
 docker compose up --build
@@ -88,6 +88,20 @@ Then open:
 The admin user is created automatically on first boot from the `.env` values. A
 first Deezer sync runs about 20 seconds after startup; your playlists, favorites
 and new releases appear shortly after.
+
+### Using the prebuilt image
+
+Every push to `master` publishes a multi-arch (amd64 + arm64) image to the
+GitHub Container Registry, so you can skip the local build:
+
+```sh
+docker pull ghcr.io/fnyaker/nsupysonic:latest
+```
+
+To use it with the compose file, comment out `build: .` and uncomment the
+`image:` line in `docker-compose.yml`. The package is private by default — either
+make it public in the repo's *Packages* settings, or
+`docker login ghcr.io` with a token that has the `read:packages` scope first.
 
 ### Getting your ARL
 
@@ -155,7 +169,7 @@ requires an account where Flow customization is available.)
 
 ## Running without Docker
 
-NSupySonic-Deezer is a normal Python package.
+NSupySonic is a normal Python package.
 
 ```sh
 pip install .

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-NSupySonic-Deezer is a fork of [supysonic](https://github.com/spl0k/supysonic) (a Python
+NSupySonic is a fork of [supysonic](https://github.com/spl0k/supysonic) (a Python
 Subsonic API server) wired into a **Subsonic ↔ Deezer proxy**. Deezer playlists, favorites,
 Flow and new releases appear as native library entries in any Subsonic client, plus there is a
 custom Svelte web player at `/app`. Tracks are fetched in FLAC, archived once, and transcoded

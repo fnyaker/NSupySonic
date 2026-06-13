@@ -4,7 +4,7 @@ services:
     build: .
     # …or pull a prebuilt image instead of building, by commenting out `build:`
     # above and uncommenting this:
-    # image: ghcr.io/fnyaker/nsupysonic-deezer:latest
+    # image: ghcr.io/fnyaker/nsupysonic:latest
     container_name: supysonic
     restart: unless-stopped
     ports:
@@ -36,7 +36,7 @@ services:
   # config and /data volume. Uncomment to enable.
   # supysonic-daemon:
   #   build: .
-  #   # image: ghcr.io/fnyaker/nsupysonic-deezer:latest
+  #   # image: ghcr.io/fnyaker/nsupysonic:latest
   #   container_name: supysonic-daemon
   #   restart: unless-stopped
   #   command: ["supysonic-daemon"]

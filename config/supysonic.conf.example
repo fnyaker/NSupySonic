@@ -1,4 +1,4 @@
-; Example NSupySonic-Deezer config for the Docker image.
+; Example NSupySonic config for the Docker image.
 ;
 ; Use this ONLY if you prefer a hand-written file over the environment variables
 ; in docker-compose.yml / .env. Copy it to "config/supysonic.conf", fill in the
