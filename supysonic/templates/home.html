@@ -12,6 +12,15 @@
 <a class="nav-link active" aria-current="page" href="{{ url_for('frontend.index') }}">Home</a>
 {% endblock %}
 {% block body %}
+{% if config.get('WEBAPP', {}).get('mount_spa', True) %}
+<div class="p-4 my-4 rounded-3 bg-primary bg-gradient text-white d-flex flex-wrap align-items-center justify-content-between gap-3">
+  <div>
+    <h2 class="h4 mb-1">NSupySonic web player</h2>
+    <p class="mb-0">Browse your Deezer library and local music, search, queue, Flow and synced lyrics — right in your browser.</p>
+  </div>
+  <a href="{{ url_for('spa.serve') }}" class="btn btn-light btn-lg fw-semibold text-nowrap">Open the web player &rarr;</a>
+</div>
+{% endif %}
 <h2 class="mt-4 pb-2 border-bottom">Welcome to Supysonic!</h2>
 <p>There's nothing much to see here. If you want to listen to some music,
 you'll have to use one of the available clients. Here's a small list of
