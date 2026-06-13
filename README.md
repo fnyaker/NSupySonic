@@ -116,6 +116,58 @@ docker compose up -d --build
 The build also compiles the Svelte web UI (`webapp/`) and bundles it into the
 image, so it needs no extra steps.
 
+### Deploy with Portainer
+
+In Portainer a deployment is a **Stack** (its own compose runner). You don't need
+the repo or an `.env` file — paste a stack and set the variables in the UI.
+
+1. **(If the GHCR package is private)** add the registry once:
+   **Registries → Add registry → Custom registry** —
+   *URL* `ghcr.io`, *Username* your GitHub user, *Password* a
+   [personal access token](https://github.com/settings/tokens) with the
+   `read:packages` scope. (Skip this if you made the package public.)
+2. **Stacks → Add stack**, give it a name (e.g. `nsupysonic`), and paste this
+   into the **Web editor**:
+
+   ```yaml
+   services:
+     supysonic:
+       image: ghcr.io/fnyaker/nsupysonic:latest
+       container_name: nsupysonic
+       restart: unless-stopped
+       ports:
+         - "5722:5722"
+       environment:
+         SUPYSONIC_ADMIN_USER: ${SUPYSONIC_ADMIN_USER:-admin}
+         SUPYSONIC_ADMIN_PASSWORD: ${SUPYSONIC_ADMIN_PASSWORD}
+         DEEZER_ARL: ${DEEZER_ARL}
+         DEEZER_SYNC_USER: ${SUPYSONIC_ADMIN_USER:-admin}
+         DEEZER_QUALITY: ${DEEZER_QUALITY:-FLAC}
+       volumes:
+         - nsupysonic-data:/data
+         # Optional existing local library (hybrid with Deezer):
+         # - /host/path/to/music:/data/music:ro
+   volumes:
+     nsupysonic-data:
+   ```
+
+3. Under **Environment variables** (still on the Add-stack page), add at least:
+
+   | Name                       | Value                              |
+   | -------------------------- | ---------------------------------- |
+   | `SUPYSONIC_ADMIN_PASSWORD` | a password you choose              |
+   | `DEEZER_ARL`               | your Deezer `arl` cookie (below)   |
+
+   Optionally `SUPYSONIC_ADMIN_USER` (default `admin`) and `DEEZER_QUALITY`.
+
+4. **Deploy the stack.** Portainer pulls the image and starts it. Open
+   `http://<host>:5722/app` and log in with the admin user above. To update
+   later: open the stack → **Pull and redeploy** (tick *re-pull image*).
+
+> Persistent state (database, caches, the Deezer FLAC archive) lives in the
+> named volume `nsupysonic-data` — it survives redeploys. To mount an existing
+> music library, uncomment the bind line and point it at a host path.
+
 ### Getting your ARL
 
 The ARL is the session cookie that authenticates you with Deezer:
