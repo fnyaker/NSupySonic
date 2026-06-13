@@ -1,21 +1,28 @@
+<div align="center">
+
 # NSupySonic
 
-> A self-hosted **Subsonic server that proxies Deezer**. Your Deezer playlists,
-> favorites, Flow and new releases show up in any Subsonic client, and there's a
-> built-in web player too. Tracks are fetched in **FLAC**, archived once, and
-> **transcoded to Opus** on demand.
+**A self-hosted Subsonic server that proxies Deezer.**
+
+Your Deezer playlists, favorites, Flow and new releases show up in any Subsonic
+client — plus there's a built-in web player. Tracks are fetched in **FLAC**,
+archived once, and **transcoded to Opus** on demand.
 
 [![Docker](https://github.com/fnyaker/NSupySonic/actions/workflows/docker.yaml/badge.svg)](https://github.com/fnyaker/NSupySonic/actions/workflows/docker.yaml)
+[![Container](https://img.shields.io/badge/ghcr.io-nsupysonic-2496ED?logo=docker&logoColor=white)](https://github.com/fnyaker/NSupySonic/pkgs/container/nsupysonic)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)
 ![Subsonic API](https://img.shields.io/badge/Subsonic%20API-1.12.0-orange.svg)
 
-NSupySonic is a fork of [supysonic][] wired to Deezer. It keeps
-everything supysonic does — a full [Subsonic][] API server for your local music
-— and adds a Deezer proxy plus a custom web UI, so you can browse and stream
-your whole Deezer library (and your local files) from one place, in any Subsonic
-app or in the browser.
+</div>
 
+NSupySonic (**N**yaker's **Supysonic**) is a fork of [supysonic][] wired to
+Deezer. It keeps everything supysonic does — a full [Subsonic][] API server for
+your local music — and adds a Deezer proxy plus a custom web UI, so you can
+browse and stream your whole Deezer library (and your local files) from one
+place, in any Subsonic app or in the browser.
+
+> [!NOTE]
 > For personal use with your own Deezer account. FLAC requires a Deezer
 > HiFi/Premium subscription. Respect Deezer's Terms of Service.
 
@@ -94,15 +101,6 @@ The admin user is created automatically on first boot from the `.env` values. A
 first Deezer sync runs about 20 seconds after startup; your playlists, favorites
 and new releases appear shortly after.
 
-> **GHCR access.** The image package is private by default, so the pull can fail
-> with `denied`/`unauthorized`. Either make it public once (repo → *Packages* →
-> `nsupysonic` → *Package settings* → *Change visibility → Public*), or
-> authenticate with a token that has the `read:packages` scope:
->
-> ```sh
-> echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
-> ```
-
 ### Building the image locally instead
 
 To build from source instead of pulling (e.g. to run un-released changes), edit
@@ -118,15 +116,11 @@ image, so it needs no extra steps.
 
 ### Deploy with Portainer
 
-In Portainer a deployment is a **Stack** (its own compose runner). You don't need
-the repo or an `.env` file — paste a stack and set the variables in the UI.
+In Portainer a deployment is a **Stack** (its own compose runner). The image is
+public, so there's nothing to authenticate — you don't even need the repo or an
+`.env` file. Just paste a stack and set the variables in the UI.
 
-1. **(If the GHCR package is private)** add the registry once:
-   **Registries → Add registry → Custom registry** —
-   *URL* `ghcr.io`, *Username* your GitHub user, *Password* a
-   [personal access token](https://github.com/settings/tokens) with the
-   `read:packages` scope. (Skip this if you made the package public.)
-2. **Stacks → Add stack**, give it a name (e.g. `nsupysonic`), and paste this
+1. **Stacks → Add stack**, give it a name (e.g. `nsupysonic`), and paste this
    into the **Web editor**:
 
    ```yaml
@@ -151,7 +145,7 @@ the repo or an `.env` file — paste a stack and set the variables in the UI.
      nsupysonic-data:
    ```
 
-3. Under **Environment variables** (still on the Add-stack page), add at least:
+2. Under **Environment variables** (still on the Add-stack page), add at least:
 
    | Name                       | Value                              |
    | -------------------------- | ---------------------------------- |
@@ -160,7 +154,7 @@ the repo or an `.env` file — paste a stack and set the variables in the UI.
 
    Optionally `SUPYSONIC_ADMIN_USER` (default `admin`) and `DEEZER_QUALITY`.
 
-4. **Deploy the stack.** Portainer pulls the image and starts it. Open
+3. **Deploy the stack.** Portainer pulls the image and starts it. Open
    `http://<host>:5722/app` and log in with the admin user above. To update
    later: open the stack → **Pull and redeploy** (tick *re-pull image*).
 
