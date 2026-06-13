@@ -5,6 +5,7 @@ on:
   push:
     paths:
     - supysonic/**
+    - deezerpy/**
     - tests/**
     - ci-requirements.txt
     - pyproject.toml
@@ -13,11 +14,13 @@ on:
   pull_request:
     paths:
     - supysonic/**
+    - deezerpy/**
     - tests/**
     - ci-requirements.txt
     - pyproject.toml
     - setup.cfg
     - setup.py
+  workflow_dispatch:
 jobs:
   build:
     name: Build
@@ -43,11 +46,14 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r ci-requirements.txt
     - name: Run tests
-      run: |
-        coverage run -m unittest
-        coverage run -a -m unittest tests.net.suite
+      run: coverage run -m unittest
+    - name: Run network tests (non-blocking; depend on third-party services)
+      continue-on-error: true
+      run: coverage run -a -m unittest tests.net.suite
     - name: Upload coverage
       uses: codecov/codecov-action@v4
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
+      # Don't fail CI when the Codecov token isn't configured on the fork.
+      continue-on-error: true
       if: ${{ !cancelled() }}
