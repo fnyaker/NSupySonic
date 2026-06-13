@@ -1,10 +1,10 @@
 services:
   supysonic:
-    # Build the image locally (includes the Svelte web UI build):
-    build: .
-    # …or pull a prebuilt image instead of building, by commenting out `build:`
-    # above and uncommenting this:
-    # image: ghcr.io/fnyaker/nsupysonic:latest
+    # Prebuilt multi-arch image from GHCR (default — no local build needed):
+    image: ghcr.io/fnyaker/nsupysonic:latest
+    # …or build locally instead (also builds the Svelte web UI) by commenting
+    # out `image:` above and uncommenting this:
+    # build: .
     container_name: supysonic
     restart: unless-stopped
     ports:
@@ -35,8 +35,8 @@ services:
   # Optional background daemon: folder watcher + jukebox. Shares the same env,
   # config and /data volume. Uncomment to enable.
   # supysonic-daemon:
-  #   build: .
-  #   # image: ghcr.io/fnyaker/nsupysonic:latest
+  #   image: ghcr.io/fnyaker/nsupysonic:latest
+  #   # build: .
   #   container_name: supysonic-daemon
   #   restart: unless-stopped
   #   command: ["supysonic-daemon"]

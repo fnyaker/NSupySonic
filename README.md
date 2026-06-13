@@ -76,8 +76,13 @@ git clone https://github.com/fnyaker/NSupySonic.git
 cd NSupySonic
 cp .env.example .env
 # edit .env: set SUPYSONIC_ADMIN_PASSWORD and DEEZER_ARL
-docker compose up --build
+docker compose up -d
 ```
+
+By default the compose file **pulls the prebuilt multi-arch (amd64 + arm64)
+image** `ghcr.io/fnyaker/nsupysonic:latest` from the GitHub Container Registry —
+no local build needed. A fresh image is published on every push to `master`;
+update with `docker compose pull && docker compose up -d`.
 
 Then open:
 
@@ -89,19 +94,27 @@ The admin user is created automatically on first boot from the `.env` values. A
 first Deezer sync runs about 20 seconds after startup; your playlists, favorites
 and new releases appear shortly after.
 
-### Using the prebuilt image
+> **GHCR access.** The image package is private by default, so the pull can fail
+> with `denied`/`unauthorized`. Either make it public once (repo → *Packages* →
+> `nsupysonic` → *Package settings* → *Change visibility → Public*), or
+> authenticate with a token that has the `read:packages` scope:
+>
+> ```sh
+> echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
+> ```
 
-Every push to `master` publishes a multi-arch (amd64 + arm64) image to the
-GitHub Container Registry, so you can skip the local build:
+### Building the image locally instead
+
+To build from source instead of pulling (e.g. to run un-released changes), edit
+`docker-compose.yml` — comment out the `image:` line and uncomment `build: .` —
+then:
 
 ```sh
-docker pull ghcr.io/fnyaker/nsupysonic:latest
+docker compose up -d --build
 ```
 
-To use it with the compose file, comment out `build: .` and uncomment the
-`image:` line in `docker-compose.yml`. The package is private by default — either
-make it public in the repo's *Packages* settings, or
-`docker login ghcr.io` with a token that has the `read:packages` scope first.
+The build also compiles the Svelte web UI (`webapp/`) and bundles it into the
+image, so it needs no extra steps.
 
 ### Getting your ARL
 
