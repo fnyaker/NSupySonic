@@ -16,8 +16,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to the repo root: these are Python build/venv artifacts. Unanchored
+# (`lib/`) they also match webapp/src/lib/, which silently dropped the SPA's
+# stores/api/actions modules from git and broke the Docker build.
+/lib/
+/lib64/
 parts/
 sdist/
 var/
