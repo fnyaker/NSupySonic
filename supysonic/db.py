@@ -30,7 +30,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260606"
+SCHEMA_VERSION = "20260614"
 
 
 def now():
@@ -444,7 +444,9 @@ class User(_Model):
     id = PrimaryKeyField()
     name = CharField(64, unique=True)
     mail = CharField(null=True)
-    password = FixedCharField(40)
+    # argon2id hashes (~97 chars) for new/updated passwords; legacy SHA1 hashes
+    # (40 chars) are transparently rehashed on the next successful login.
+    password = CharField(255)
     salt = FixedCharField(6)
     # Reversibly-encrypted password, enabling Subsonic token auth (t+s).
     password_clear = CharField(null=True)

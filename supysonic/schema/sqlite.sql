@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS user (
     id CHAR(36) PRIMARY KEY,
     name VARCHAR(64) NOT NULL,
     mail VARCHAR(256),
-    password CHAR(40) NOT NULL,
+    password VARCHAR(255) NOT NULL,
     salt CHAR(6) NOT NULL,
     password_clear VARCHAR(512),
     admin BOOLEAN NOT NULL,

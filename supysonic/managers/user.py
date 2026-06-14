@@ -13,6 +13,9 @@ import secrets
 import string
 import uuid
 
+from argon2 import PasswordHasher
+from argon2.exceptions import Argon2Error
+
 try:  # pycryptodome
     from Crypto.Cipher import AES
     from Crypto.Random import get_random_bytes
@@ -22,6 +25,10 @@ except ImportError:  # pycryptodomex
 
 from ..db import User
 from ..utils import get_secret_key
+
+# Password hashing: argon2id for everything new. Legacy users carry a 40-char
+# SHA1(salt+password) hash and are transparently upgraded on next login.
+_hasher = PasswordHasher()
 
 
 def _password_key():
@@ -59,7 +66,7 @@ class UserManager:
         if User.select().where(User.name == name).exists():
             raise ValueError(f"User '{name}' exists")
 
-        crypt, salt = UserManager.__encrypt_password(password)
+        crypt, salt = UserManager._hash_fields(password)
         return User.create(
             name=name,
             password=crypt,
@@ -83,17 +90,14 @@ class UserManager:
         user = User.get_or_none(name=name)
         if user is None:
             return None
-        elif not hmac.compare_digest(
-            UserManager.__encrypt_password(password, user.salt)[0], user.password
-        ):
+        if not UserManager._verify_password(user, password):
             return None
-        else:
-            # Backfill the recoverable password so token auth works for users
-            # created before this was added (after one password login).
-            if not user.password_clear:
-                user.password_clear = encrypt_password(password)
-                user.save()
-            return user
+        # Backfill the recoverable password so token auth works for users
+        # created before that was added (after one password login).
+        if not user.password_clear:
+            user.password_clear = encrypt_password(password)
+            user.save()
+        return user
 
     @staticmethod
     def try_auth_token(name, token, salt):
@@ -113,12 +117,10 @@ class UserManager:
     @staticmethod
     def change_password(uid, old_pass, new_pass):
         user = UserManager.get(uid)
-        if not hmac.compare_digest(
-            UserManager.__encrypt_password(old_pass, user.salt)[0], user.password
-        ):
+        if not UserManager._verify_password(user, old_pass):
             raise ValueError("Wrong password")
 
-        user.password = UserManager.__encrypt_password(new_pass, user.salt)[0]
+        user.password, user.salt = UserManager._hash_fields(new_pass)
         user.password_clear = encrypt_password(new_pass)
         user.save()
 
@@ -131,15 +133,47 @@ class UserManager:
         else:
             raise TypeError("Requires a User instance or a user name (string)")
 
-        user.password = UserManager.__encrypt_password(new_pass, user.salt)[0]
+        user.password, user.salt = UserManager._hash_fields(new_pass)
         user.password_clear = encrypt_password(new_pass)
         user.save()
 
     @staticmethod
-    def __encrypt_password(password, salt=None):
-        if salt is None:
-            salt = "".join(secrets.choice(string.printable.strip()) for _ in range(6))
-        return (
-            hashlib.sha1(salt.encode("utf-8") + password.encode("utf-8")).hexdigest(),
-            salt,
-        )
+    def _hash_fields(password):
+        """argon2id hash + a throwaway salt (the salt column is NOT NULL but is
+        unused for argon2, whose salt is embedded in the hash)."""
+        salt = "".join(secrets.choice(string.printable.strip()) for _ in range(6))
+        return _hasher.hash(password), salt
+
+    @staticmethod
+    def _verify_password(user, password):
+        """Verify `password` against the stored hash, upgrading legacy hashes.
+
+        Handles both argon2id and legacy SHA1(salt+password). On a successful
+        legacy verification the password is transparently rehashed with argon2
+        and saved, so old accounts migrate on their next login.
+        """
+        stored = user.password or ""
+        if stored.startswith("$argon2"):
+            try:
+                _hasher.verify(stored, password)
+            except Argon2Error:
+                return False
+            if _hasher.check_needs_rehash(stored):
+                user.password, user.salt = UserManager._hash_fields(password)
+                user.save()
+            return True
+
+        # Legacy SHA1(salt + password), constant-time compared.
+        if not hmac.compare_digest(
+            UserManager.__legacy_sha1(password, user.salt), stored
+        ):
+            return False
+        user.password, user.salt = UserManager._hash_fields(password)
+        user.save()
+        return True
+
+    @staticmethod
+    def __legacy_sha1(password, salt):
+        return hashlib.sha1(
+            salt.encode("utf-8") + password.encode("utf-8")
+        ).hexdigest()

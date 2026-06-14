@@ -53,19 +53,39 @@ class UserManagerTestCase(unittest.TestCase):
         playlist = db.Playlist.create(name="Playlist", user=db.User.get(name="alice"))
         playlist.add(track)
 
-    def test_encrypt_password(self):
-        func = UserManager._UserManager__encrypt_password
+    def test_legacy_sha1(self):
+        # The legacy SHA1(salt+password) verifier, kept for migrating old hashes.
+        func = UserManager._UserManager__legacy_sha1
         self.assertEqual(
-            func("password", "salt"),
-            ("59b3e8d637cf97edbe2384cf59cb7453dfe30789", "salt"),
+            func("password", "salt"), "59b3e8d637cf97edbe2384cf59cb7453dfe30789"
         )
         self.assertEqual(
-            func("pass-word", "pepper"),
-            ("d68c95a91ed7773aa57c7c044d2309a5bf1da2e7", "pepper"),
+            func("pass-word", "pepper"), "d68c95a91ed7773aa57c7c044d2309a5bf1da2e7"
         )
         self.assertEqual(
-            func("éèàïô", "ABC+"), ("b639ba5217b89c906019d89d5816b407d8730898", "ABC+")
+            func("éèàïô", "ABC+"), "b639ba5217b89c906019d89d5816b407d8730898"
         )
+
+    def test_new_passwords_use_argon2(self):
+        alice = UserManager.add("alice", "ALICE")
+        self.assertTrue(alice.password.startswith("$argon2"))
+        self.assertIsNotNone(UserManager.try_auth("alice", "ALICE"))
+        self.assertIsNone(UserManager.try_auth("alice", "wrong"))
+
+    def test_legacy_hash_upgraded_on_login(self):
+        # Simulate a pre-argon2 account: SHA1(salt+password) in the password
+        # column. A correct login must succeed and transparently rehash.
+        import hashlib
+
+        salt = "abcdef"
+        legacy = hashlib.sha1((salt + "secret").encode()).hexdigest()
+        db.User.create(name="old", password=legacy, salt=salt)
+
+        self.assertIsNone(UserManager.try_auth("old", "wrong"))
+        self.assertIsNotNone(UserManager.try_auth("old", "secret"))
+        # Rehashed to argon2 in place, still verifiable afterwards.
+        self.assertTrue(db.User.get(name="old").password.startswith("$argon2"))
+        self.assertIsNotNone(UserManager.try_auth("old", "secret"))
 
     def test_get_user(self):
         self.create_data()
