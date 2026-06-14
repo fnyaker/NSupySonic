@@ -145,9 +145,10 @@ def create_application(config=None):
     if hops > 0:
         from werkzeug.middleware.proxy_fix import ProxyFix
 
-        app.wsgi_app = ProxyFix(
-            app.wsgi_app, x_for=hops, x_proto=hops, x_host=hops, x_prefix=hops
-        )
+        # Only trust X-Forwarded-For (client IP) and -Proto (http/https). NOT
+        # -Host / -Prefix: rewriting those breaks URL generation if any upstream
+        # sends them, and they're not needed for rate limiting or the cookie.
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=hops)
 
     # Import app sections
     if app.config["WEBAPP"]["mount_webui"]:
