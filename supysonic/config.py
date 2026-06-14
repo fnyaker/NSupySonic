@@ -38,6 +38,7 @@ class DefaultConfig:
         "mount_webui": True,
         "mount_api": True,
         "mount_spa": True,
+        "session_cookie_secure": False,
         "index_ignored_prefixes": "El La Le Las Les Los The",
         "online_lyrics": False,
     }

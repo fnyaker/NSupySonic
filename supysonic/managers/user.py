@@ -8,7 +8,8 @@
 
 import base64
 import hashlib
-import random
+import hmac
+import secrets
 import string
 import uuid
 
@@ -82,7 +83,9 @@ class UserManager:
         user = User.get_or_none(name=name)
         if user is None:
             return None
-        elif UserManager.__encrypt_password(password, user.salt)[0] != user.password:
+        elif not hmac.compare_digest(
+            UserManager.__encrypt_password(password, user.salt)[0], user.password
+        ):
             return None
         else:
             # Backfill the recoverable password so token auth works for users
@@ -103,14 +106,16 @@ class UserManager:
         except Exception:
             return None
         expected = hashlib.md5((password + salt).encode("utf-8")).hexdigest()
-        if expected == str(token).lower():
+        if hmac.compare_digest(expected, str(token).lower()):
             return user
         return None
 
     @staticmethod
     def change_password(uid, old_pass, new_pass):
         user = UserManager.get(uid)
-        if UserManager.__encrypt_password(old_pass, user.salt)[0] != user.password:
+        if not hmac.compare_digest(
+            UserManager.__encrypt_password(old_pass, user.salt)[0], user.password
+        ):
             raise ValueError("Wrong password")
 
         user.password = UserManager.__encrypt_password(new_pass, user.salt)[0]
@@ -133,7 +138,7 @@ class UserManager:
     @staticmethod
     def __encrypt_password(password, salt=None):
         if salt is None:
-            salt = "".join(random.choice(string.printable.strip()) for _ in range(6))
+            salt = "".join(secrets.choice(string.printable.strip()) for _ in range(6))
         return (
             hashlib.sha1(salt.encode("utf-8") + password.encode("utf-8")).hexdigest(),
             salt,

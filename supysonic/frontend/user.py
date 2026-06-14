@@ -10,15 +10,29 @@ import logging
 from flask import flash, redirect, render_template, request, session, url_for
 from flask import current_app
 from functools import wraps
+from urllib.parse import urlsplit
 
 from ..db import ClientPrefs, User
 from ..lastfm import LastFm
 from ..listenbrainz import ListenBrainz
 from ..managers.user import UserManager
+from ..ratelimit import auth_limiter
 
 from . import admin_only, frontend
 
 logger = logging.getLogger(__name__)
+
+
+def safe_redirect_target(target, fallback):
+    """Only allow same-site relative redirect targets (blocks open redirects)."""
+    if not target:
+        return fallback
+    # Reject absolute URLs, protocol-relative (//evil), and anything with a
+    # scheme or host; only a path that stays on this site is allowed.
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc or not target.startswith("/") or target.startswith("//"):
+        return fallback
+    return target
 
 
 def me_or_uuid(f, arg="uid"):
@@ -331,13 +345,20 @@ def listenbrainz_unreg(uid, user):
 
 @frontend.route("/user/login", methods=["GET", "POST"])
 def login():
-    return_url = request.args.get("returnUrl") or url_for("frontend.index")
+    return_url = safe_redirect_target(
+        request.args.get("returnUrl"), url_for("frontend.index")
+    )
     if request.user:
         flash("Already logged in")
         return redirect(return_url)
 
     if request.method == "GET":
         return render_template("login.html")
+
+    throttled = not current_app.testing
+    if throttled and auth_limiter.is_blocked(request.remote_addr):
+        flash("Too many failed attempts. Try again later.", "danger")
+        return render_template("login.html"), 429
 
     name, password = map(request.form.get, ("user", "password"))
     error = False
@@ -352,6 +373,8 @@ def login():
         user = UserManager.try_auth(name, password)
         if user:
             logger.info("Logged user %s (IP: %s)", name, request.remote_addr)
+            if throttled:
+                auth_limiter.reset(request.remote_addr)
             session["userid"] = str(user.id)
             flash("Logged in!", "success")
             return redirect(return_url)
@@ -359,6 +382,8 @@ def login():
             logger.error(
                 "Failed login attempt for user %s (IP: %s)", name, request.remote_addr
             )
+            if throttled:
+                auth_limiter.record_failure(request.remote_addr)
             flash("Wrong username or password", "danger")
 
     return render_template("login.html")

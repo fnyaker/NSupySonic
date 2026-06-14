@@ -84,6 +84,18 @@ class Cache:
             self._size += size
 
     def _filepath(self, key):
+        # Keys must be plain filenames. Reject anything with path separators or
+        # ".."/"." so a caller-influenced key (e.g. a Subsonic `format` param)
+        # can never escape the cache directory to write or read elsewhere.
+        key = str(key)
+        if (
+            key in ("", ".", "..")
+            or "/" in key
+            or "\\" in key
+            or os.sep in key
+            or (os.altsep and os.altsep in key)
+        ):
+            raise ValueError(f"Invalid cache key: {key!r}")
         return os.path.join(self._cache_dir, key)
 
     def _make_space(self, required_space, key=None):

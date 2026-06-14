@@ -22,6 +22,7 @@ from flask import Blueprint, current_app, jsonify, request, send_file, session
 
 from ..db import Album, Artist, StarredTrack, Track, User, now
 from ..managers.user import UserManager
+from ..ratelimit import auth_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -296,12 +297,21 @@ def _local_starred() -> list:
 
 @webapi.route("/login", methods=["POST"])
 def login():
+    throttled = not current_app.testing
+    if throttled and auth_limiter.is_blocked(request.remote_addr):
+        return jsonify({"error": "too many attempts, try again later"}), 429
     data = request.get_json(silent=True) or request.form
     username = data.get("username")
     password = data.get("password")
     user = UserManager.try_auth(username, password) if username and password else None
     if user is None:
+        logger.error(
+            "Failed web login for user %s (IP: %s)", username, request.remote_addr
+        )
+        if throttled:
+            auth_limiter.record_failure(request.remote_addr)
         return jsonify({"error": "invalid credentials"}), 401
+    auth_limiter.reset(request.remote_addr)
     session["uid"] = str(user.id)
     session.permanent = True
     return jsonify({"user": {"name": user.name, "admin": user.admin}})

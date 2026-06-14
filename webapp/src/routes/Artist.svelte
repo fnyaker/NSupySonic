@@ -111,7 +111,7 @@
 
     {#if data.bio}
       <h2>Biographie</h2>
-      <p class="bio muted">{@html data.bio}</p>
+      <p class="bio muted">{data.bio}</p>
     {/if}
   </div>
 {/if}
@@ -154,6 +154,7 @@
   .bio {
     line-height: 1.6;
     max-width: 70ch;
+    white-space: pre-line;
   }
   @media (max-width: 640px) {
     .art {

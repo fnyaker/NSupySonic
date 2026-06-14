@@ -10,12 +10,13 @@ API_VERSION = "1.12.0"
 import binascii
 import logging
 import uuid
-from flask import request
+from flask import request, current_app
 from flask import Blueprint
 from peewee import IntegrityError
 
 from ..db import ClientPrefs, Folder
 from ..managers.user import UserManager
+from ..ratelimit import auth_limiter
 
 from .exceptions import GenericError, Unauthorized, NotFound
 from .formatters import JSONFormatter, JSONPFormatter, XMLFormatter
@@ -56,18 +57,32 @@ def decode_password(password):
         return password
 
 
+def _auth_rate_limited():
+    return not current_app.testing and auth_limiter.is_blocked(request.remote_addr)
+
+
+def _record_auth_failure(username):
+    logger.error(
+        "Failed login attempt for user %s (IP: %s)", username, request.remote_addr
+    )
+    if not current_app.testing:
+        auth_limiter.record_failure(request.remote_addr)
+
+
 @api.before_request
 def authorize():
+    if _auth_rate_limited():
+        raise Unauthorized()
+
     if request.authorization:
         username = request.authorization.username
         user = UserManager.try_auth(username, request.authorization.password)
         if user is not None:
+            auth_limiter.reset(request.remote_addr)
             request.user = user
             return
 
-        logger.error(
-            "Failed login attempt for user %s (IP: %s)", username, request.remote_addr
-        )
+        _record_auth_failure(username)
         raise Unauthorized()
 
     username = request.values["u"]
@@ -81,11 +96,10 @@ def authorize():
         user = UserManager.try_auth(username, password)
 
     if user is None:
-        logger.error(
-            "Failed login attempt for user %s (IP: %s)", username, request.remote_addr
-        )
+        _record_auth_failure(username)
         raise Unauthorized()
 
+    auth_limiter.reset(request.remote_addr)
     request.user = user
 
 

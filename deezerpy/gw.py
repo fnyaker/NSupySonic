@@ -42,7 +42,7 @@ class GW:
         limiter.acquire()
         try:
             result_json = self.session.post(
-                "http://www.deezer.com/ajax/gw-light.php",
+                "https://www.deezer.com/ajax/gw-light.php",
                 params=p,
                 timeout=30,
                 json=args,

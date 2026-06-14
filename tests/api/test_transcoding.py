@@ -42,6 +42,13 @@ class TranscodingTestCase(ApiTestBase):
     def test_no_transcoding_available(self):
         self._make_request("stream", {"id": self.trackid, "format": "wat"}, error=0)
 
+    def test_rejects_unsafe_format(self):
+        # The format becomes part of the transcode cache filename; values with
+        # path separators / dots / over length must be rejected up front so they
+        # can't escape the cache directory (CWE-22). Subsonic generic error.
+        for bad in ("../../etc/passwd", "a/b", "..", ".", "toolongformat", "a.b"):
+            self._make_request("stream", {"id": self.trackid, "format": bad}, error=0)
+
     @unittest.skipIf(
         sys.platform == "win32",
         "Can't test transcoding on Windows because of a lack of simple commandline tools",

@@ -44,6 +44,12 @@ log_rotate = yes
 ; you). Default: on
 ;mount_spa = on
 
+; Add the Secure flag to the web UI session cookie so it is only ever sent over
+; HTTPS. Turn this on when the server is exposed to the internet behind TLS.
+; Leave off for plain-HTTP LAN access (a Secure cookie would never be stored).
+; Default: off
+;session_cookie_secure = off
+
 ; Space separated list of prefixes that should be ignored on index endpoints
 ; Default: El La Le Las Les Los The
 index_ignored_prefixes = El La Le Las Les Los The

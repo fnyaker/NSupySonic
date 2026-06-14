@@ -12,6 +12,7 @@ import logging
 import mediafile
 import mimetypes
 import os.path
+import re
 import requests
 import shlex
 import subprocess
@@ -117,6 +118,10 @@ def stream_media():
     )
     if request_format:
         request_format = request_format.lower()
+        # The format becomes part of the transcode cache filename, so constrain
+        # it to a safe charset (no path separators / dots) to prevent traversal.
+        if not re.fullmatch(r"[a-z0-9]{1,8}", request_format):
+            raise GenericError("Invalid format")
 
     src_suffix = res.suffix()
     dst_suffix = res.suffix()

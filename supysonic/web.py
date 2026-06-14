@@ -101,6 +101,38 @@ def create_application(config=None):
     # cookie on cross-site POSTs, mitigating CSRF on the mutating /api endpoints.
     app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
     app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
+    # Set the Secure flag when served behind TLS (recommended for internet
+    # exposure). Off by default so plain-HTTP LAN setups keep working; enable
+    # via [webapp] session_cookie_secure = yes.
+    app.config.setdefault(
+        "SESSION_COOKIE_SECURE",
+        bool(app.config["WEBAPP"].get("session_cookie_secure", False)),
+    )
+
+    # Baseline security response headers for the admin UI and the bundled SPA.
+    # CSP: scripts are served from this origin (admin assets are local, the
+    # Svelte build emits external bundles), Deezer cover art / audio come over
+    # https, and Svelte injects scoped <style> blocks (style 'unsafe-inline').
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "media-src 'self' blob: https:; "
+        "connect-src 'self' https:; "
+        "font-src 'self' data:; "
+        "frame-ancestors 'self'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+
+    @app.after_request
+    def set_security_headers(response):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Content-Security-Policy", csp)
+        return response
 
     # Import app sections
     if app.config["WEBAPP"]["mount_webui"]:
