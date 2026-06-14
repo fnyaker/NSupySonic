@@ -17,12 +17,21 @@ CONF=/data/supysonic.conf
 
 render_config() {
     # Only generate when env-driven config is requested.
-    [ -n "$DEEZER_ARL" ] || [ -n "$DATABASE_URI" ] || return 0
+    [ -n "$DEEZER_ARL" ] || [ -n "$DATABASE_URI" ] \
+        || [ -n "$SUPYSONIC_PROXY_HOPS" ] || [ -n "$SUPYSONIC_SESSION_COOKIE_SECURE" ] \
+        || return 0
 
     {
         if [ -n "$DATABASE_URI" ]; then
             printf '[base]\n'
             printf 'database_uri = %s\n\n' "$DATABASE_URI"
+        fi
+        # Reverse-proxy / TLS hardening (off unless explicitly set).
+        if [ -n "$SUPYSONIC_PROXY_HOPS" ] || [ -n "$SUPYSONIC_SESSION_COOKIE_SECURE" ]; then
+            printf '[webapp]\n'
+            [ -n "$SUPYSONIC_PROXY_HOPS" ] && printf 'proxy_fix_hops = %s\n' "$SUPYSONIC_PROXY_HOPS"
+            [ -n "$SUPYSONIC_SESSION_COOKIE_SECURE" ] && printf 'session_cookie_secure = %s\n' "$SUPYSONIC_SESSION_COOKIE_SECURE"
+            printf '\n'
         fi
         if [ -n "$DEEZER_ARL" ]; then
             printf '[deezer]\n'

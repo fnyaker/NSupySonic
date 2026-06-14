@@ -134,6 +134,21 @@ def create_application(config=None):
         response.headers.setdefault("Content-Security-Policy", csp)
         return response
 
+    # Honour X-Forwarded-* from a trusted reverse proxy so request.remote_addr
+    # (rate limiting, logs) and request.is_secure (Secure cookie) reflect the
+    # real client. Opt-in only: enabling this when the app is reachable directly
+    # would let clients spoof those headers. proxy_fix_hops = number of proxies.
+    try:
+        hops = int(app.config["WEBAPP"].get("proxy_fix_hops") or 0)
+    except (TypeError, ValueError):
+        hops = 0
+    if hops > 0:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+
+        app.wsgi_app = ProxyFix(
+            app.wsgi_app, x_for=hops, x_proto=hops, x_host=hops, x_prefix=hops
+        )
+
     # Import app sections
     if app.config["WEBAPP"]["mount_webui"]:
         from .frontend import frontend

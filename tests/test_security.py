@@ -100,5 +100,46 @@ class SecretFromEnvTestCase(unittest.TestCase):
         self.assertEqual(key, hashlib.sha256(b"hunter2").digest())
 
 
+class ProxyFixTestCase(unittest.TestCase):
+    def _make_app(self, hops):
+        from tests.testbase import TestConfig
+        from supysonic.web import create_application
+
+        cfg = TestConfig(True, True)
+        cfg.BASE["database_uri"] = "sqlite:///" + tempfile.mkstemp()[1]
+        cfg.WEBAPP["cache_dir"] = tempfile.mkdtemp()
+        cfg.WEBAPP["proxy_fix_hops"] = hops
+        return create_application(cfg)
+
+    def test_disabled_by_default(self):
+        from werkzeug.middleware.proxy_fix import ProxyFix
+
+        app = self._make_app(0)
+        self.assertNotIsInstance(app.wsgi_app, ProxyFix)
+
+    def test_enabled_resolves_real_client_ip(self):
+        from werkzeug.middleware.proxy_fix import ProxyFix
+
+        app = self._make_app(2)
+        self.assertIsInstance(app.wsgi_app, ProxyFix)
+
+        seen = {}
+
+        @app.route("/_probe_ip")
+        def _probe():
+            from flask import request
+
+            seen["ip"] = request.remote_addr
+            return "ok"
+
+        app.testing = True
+        app.test_client().get(
+            "/_probe_ip",
+            headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"},
+            environ_overrides={"REMOTE_ADDR": "10.0.0.1"},
+        )
+        self.assertEqual(seen.get("ip"), "203.0.113.7")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,13 @@ services:
       # Report what you play back to Deezer so recommendations/Flow keep learning.
       # Off by default (opt-in). Set to "yes" to enable.
       DEEZER_REPORT_LISTENS: ${DEEZER_REPORT_LISTENS:-}
+      # Behind a reverse proxy / TLS? Uncomment these to harden:
+      #   - PROXY_HOPS = number of trusted proxies in front (enables ProxyFix so
+      #     rate-limiting and logs see the real client IP). Only set it if a
+      #     proxy you control is really in front.
+      #   - COOKIE_SECURE = yes  -> session cookie only sent over HTTPS.
+      # SUPYSONIC_PROXY_HOPS: ${SUPYSONIC_PROXY_HOPS:-}
+      # SUPYSONIC_SESSION_COOKIE_SECURE: ${SUPYSONIC_SESSION_COOKIE_SECURE:-}
     volumes:
       # Persistent state: sqlite db, caches and the Deezer FLAC archive.
       - supysonic-data:/data

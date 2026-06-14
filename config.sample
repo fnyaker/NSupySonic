@@ -50,6 +50,14 @@ log_rotate = yes
 ; Default: off
 ;session_cookie_secure = off
 
+; Number of trusted reverse proxies in front of the server. 0 = the app is
+; reached directly. When > 0, that many X-Forwarded-For / -Proto hops are
+; trusted (ProxyFix), so request IP (rate limiting, logs) and HTTPS detection
+; reflect the real client. SECURITY: only set this if a proxy you control is
+; really in front — otherwise clients can spoof their IP and protocol.
+; Default: 0
+;proxy_fix_hops = 1
+
 ; Space separated list of prefixes that should be ignored on index endpoints
 ; Default: El La Le Las Les Los The
 index_ignored_prefixes = El La Le Las Les Los The

@@ -39,6 +39,11 @@ class DefaultConfig:
         "mount_api": True,
         "mount_spa": True,
         "session_cookie_secure": False,
+        # Number of trusted reverse proxies in front of the app. 0 = none (the
+        # app is reached directly); when > 0, X-Forwarded-* headers from that
+        # many hops are trusted (ProxyFix). NEVER set this unless a proxy you
+        # control really sits in front, or clients could spoof their IP/proto.
+        "proxy_fix_hops": 0,
         "index_ignored_prefixes": "El La Le Las Les Los The",
         "online_lyrics": False,
     }
