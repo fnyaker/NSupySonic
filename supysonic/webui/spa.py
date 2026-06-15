@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os.path
 
-from flask import Blueprint, send_from_directory
+from flask import Blueprint, abort, send_from_directory
 
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
 
@@ -35,6 +35,31 @@ _NOT_BUILT = (
 )
 
 
+# Force the Content-Type by extension instead of trusting the host's mimetypes
+# registry: a slim base image without /etc/mime.types can return an empty/wrong
+# type, and a JS module served without a JavaScript MIME type is blocked by the
+# browser under the global X-Content-Type-Options: nosniff header.
+_MIME_BY_EXT = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".html": "text/html; charset=utf-8",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".svg": "image/svg+xml",
+    ".wasm": "application/wasm",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".ico": "image/x-icon",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
 def _has_build() -> bool:
     return os.path.isfile(os.path.join(DIST_DIR, "index.html"))
 
@@ -44,7 +69,27 @@ def _has_build() -> bool:
 def serve(path: str = ""):
     if not _has_build():
         return _NOT_BUILT
-    if path and os.path.isfile(os.path.join(DIST_DIR, path)):
-        return send_from_directory(DIST_DIR, path)
-    # Hash-routing fallback: any unknown path serves the SPA entry point.
-    return send_from_directory(DIST_DIR, "index.html")
+    if path:
+        if os.path.isfile(os.path.join(DIST_DIR, path)):
+            mimetype = _MIME_BY_EXT.get(os.path.splitext(path)[1].lower())
+            response = send_from_directory(DIST_DIR, path, mimetype=mimetype)
+            # Vite asset filenames are content-hashed, so they're immutable.
+            if path.startswith("assets/"):
+                response.headers["Cache-Control"] = (
+                    "public, max-age=31536000, immutable"
+                )
+            return response
+        # A missing *file* request (it has an extension, e.g. a stale asset
+        # hash) must 404 — never fall through to index.html. Serving HTML for a
+        # .js/.css gets blocked by the browser as a forbidden MIME type because
+        # of the global X-Content-Type-Options: nosniff header.
+        if os.path.splitext(path)[1]:
+            abort(404)
+    # Hash-routing fallback: any unknown route serves the SPA entry point.
+    # Never cache it, so a redeploy's new asset references are picked up
+    # immediately (a stale index.html points at assets that no longer exist).
+    response = send_from_directory(
+        DIST_DIR, "index.html", mimetype="text/html; charset=utf-8"
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    return response
