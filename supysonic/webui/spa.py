@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os.path
 
-from flask import Blueprint, send_from_directory
+from flask import Blueprint, abort, send_from_directory
 
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
 
@@ -44,7 +44,24 @@ def _has_build() -> bool:
 def serve(path: str = ""):
     if not _has_build():
         return _NOT_BUILT
-    if path and os.path.isfile(os.path.join(DIST_DIR, path)):
-        return send_from_directory(DIST_DIR, path)
-    # Hash-routing fallback: any unknown path serves the SPA entry point.
-    return send_from_directory(DIST_DIR, "index.html")
+    if path:
+        if os.path.isfile(os.path.join(DIST_DIR, path)):
+            response = send_from_directory(DIST_DIR, path)
+            # Vite asset filenames are content-hashed, so they're immutable.
+            if path.startswith("assets/"):
+                response.headers["Cache-Control"] = (
+                    "public, max-age=31536000, immutable"
+                )
+            return response
+        # A missing *file* request (it has an extension, e.g. a stale asset
+        # hash) must 404 — never fall through to index.html. Serving HTML for a
+        # .js/.css gets blocked by the browser as a forbidden MIME type because
+        # of the global X-Content-Type-Options: nosniff header.
+        if os.path.splitext(path)[1]:
+            abort(404)
+    # Hash-routing fallback: any unknown route serves the SPA entry point.
+    # Never cache it, so a redeploy's new asset references are picked up
+    # immediately (a stale index.html points at assets that no longer exist).
+    response = send_from_directory(DIST_DIR, "index.html")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
