@@ -185,13 +185,24 @@ def stream_media():
                 for x in (transcoder, decoder, encoder)
             )
             try:
+                # stderr is sent to /dev/null: an unread, inherited stderr can
+                # fill its pipe buffer under a chatty transcoder and deadlock
+                # the worker (it blocks writing stderr while we block reading
+                # stdout) — a source of "random freezes" under load.
                 if transcoder:
                     dec_proc = None
-                    proc = subprocess.Popen(transcoder, stdout=subprocess.PIPE)
-                else:
-                    dec_proc = subprocess.Popen(decoder, stdout=subprocess.PIPE)
                     proc = subprocess.Popen(
-                        encoder, stdin=dec_proc.stdout, stdout=subprocess.PIPE
+                        transcoder, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                    )
+                else:
+                    dec_proc = subprocess.Popen(
+                        decoder, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                    )
+                    proc = subprocess.Popen(
+                        encoder,
+                        stdin=dec_proc.stdout,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
                     )
             except OSError:
                 raise ServerError("Error while running the transcoding process")

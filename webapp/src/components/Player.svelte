@@ -78,6 +78,9 @@
       audio.load();
       if ($player.playing) audio.play().catch(() => {});
       if (!sameTrack) {
+        // Seed duration from metadata right away so the seek bar is correct
+        // before the first timeupdate (live transcodes report no duration).
+        player.setProgress(0, $current.duration || 0);
         flushListen($current.deezer_id);
         pushRecent($current);
         updateMediaSession($current);
@@ -93,7 +96,14 @@
   $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
 
   function onTime() {
-    player.setProgress(audio.currentTime, audio.duration);
+    // A live, on-the-fly transcoded stream (e.g. Opus/ogg piped from ffmpeg)
+    // has no Content-Length, so audio.duration is Infinity/NaN. Fall back to
+    // the duration we already know from the track metadata.
+    const d =
+      audio.duration && isFinite(audio.duration)
+        ? audio.duration
+        : $current?.duration || 0;
+    player.setProgress(audio.currentTime, d);
   }
 
   async function onEnded() {
@@ -492,8 +502,8 @@
     font-size: 0.68rem;
   }
 
-  /* mobile */
-  @media (max-width: 820px) {
+  /* mobile (phone-sized only — narrow desktop keeps the full player bar) */
+  @media (max-width: 640px) {
     .player {
       grid-template-columns: 1fr auto;
       height: 60px;

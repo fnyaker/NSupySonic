@@ -83,7 +83,7 @@
     overflow: hidden;
     height: 100%;
   }
-  @media (max-width: 820px) {
+  @media (max-width: 640px) {
     .sidebar {
       display: none;
     }

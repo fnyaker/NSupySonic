@@ -8,7 +8,7 @@
   import DesktopNowPlaying from "./DesktopNowPlaying.svelte";
 
   let mobile = false;
-  const mq = "(max-width: 820px)";
+  const mq = "(max-width: 640px)";
   if (typeof window !== "undefined") mobile = window.matchMedia(mq).matches;
 
   onMount(() => {

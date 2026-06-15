@@ -1042,13 +1042,19 @@ def _opus_generator(flac_path, bitrate):
         "-map", "0:a:0", "-c:a", "libopus", "-b:a", f"{bitrate}k", "-vbr", "on",
         "-vn", "-f", "ogg", "pipe:1",
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    # stderr -> /dev/null so an unread, full stderr pipe can't deadlock ffmpeg.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         while True:
             data = proc.stdout.read(8192)
             if not data:
                 break
             yield data
+    except GeneratorExit:
+        # Client disconnected mid-stream: stop ffmpeg promptly instead of
+        # letting it run to completion (wasted CPU under load).
+        proc.kill()
+        raise
     finally:
         proc.stdout.close()
         proc.wait()
