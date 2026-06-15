@@ -16,7 +16,7 @@
     openMenu,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
-  import { duration as fmtDuration } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover } from "../lib/format.js";
   import { createVisualizer } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
@@ -236,7 +236,7 @@
 
     <div class="scroller" bind:this={scroller} on:scroll|passive={onScroll}>
       {#each slots as s (s.deezer_id)}
-        <div class="slide"><Cover src={s.album?.cover} alt={s.title} /></div>
+        <div class="slide"><Cover src={hiResCover(s.album?.cover, 1000)} alt={s.title} /></div>
       {/each}
     </div>
 
@@ -386,14 +386,14 @@
     scroll-snap-type: x proximity;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
-    padding: 10px 11%;
+    padding: 10px 7.5%;
     overscroll-behavior-x: contain;
   }
   .scroller::-webkit-scrollbar {
     display: none;
   }
   .slide {
-    flex: 0 0 78%;
+    flex: 0 0 85%;
     scroll-snap-align: center;
     aspect-ratio: 1 / 1;
   }

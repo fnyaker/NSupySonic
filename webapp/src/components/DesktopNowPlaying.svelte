@@ -14,7 +14,7 @@
     openMenu,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
-  import { duration as fmtDuration } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover } from "../lib/format.js";
   import { createVisualizer } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
@@ -107,7 +107,7 @@
         <div class="glow" style={`background-image:url(${$current.album?.cover || ""})`}></div>
         {#key $current.deezer_id}
           <div class="cover-fade" in:fade={{ duration: 260 }} out:fade={{ duration: 260 }}>
-            <Cover src={$current.album?.cover} alt={$current.title} />
+            <Cover src={hiResCover($current.album?.cover, 1500)} alt={$current.title} />
           </div>
         {/key}
       </div>
