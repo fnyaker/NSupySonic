@@ -14,6 +14,14 @@
   color-scheme: dark;
 }
 
+/* Narrow desktop windows: trim the sidebar so the main content keeps room
+   (keeps the full desktop layout instead of dropping to the mobile UI). */
+@media (max-width: 1024px) {
+  :root {
+    --sidebar-w: 200px;
+  }
+}
+
 * {
   box-sizing: border-box;
 }

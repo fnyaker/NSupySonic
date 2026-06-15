@@ -103,10 +103,18 @@
     height: 100vh;
     padding-bottom: var(--player-h);
   }
-  .layout.np-open {
-    grid-template-columns: var(--sidebar-w) 1fr var(--np-w);
+  /* The Now-Playing panel is a real third column only on wide screens. On
+     narrower (but still desktop) windows it floats as an overlay instead, so
+     the main content keeps a usable width — see NowPlaying.svelte. */
+  @media (min-width: 1025px) {
+    .layout.np-open {
+      grid-template-columns: var(--sidebar-w) 1fr var(--np-w);
+    }
   }
-  @media (max-width: 820px) {
+  /* Phone-sized only: collapse to a single column with the mini player +
+     bottom nav. Above this the desktop shell (sidebar + full player) stays,
+     so narrow PC windows look like the full desktop UI rather than a hybrid. */
+  @media (max-width: 640px) {
     .layout,
     .layout.np-open {
       grid-template-columns: 1fr;

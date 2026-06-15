@@ -24,7 +24,7 @@
   .mobilenav {
     display: none;
   }
-  @media (max-width: 820px) {
+  @media (max-width: 640px) {
     .mobilenav {
       position: fixed;
       left: 0;

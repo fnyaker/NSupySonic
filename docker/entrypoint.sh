@@ -54,6 +54,29 @@ render_config() {
     echo "Rendered $CONF from environment."
 }
 
+LEGACY_SQLITE=/data/db/supysonic.db
+
+auto_migrate() {
+    # One-shot, transparent SQLite -> external DB migration. Triggers only when
+    # the deployment has switched DATABASE_URI to Postgres/MySQL *and* a legacy
+    # SQLite database with data is still on the volume. It is idempotent: once
+    # the destination holds data the copy is skipped, so it is safe every boot.
+    [ -n "$DATABASE_URI" ] || return 0
+    case "$DATABASE_URI" in
+        sqlite*) return 0 ;;  # still on SQLite, nothing to migrate
+    esac
+    [ -f "$LEGACY_SQLITE" ] || return 0  # no legacy data to carry over
+
+    echo "Found legacy SQLite DB and an external DATABASE_URI; migrating data…"
+    if supysonic-cli db migrate-to "$DATABASE_URI" \
+        --from "sqlite:///$LEGACY_SQLITE" --skip-if-populated; then
+        echo "Data migration step complete."
+    else
+        echo "Data migration step failed; check the destination database." >&2
+        return 1
+    fi
+}
+
 bootstrap_admin() {
     [ -n "$SUPYSONIC_ADMIN_USER" ] && [ -n "$SUPYSONIC_ADMIN_PASSWORD" ] || return 0
     # `user add` initializes the DB schema and is non-interactive with -p.
@@ -66,9 +89,12 @@ bootstrap_admin() {
 
 render_config
 
-# Only touch the database when actually starting the server.
+# Only touch the database when actually starting the server. Migration must run
+# before bootstrap_admin: creating the admin would make the destination "non
+# empty" and cause the migration to skip.
 case "$1" in
     gunicorn | supysonic-server)
+        auto_migrate
         bootstrap_admin
         ;;
 esac
