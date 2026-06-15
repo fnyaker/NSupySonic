@@ -187,6 +187,33 @@ class MediaTestCase(ApiTestBase):
                 self.assertEqual(rv.mimetype, "image/png")
                 self.__assert_image_data(rv, "PNG", 120)
 
+    def test_get_cover_art_from_album_embedded(self):
+        # Requesting an ALBUM's cover when the folder has no cover file falls
+        # back to extracting embedded art from a track. Regression: that branch
+        # used to pass the track's UUID instead of the Track object.
+        nocover = Folder.create(
+            name="NoCoverRoot",
+            path=os.path.abspath("tests/assets/formats/nocover"),
+            root=True,
+        )
+        # Reuse an existing embedded-art track (its file path is unique) but move
+        # it into a fresh album whose folder carries no cover file, so the lookup
+        # is forced down the embedded-extraction branch.
+        track = Track.get_by_id(self.formats[1])  # silence.flac
+        album = Album.create(artist=track.artist, name="EmbedAlbum")
+        track.album = album
+        track.folder = nocover
+        track.root_folder = nocover
+        track.has_art = True
+        track.save()
+
+        args = {"u": "alice", "p": "Alic3", "c": "tests", "id": str(album.id)}
+        with closing(
+            self.client.get("/rest/getCoverArt.view", query_string=args)
+        ) as rv:
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(rv.mimetype, "image/png")
+
     def test_get_avatar(self):
         self._make_request("getAvatar", error=0)
 
