@@ -88,4 +88,5 @@ config/*.local.conf
 # Svelte web UI build artifacts
 webapp/node_modules/
 webapp/dist/
+webapp/package-lock.json
 supysonic/webui/dist/
