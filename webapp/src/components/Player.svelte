@@ -23,16 +23,20 @@
   let audio;
   let loadedKey = null;
 
-  const QUALITIES = ["FLAC", "OPUS_320", "OPUS_128", "OPUS_64"];
+  const QUALITIES = ["FLAC", "OPUS_320", "OPUS_256", "OPUS_192", "OPUS_128", "OPUS_64"];
   const QUALITY_LABEL = {
     FLAC: "FLAC",
     OPUS_320: "Opus 320",
+    OPUS_256: "Opus 256",
+    OPUS_192: "Opus 192",
     OPUS_128: "Opus 128",
     OPUS_64: "Opus 64",
   };
   const QUALITY_HINT = {
     FLAC: "Sans perte",
     OPUS_320: "Haute qualité",
+    OPUS_256: "Haute qualité",
+    OPUS_192: "Bon compromis",
     OPUS_128: "Standard",
     OPUS_64: "Données réduites",
   };

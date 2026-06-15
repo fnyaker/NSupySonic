@@ -1033,7 +1033,7 @@ def upload():
 
 
 # Opus transcode bitrates (kbps) the web player may request: q=OPUS_320 etc.
-_OPUS_BITRATES = {320, 128, 64}
+_OPUS_BITRATES = {320, 256, 192, 128, 64}
 
 
 def _opus_generator(flac_path, bitrate):

@@ -4,9 +4,16 @@
   import { quality } from "../lib/stores.js";
   import Icon from "./Icon.svelte";
 
-  const QUALITIES = ["FLAC", "OPUS_320", "OPUS_128", "OPUS_64"];
-  const LABEL = { FLAC: "FLAC", OPUS_320: "Opus 320", OPUS_128: "Opus 128", OPUS_64: "Opus 64" };
-  const SHORT = { FLAC: "FLAC", OPUS_320: "320", OPUS_128: "128", OPUS_64: "64" };
+  const QUALITIES = ["FLAC", "OPUS_320", "OPUS_256", "OPUS_192", "OPUS_128", "OPUS_64"];
+  const LABEL = {
+    FLAC: "FLAC",
+    OPUS_320: "Opus 320",
+    OPUS_256: "Opus 256",
+    OPUS_192: "Opus 192",
+    OPUS_128: "Opus 128",
+    OPUS_64: "Opus 64",
+  };
+  const SHORT = { FLAC: "FLAC", OPUS_320: "320", OPUS_256: "256", OPUS_192: "192", OPUS_128: "128", OPUS_64: "64" };
 
   let open = false;
   function pick(q) {
