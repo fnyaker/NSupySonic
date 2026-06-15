@@ -45,6 +45,7 @@ _MIME_BY_EXT = {
     ".css": "text/css",
     ".html": "text/html; charset=utf-8",
     ".json": "application/json",
+    ".webmanifest": "application/manifest+json",
     ".map": "application/json",
     ".svg": "image/svg+xml",
     ".wasm": "application/wasm",

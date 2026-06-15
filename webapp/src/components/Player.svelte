@@ -88,12 +88,22 @@
     }
   }
 
-  // Reflect transport + volume state onto the element.
+  // Reflect transport state onto the element, but ONLY on a real mismatch.
+  // This block re-runs on every player-store change (incl. 4×/s progress
+  // updates), so blindly calling audio.play()/pause() here would fight the OS:
+  // when another app (e.g. a TTS that grabs audio focus) pauses us, the element
+  // is paused while the store may still read playing=true for a tick, and an
+  // unconditional play() gets cut off again → a rapid play/pause loop. Guarding
+  // on audio.paused makes each direction idempotent and breaks the oscillation.
   $: if (audio && loadedKey) {
-    if ($player.playing) audio.play().catch(() => {});
-    else audio.pause();
+    if ($player.playing && audio.paused) audio.play().catch(() => {});
+    else if (!$player.playing && !audio.paused) audio.pause();
   }
   $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
+
+  // Keep the OS media notification's transport state in sync (play/pause glyph).
+  $: if ("mediaSession" in navigator)
+    navigator.mediaSession.playbackState = $player.playing ? "playing" : "paused";
 
   function onTime() {
     // A live, on-the-fly transcoded stream (e.g. Opus/ogg piped from ffmpeg)
@@ -104,6 +114,24 @@
         ? audio.duration
         : $current?.duration || 0;
     player.setProgress(audio.currentTime, d);
+    updatePositionState(audio.currentTime, d);
+  }
+
+  // Feed the OS media notification a duration/position so it can draw a seek
+  // bar. Throws if duration <= 0 or position > duration, so clamp + guard.
+  function updatePositionState(position, duration) {
+    if (!("mediaSession" in navigator) || !("setPositionState" in navigator.mediaSession))
+      return;
+    if (!duration || !isFinite(duration)) return;
+    try {
+      navigator.mediaSession.setPositionState({
+        duration,
+        position: Math.min(Math.max(position, 0), duration),
+        playbackRate: audio?.playbackRate || 1,
+      });
+    } catch {
+      /* ignore */
+    }
   }
 
   async function onEnded() {
@@ -184,6 +212,21 @@
       navigator.mediaSession.setActionHandler("pause", () => player.pause());
       navigator.mediaSession.setActionHandler("nexttrack", () => player.next());
       navigator.mediaSession.setActionHandler("previoustrack", () => player.prev());
+      // Scrubbing + skip from the OS notification / lock screen.
+      navigator.mediaSession.setActionHandler("seekto", (d) => {
+        if (audio && d.seekTime != null) audio.currentTime = d.seekTime;
+      });
+      navigator.mediaSession.setActionHandler("seekbackward", (d) => {
+        if (audio)
+          audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10));
+      });
+      navigator.mediaSession.setActionHandler("seekforward", (d) => {
+        if (audio)
+          audio.currentTime = Math.min(
+            audio.duration || $current?.duration || 0,
+            audio.currentTime + (d.seekOffset || 10)
+          );
+      });
     } catch {
       /* ignore */
     }
@@ -202,9 +245,11 @@
   on:play={() => {
     wireAudio(audio); // lazy: first play is a user gesture, so the context starts
     resumeAudio();
-    player.play();
+    if (!get(player).playing) player.play();
   }}
-  on:pause={() => player.pause()}
+  on:pause={() => {
+    if (get(player).playing) player.pause();
+  }}
 ></audio>
 
 <footer class="player">

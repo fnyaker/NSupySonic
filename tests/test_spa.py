@@ -76,6 +76,15 @@ class SpaServeTestCase(unittest.TestCase):
         self.assertIn("text/html", rv.headers["Content-Type"])
         self.assertEqual(rv.headers.get("Cache-Control"), "no-cache")
 
+    def test_webmanifest_served_with_manifest_mime(self):
+        # The PWA manifest must carry an explicit type; under nosniff a generic
+        # octet-stream would be rejected by some browsers for rel=manifest.
+        with open(os.path.join(self.dist, "manifest.webmanifest"), "w") as fh:
+            fh.write('{"name":"x"}')
+        rv = self.client.get("/app/manifest.webmanifest")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.headers["Content-Type"], "application/manifest+json")
+
 
 if __name__ == "__main__":
     unittest.main()
