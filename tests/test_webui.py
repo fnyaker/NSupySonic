@@ -736,6 +736,19 @@ class WebUITestCase(unittest.TestCase):
         self.assertFalse(sent[0]["isEnabled"])
         self.assertTrue(sent[0]["isEditedByUser"])
 
+    def test_set_flow_clusters_marks_enabled_as_edited(self):
+        # Enabled clusters must also be flagged edited, otherwise Deezer treats
+        # them as "default" and drops them -> the tuner reopens with nothing on.
+        self._login()
+        rv = self.client.post(
+            "/api/flow/clusters",
+            json={"clusters": [{"id": "default-rap", "enabled": True}]},
+        )
+        self.assertEqual(rv.status_code, 200)
+        sent = self.app.deezer.dz.gql.updated
+        self.assertTrue(sent[0]["isEnabled"])
+        self.assertTrue(sent[0]["isEditedByUser"])
+
     # -- download (pre-archive) -----------------------------------------
 
     def test_download(self):

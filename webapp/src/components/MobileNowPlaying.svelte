@@ -3,7 +3,7 @@
   // (smooth, momentum, no transform math): three slots [prev, current, next],
   // current centred, neighbours peeking. When the user settles on a neighbour we
   // advance the queue and re-centre, so the cover they swiped to stays put.
-  import { tick, onDestroy } from "svelte";
+  import { tick, onMount, onDestroy } from "svelte";
   import { push } from "svelte-spa-router";
   import { fade } from "svelte/transition";
   import {
@@ -11,19 +11,40 @@
     current,
     playing,
     favorites,
-    quality,
     immersiveOpen,
     seekTo,
+    openMenu,
   } from "../lib/stores.js";
-  import { toggleFavorite } from "../lib/actions.js";
+  import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
+  import { createVisualizer } from "../lib/visualizer.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
-
-  const QUALITIES = ["FLAC", "OPUS_320", "OPUS_128", "OPUS_64"];
-  const QLABEL = { FLAC: "FLAC", OPUS_320: "320", OPUS_128: "128", OPUS_64: "64" };
+  import QualityMenu from "./QualityMenu.svelte";
 
   let showQueue = false;
+
+  async function trackMenu(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!$current) return;
+    const coords = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
+    await userPlaylists();
+    openMenu(coords, buildTrackMenu($current, go));
+  }
+
+  // -- bar visualizer (same renderer as desktop) ----------------------------
+  let viz;
+  let rafId = null;
+  const drawBars = createVisualizer();
+  function tickViz() {
+    rafId = requestAnimationFrame(tickViz);
+    drawBars(viz);
+  }
+  onMount(() => {
+    tickViz();
+    return () => rafId && cancelAnimationFrame(rafId);
+  });
 
   // Background crossfade: each new cover is stacked ON TOP of the previous one
   // (which stays fully opaque) and fades in, then the old layers are dropped.
@@ -217,13 +238,12 @@
       <button class="sm" class:on={$player.repeat !== "off"} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
     </div>
 
+    <canvas class="viz" bind:this={viz} aria-hidden="true"></canvas>
+
     <div class="footer">
-      <button class="sm" class:on={$player.autoplay} on:click={() => player.toggleAutoplay()} aria-label="Lecture auto"><Icon name="infinity" size={20} /></button>
-      <div class="quality" role="group" aria-label="Qualité">
-        {#each QUALITIES as qq}
-          <button class:sel={$quality === qq} on:click={() => quality.set(qq)}>{QLABEL[qq]}</button>
-        {/each}
-      </div>
+      <button class="sm more" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={22} /></button>
+      <span class="grow"></span>
+      <QualityMenu />
     </div>
   </div>
 
@@ -421,6 +441,13 @@
     place-items: center;
   }
 
+  .viz {
+    width: 100%;
+    height: 40px;
+    opacity: 0.9;
+    padding: 0 22px;
+    box-sizing: border-box;
+  }
   .footer {
     display: flex;
     align-items: center;
@@ -430,28 +457,8 @@
   .footer .sm {
     color: rgba(255, 255, 255, 0.7);
   }
-  .footer .sm.on {
-    color: var(--accent);
-  }
-  .quality {
-    display: flex;
+  .footer .grow {
     flex: 1;
-    gap: 6px;
-    padding: 5px;
-    background: rgba(255, 255, 255, 0.12);
-    border-radius: 999px;
-  }
-  .quality button {
-    flex: 1;
-    padding: 9px;
-    border-radius: 999px;
-    font-size: 0.8rem;
-    font-weight: 700;
-    color: rgba(255, 255, 255, 0.75);
-  }
-  .quality button.sel {
-    background: #fff;
-    color: #111;
   }
 
   /* queue bottom sheet */

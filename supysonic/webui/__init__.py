@@ -641,9 +641,12 @@ def set_flow_clusters():
         if not cid:
             continue
         enabled = bool(it.get("enabled", True))
-        # Deezer marks user-disabled clusters as edited (mirrors the web app).
+        # Every cluster the user touched here is an explicit choice, so flag it
+        # as edited in BOTH directions. Marking only disabled ones as edited let
+        # Deezer treat the enabled ones as "default" and drop them, so reopening
+        # the tuner showed nothing checked.
         clusters.append(
-            {"clusterId": cid, "isEnabled": enabled, "isEditedByUser": not enabled}
+            {"clusterId": cid, "isEnabled": enabled, "isEditedByUser": True}
         )
     if not clusters:
         return jsonify({"error": "no clusters"}), 400
