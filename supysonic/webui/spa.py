@@ -35,6 +35,31 @@ _NOT_BUILT = (
 )
 
 
+# Force the Content-Type by extension instead of trusting the host's mimetypes
+# registry: a slim base image without /etc/mime.types can return an empty/wrong
+# type, and a JS module served without a JavaScript MIME type is blocked by the
+# browser under the global X-Content-Type-Options: nosniff header.
+_MIME_BY_EXT = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".html": "text/html; charset=utf-8",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".svg": "image/svg+xml",
+    ".wasm": "application/wasm",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".ico": "image/x-icon",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
 def _has_build() -> bool:
     return os.path.isfile(os.path.join(DIST_DIR, "index.html"))
 
@@ -46,7 +71,8 @@ def serve(path: str = ""):
         return _NOT_BUILT
     if path:
         if os.path.isfile(os.path.join(DIST_DIR, path)):
-            response = send_from_directory(DIST_DIR, path)
+            mimetype = _MIME_BY_EXT.get(os.path.splitext(path)[1].lower())
+            response = send_from_directory(DIST_DIR, path, mimetype=mimetype)
             # Vite asset filenames are content-hashed, so they're immutable.
             if path.startswith("assets/"):
                 response.headers["Cache-Control"] = (
@@ -62,6 +88,8 @@ def serve(path: str = ""):
     # Hash-routing fallback: any unknown route serves the SPA entry point.
     # Never cache it, so a redeploy's new asset references are picked up
     # immediately (a stale index.html points at assets that no longer exist).
-    response = send_from_directory(DIST_DIR, "index.html")
+    response = send_from_directory(
+        DIST_DIR, "index.html", mimetype="text/html; charset=utf-8"
+    )
     response.headers["Cache-Control"] = "no-cache"
     return response
