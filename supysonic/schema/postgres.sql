@@ -1,4 +1,3 @@
--- Case-insensitive text used by the name/title columns below.
 CREATE EXTENSION IF NOT EXISTS citext;
 
 CREATE TABLE IF NOT EXISTS folder (
