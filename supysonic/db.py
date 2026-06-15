@@ -676,8 +676,16 @@ def list_migrations(provider):
 def execute_sql_resource_script(respath):
     sql = get_resource_text(respath)
     for statement in sql.split(";"):
-        statement = statement.strip()
-        if statement and not statement.startswith("--"):
+        # Drop standalone comment lines first: ``split(";")`` keeps a leading
+        # comment attached to the statement that follows it, and skipping the
+        # whole chunk when it starts with "--" would silently drop that
+        # statement (e.g. a CREATE right after a comment).
+        statement = "\n".join(
+            line
+            for line in statement.splitlines()
+            if line.strip() and not line.strip().startswith("--")
+        ).strip()
+        if statement:
             db.execute_sql(statement)
 
 
