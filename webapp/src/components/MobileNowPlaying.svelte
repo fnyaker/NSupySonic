@@ -18,6 +18,7 @@
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import { createVisualizer } from "../lib/visualizer.js";
+  import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import QualityMenu from "./QualityMenu.svelte";
@@ -34,16 +35,33 @@
   }
 
   // -- bar visualizer (same renderer as desktop) ----------------------------
+  // Only animate while the page is actually visible: on mobile, burning rAF
+  // frames behind a locked screen / backgrounded PWA wastes battery.
   let viz;
   let rafId = null;
   const drawBars = createVisualizer();
-  function tickViz() {
-    rafId = requestAnimationFrame(tickViz);
-    drawBars(viz);
+  function startViz() {
+    if (rafId || (typeof document !== "undefined" && document.hidden)) return;
+    const loop = () => {
+      rafId = requestAnimationFrame(loop);
+      drawBars(viz);
+    };
+    loop();
+  }
+  function stopViz() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+  function onVisibility() {
+    document.hidden ? stopViz() : startViz();
   }
   onMount(() => {
-    tickViz();
-    return () => rafId && cancelAnimationFrame(rafId);
+    startViz();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stopViz();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   });
 
   // Background crossfade: each new cover is stacked ON TOP of the previous one
@@ -208,6 +226,14 @@
   </header>
 
   <div class="body">
+    <div class="cur-lyric" aria-hidden="true">
+      {#if $currentLyricLine}
+        {#key $currentLyricLine}
+          <span in:fade={{ duration: 220 }}>{$currentLyricLine}</span>
+        {/key}
+      {/if}
+    </div>
+
     <div class="scroller" bind:this={scroller} on:scroll|passive={onScroll}>
       {#each slots as s (s.deezer_id)}
         <div class="slide"><Cover src={s.album?.cover} alt={s.title} /></div>
@@ -322,6 +348,32 @@
     justify-content: center;
     gap: 6px;
     min-height: 0;
+  }
+
+  /* current synced lyric line, above the cover carousel */
+  .cur-lyric {
+    position: relative;
+    min-height: 26px;
+    margin: 0 22px 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cur-lyric span {
+    position: absolute;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 1.02rem;
+    font-weight: 800;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
   }
 
   /* native scroll-snap cover carousel */

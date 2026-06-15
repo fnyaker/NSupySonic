@@ -16,6 +16,7 @@
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import { createVisualizer } from "../lib/visualizer.js";
+  import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
   import Icon from "./Icon.svelte";
@@ -94,6 +95,14 @@
 
   <div class="stage">
     <section class="main">
+      <div class="cur-lyric" aria-hidden="true">
+        {#if $currentLyricLine}
+          {#key $currentLyricLine}
+            <span in:fade={{ duration: 220 }}>{$currentLyricLine}</span>
+          {/key}
+        {/if}
+      </div>
+
       <div class="cover">
         <div class="glow" style={`background-image:url(${$current.album?.cover || ""})`}></div>
         {#key $current.deezer_id}
@@ -261,6 +270,31 @@
   }
   .cover :global(.cover) {
     box-shadow: 0 30px 70px rgba(0, 0, 0, 0.55);
+  }
+
+  /* current synced lyric line, above the cover */
+  .cur-lyric {
+    position: relative;
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cur-lyric span {
+    position: absolute;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 1.1rem;
+    font-weight: 800;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
   }
 
   .info {
