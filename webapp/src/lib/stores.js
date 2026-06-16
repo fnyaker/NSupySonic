@@ -116,7 +116,10 @@ const savedVolume = persisted("player.volume", 1);
 const savedMuted = persisted("player.muted", false);
 const savedShuffle = persisted("player.shuffle", false);
 const savedRepeat = persisted("player.repeat", "off"); // off | all | one
-const savedAutoplay = persisted("player.autoplay", true);
+// Last session (queue/index/position/context), so a reload resumes where you
+// left off. Capped so a huge queue (e.g. all favorites) can't blow the quota.
+const savedSession = persisted("player.session", null);
+const SESSION_CAP = 300;
 
 function shuffled(arr) {
   const a = arr.slice();
@@ -128,19 +131,58 @@ function shuffled(arr) {
 }
 
 function createPlayer() {
+  const sess = get(savedSession) || {};
+  const restoredQueue = Array.isArray(sess.queue) ? sess.queue : [];
   const { subscribe, update, set } = writable({
-    queue: [],
-    index: -1,
-    playing: false,
-    currentTime: 0,
+    queue: restoredQueue,
+    index:
+      Number.isInteger(sess.index) && sess.index < restoredQueue.length
+        ? sess.index
+        : restoredQueue.length
+          ? 0
+          : -1,
+    playing: false, // never auto-resume audio without a user gesture
+    currentTime: sess.currentTime || 0, // seek bar starts where we left off
     duration: 0,
     volume: get(savedVolume),
     muted: get(savedMuted),
     shuffle: get(savedShuffle),
     repeat: get(savedRepeat),
-    autoplay: get(savedAutoplay),
-    context: null,
-    _orig: null, // unshuffled order, when shuffle is on
+    autoplay: true, // autoplay is always on (no toggle)
+    context: sess.context || null,
+    _orig: Array.isArray(sess._orig) ? sess._orig : null,
+  });
+
+  // Persist the session: immediately when the track/queue changes, throttled
+  // (~2s) for mere position updates so we don't hammer localStorage 4×/s.
+  let saveTimer = null;
+  let lastStructKey = "";
+  let latest = null;
+  function snapshot(s) {
+    return {
+      queue: s.queue.slice(0, SESSION_CAP),
+      index: Math.min(s.index, SESSION_CAP - 1),
+      currentTime: s.currentTime,
+      context: s.context,
+      shuffle: s.shuffle,
+      repeat: s.repeat,
+      _orig: s._orig ? s._orig.slice(0, SESSION_CAP) : null,
+    };
+  }
+  subscribe((s) => {
+    latest = s;
+    const key = `${s.index}|${s.queue[s.index]?.deezer_id ?? ""}|${s.queue.length}`;
+    if (key !== lastStructKey) {
+      lastStructKey = key;
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      savedSession.set(snapshot(s));
+    } else if (!saveTimer) {
+      saveTimer = setTimeout(() => {
+        saveTimer = null;
+        savedSession.set(snapshot(latest));
+      }, 2000);
+    }
   });
 
   function clean(tracks) {
@@ -340,15 +382,6 @@ function createPlayer() {
         const repeat = order[s.repeat] || "off";
         savedRepeat.set(repeat);
         return { ...s, repeat };
-      });
-    },
-
-    toggleAutoplay() {
-      update((s) => {
-        const autoplay = !s.autoplay;
-        savedAutoplay.set(autoplay);
-        toasts.push(autoplay ? "Lecture auto activée" : "Lecture auto désactivée");
-        return { ...s, autoplay };
       });
     },
   };

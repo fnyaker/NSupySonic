@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import weakref
 from pathlib import Path
 
 import requests
@@ -67,7 +68,12 @@ class DeezerProvider:
         )
         self._dz: Deezer | None = None
         self._login_lock = threading.Lock()
-        self._track_locks: dict[str, threading.Lock] = {}
+        # Weak values so a per-track lock is garbage-collected once nothing
+        # holds it anymore. A plain dict here grew without bound (one entry per
+        # distinct Deezer track ever played) — a slow memory leak in long runs.
+        self._track_locks: "weakref.WeakValueDictionary[str, threading.Lock]" = (
+            weakref.WeakValueDictionary()
+        )
         self._track_locks_guard = threading.Lock()
         # (checksum, tracks) cache for the favorites list — see
         # get_my_favorite_tracks. The expensive part is fetching full metadata

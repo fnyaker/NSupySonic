@@ -90,13 +90,20 @@
     overflow: hidden;
     height: 100%;
   }
-  @media (max-width: 820px) {
+  /* Narrow desktop: float over the content instead of taking a column. */
+  @media (max-width: 1024px) {
     .np {
       position: fixed;
       inset: 0;
-      bottom: 60px;
+      bottom: var(--player-h);
       z-index: 110;
       border-left: none;
+    }
+  }
+  /* Phone: clear the mini player instead of the full desktop player bar. */
+  @media (max-width: 640px) {
+    .np {
+      bottom: 60px;
     }
   }
   .np-head {

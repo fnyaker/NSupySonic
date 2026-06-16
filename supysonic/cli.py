@@ -494,6 +494,62 @@ def deezer_scan_local(config):
     click.echo(f"Local scan: {out['added']} added, {out['removed']} removed.")
 
 
+@cli.group("db")
+def db_group():
+    """Database management commands"""
+    pass
+
+
+@db_group.command("migrate-to")
+@click.argument("dest_uri")
+@click.option(
+    "--from",
+    "source_uri",
+    default=None,
+    help="Source database URI (defaults to the configured [base] database_uri).",
+)
+@click.option(
+    "--skip-if-populated",
+    is_flag=True,
+    help="Exit successfully (instead of erroring) if the destination already "
+    "holds data. Used for idempotent boot-time migrations.",
+)
+@click.pass_obj
+def db_migrate_to(config, dest_uri, source_uri, skip_if_populated):
+    """Copy all data into another database, e.g. SQLite -> PostgreSQL.
+
+    DEST_URI is a database URI such as
+    postgresql://supysonic:supysonic@db/supysonic
+
+    The destination schema is created automatically and the copy refuses to run
+    if the destination already contains data (unless --skip-if-populated).
+    """
+    from .db import migrate_database
+
+    if source_uri is None:
+        source_uri = config.BASE["database_uri"]
+
+    def _progress(table, count):
+        click.echo(f"  {table}: {count} rows")
+
+    click.echo(f"Migrating {source_uri} -> {dest_uri}")
+    try:
+        copied = migrate_database(
+            source_uri,
+            dest_uri,
+            progress=_progress,
+            skip_if_populated=skip_if_populated,
+        )
+    except Exception as exc:  # surface as a clean CLI error
+        raise ClickException(str(exc))
+
+    if copied is None:
+        click.echo("Destination already populated; nothing to migrate.")
+    else:
+        total = sum(copied.values())
+        click.echo(f"Done. Copied {total} rows across {len(copied)} tables.")
+
+
 def main():
     config = IniConfig.from_common_locations()
     init_database(config.BASE["database_uri"])

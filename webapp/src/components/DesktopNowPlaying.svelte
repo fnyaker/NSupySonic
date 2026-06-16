@@ -9,21 +9,29 @@
     current,
     playing,
     favorites,
-    quality,
     immersiveOpen,
     seekTo,
+    openMenu,
   } from "../lib/stores.js";
-  import { toggleFavorite } from "../lib/actions.js";
-  import { duration as fmtDuration } from "../lib/format.js";
-  import { getAnalyser } from "../lib/visualizer.js";
+  import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
+  import { duration as fmtDuration, hiResCover } from "../lib/format.js";
+  import { createVisualizer } from "../lib/visualizer.js";
+  import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
   import Icon from "./Icon.svelte";
-
-  const QUALITIES = ["FLAC", "OPUS_320", "OPUS_128", "OPUS_64"];
-  const QLABEL = { FLAC: "FLAC", OPUS_320: "320", OPUS_128: "128", OPUS_64: "64" };
+  import QualityMenu from "./QualityMenu.svelte";
 
   let tab = "queue";
+
+  async function trackMenu(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!$current) return;
+    const coords = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
+    await userPlaylists();
+    openMenu(coords, buildTrackMenu($current, go));
+  }
 
   $: q = $player.queue;
   $: idx = $player.index;
@@ -47,59 +55,11 @@
   // -- bar visualizer --------------------------------------------------------
   let canvas;
   let rafId = null;
-  let freq = null;
-  let agc = 0.18; // slow-moving average level, for automatic gain control
+  const drawBars = createVisualizer();
 
   function draw() {
     rafId = requestAnimationFrame(draw);
-    const an = getAnalyser();
-    if (!an || !canvas) return;
-    if (!freq || freq.length !== an.frequencyBinCount)
-      freq = new Uint8Array(an.frequencyBinCount);
-    an.getByteFrequencyData(freq);
-    const cw = canvas.clientWidth,
-      ch = canvas.clientHeight;
-    if (!cw || !ch) return;
-    if (canvas.width !== cw) canvas.width = cw;
-    if (canvas.height !== ch) canvas.height = ch;
-    const g = canvas.getContext("2d");
-    g.clearRect(0, 0, cw, ch);
-
-    const bars = Math.max(28, Math.min(64, Math.floor(cw / 9)));
-    const bins = freq.length;
-    const minBin = 1;
-    const maxBin = Math.floor(bins * 0.9);
-
-    // Pass 1: log-spaced bands + a gentle high-frequency tilt (raw 0..1).
-    const raw = new Array(bars);
-    let frameSum = 0;
-    for (let i = 0; i < bars; i++) {
-      const lo = Math.floor(minBin * Math.pow(maxBin / minBin, i / bars));
-      const hi = Math.max(lo + 1, Math.floor(minBin * Math.pow(maxBin / minBin, (i + 1) / bars)));
-      let sum = 0,
-        n = 0;
-      for (let b = lo; b < hi && b < bins; b++) {
-        sum += freq[b];
-        n++;
-      }
-      const r = Math.min(1, (n ? sum / n : 0) / 255) * (0.85 + 0.4 * (i / bars));
-      raw[i] = r;
-      frameSum += r;
-    }
-
-    // Automatic gain: adapt to the running average so loud tracks don't peg the
-    // meter and quiet ones still move — heavily smoothed, low base sensitivity.
-    agc = agc * 0.94 + (frameSum / bars) * 0.06;
-    const gain = 0.55 / Math.max(0.15, agc);
-
-    const bw = cw / bars;
-    for (let i = 0; i < bars; i++) {
-      let v = Math.min(1, raw[i] * gain);
-      v = Math.pow(v, 1.25); // mild contrast, no hard ceiling slam
-      const bh = Math.max(2, v * ch);
-      g.fillStyle = `rgba(255,255,255,${0.14 + 0.55 * v})`;
-      g.fillRect(i * bw + bw * 0.16, (ch - bh) / 2, bw * 0.68, bh);
-    }
+    drawBars(canvas);
   }
   function start() {
     if (rafId || (typeof document !== "undefined" && document.hidden)) return;
@@ -135,11 +95,19 @@
 
   <div class="stage">
     <section class="main">
+      <div class="cur-lyric" aria-hidden="true">
+        {#if $currentLyricLine}
+          {#key $currentLyricLine}
+            <span in:fade={{ duration: 220 }}>{$currentLyricLine}</span>
+          {/key}
+        {/if}
+      </div>
+
       <div class="cover">
         <div class="glow" style={`background-image:url(${$current.album?.cover || ""})`}></div>
         {#key $current.deezer_id}
           <div class="cover-fade" in:fade={{ duration: 260 }} out:fade={{ duration: 260 }}>
-            <Cover src={$current.album?.cover} alt={$current.title} />
+            <Cover src={hiResCover($current.album?.cover, 1500)} alt={$current.title} />
           </div>
         {/key}
       </div>
@@ -172,16 +140,14 @@
 
       <div class="footer">
         <div class="left">
-          <button class="sm" class:on={$player.autoplay} on:click={() => player.toggleAutoplay()} aria-label="Lecture auto"><Icon name="infinity" size={20} /></button>
           <div class="vol">
             <button class="sm" on:click={() => player.toggleMute()} aria-label="Muet"><Icon name={$player.muted || $player.volume === 0 ? "mute" : "volume"} size={19} /></button>
             <input class="vol-range" type="range" min="0" max="1" step="0.01" value={$player.muted ? 0 : $player.volume} on:input={(e) => player.setVolume(+e.target.value)} style={`--p:${($player.muted ? 0 : $player.volume) * 100}%`} aria-label="Volume" />
           </div>
         </div>
-        <div class="quality" role="group" aria-label="Qualité">
-          {#each QUALITIES as qq}
-            <button class:sel={$quality === qq} on:click={() => quality.set(qq)}>{QLABEL[qq]}</button>
-          {/each}
+        <div class="right">
+          <button class="sm" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={20} /></button>
+          <QualityMenu />
         </div>
       </div>
     </section>
@@ -306,6 +272,31 @@
     box-shadow: 0 30px 70px rgba(0, 0, 0, 0.55);
   }
 
+  /* current synced lyric line, above the cover */
+  .cur-lyric {
+    position: relative;
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cur-lyric span {
+    position: absolute;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 1.1rem;
+    font-weight: 800;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+
   .info {
     display: flex;
     align-items: center;
@@ -423,8 +414,8 @@
   .footer .sm {
     color: rgba(255, 255, 255, 0.7);
   }
-  .footer .sm.on {
-    color: var(--accent);
+  .footer .sm:hover {
+    color: #fff;
   }
   .vol {
     display: flex;
@@ -435,23 +426,10 @@
     width: 110px;
     flex: none;
   }
-  .quality {
+  .right {
     display: flex;
-    gap: 4px;
-    padding: 4px;
-    background: rgba(255, 255, 255, 0.12);
-    border-radius: 999px;
-  }
-  .quality button {
-    padding: 6px 12px;
-    border-radius: 999px;
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: rgba(255, 255, 255, 0.75);
-  }
-  .quality button.sel {
-    background: #fff;
-    color: #111;
+    align-items: center;
+    gap: 12px;
   }
 
   .side {

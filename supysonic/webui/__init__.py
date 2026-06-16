@@ -641,9 +641,12 @@ def set_flow_clusters():
         if not cid:
             continue
         enabled = bool(it.get("enabled", True))
-        # Deezer marks user-disabled clusters as edited (mirrors the web app).
+        # Every cluster the user touched here is an explicit choice, so flag it
+        # as edited in BOTH directions. Marking only disabled ones as edited let
+        # Deezer treat the enabled ones as "default" and drop them, so reopening
+        # the tuner showed nothing checked.
         clusters.append(
-            {"clusterId": cid, "isEnabled": enabled, "isEditedByUser": not enabled}
+            {"clusterId": cid, "isEnabled": enabled, "isEditedByUser": True}
         )
     if not clusters:
         return jsonify({"error": "no clusters"}), 400
@@ -1030,7 +1033,7 @@ def upload():
 
 
 # Opus transcode bitrates (kbps) the web player may request: q=OPUS_320 etc.
-_OPUS_BITRATES = {320, 128, 64}
+_OPUS_BITRATES = {320, 256, 192, 128, 64}
 
 
 def _opus_generator(flac_path, bitrate):
@@ -1042,13 +1045,19 @@ def _opus_generator(flac_path, bitrate):
         "-map", "0:a:0", "-c:a", "libopus", "-b:a", f"{bitrate}k", "-vbr", "on",
         "-vn", "-f", "ogg", "pipe:1",
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    # stderr -> /dev/null so an unread, full stderr pipe can't deadlock ffmpeg.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         while True:
             data = proc.stdout.read(8192)
             if not data:
                 break
             yield data
+    except GeneratorExit:
+        # Client disconnected mid-stream: stop ffmpeg promptly instead of
+        # letting it run to completion (wasted CPU under load).
+        proc.kill()
+        raise
     finally:
         proc.stdout.close()
         proc.wait()

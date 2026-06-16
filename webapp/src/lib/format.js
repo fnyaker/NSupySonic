@@ -8,3 +8,12 @@ export function duration(sec) {
 export function artists(track) {
   return track && track.artist ? track.artist.name : "";
 }
+
+// Deezer CDN covers embed their dimensions in the path, e.g.
+// .../cover/<md5>/500x500-000000-80-0-0.jpg. The API hands us 500px art, which
+// upscales (blurry) in the full-screen now-playing views, so bump the size in
+// the URL for those. Leaves non-Deezer / local covers untouched.
+export function hiResCover(url, size = 1000) {
+  if (!url || typeof url !== "string") return url;
+  return url.replace(/\/\d+x\d+(-[^/]*\.(?:jpg|jpeg|png|webp))/i, `/${size}x${size}$1`);
+}

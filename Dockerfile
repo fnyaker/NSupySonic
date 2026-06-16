@@ -33,7 +33,7 @@ COPY --from=webbuilder /web/supysonic/webui/dist /src/supysonic/webui/dist
 # The trailing block copies the built SPA next to the installed package, in case
 # package_data didn't pick up the gitignored dist directory (belt + braces).
 RUN pip install --upgrade pip setuptools wheel \
- && pip install --no-build-isolation . gunicorn \
+ && pip install --no-build-isolation ".[postgresql]" gunicorn \
  && DEST="$(cd / && python -c 'import os, supysonic.webui as w; print(os.path.dirname(w.__file__))')" \
  && if [ "$DEST" != "/src/supysonic/webui" ]; then \
         mkdir -p "$DEST/dist" \
@@ -72,6 +72,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 # Baked default config so the container boots without a mounted config; a
 # bind-mounted /etc/supysonic overrides it entirely.
 COPY docker/default.conf /etc/supysonic
+# Gunicorn config (workers/threads/timeout are env-tunable; see the file).
+COPY docker/gunicorn.conf.py /etc/gunicorn.conf.py
 
 USER supysonic
 WORKDIR /data
@@ -83,10 +85,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["python", "-c", "import socket; socket.create_connection(('127.0.0.1', 5722), 4).close()"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-# gunicorn via the app factory so we can raise --timeout (first play of a
-# Deezer track downloads the full FLAC before responding). One worker keeps the
-# per-process archive lock / single Deezer session effective; threads give
-# concurrency.
-CMD ["gunicorn", "--bind", "0.0.0.0:5722", \
-     "--workers", "1", "--threads", "4", "--timeout", "120", \
+# gunicorn via the app factory. Concurrency/timeout come from the config file
+# (env-tunable). One worker keeps the per-process archive lock / single Deezer
+# session effective; threads give concurrency.
+CMD ["gunicorn", "-c", "/etc/gunicorn.conf.py", \
      "supysonic.web:create_application()"]

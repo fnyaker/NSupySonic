@@ -25,7 +25,7 @@ from peewee import (
     UUIDField,
 )
 from peewee import CompositeKey, DatabaseProxy, Model, MySQLDatabase
-from peewee import fn
+from peewee import PostgresqlDatabase, chunked, fn
 from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -676,12 +676,27 @@ def list_migrations(provider):
 def execute_sql_resource_script(respath):
     sql = get_resource_text(respath)
     for statement in sql.split(";"):
-        statement = statement.strip()
-        if statement and not statement.startswith("--"):
+        # Drop standalone comment lines first: ``split(";")`` keeps a leading
+        # comment attached to the statement that follows it, and skipping the
+        # whole chunk when it starts with "--" would silently drop that
+        # statement (e.g. a CREATE right after a comment).
+        statement = "\n".join(
+            line
+            for line in statement.splitlines()
+            if line.strip() and not line.strip().startswith("--")
+        ).strip()
+        if statement:
             db.execute_sql(statement)
 
 
-def init_database(database_uri):
+def _database_from_uri(database_uri):
+    """Build a peewee Database instance (and its provider name) from a URI.
+
+    Returns ``(database, provider, args)`` without binding the global proxy, so
+    the same logic can serve both ``init_database`` and the SQLite->Postgres/
+    MySQL migration (which needs two independent connections at once). ``args``
+    is the raw connection kwargs dict, needed by the ``.py`` migrations.
+    """
     uri = urlparse(database_uri)
     args = parseresult_to_dict(uri)
     if uri.scheme.startswith("mysql"):
@@ -707,7 +722,12 @@ def init_database(database_uri):
         raise RuntimeError(f"Unsupported database: {uri.scheme}")
 
     db_class = schemes.get(uri.scheme)
-    db.initialize(db_class(**args))
+    return db_class(**args), provider, args
+
+
+def init_database(database_uri):
+    database, provider, args = _database_from_uri(database_uri)
+    db.initialize(database)
     db.connect()
 
     # Check if we should create the tables
@@ -745,8 +765,100 @@ def init_database(database_uri):
 
 
 def release_database():
-    db.close()
+    if db.obj is not None:
+        db.close()
     db.initialize(None)
+
+
+# Models in foreign-key-safe insertion order (parents before children). ``meta``
+# is intentionally excluded: the destination already holds the correct
+# schema_version after ``init_database`` runs its create/migrate step.
+def _migration_order():
+    return [
+        Folder,
+        Artist,
+        Album,
+        Track,
+        User,
+        ClientPrefs,
+        StarredFolder,
+        StarredArtist,
+        StarredAlbum,
+        StarredTrack,
+        RatingFolder,
+        RatingTrack,
+        ChatMessage,
+        Playlist,
+        PlaylistTrack,
+        RadioStation,
+    ]
+
+
+def _reset_postgres_sequences():
+    """After copying rows with explicit ids, advance Postgres identity columns
+    so future inserts don't collide. Only ``folder.id`` is auto-generated."""
+    if not isinstance(db.obj, PostgresqlDatabase):
+        return
+    db.execute_sql(
+        "SELECT setval(pg_get_serial_sequence('folder', 'id'), "
+        "COALESCE((SELECT MAX(id) FROM folder), 1))"
+    )
+
+
+def migrate_database(
+    source_uri, dest_uri, *, progress=None, batch_size=200, skip_if_populated=False
+):
+    """Copy all data from one database to another (e.g. SQLite -> Postgres).
+
+    The destination schema is created/migrated to the current version first; the
+    copy then refuses to run unless the destination is still empty, so it is
+    safe to invoke unconditionally. ``progress`` is an optional callable
+    ``(table_name, row_count)`` invoked once per table. With
+    ``skip_if_populated`` a non-empty destination returns ``None`` instead of
+    raising (handy for an idempotent boot-time migration). Otherwise returns a
+    dict of ``{table_name: rows_copied}``.
+    """
+    if urlparse(source_uri).geturl() == urlparse(dest_uri).geturl():
+        raise RuntimeError("source and destination databases are identical")
+
+    source_db, _, _ = _database_from_uri(source_uri)
+    source_db.connect()
+
+    # Bind the global proxy (and therefore every model) to the destination and
+    # ensure its schema exists. Reads from the source go through bind_ctx below.
+    init_database(dest_uri)
+
+    try:
+        if User.select().count() or Folder.select().count():
+            if skip_if_populated:
+                return None
+            raise RuntimeError(
+                "destination database already contains data; refusing to "
+                "overwrite it (drop it first to re-run the migration)"
+            )
+
+        copied = {}
+        for model in _migration_order():
+            table = model._meta.table_name
+            with source_db.bind_ctx([model]):
+                query = model.select()
+                # Self-referential FK: insert parents (lower ids) first.
+                if model is Folder:
+                    query = query.order_by(Folder.id)
+                rows = [dict(inst.__data__) for inst in query]
+
+            if rows:
+                with db.atomic():
+                    for batch in chunked(rows, batch_size):
+                        model.insert_many(batch).execute()
+            copied[table] = len(rows)
+            if progress:
+                progress(table, len(rows))
+
+        _reset_postgres_sequences()
+        return copied
+    finally:
+        source_db.close()
 
 
 def open_connection(reuse=False):

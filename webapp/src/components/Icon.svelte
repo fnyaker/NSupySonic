@@ -3,7 +3,7 @@
   export let name;
   export let size = 20;
 
-  const FILLED = new Set(["play", "pause", "prev", "next", "more", "heartFilled"]);
+  const FILLED = new Set(["play", "pause", "prev", "next", "more", "moreVertical", "heartFilled"]);
   $: filled = FILLED.has(name);
 </script>
 
@@ -68,6 +68,10 @@
     <circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none" />
     <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
     <circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none" />
+  {:else if name === "moreVertical"}
+    <circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none" />
   {:else if name === "queue"}
     <line x1="3" y1="6" x2="16" y2="6" />
     <line x1="3" y1="12" x2="16" y2="12" />

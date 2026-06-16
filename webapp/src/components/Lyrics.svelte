@@ -1,34 +1,8 @@
 <script>
-  import { current, player } from "../lib/stores.js";
-  import { api } from "../lib/api.js";
+  import { trackLyrics, activeLyricIndex } from "../lib/lyrics.js";
 
-  let lyrics = null;
-  let loadingFor = null;
-  let activeIdx = -1;
-
-  // Fetch lyrics whenever the current track changes.
-  $: if ($current && $current.deezer_id !== loadingFor) {
-    loadingFor = $current.deezer_id;
-    lyrics = null;
-    activeIdx = -1;
-    api
-      .lyrics($current.deezer_id)
-      .then((r) => {
-        if (loadingFor === $current?.deezer_id) lyrics = r.lyrics;
-      })
-      .catch(() => (lyrics = null));
-  }
-
-  // Track the active synced line from playback position.
-  $: if (lyrics && lyrics.synced && lyrics.synced.length) {
-    const ms = ($player.currentTime || 0) * 1000;
-    let idx = -1;
-    for (let i = 0; i < lyrics.synced.length; i++) {
-      if (lyrics.synced[i].time <= ms) idx = i;
-      else break;
-    }
-    activeIdx = idx;
-  }
+  $: lyrics = $trackLyrics;
+  $: activeIdx = $activeLyricIndex;
 </script>
 
 <div class="lyrics">
