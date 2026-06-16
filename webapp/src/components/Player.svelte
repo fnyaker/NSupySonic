@@ -274,7 +274,7 @@
       {/if}
     </div>
     <button class="sm" class:on={$player.autoplay} on:click={() => player.toggleAutoplay()} title="Lecture auto" aria-label="Lecture auto"><Icon name="infinity" size={18} /></button>
-    <button class="sm" on:click={() => immersiveOpen.set(true)} title="Plein écran" aria-label="Plein écran"><Icon name="maximize" size={17} /></button>
+    <button class="sm fs" on:click={() => immersiveOpen.set(true)} title="Plein écran" aria-label="Plein écran"><Icon name="maximize" size={17} /></button>
     <button class="sm" class:on={$nowPlayingOpen} on:click={() => nowPlayingOpen.update((v) => !v)} title="File / Paroles" aria-label="File d'attente"><Icon name="queue" size={18} /></button>
     <button class="sm vol-ic" on:click={() => player.toggleMute()} aria-label="Muet"><Icon name={$player.muted || $player.volume === 0 ? "mute" : "volume"} size={18} /></button>
     <input class="vol" type="range" min="0" max="1" step="0.01" value={$player.muted ? 0 : $player.volume} on:input={(e) => player.setVolume(+e.target.value)} />
@@ -495,14 +495,22 @@
   /* mobile */
   @media (max-width: 820px) {
     .player {
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       height: 60px;
       gap: 8px;
     }
     .controls .seek,
-    .extra,
     .fav.desk {
       display: none;
+    }
+    /* Keep only the fullscreen toggle from the extras cluster — the quality
+       menu, volume, etc. don't fit a narrow bar, but the fullscreen button
+       must stay reachable. */
+    .extra > :not(.fs) {
+      display: none;
+    }
+    .extra {
+      gap: 0;
     }
     .controls {
       flex-direction: row;

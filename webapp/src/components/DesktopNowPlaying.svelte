@@ -534,4 +534,50 @@
     color: rgba(255, 255, 255, 0.6);
     font-variant-numeric: tabular-nums;
   }
+
+  /* Short viewports: the cover already scales with vh, but the fixed-height
+     rows below it (controls, visualizer, quality/volume footer) can still
+     overflow and get clipped. Degrade gracefully — drop the visualizer first,
+     then tighten spacing — so the footer is never the thing that disappears. */
+  @media (max-height: 780px) {
+    .main {
+      gap: 16px;
+      justify-content: center;
+    }
+    .viz {
+      display: none;
+    }
+  }
+  @media (max-height: 660px) {
+    .stage {
+      padding: 0 24px 18px;
+    }
+    .main {
+      gap: 12px;
+    }
+    .cover {
+      width: min(34vh, 100%);
+    }
+    .t {
+      font-size: 1.3rem;
+    }
+    .controls {
+      gap: 20px;
+    }
+    .controls .pp {
+      width: 56px;
+      height: 56px;
+    }
+  }
+  @media (max-height: 560px) {
+    .stage {
+      padding: 0 24px 14px;
+    }
+    .main {
+      gap: 8px;
+    }
+    .cover {
+      width: min(26vh, 100%);
+    }
+  }
 </style>
