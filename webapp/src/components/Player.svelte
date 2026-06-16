@@ -641,14 +641,22 @@
   /* mobile (phone-sized): just the now-playing + play/next, tap to expand */
   @media (max-width: 640px) {
     .player {
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       height: 60px;
       gap: 8px;
     }
     .controls .seek,
-    .extra,
     .fav.desk {
       display: none;
+    }
+    /* Keep only the fullscreen toggle from the extras cluster — the quality
+       menu, volume, etc. don't fit a narrow bar, but the fullscreen button
+       must stay reachable. */
+    .extra > :not(.fs) {
+      display: none;
+    }
+    .extra {
+      gap: 0;
     }
     .controls {
       display: flex;
