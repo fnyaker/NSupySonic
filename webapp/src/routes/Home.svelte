@@ -1,7 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
-  import { player, recent } from "../lib/stores.js";
+  import { player, recent, isAdmin } from "../lib/stores.js";
   import Card from "../components/Card.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
@@ -36,6 +36,11 @@
   })();
 
   onMount(async () => {
+    // Personalized Deezer discovery is the account owner's; guests just browse.
+    if (!$isAdmin) {
+      loading = false;
+      return;
+    }
     const [h, r] = await Promise.allSettled([api.home(), api.recommendations()]);
     if (h.status === "fulfilled") mixes = h.value.mixes || [];
     if (r.status === "fulfilled") reco = r.value;
@@ -58,19 +63,23 @@
 <div class="hero fade-in">
   <div>
     <h1>{greeting}</h1>
-    <p class="muted">Vos mixes, vos nouveautés et vos recommandations.</p>
+    <p class="muted">
+      {$isAdmin ? "Vos mixes, vos nouveautés et vos recommandations." : "Cherchez un artiste, un album ou un titre pour commencer."}
+    </p>
   </div>
-  <div class="flow-actions">
-    <button class="pill" on:click={playFlow} disabled={flowLoading}>
-      <Icon name="play" size={18} /> Lancer mon Flow
-    </button>
-    <button class="pill ghost" on:click={() => (tuner = true)}>
-      <Icon name="sliders" size={16} /> Personnaliser
-    </button>
-  </div>
+  {#if $isAdmin}
+    <div class="flow-actions">
+      <button class="pill" on:click={playFlow} disabled={flowLoading}>
+        <Icon name="play" size={18} /> Lancer mon Flow
+      </button>
+      <button class="pill ghost" on:click={() => (tuner = true)}>
+        <Icon name="sliders" size={16} /> Personnaliser
+      </button>
+    </div>
+  {/if}
 </div>
 
-{#if tuner}
+{#if tuner && $isAdmin}
   <FlowTuner onClose={() => (tuner = false)} />
 {/if}
 
@@ -112,6 +121,13 @@
       {#each reco.artists as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}
     </div>
   {/if}
+
+  {#if !$isAdmin && !recentAlbums.length}
+    <p class="muted guest-hint">
+      Utilisez la recherche pour trouver de la musique, puis lancez la lecture.
+      Vos favoris et fichiers importés sont dans « Ma bibliothèque ».
+    </p>
+  {/if}
 {/if}
 
 <style>
@@ -129,6 +145,9 @@
     display: flex;
     gap: 10px;
     flex: none;
+  }
+  .guest-hint {
+    margin-top: 28px;
   }
   .pill {
     gap: 8px;

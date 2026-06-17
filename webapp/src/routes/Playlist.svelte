@@ -1,6 +1,6 @@
 <script>
   import { api } from "../lib/api.js";
-  import { player } from "../lib/stores.js";
+  import { player, isAdmin } from "../lib/stores.js";
   import { toggleEntityFavorite } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
@@ -70,7 +70,9 @@
     <div class="row actions">
       <button class="pill" on:click={playAll}><Icon name="play" size={18} /> Lire</button>
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
-      <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
+      {#if $isAdmin}
+        <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
+      {/if}
     </div>
 
     <TrackBrowser tracks={data.tracks} context={{ kind: "playlist", id }} />

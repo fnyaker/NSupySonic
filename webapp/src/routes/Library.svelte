@@ -1,6 +1,6 @@
 <script>
   import { onMount } from "svelte";
-  import { player, favTracks, toasts } from "../lib/stores.js";
+  import { player, favTracks, toasts, isAdmin } from "../lib/stores.js";
   import { userPlaylists, loadMyFavorites } from "../lib/actions.js";
   import { api } from "../lib/api.js";
   import Card from "../components/Card.svelte";
@@ -19,7 +19,7 @@
 
   onMount(() => {
     loadMyFavorites();
-    userPlaylists().then((p) => (playlists = p));
+    if ($isAdmin) userPlaylists().then((p) => (playlists = p));
     loadLocal();
   });
 
@@ -75,7 +75,9 @@
 
 <div class="tabs">
   <button class:active={tab === "favorites"} on:click={() => (tab = "favorites")}>Titres favoris</button>
-  <button class:active={tab === "playlists"} on:click={() => (tab = "playlists")}>Mes playlists</button>
+  {#if $isAdmin}
+    <button class:active={tab === "playlists"} on:click={() => (tab = "playlists")}>Mes playlists</button>
+  {/if}
   <button class:active={tab === "local"} on:click={() => (tab = "local")}>Mes fichiers</button>
 </div>
 

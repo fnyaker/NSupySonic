@@ -767,5 +767,123 @@ class WebUITestCase(unittest.TestCase):
         self.assertIn(b"not built", rv.data)
 
 
+class WebUIGuestTestCase(unittest.TestCase):
+    """Non-admin users are guests: Deezer is just a content source. No owner
+    playlists / favorites / recommendations / Flow, no telemetry, and no writes
+    to the shared Deezer account. Their own favorites are private + local."""
+
+    def setUp(self):
+        self.__db = tempfile.mkstemp()
+        self.__dir = tempfile.mkdtemp()
+        self.archive = tempfile.mkdtemp()
+        db_path = self.__db[1]
+        cache = self.__dir
+
+        class Config(DefaultConfig):
+            TESTING = True
+
+            def __init__(self):
+                super().__init__()
+                self.BASE = dict(self.BASE, database_uri="sqlite:///" + db_path)
+                self.WEBAPP = dict(
+                    self.WEBAPP, cache_dir=cache, mount_webui=True, mount_api=True
+                )
+
+        self.app = create_application(Config())
+        UserManager.add("bob", "B0bbb", admin=False)
+
+        from supysonic.deezer.provider import DeezerProvider
+
+        provider = DeezerProvider("arl", self.archive, "FLAC")
+        provider._dz = MockDz()
+        self.app.deezer = provider
+        self.app.deezer_prefetch = MockPrefetch()
+        self.app.config["DEEZER"]["archive_dir"] = self.archive
+        # Telemetry enabled, to prove guests still never feed it.
+        self.app.config["DEEZER"]["report_listens"] = True
+
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        release_database()
+        shutil.rmtree(self.__dir, ignore_errors=True)
+        shutil.rmtree(self.archive, ignore_errors=True)
+        os.close(self.__db[0])
+        os.remove(self.__db[1])
+
+    def _login(self):
+        return self.client.post(
+            "/api/login", json={"username": "bob", "password": "B0bbb"}
+        )
+
+    def test_login_marks_non_admin(self):
+        self.assertFalse(self._login().get_json()["user"]["admin"])
+
+    def test_no_personalized_discovery(self):
+        self._login()
+        self.assertEqual(self.client.get("/api/home").get_json(), {"mixes": []})
+        self.assertEqual(self.client.get("/api/flow").get_json(), {"tracks": []})
+        self.assertEqual(
+            self.client.get("/api/recommendations").get_json(),
+            {"albums": [], "artists": [], "playlists": []},
+        )
+        self.assertFalse(self.client.get("/api/flow/clusters").get_json()["available"])
+
+    def test_no_owner_playlists(self):
+        self._login()
+        self.assertEqual(
+            self.client.get("/api/me/playlists").get_json(), {"playlists": []}
+        )
+
+    def test_telemetry_suppressed(self):
+        self._login()
+        rv = self.client.post("/api/listen", json={"deezer_id": "1", "listened": 30})
+        self.assertEqual(rv.status_code, 204)
+        self.assertEqual(self.app.deezer.dz.gw.listens, [])
+
+    def test_favorite_is_local_only(self):
+        self._login()
+        rv = self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(self.app.deezer.dz.gw.fav_added, [])  # not mirrored to Deezer
+
+        bob = User.get(name="bob")
+        self.assertEqual(
+            StarredTrack.select().where(StarredTrack.user == bob).count(), 1
+        )
+        # ...but it shows in the guest's own (local) favorites + heart-state ids.
+        favs = self.client.get("/api/me/favorites").get_json()["tracks"]
+        self.assertEqual(favs[0]["deezer_id"], "1")
+        self.assertIn("1", self.client.get("/api/me/favorite-ids").get_json()["ids"])
+
+    def test_account_writes_forbidden(self):
+        self._login()
+        self.assertEqual(
+            self.client.post(
+                "/api/favorite/album", json={"deezer_id": "10", "on": True}
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post("/api/playlists", json={"title": "X"}).status_code, 403
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/flow/clusters",
+                json={"clusters": [{"id": "x", "enabled": True}]},
+            ).status_code,
+            403,
+        )
+        # nothing reached the Deezer account
+        self.assertEqual(self.app.deezer.dz.gw.album_fav, [])
+        self.assertEqual(self.app.deezer.dz.gw.created, [])
+
+    def test_browsing_still_works(self):
+        self._login()
+        self.assertEqual(self.client.get("/api/album/302127").status_code, 200)
+        self.assertEqual(self.client.get("/api/radio/track/3").status_code, 200)
+        self.assertEqual(self.client.get("/api/search?q=foo").status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

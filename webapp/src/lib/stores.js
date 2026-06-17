@@ -5,6 +5,12 @@ import { writable, derived, get } from "svelte/store";
 export const user = writable(null);
 export const authChecked = writable(false);
 
+// Only the admin owns the Deezer account: its playlists, favorites, Flow,
+// recommendations and listen telemetry. Everyone else is a guest — Deezer is
+// just a content source, their favorites are private/local. The UI hides the
+// owner-only bits accordingly (the backend enforces it regardless).
+export const isAdmin = derived(user, ($u) => !!($u && $u.admin));
+
 // -- small persistence helper ----------------------------------------------
 
 function persisted(key, initial) {

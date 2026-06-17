@@ -217,6 +217,29 @@ def login_required(f):
     return wrapper
 
 
+# The single Deezer account (the ARL) belongs to the admin / sync user. Only the
+# admin sees that account's personal data — its playlists, favorites, Flow and
+# recommendations — and only the admin's plays feed Deezer telemetry. Everyone
+# else is a guest: Deezer is just a content catalogue (search / browse / play),
+# their favorites are private and local-only, and the account is never mutated.
+def _is_admin():
+    u = getattr(request, "webuser", None)
+    return bool(u and u.admin)
+
+
+def admin_required(f):
+    """Reject non-admins outright — for endpoints that would write to the
+    shared Deezer account (favorites, playlist edits, Flow tuning)."""
+
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not _is_admin():
+            return jsonify({"error": "forbidden"}), 403
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
 def _provider():
     provider = getattr(current_app, "deezer", None)
     if provider is None:
@@ -292,6 +315,42 @@ def _local_starred() -> list:
     )
 
 
+def _user_starred() -> list:
+    """Every track the current user has starred (local *and* Deezer), newest
+    first. Used for guests, whose favorites are private/local-only — there's no
+    Deezer-account favorites list to read from."""
+    return list(
+        Track.select(Track, Album, Artist)
+        .join(Album)
+        .switch(Track)
+        .join(Artist)
+        .switch(Track)
+        .join(StarredTrack, on=(StarredTrack.starred == Track.id))
+        .where(StarredTrack.user == request.webuser)
+        .order_by(StarredTrack.date.desc())
+    )
+
+
+def _db_track(t: Track) -> dict:
+    """Normalize a DB Track row to the API track shape. Local files go through
+    ``_local_track``; Deezer-imported rows rebuild their cover from the stored
+    ``cover_md5`` so no Deezer call is needed."""
+    if t.deezer_id is None:
+        return _local_track(t)
+    return {
+        "deezer_id": str(t.deezer_id),
+        "title": t.title,
+        "duration": t.duration or 0,
+        "explicit": False,
+        "artist": {"deezer_id": str(t.artist.deezer_id or ""), "name": t.artist.name},
+        "album": {
+            "deezer_id": str(t.album.deezer_id or ""),
+            "title": t.album.name,
+            "cover": _image("cover", t.album.cover_md5),
+        },
+    }
+
+
 # -- auth -------------------------------------------------------------------
 
 
@@ -349,6 +408,8 @@ def _smart_cover(data):
 @login_required
 def home():
     """Card-based home: personalized mixes (smart tracklists), no track dump."""
+    if not _is_admin():
+        return jsonify({"mixes": []})  # guests get no personalized Deezer mixes
     provider, err = _need_provider()
     if err:
         return err
@@ -580,6 +641,8 @@ def lyrics(track_id):
 @webapi.route("/flow")
 @login_required
 def flow():
+    if not _is_admin():
+        return jsonify({"tracks": []})  # Flow is the account owner's personal radio
     provider, err = _need_provider()
     if err:
         return err
@@ -599,6 +662,8 @@ def _gql_pic(pic):
 @login_required
 def flow_clusters():
     """The Flow's genre/style clusters and whether each is enabled."""
+    if not _is_admin():
+        return jsonify({"available": False, "clusters": []})
     provider, err = _need_provider()
     if err:
         return err
@@ -630,6 +695,7 @@ def flow_clusters():
 
 @webapi.route("/flow/clusters", methods=["POST"])
 @login_required
+@admin_required
 def set_flow_clusters():
     provider, err = _need_provider()
     if err:
@@ -687,6 +753,8 @@ def artist_radio(artist_id):
 @login_required
 def recommendations():
     """Discovery rows for the home: new releases + charts (public API, stable)."""
+    if not _is_admin():
+        return jsonify({"albums": [], "artists": [], "playlists": []})
     provider, err = _need_provider()
     if err:
         return err
@@ -709,6 +777,8 @@ def recommendations():
 @webapi.route("/me/playlists")
 @login_required
 def my_playlists():
+    if not _is_admin():
+        return jsonify({"playlists": []})  # the Deezer playlists belong to the owner
     provider, err = _need_provider()
     if err:
         return err
@@ -732,6 +802,10 @@ def my_playlists():
 @login_required
 def my_favorite_ids():
     """Just the favorite track ids (cheap) — for accurate heart state in the UI."""
+    # Guests: their own private stars only (Deezer id when known, else UUID).
+    if not _is_admin():
+        ids = [str(t.deezer_id) if t.deezer_id else str(t.id) for t in _user_starred()]
+        return jsonify({"ids": ids})
     ids = [str(t.id) for t in _local_starred()]  # local stars (UUIDs)
     provider = _provider()
     if provider is not None:
@@ -763,6 +837,9 @@ def my_local():
 @webapi.route("/me/favorites")
 @login_required
 def my_favorites():
+    # Guests: their own private stars only (no Deezer-account favorites).
+    if not _is_admin():
+        return jsonify({"tracks": [_db_track(t) for t in _user_starred()]})
     # Locally-starred files first (always available), then Deezer favorites.
     tracks = [_local_track(t) for t in _local_starred()]
     provider = _provider()
@@ -788,7 +865,10 @@ def report_listen():
 
     Opt-in: a no-op unless ``report_listens`` is enabled in the config. The web
     player calls this on every track change, so the disabled path stays cheap.
+    Guests never feed telemetry — only the account owner's plays do.
     """
+    if not _is_admin():
+        return ("", 204)
     provider = _provider()
     if provider is None or not current_app.config["DEEZER"].get("report_listens"):
         return ("", 204)
@@ -845,20 +925,23 @@ def favorite():
     from ..deezer import archive
 
     track = archive.import_track(provider, deezer_id)
-    try:
-        if on:
-            provider.dz.gw.add_song_to_favorites(deezer_id)
-        else:
-            provider.dz.gw.remove_song_from_favorites(deezer_id)
-    except Exception as exc:
-        logger.warning("Deezer favorite toggle failed: %s", exc)
-    provider.invalidate_favorites_cache()  # next /me/favorites refetches
+    # Guests keep favorites private/local — never mirror them to the Deezer account.
+    if _is_admin():
+        try:
+            if on:
+                provider.dz.gw.add_song_to_favorites(deezer_id)
+            else:
+                provider.dz.gw.remove_song_from_favorites(deezer_id)
+        except Exception as exc:
+            logger.warning("Deezer favorite toggle failed: %s", exc)
+        provider.invalidate_favorites_cache()  # next /me/favorites refetches
     _set_star(track, on)
     return jsonify({"ok": True, "favorite": on})
 
 
 @webapi.route("/favorite/<kind>", methods=["POST"])
 @login_required
+@admin_required
 def favorite_entity(kind):
     """Toggle a Deezer favorite for an album, artist or playlist."""
     provider, err = _need_provider()
@@ -890,6 +973,7 @@ def favorite_entity(kind):
 
 @webapi.route("/playlists", methods=["POST"])
 @login_required
+@admin_required
 def create_playlist():
     provider, err = _need_provider()
     if err:
@@ -907,6 +991,7 @@ def create_playlist():
 
 @webapi.route("/playlist/<playlist_id>", methods=["PATCH"])
 @login_required
+@admin_required
 def edit_playlist(playlist_id):
     provider, err = _need_provider()
     if err:
@@ -920,6 +1005,7 @@ def edit_playlist(playlist_id):
 
 @webapi.route("/playlist/<playlist_id>", methods=["DELETE"])
 @login_required
+@admin_required
 def delete_playlist(playlist_id):
     provider, err = _need_provider()
     if err:
@@ -930,6 +1016,7 @@ def delete_playlist(playlist_id):
 
 @webapi.route("/playlist/<playlist_id>/tracks", methods=["POST"])
 @login_required
+@admin_required
 def add_playlist_tracks(playlist_id):
     provider, err = _need_provider()
     if err:
@@ -944,6 +1031,7 @@ def add_playlist_tracks(playlist_id):
 
 @webapi.route("/playlist/<playlist_id>/tracks", methods=["DELETE"])
 @login_required
+@admin_required
 def remove_playlist_tracks(playlist_id):
     provider, err = _need_provider()
     if err:

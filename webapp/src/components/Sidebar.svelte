@@ -1,7 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { link, location, push } from "svelte-spa-router";
-  import { user } from "../lib/stores.js";
+  import { user, isAdmin } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { userPlaylists, invalidatePlaylists } from "../lib/actions.js";
   import Icon from "./Icon.svelte";
@@ -10,7 +10,8 @@
   let playlists = [];
 
   onMount(async () => {
-    playlists = await userPlaylists();
+    // Deezer playlists belong to the account owner — guests don't see them.
+    if ($isAdmin) playlists = await userPlaylists();
   });
 
   function submitSearch(e) {
@@ -57,15 +58,19 @@
     <li><a use:link href="/library" class={active("/library")}><Icon name="library" size={20} /> Ma bibliothèque</a></li>
   </ul>
 
-  <div class="pl-head">
-    <span>Playlists</span>
-    <button class="new" on:click={newPlaylist} aria-label="Nouvelle playlist"><Icon name="plus" size={18} /></button>
-  </div>
-  <ul class="playlists">
-    {#each playlists as p (p.deezer_id)}
-      <li><a use:link href={"/playlist/" + p.deezer_id}>{p.title}</a></li>
-    {/each}
-  </ul>
+  {#if $isAdmin}
+    <div class="pl-head">
+      <span>Playlists</span>
+      <button class="new" on:click={newPlaylist} aria-label="Nouvelle playlist"><Icon name="plus" size={18} /></button>
+    </div>
+    <ul class="playlists">
+      {#each playlists as p (p.deezer_id)}
+        <li><a use:link href={"/playlist/" + p.deezer_id}>{p.title}</a></li>
+      {/each}
+    </ul>
+  {:else}
+    <div class="spacer"></div>
+  {/if}
 
   <div class="account">
     <span class="who">{$user?.name}</span>
@@ -165,6 +170,9 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+  }
+  .spacer {
+    flex: 1;
   }
   .playlists a {
     display: block;

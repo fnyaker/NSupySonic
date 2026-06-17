@@ -1,7 +1,7 @@
 <script>
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
-  import { player, toasts } from "../lib/stores.js";
+  import { player, toasts, isAdmin } from "../lib/stores.js";
   import { toggleEntityFavorite } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
@@ -88,7 +88,9 @@
     <div class="row actions">
       <button class="pill" on:click={() => playAll()}><Icon name="play" size={18} /> Lire</button>
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
-      <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
+      {#if $isAdmin}
+        <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
+      {/if}
       <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger l'album" title="Télécharger (archiver) l'album"><Icon name="download" size={22} /></button>
     </div>
 
