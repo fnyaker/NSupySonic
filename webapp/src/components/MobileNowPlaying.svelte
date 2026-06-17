@@ -19,6 +19,7 @@
   import { duration as fmtDuration, hiResCover } from "../lib/format.js";
   import { createVisualizer } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
+  import { followScroll } from "../lib/scroll.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import QualityMenu from "./QualityMenu.svelte";
@@ -88,9 +89,74 @@
   $: progress = $player.duration ? ($player.currentTime / $player.duration) * 100 : 0;
   $: repeatIcon = $player.repeat === "one" ? "repeat1" : "repeat";
 
+  // Keep the playing track in view when the queue sheet is open (first quarter
+  // on open, then follow as it advances).
+  let queueBox;
+  let firstQueueFollow = true;
+  $: followQueue(showQueue, idx);
+  async function followQueue() {
+    if (!showQueue || idx < 0) return;
+    await tick();
+    const el = queueBox?.querySelector("li.now");
+    if (!el) return;
+    followScroll(queueBox, el, { ratio: 0.25, smooth: !firstQueueFollow });
+    firstQueueFollow = false;
+  }
+  $: if (!showQueue) firstQueueFollow = true;
+
   function close() {
     immersiveOpen.set(false);
   }
+
+  // -- swipe-down to dismiss -------------------------------------------------
+  // Drag the whole sheet down with the finger; release past a threshold closes
+  // it. Ignore gestures that start on the cover carousel, the sliders or the
+  // queue sheet so we don't fight their own horizontal/scroll behaviour.
+  let dragY = 0;
+  let dragging = false;
+  let dragArmed = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let dragAxis = null;
+  function onTouchStart(e) {
+    if (e.touches.length !== 1 || showQueue) {
+      dragArmed = false;
+      return;
+    }
+    const t = e.target;
+    if (t.closest(".scroller") || t.closest("input") || t.closest(".sheet")) {
+      dragArmed = false;
+      return;
+    }
+    dragArmed = true;
+    dragAxis = null;
+    dragStartX = e.touches[0].clientX;
+    dragStartY = e.touches[0].clientY;
+  }
+  function onTouchMove(e) {
+    if (!dragArmed) return;
+    const dx = e.touches[0].clientX - dragStartX;
+    const dy = e.touches[0].clientY - dragStartY;
+    if (dragAxis === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8))
+      dragAxis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
+    if (dragAxis === "y" && dy > 0) {
+      dragging = true;
+      dragY = dy;
+    }
+  }
+  function onTouchEnd() {
+    if (!dragArmed) return;
+    dragArmed = false;
+    dragAxis = null;
+    if (dragging && dragY > 110) {
+      close(); // fade out from the dragged position; component unmounts
+      dragging = false;
+      return;
+    }
+    dragging = false; // snap back
+    dragY = 0;
+  }
+
   function go(p) {
     close();
     push(p);
@@ -213,7 +279,15 @@
   });
 </script>
 
-<div class="m" transition:fade={{ duration: 140 }}>
+<div
+  class="m"
+  class:dragging
+  style={`transform:translateY(${dragY}px)`}
+  on:touchstart|passive={onTouchStart}
+  on:touchmove|passive={onTouchMove}
+  on:touchend={onTouchEnd}
+  transition:fade={{ duration: 140 }}
+>
   {#each bgLayers as layer (layer.id)}
     <div class="bg" style={`background-image:url(${layer.src})`} in:fade={{ duration: 350 }}></div>
   {/each}
@@ -279,7 +353,7 @@
         <span>File d'attente</span>
         <button class="ic" on:click={() => (showQueue = false)} aria-label="Fermer"><Icon name="chevronDown" size={22} /></button>
       </div>
-      <ol class="queue">
+      <ol class="queue" bind:this={queueBox}>
         {#each q as t, i (t.deezer_id + ":" + i)}
           <li class:now={i === idx} class:past={i < idx}>
             <button on:click={() => { player.jump(i); showQueue = false; }}>
@@ -303,6 +377,10 @@
     flex-direction: column;
     overflow: hidden;
     background: #0b0910; /* opaque base: the page behind never shows through */
+    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .m.dragging {
+    transition: none; /* follow the finger 1:1 while dragging */
   }
   .bg {
     position: absolute;
@@ -350,25 +428,26 @@
     min-height: 0;
   }
 
-  /* current synced lyric line, above the cover carousel */
+  /* current synced lyric line, above the cover carousel (up to 3 lines) */
   .cur-lyric {
-    position: relative;
     min-height: 26px;
     margin: 0 22px 2px;
-    display: flex;
+    /* grid stack: crossfading lines share one cell so the box grows to fit
+       the tallest line instead of clipping long lyrics to a single row */
+    display: grid;
+    justify-items: center;
     align-items: center;
-    justify-content: center;
   }
   .cur-lyric span {
-    position: absolute;
-    left: 0;
-    right: 0;
+    grid-area: 1 / 1;
     text-align: center;
     font-size: 1.02rem;
+    line-height: 1.3;
     font-weight: 800;
-    white-space: nowrap;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
     overflow: hidden;
-    text-overflow: ellipsis;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
     -webkit-background-clip: text;
     background-clip: text;

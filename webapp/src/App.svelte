@@ -5,6 +5,7 @@
   import { api } from "./lib/api.js";
   import { loadFavorites } from "./lib/actions.js";
   import Sidebar from "./components/Sidebar.svelte";
+  import BackButton from "./components/BackButton.svelte";
   import MobileNav from "./components/MobileNav.svelte";
   import Player from "./components/Player.svelte";
   import NowPlaying from "./components/NowPlaying.svelte";
@@ -82,6 +83,7 @@
 {:else}
   <div class="layout" class:np-open={$nowPlayingOpen}>
     <Sidebar />
+    <BackButton />
     <main>
       <Router {routes} />
     </main>

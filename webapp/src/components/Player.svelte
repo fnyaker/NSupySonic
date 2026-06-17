@@ -1,4 +1,5 @@
 <script>
+  import { onMount, onDestroy } from "svelte";
   import { get } from "svelte/store";
   import { push } from "svelte-spa-router";
   import {
@@ -20,8 +21,50 @@
   import Icon from "./Icon.svelte";
   import ImmersivePlayer from "./ImmersivePlayer.svelte";
 
-  let audio;
-  let loadedKey = null;
+  // Two managed audio elements so a quality change can be gapless: we preload
+  // the new bitrate on the idle element at the exact current position, then
+  // hand playback over with no reload pause. `audio` is whichever is playing.
+  let audio = null;
+  let els = [];
+  let curId = null; // deezer_id currently loaded on `audio`
+  let curQ = null; // quality currently loaded on `audio`
+  let switching = false;
+
+  function makeEl() {
+    const el = new Audio();
+    el.preload = "auto";
+    el.addEventListener("timeupdate", onTime);
+    el.addEventListener("ended", onEnded);
+    el.addEventListener("play", onElPlay);
+    el.addEventListener("pause", onElPause);
+    return el;
+  }
+  onMount(() => {
+    els = [makeEl(), makeEl()];
+    audio = els[0]; // assignment kicks the reactive load/transport blocks
+  });
+  onDestroy(() => {
+    for (const el of els) {
+      try {
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  function onElPlay(e) {
+    if (e.target !== audio) return;
+    wireAudio(audio); // lazy: first play is a user gesture, so the context starts
+    resumeAudio();
+    if (!get(player).playing) player.play();
+  }
+  function onElPause(e) {
+    if (e.target !== audio) return;
+    if (get(player).playing) player.pause();
+  }
 
   const QUALITIES = ["FLAC", "OPUS_320", "OPUS_256", "OPUS_192", "OPUS_128", "OPUS_64"];
   const QUALITY_LABEL = {
@@ -74,33 +117,96 @@
 
   $: fav = $current && $favorites.has(String($current.deezer_id));
 
-  // (Re)load the source when the track OR the chosen quality changes.
-  $: if (audio && $current) {
-    const key = $current.deezer_id + "@" + $quality;
-    if (key !== loadedKey) {
-      const firstLoad = loadedKey === null;
-      const sameTrack = loadedKey && loadedKey.split("@")[0] === $current.deezer_id;
-      // Resume in place when only the quality changed, or restore the saved
-      // position on the very first (session-restored) load.
-      const resumeAt = sameTrack
-        ? audio.currentTime
-        : firstLoad && $player.currentTime > 1
-          ? $player.currentTime
-          : 0;
-      loadedKey = key;
-      audio.src = api.streamUrl($current.deezer_id, $quality);
-      audio.load();
-      if (resumeAt > 0) seekOnceLoaded(resumeAt);
-      if ($player.playing) audio.play().catch(() => {});
-      if (!sameTrack) {
-        // Seed duration from metadata right away so the seek bar is correct
-        // before the first timeupdate (live transcodes report no duration).
-        player.setProgress(resumeAt, $current.duration || 0);
-        flushListen($current.deezer_id);
-        pushRecent($current);
-        updateMediaSession($current);
+  // Load a new track onto the active element when the track changes.
+  $: if (audio && $current && $current.deezer_id !== curId) loadTrack($current);
+  // A quality change for the SAME track is handed off gaplessly instead of
+  // reloading the element in place.
+  $: if (
+    audio &&
+    $current &&
+    $current.deezer_id === curId &&
+    $quality !== curQ &&
+    !switching
+  )
+    switchQuality($quality);
+
+  function loadTrack(track) {
+    const firstLoad = curId === null;
+    // On the very first (session-restored) load, resume the saved position.
+    const resumeAt = firstLoad && $player.currentTime > 1 ? $player.currentTime : 0;
+    curId = track.deezer_id;
+    curQ = get(quality);
+    audio.src = api.streamUrl(track.deezer_id, curQ);
+    audio.load();
+    if (resumeAt > 0) seekOnceLoaded(resumeAt);
+    if ($player.playing) audio.play().catch(() => {});
+    // Seed duration from metadata right away so the seek bar is correct before
+    // the first timeupdate (live transcodes report no duration).
+    player.setProgress(resumeAt, track.duration || 0);
+    flushListen(track.deezer_id);
+    pushRecent(track);
+    updateMediaSession(track);
+  }
+
+  // Gapless quality switch: buffer the new bitrate on the idle element at the
+  // current position, then swap playback over once it can play through. Keeps
+  // the position to the element's full precision so there's no audible jump.
+  function switchQuality(newQ) {
+    const cur = get(current);
+    const incoming = els.find((e) => e !== audio);
+    if (!audio || !cur || !incoming) return;
+    switching = true;
+    const pos = audio.currentTime;
+    const wasPlaying = !audio.paused && get(player).playing;
+    incoming.volume = audio.volume;
+    incoming.muted = audio.muted;
+    incoming.src = api.streamUrl(cur.deezer_id, newQ);
+    incoming.load();
+
+    let done = false;
+    let failTimer = null;
+    const onMeta = () => {
+      try {
+        incoming.currentTime = pos;
+      } catch {
+        /* not seekable yet */
       }
-    }
+    };
+    const swap = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(failTimer);
+      incoming.removeEventListener("loadedmetadata", onMeta);
+      incoming.removeEventListener("canplay", swap);
+      // Bail if the track changed underneath us while preloading.
+      if (get(current)?.deezer_id !== cur.deezer_id) {
+        switching = false;
+        return;
+      }
+      try {
+        if (Math.abs(incoming.currentTime - pos) > 0.05) incoming.currentTime = pos;
+      } catch {
+        /* ignore */
+      }
+      const old = audio;
+      audio = incoming; // make it active BEFORE play so the handlers accept it
+      curQ = newQ;
+      wireAudio(incoming);
+      resumeAudio();
+      if (wasPlaying) incoming.play().catch(() => {});
+      old.pause();
+      try {
+        old.removeAttribute("src");
+        old.load();
+      } catch {
+        /* ignore */
+      }
+      switching = false;
+    };
+    incoming.addEventListener("loadedmetadata", onMeta);
+    incoming.addEventListener("canplay", swap); // enough buffered at `pos` to start
+    // Safety net so a stalled preload can't lock the quality picker forever.
+    failTimer = setTimeout(swap, 8000);
   }
 
   // Apply a target time once the freshly-loaded source can seek. Cached/archived
@@ -124,7 +230,7 @@
   // is paused while the store may still read playing=true for a tick, and an
   // unconditional play() gets cut off again → a rapid play/pause loop. Guarding
   // on audio.paused makes each direction idempotent and breaks the oscillation.
-  $: if (audio && loadedKey) {
+  $: if (audio && curId) {
     if ($player.playing && audio.paused) audio.play().catch(() => {});
     else if (!$player.playing && !audio.paused) audio.pause();
   }
@@ -134,7 +240,8 @@
   $: if ("mediaSession" in navigator)
     navigator.mediaSession.playbackState = $player.playing ? "playing" : "paused";
 
-  function onTime() {
+  function onTime(e) {
+    if (e && e.target !== audio) return; // ignore the idle/preloading element
     // A live, on-the-fly transcoded stream (e.g. Opus/ogg piped from ffmpeg)
     // has no Content-Length, so audio.duration is Infinity/NaN. Fall back to
     // the duration we already know from the track metadata.
@@ -163,7 +270,8 @@
     }
   }
 
-  async function onEnded() {
+  async function onEnded(e) {
+    if (e && e.target !== audio) return; // ignore the idle/preloading element
     const s = get(player);
     const cur = $current;
     if (s.repeat === "one") {
@@ -289,19 +397,7 @@
 
 <svelte:window on:click={() => (qOpen = false)} />
 
-<audio
-  bind:this={audio}
-  on:timeupdate={onTime}
-  on:ended={onEnded}
-  on:play={() => {
-    wireAudio(audio); // lazy: first play is a user gesture, so the context starts
-    resumeAudio();
-    if (!get(player).playing) player.play();
-  }}
-  on:pause={() => {
-    if (get(player).playing) player.pause();
-  }}
-></audio>
+<!-- the <audio> elements are created and managed in JS (see makeEl/switchQuality) -->
 
 <footer class="player">
   <!-- now playing (left / tap to open the immersive view) -->

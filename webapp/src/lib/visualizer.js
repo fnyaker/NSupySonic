@@ -8,25 +8,31 @@
 
 let ctx = null;
 let analyser = null;
-let wired = false;
+// createMediaElementSource may only run ONCE per element, so track which
+// elements are already wired. The player keeps two <audio> elements (for
+// gapless quality switching); both feed the same shared analyser, so the
+// visualizer keeps working whichever one is currently playing.
+const wiredEls = new WeakSet();
 
 export function wireAudio(el) {
-  if (wired || !el) return;
+  if (!el || wiredEls.has(el)) return;
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return;
   try {
-    ctx = new AC();
+    if (!ctx) ctx = new AC();
     const source = ctx.createMediaElementSource(el);
     // Restore the audio path FIRST so a later failure can't mute playback.
     source.connect(ctx.destination);
-    wired = true;
-    const an = ctx.createAnalyser();
-    an.fftSize = 512; // 256 bins — finer resolution for the log-spaced bars
-    an.smoothingTimeConstant = 0.82;
-    source.connect(an);
-    analyser = an; // only expose it once the tap is fully connected
+    wiredEls.add(el);
+    if (!analyser) {
+      const an = ctx.createAnalyser();
+      an.fftSize = 512; // 256 bins — finer resolution for the log-spaced bars
+      an.smoothingTimeConstant = 0.82;
+      analyser = an;
+    }
+    source.connect(analyser);
   } catch {
-    analyser = null;
+    /* keep any analyser we already have */
   }
 }
 

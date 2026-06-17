@@ -17,3 +17,13 @@ export function hiResCover(url, size = 1000) {
   if (!url || typeof url !== "string") return url;
   return url.replace(/\/\d+x\d+(-[^/]*\.(?:jpg|jpeg|png|webp))/i, `/${size}x${size}$1`);
 }
+
+// A tiny variant of a Deezer cover, used as an instant low-quality placeholder
+// while the full-size art loads (it downloads in a few KB). Returns null when
+// the URL has no Deezer dimensions to shrink (local / non-Deezer covers), so
+// the caller can skip the placeholder.
+export function loResCover(url, size = 48) {
+  if (!url || typeof url !== "string") return null;
+  const out = url.replace(/\/\d+x\d+(-[^/]*\.(?:jpg|jpeg|png|webp))/i, `/${size}x${size}$1`);
+  return out === url ? null : out;
+}

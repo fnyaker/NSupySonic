@@ -2,11 +2,14 @@
 
 # NSupySonic
 
-**A self-hosted Subsonic server that proxies Deezer.**
+**A fast, modern web player for your Deezer library — backed by a self-hosted
+Subsonic server.**
 
-Your Deezer playlists, favorites, Flow and new releases show up in any Subsonic
-client — plus there's a built-in web player. Tracks are fetched in **FLAC**,
-archived once, and **transcoded to Opus** on demand.
+A clean Svelte web player at `/app` for your whole Deezer library — playlists,
+favorites, Flow and new releases — built as a snappy alternative to Deezer's own
+web UI. Under the hood it's a full Subsonic API server, so the same library also
+plays in any Subsonic client. Tracks are fetched in **FLAC**, archived once, and
+**transcoded to Opus** on demand.
 
 [![Docker](https://github.com/fnyaker/NSupySonic/actions/workflows/docker.yaml/badge.svg)](https://github.com/fnyaker/NSupySonic/actions/workflows/docker.yaml)
 [![Container](https://img.shields.io/badge/ghcr.io-nsupysonic-2496ED?logo=docker&logoColor=white)](https://github.com/fnyaker/NSupySonic/pkgs/container/nsupysonic)
@@ -17,10 +20,12 @@ archived once, and **transcoded to Opus** on demand.
 </div>
 
 NSupySonic (**N**yaker's **Supysonic**) is a fork of [supysonic][] wired to
-Deezer. It keeps everything supysonic does — a full [Subsonic][] API server for
-your local music — and adds a Deezer proxy plus a custom web UI, so you can
-browse and stream your whole Deezer library (and your local files) from one
-place, in any Subsonic app or in the browser.
+Deezer. The headline is the **web player**: a custom single-page app that makes
+your Deezer library feel quick and pleasant to browse — the part most people are
+actually here for, since Deezer's own web client is sluggish and clumsy. Because
+it's built on a full [Subsonic][] API server, that same library (and any local
+files) is also available in any Subsonic app — you get a great browser
+experience *and* native mobile/desktop clients, from one server.
 
 > [!NOTE]
 > For personal use with your own Deezer account. FLAC requires a Deezer
@@ -37,11 +42,15 @@ reference them here, e.g.:
 
 ## Features
 
-- **Deezer in your Subsonic client** — your playlists (created *and* favorited),
-  favorites, *Nouveautés* / *Découverte*, and charts appear as native library
-  entries. Works with any Subsonic app (Symfonium, DSub, play:Sub, Tempo, …).
-- **Built-in web player** at `/app` — a custom Svelte single-page app: search,
-  artist / album / playlist pages, queue, synced lyrics, and Flow.
+- **A web player that's actually fast** at `/app` — a custom Svelte single-page
+  app: home cards, search, artist / album / playlist pages, a real queue, synced
+  lyrics, an immersive full-screen now-playing view with a visualizer, gapless
+  quality switching, and Flow. The quick, clean Deezer front-end you wish Deezer
+  shipped.
+- **Deezer in your Subsonic client too** — your playlists (created *and*
+  favorited), favorites, *Nouveautés* / *Découverte*, and charts appear as
+  native library entries. Works with any Subsonic app (Symfonium, DSub,
+  play:Sub, Tempo, …).
 - **Archive once, keep forever** — the first time a track is played it's fetched
   in FLAC from Deezer, decrypted, tagged and stored under `archive_dir`. Every
   later play is served straight from disk.

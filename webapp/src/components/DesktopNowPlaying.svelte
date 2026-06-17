@@ -1,9 +1,10 @@
 <script>
   // Desktop now-playing: two panes — a large cover with controls and a bar
   // visualizer on the left, the up-next queue / lyrics on the right.
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { push } from "svelte-spa-router";
   import { fade } from "svelte/transition";
+  import { followScroll } from "../lib/scroll.js";
   import {
     player,
     current,
@@ -35,6 +36,22 @@
 
   $: q = $player.queue;
   $: idx = $player.index;
+
+  // Keep the playing track in view in the queue list (first quarter): jump
+  // instantly when the queue tab (re)opens, then follow smoothly as it plays.
+  let queueBox;
+  let firstQueueFollow = true;
+  $: followQueue(tab, idx, $immersiveOpen);
+  async function followQueue() {
+    if (tab !== "queue" || !$immersiveOpen || idx < 0) return;
+    await tick();
+    const el = queueBox?.querySelector("li.now");
+    if (!el) return;
+    followScroll(queueBox, el, { ratio: 0.25, smooth: !firstQueueFollow });
+    firstQueueFollow = false;
+  }
+  $: if (tab !== "queue" || !$immersiveOpen) firstQueueFollow = true;
+
   $: fav = $current && $favorites.has(String($current.deezer_id));
   $: progress = $player.duration ? ($player.currentTime / $player.duration) * 100 : 0;
   $: repeatIcon = $player.repeat === "one" ? "repeat1" : "repeat";
@@ -157,7 +174,7 @@
         <button class:active={tab === "queue"} on:click={() => (tab = "queue")}>File d'attente</button>
         <button class:active={tab === "lyrics"} on:click={() => (tab = "lyrics")}>Paroles</button>
       </div>
-      <div class="side-body">
+      <div class="side-body" bind:this={queueBox}>
         {#if tab === "queue"}
           <ol class="queue">
             {#each q as t, i (t.deezer_id + ":" + i)}
@@ -272,24 +289,25 @@
     box-shadow: 0 30px 70px rgba(0, 0, 0, 0.55);
   }
 
-  /* current synced lyric line, above the cover */
+  /* current synced lyric line, above the cover (up to 3 lines) */
   .cur-lyric {
-    position: relative;
     min-height: 30px;
-    display: flex;
+    /* grid stack: the crossfading lines share one cell, so the box grows to
+       fit the tallest line instead of clipping long ones to a single row */
+    display: grid;
+    justify-items: center;
     align-items: center;
-    justify-content: center;
   }
   .cur-lyric span {
-    position: absolute;
-    left: 0;
-    right: 0;
+    grid-area: 1 / 1;
     text-align: center;
     font-size: 1.1rem;
+    line-height: 1.3;
     font-weight: 800;
-    white-space: nowrap;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
     overflow: hidden;
-    text-overflow: ellipsis;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
     -webkit-background-clip: text;
     background-clip: text;
