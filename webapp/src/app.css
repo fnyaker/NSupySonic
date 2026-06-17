@@ -30,6 +30,9 @@ html,
 body {
   margin: 0;
   height: 100%;
+  /* kill the browser's pull-to-refresh / overscroll bounce (it fired on the
+     mobile player's swipe-down-to-dismiss and on list overscroll) */
+  overscroll-behavior-y: none;
   background: var(--bg);
   color: var(--text);
   font-family:

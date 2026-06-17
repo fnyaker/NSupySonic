@@ -140,6 +140,8 @@
     if (dragAxis === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8))
       dragAxis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
     if (dragAxis === "y" && dy > 0) {
+      // cancel the browser's native pull-to-refresh while we drag to dismiss
+      if (e.cancelable) e.preventDefault();
       dragging = true;
       dragY = dy;
     }
@@ -284,7 +286,7 @@
   class:dragging
   style={`transform:translateY(${dragY}px)`}
   on:touchstart|passive={onTouchStart}
-  on:touchmove|passive={onTouchMove}
+  on:touchmove={onTouchMove}
   on:touchend={onTouchEnd}
   transition:fade={{ duration: 140 }}
 >
