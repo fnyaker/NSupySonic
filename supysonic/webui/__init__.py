@@ -608,17 +608,22 @@ def discography(artist_id):
         tabs = {}
     out = {}
     for tab, releases in (tabs or {}).items():
-        out[tab] = [
+        items = [
             {
                 "deezer_id": str(r.get("id")),
                 "title": r.get("title", ""),
                 "cover": _image("cover", r.get("md5_image")),
+                "release_date": (str(r.get("release_date") or "")[:10]) or None,
                 "year": (str(r.get("release_date") or "")[:4]) or None,
                 "record_type": r.get("record_type"),
                 "nb_tracks": r.get("nb_song"),
             }
             for r in (releases or [])
         ]
+        # Surface the most recent releases first so the client can show a
+        # "latest releases" shelf without re-sorting (the gw order isn't reliable).
+        items.sort(key=lambda x: x["release_date"] or "", reverse=True)
+        out[tab] = items
     return jsonify({"discography": out})
 
 

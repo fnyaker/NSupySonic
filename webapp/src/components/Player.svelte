@@ -37,13 +37,20 @@
     el.addEventListener("ended", onEnded);
     el.addEventListener("play", onElPlay);
     el.addEventListener("pause", onElPause);
+    el.addEventListener("error", onElError);
+    el.addEventListener("stalled", onElStall);
     return el;
   }
   onMount(() => {
     els = [makeEl(), makeEl()];
     audio = els[0]; // assignment kicks the reactive load/transport blocks
+    startWatchdog();
+    document.addEventListener("visibilitychange", onVisibility);
   });
   onDestroy(() => {
+    stopWatchdog();
+    document.removeEventListener("visibilitychange", onVisibility);
+    releaseWakeLock();
     for (const el of els) {
       try {
         el.pause();
@@ -54,6 +61,107 @@
       }
     }
   });
+
+  // --- Screen wake lock ------------------------------------------------------
+  // Mobile browsers suspend a backgrounded/locked page after a few minutes,
+  // which silently kills playback. Holding a screen wake lock while we're
+  // actively playing keeps the tab alive. The lock is auto-dropped whenever the
+  // page is hidden, so we re-acquire it on visibilitychange if still playing.
+  let wakeLock = null;
+  async function requestWakeLock() {
+    if (!("wakeLock" in navigator) || wakeLock) return;
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => {
+        wakeLock = null;
+      });
+    } catch {
+      wakeLock = null; // e.g. denied while not visible — retried on visibility
+    }
+  }
+  function releaseWakeLock() {
+    try {
+      wakeLock?.release();
+    } catch {
+      /* ignore */
+    }
+    wakeLock = null;
+  }
+  function onVisibility() {
+    if (document.visibilityState !== "visible") return;
+    if (get(player).playing) requestWakeLock();
+  }
+  // Hold the lock exactly while playing.
+  $: if ($player.playing) requestWakeLock();
+  else releaseWakeLock();
+
+  // --- Playback watchdog / auto-recovery -------------------------------------
+  // If playback dies on a bug (network drop, decode error, a stalled live
+  // transcode) we reload the source and resume at the same position. We must
+  // NOT auto-resume a *clean* pause: when another app grabs audio focus (a GPS
+  // voice prompt, etc.) the element fires `pause`, onElPause flips the store to
+  // paused, and the watchdog then sees playing=false and stays out of the way.
+  let watchdog = null;
+  let lastPos = -1;
+  let lastAdvance = 0;
+  let recovering = false;
+  let recoverAttempts = 0;
+
+  function startWatchdog() {
+    stopWatchdog();
+    lastAdvance = Date.now();
+    watchdog = setInterval(() => {
+      if (!audio || switching || recovering) return;
+      const s = get(player);
+      if (!s.playing || audio.paused) return; // not trying to play / cleanly paused
+      if (audio.currentTime !== lastPos) {
+        lastPos = audio.currentTime;
+        lastAdvance = Date.now();
+        return;
+      }
+      // currentTime frozen while we believe we're playing → stuck on a bug.
+      if (Date.now() - lastAdvance > 6000) recoverPlayback();
+    }, 2000);
+  }
+  function stopWatchdog() {
+    clearTimeout(watchdog);
+    clearInterval(watchdog);
+    watchdog = null;
+  }
+
+  function onElError(e) {
+    if (e && e.target !== audio) return;
+    if (get(player).playing) recoverPlayback();
+  }
+  function onElStall(e) {
+    if (e && e.target !== audio) return;
+    // Give buffering a moment; the watchdog handles a sustained freeze.
+  }
+
+  // Reload the current track in place and resume where it died. Capped so a
+  // permanently broken stream can't spin in a reload loop.
+  function recoverPlayback() {
+    const cur = get(current);
+    if (!cur || !audio || switching || recovering) return;
+    if (recoverAttempts >= 4) return; // give up; user can hit play to retry
+    recovering = true;
+    recoverAttempts++;
+    const pos = audio.currentTime || get(player).currentTime || 0;
+    audio.src = api.streamUrl(cur.deezer_id, curQ);
+    audio.load();
+    const resume = () => {
+      audio.removeEventListener("loadedmetadata", resume);
+      try {
+        if (pos > 0) audio.currentTime = pos;
+      } catch {
+        /* not seekable yet */
+      }
+      audio.play().catch(() => {});
+      recovering = false;
+      lastAdvance = Date.now();
+    };
+    audio.addEventListener("loadedmetadata", resume);
+  }
 
   function onElPlay(e) {
     if (e.target !== audio) return;
@@ -136,6 +244,7 @@
     const resumeAt = firstLoad && $player.currentTime > 1 ? $player.currentTime : 0;
     curId = track.deezer_id;
     curQ = get(quality);
+    recoverAttempts = 0; // fresh track, fresh recovery budget
     audio.src = api.streamUrl(track.deezer_id, curQ);
     audio.load();
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
@@ -242,6 +351,9 @@
 
   function onTime(e) {
     if (e && e.target !== audio) return; // ignore the idle/preloading element
+    // Healthy progress: clear the recovery budget so a later, unrelated stall
+    // gets its full retry allowance again.
+    if (recoverAttempts && audio.currentTime > lastPos) recoverAttempts = 0;
     // A live, on-the-fly transcoded stream (e.g. Opus/ogg piped from ffmpeg)
     // has no Content-Length, so audio.duration is Infinity/NaN. Fall back to
     // the duration we already know from the track metadata.

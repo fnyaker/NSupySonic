@@ -57,9 +57,19 @@
     if (await toggleEntityFavorite("artist", id, next)) fav = next;
   }
 
+  const TYPE_LABEL = { album: "Album", single: "Single", ep: "EP", compile: "Compilation" };
+  function releaseSubtitle(r) {
+    const type = TYPE_LABEL[r.record_type] || "Sortie";
+    return r.year ? `${type} · ${r.year}` : type;
+  }
+
   $: albums = disco?.album || data?.albums || [];
   $: singles = disco?.single || [];
   $: featured = disco?.featured || [];
+  // The 5 most recent official releases (backend already sorts `all` by date).
+  $: latest = ((disco?.all && disco.all.length ? disco.all : albums) || [])
+    .slice(0, 5)
+    .map((r) => ({ ...r, subtitle: releaseSubtitle(r) }));
 </script>
 
 {#if loading}
@@ -83,6 +93,11 @@
       <button class="pill ghost" on:click={startRadio}><Icon name="radio" size={18} /> Radio</button>
       <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Suivre"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
     </div>
+
+    {#if latest.length}
+      <h2>Dernières sorties</h2>
+      <div class="shelf">{#each latest as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+    {/if}
 
     {#if data.top?.length}
       <h2>Titres populaires</h2>
