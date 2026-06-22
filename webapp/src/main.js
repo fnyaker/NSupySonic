@@ -1,7 +1,11 @@
 import "./app.css";
+import { mount } from "svelte";
 import App from "./App.svelte";
 
-const app = new App({ target: document.getElementById("app") });
+// Svelte 5 mounting API. The old `new App({ target })` form doesn't establish a
+// root effect context, which leaves library deriveds/effects (e.g. svelte-spa-
+// router's runes-based `router`) orphaned and crashes the boot.
+const app = mount(App, { target: document.getElementById("app") });
 
 // Register the PWA service worker (installability + offline shell). Scope /app/.
 // Dev (`npm run dev`) has no sw.js, so registration just fails silently.

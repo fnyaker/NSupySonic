@@ -1,5 +1,6 @@
 <script>
-  import { link, location } from "svelte-spa-router";
+  import { link } from "svelte-spa-router";
+  import { location } from "../lib/router.js";
   import Icon from "./Icon.svelte";
 
   $: active = (prefix) =>

@@ -3,7 +3,8 @@
   // so you can always return to where you came from. Hash routing keeps real
   // browser history, so history.back() does the right thing; if there's nothing
   // to go back to (deep link / first load), fall back to Home.
-  import { location, push } from "svelte-spa-router";
+  import { push } from "svelte-spa-router";
+  import { location } from "../lib/router.js";
   import Icon from "./Icon.svelte";
 
   function back() {

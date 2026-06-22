@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
-  import { link, location, push } from "svelte-spa-router";
+  import { link, push } from "svelte-spa-router";
+  import { location } from "../lib/router.js";
   import { user, isAdmin } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { userPlaylists, invalidatePlaylists } from "../lib/actions.js";
