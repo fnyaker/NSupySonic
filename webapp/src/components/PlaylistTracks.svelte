@@ -1,6 +1,6 @@
 <script>
   import { flip } from "svelte/animate";
-  import { dndzone } from "svelte-dnd-action";
+  import { dragHandleZone, dragHandle } from "svelte-dnd-action";
   import { push } from "svelte-spa-router";
   import { player, currentId, playing, openMenu } from "../lib/stores.js";
   import { buildTrackMenu, userPlaylists } from "../lib/actions.js";
@@ -8,18 +8,18 @@
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
 
-  // An editable, reorderable playlist track list. Reordering is initiated from
-  // the grip handle (so a normal click/tap still plays the track) and works with
-  // both mouse and touch. `editing` (the mobile "Modifier" mode) keeps the grips
-  // and remove buttons permanently visible.
+  // Editable, reorderable playlist list. Reordering uses svelte-dnd-action's
+  // native drag-handle support (dragHandleZone + dragHandle), which handles
+  // mouse, touch and keyboard reliably — dragging is initiated only from the
+  // grip, so tapping/clicking a row still plays it and the list still scrolls.
+  // `editing` is the dedicated mobile edit mode (big handles, taller rows).
   export let tracks = [];
   export let context = null;
   export let editing = false;
   export let onreorder = null; // (newTracks) => void
   export let onremove = null; // (index) => void
 
-  const FLIP = 180;
-  let dragDisabled = true;
+  const FLIP = 160;
 
   // Wrap each track with a stable id for keyed iteration + dnd. Rebuilt only
   // when the parent's track array changes (load / add / remove), never mid-drag.
@@ -35,14 +35,7 @@
   }
   function handleFinalize(e) {
     rows = e.detail.items;
-    dragDisabled = true;
     onreorder?.(rows.map((r) => r.track));
-  }
-
-  // Touch/mouse: arm dragging only while the grip is held.
-  function grab(e) {
-    e.preventDefault();
-    dragDisabled = false;
   }
 
   function playAt(i) {
@@ -64,7 +57,7 @@
 <div
   class="list"
   class:editing
-  use:dndzone={{ items: rows, dragDisabled, flipDurationMs: FLIP, dropTargetStyle: {} }}
+  use:dragHandleZone={{ items: rows, flipDurationMs: FLIP, dropTargetStyle: {} }}
   on:consider={handleConsider}
   on:finalize={handleFinalize}
 >
@@ -73,15 +66,9 @@
     {@const isCurrent = $currentId === track.deezer_id}
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div class="row" class:active={isCurrent} animate:flip={{ duration: FLIP }} on:contextmenu={(e) => menu(e, track)}>
-      <button
-        class="grip"
-        aria-label="Déplacer"
-        title="Glisser pour réordonner"
-        on:pointerdown={grab}
-        on:pointerup={() => (dragDisabled = true)}
-      >
-        <Icon name="grip" size={18} />
-      </button>
+      <span class="grip" use:dragHandle aria-label="Déplacer le titre" title="Glisser pour réordonner">
+        <Icon name="grip" size={editing ? 22 : 18} />
+      </span>
 
       <button class="play" on:click={() => playAt(i)} aria-label="Lire">
         {#if isCurrent && $playing}
@@ -109,7 +96,7 @@
       <span class="dur muted">{fmtDuration(track.duration)}</span>
 
       <button class="remove" on:click|stopPropagation={() => onremove?.(i)} aria-label="Retirer de la playlist" title="Retirer">
-        <Icon name="minusCircle" size={20} />
+        <Icon name="minusCircle" size={editing ? 24 : 20} />
       </button>
       <button class="more" on:click|stopPropagation={(e) => menu(e, track)} aria-label="Plus d'options"><Icon name="more" size={18} /></button>
     </div>
@@ -146,11 +133,15 @@
     cursor: grab;
     opacity: 0;
     display: flex;
+    align-items: center;
     justify-content: center;
+    height: 100%;
+    /* let the handle own the gesture (no browser scroll/zoom while dragging) */
     touch-action: none;
   }
   .grip:active {
     cursor: grabbing;
+    color: var(--text);
   }
   .row:hover .grip,
   .list.editing .grip {
@@ -285,17 +276,53 @@
       height: 100%;
     }
   }
+
+  /* ----- Touch edit mode: a dedicated, finger-friendly layout ----- */
   @media (max-width: 640px) {
     .row {
-      grid-template-columns: 30px 40px 1fr 30px 28px;
+      grid-template-columns: 40px 40px 1fr 30px 28px;
     }
     .dur {
       display: none;
     }
-    /* On mobile the remove/more controls stay visible for thumb reach. */
-    .list.editing .remove,
     .more {
       opacity: 1;
     }
+    /* Hide the grip entirely when not editing (no hover on touch). */
+    .grip {
+      display: none;
+    }
+    .list.editing .grip {
+      display: flex;
+      opacity: 1;
+      width: 44px;
+      /* big, comfortable drag target */
+      margin-left: -4px;
+    }
+    .list.editing .row {
+      grid-template-columns: 44px 1fr 44px;
+      padding: 12px 6px;
+      align-items: center;
+    }
+    .list.editing .more {
+      display: none;
+    }
+    .list.editing .remove {
+      opacity: 1;
+      width: 44px;
+      height: 44px;
+    }
+    .list.editing .row:nth-child(odd) {
+      background: var(--bg-hover);
+    }
+  }
+
+  /* The floating clone svelte-dnd-action renders while dragging: lift it. */
+  :global(#dnd-action-dragged-el) {
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+    border-radius: 10px;
+    outline: 1px solid var(--accent);
+    background: var(--bg-elev);
+    cursor: grabbing;
   }
 </style>
