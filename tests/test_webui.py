@@ -481,9 +481,11 @@ class WebUITestCase(unittest.TestCase):
 
     def test_my_playlists(self):
         self._login()
+        self.client.post("/api/playlists", json={"title": "Mine"})
         data = self.client.get("/api/me/playlists").get_json()
-        self.assertEqual(data["playlists"][0]["title"], "P")
-        self.assertTrue(data["playlists"][0]["cover"].startswith("https://"))
+        titles = [p["title"] for p in data["playlists"]]
+        self.assertIn("Mine", titles)
+        self.assertTrue(all("id" in p for p in data["playlists"]))
 
     def test_my_favorites(self):
         self._login()
@@ -685,16 +687,33 @@ class WebUITestCase(unittest.TestCase):
         rv = self.client.post("/api/favorite/wat", json={"deezer_id": "1"})
         self.assertEqual(rv.status_code, 400)
 
-    # -- playlist CRUD --------------------------------------------------
+    # -- playlist CRUD (DB-backed, Deezer-mirrored) ---------------------
+
+    def _create_playlist(self, title="New", tracks=None):
+        return self.client.post(
+            "/api/playlists", json={"title": title, "tracks": tracks or []}
+        ).get_json()
+
+    @staticmethod
+    def _pushed_song_ids(gw):
+        out = []
+        for _p, songs in gw.songs_added:
+            out += songs
+        for _p, songs in gw.songs_removed:
+            out += songs
+        for entry in gw.created:
+            if len(entry) == 3:  # (title, description, songs)
+                out += entry[2]
+        return out
 
     def test_create_playlist(self):
         self._login()
-        rv = self.client.post(
-            "/api/playlists", json={"title": "New", "tracks": ["1", "2"]}
-        )
-        self.assertEqual(rv.status_code, 200)
-        self.assertEqual(rv.get_json()["deezer_id"], "9999")
+        body = self._create_playlist("New", ["1", "2"])
+        self.assertIn("id", body)  # the Playlist UUID
+        self.assertEqual(body["deezer_id"], "9999")  # mirrored to the account
         self.assertEqual(self.app.deezer.dz.gw.created[0][0], "New")
+        # the two Deezer tracks were materialized and pushed in order
+        self.assertEqual(self.app.deezer.dz.gw.created[0][2], ["1", "2"])
 
     def test_create_playlist_requires_title(self):
         self._login()
@@ -703,16 +722,69 @@ class WebUITestCase(unittest.TestCase):
 
     def test_add_remove_playlist_tracks(self):
         self._login()
-        self.client.post("/api/playlist/77/tracks", json={"tracks": ["1", "2"]})
-        self.assertEqual(self.app.deezer.dz.gw.songs_added[0][0], "77")
-        self.client.delete("/api/playlist/77/tracks", json={"tracks": ["1"]})
-        self.assertEqual(self.app.deezer.dz.gw.songs_removed[0][0], "77")
+        pid = self._create_playlist("PL")["id"]
+        self.client.post(f"/api/playlist/{pid}/tracks", json={"tracks": ["1", "2"]})
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1", "2"])
+        self.assertTrue(data["playlist"]["editable"])
+        # remove one by its id
+        self.client.delete(f"/api/playlist/{pid}/tracks", json={"tracks": ["1"]})
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["2"])
+
+    def test_remove_playlist_track_by_index(self):
+        self._login()
+        pid = self._create_playlist("PL")["id"]
+        self.client.post(f"/api/playlist/{pid}/tracks", json={"tracks": ["1", "2", "3"]})
+        self.client.delete(f"/api/playlist/{pid}/tracks", json={"indexes": [1]})
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1", "3"])
+
+    def test_playlist_mixes_local_and_deezer(self):
+        self._login()
+        loc = self._make_local_track("Mixtape")
+        pid = self._create_playlist("Mix")["id"]
+        self.client.post(
+            f"/api/playlist/{pid}/tracks", json={"tracks": [str(loc.id), "1"]}
+        )
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        uids = [t["deezer_id"] for t in data["tracks"]]
+        self.assertIn(str(loc.id), uids)  # local file present (uid == UUID)
+        self.assertIn("1", uids)  # Deezer track present
+        self.assertTrue(any(t.get("local") for t in data["tracks"]))
+        # the local file is never pushed to the Deezer account
+        self.assertNotIn(str(loc.id), self._pushed_song_ids(self.app.deezer.dz.gw))
+
+    def test_reorder_playlist(self):
+        self._login()
+        pid = self._create_playlist("PL")["id"]
+        self.client.post(
+            f"/api/playlist/{pid}/tracks", json={"tracks": ["1", "2", "3"]}
+        )
+        rv = self.client.put(
+            f"/api/playlist/{pid}/order", json={"tracks": ["3", "1", "2"]}
+        )
+        self.assertEqual(rv.status_code, 200)
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["3", "1", "2"])
+
+    def test_rename_playlist(self):
+        self._login()
+        pid = self._create_playlist("Old")["id"]
+        rv = self.client.patch(
+            f"/api/playlist/{pid}", json={"title": "Renamed", "description": "hey"}
+        )
+        self.assertEqual(rv.status_code, 200)
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        self.assertEqual(data["playlist"]["title"], "Renamed")
+        self.assertEqual(data["playlist"]["description"], "hey")
 
     def test_delete_playlist(self):
         self._login()
-        rv = self.client.delete("/api/playlist/77")
+        body = self._create_playlist("PL", ["1"])
+        rv = self.client.delete(f"/api/playlist/{body['id']}")
         self.assertEqual(rv.status_code, 200)
-        self.assertIn("77", self.app.deezer.dz.gw.deleted)
+        self.assertIn(body["deezer_id"], self.app.deezer.dz.gw.deleted)
 
     # -- Flow customization ---------------------------------------------
 

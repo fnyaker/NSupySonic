@@ -100,7 +100,7 @@
     <p class="muted hint">Aucune playlist.</p>
   {:else}
     <div class="grid">
-      {#each playlists as p (p.deezer_id)}<Card item={p} kind="playlist" />{/each}
+      {#each playlists as p (p.id)}<Card item={p} kind="playlist" />{/each}
     </div>
   {/if}
 {:else if tab === "local"}

@@ -71,11 +71,17 @@ export const api = {
     req("/favorite/" + kind, { method: "POST", body: body({ deezer_id, on }) }),
   createPlaylist: (title, tracks) =>
     req("/playlists", { method: "POST", body: body({ title, tracks }) }),
+  editPlaylist: (id, fields) =>
+    req("/playlist/" + id, { method: "PATCH", body: body(fields) }),
   deletePlaylist: (id) => req("/playlist/" + id, { method: "DELETE" }),
   addToPlaylist: (id, tracks) =>
     req("/playlist/" + id + "/tracks", { method: "POST", body: body({ tracks }) }),
   removeFromPlaylist: (id, tracks) =>
     req("/playlist/" + id + "/tracks", { method: "DELETE", body: body({ tracks }) }),
+  removePlaylistIndexes: (id, indexes) =>
+    req("/playlist/" + id + "/tracks", { method: "DELETE", body: body({ indexes }) }),
+  reorderPlaylist: (id, tracks) =>
+    req("/playlist/" + id + "/order", { method: "PUT", body: body({ tracks }) }),
   download: (ids) => req("/download", { method: "POST", body: body({ ids }) }),
 
   // upload local audio files into the archive (multipart; let the browser set

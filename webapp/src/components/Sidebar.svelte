@@ -37,7 +37,7 @@
       const r = await api.createPlaylist(title.trim(), []);
       invalidatePlaylists();
       playlists = await userPlaylists(true);
-      if (r.deezer_id) push("/playlist/" + r.deezer_id);
+      if (r.id) push("/playlist/" + r.id);
     } catch {
       /* ignore */
     }
@@ -65,8 +65,8 @@
       <button class="new" on:click={newPlaylist} aria-label="Nouvelle playlist"><Icon name="plus" size={18} /></button>
     </div>
     <ul class="playlists">
-      {#each playlists as p (p.deezer_id)}
-        <li><a use:link href={"/playlist/" + p.deezer_id}>{p.title}</a></li>
+      {#each playlists as p (p.id)}
+        <li><a use:link href={"/playlist/" + p.id}>{p.title}</a></li>
       {/each}
     </ul>
   {:else}
