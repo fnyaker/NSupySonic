@@ -20,7 +20,7 @@ from functools import wraps
 
 from flask import Blueprint, current_app, jsonify, request, send_file, session
 
-from ..db import Album, Artist, StarredTrack, Track, User, now
+from ..db import Album, Artist, Playlist, PlaylistTrack, StarredTrack, Track, User, db, now
 from ..managers.user import UserManager
 from ..ratelimit import auth_limiter
 
@@ -351,6 +351,95 @@ def _db_track(t: Track) -> dict:
     }
 
 
+# -- DB-backed playlists ----------------------------------------------------
+# The web app's *user* playlists live in supysonic's own Playlist/PlaylistTrack
+# tables (ordered by PlaylistTrack.index), exactly like the Subsonic side. This
+# lets a playlist mix Deezer tracks and purely-local files (deezer_id NULL), and
+# gives reliable reordering. Edits are mirrored back to the Deezer account
+# fail-soft (deezer/push.py), but only the Deezer-track subset is pushed.
+
+
+def _track_uid(t: Track) -> str:
+    """The id the front-end addresses a track by: the Deezer id for Deezer
+    tracks, the row UUID for local files (matches ``_local_track``)."""
+    return str(t.deezer_id) if t.deezer_id else str(t.id)
+
+
+def _resolve_db_playlist(pid):
+    """Return the DB Playlist for a UUID *or* a mappable Deezer numeric id,
+    else None (a non-imported recommendation/editorial playlist)."""
+    from ..deezer import ids
+
+    sid = str(pid)
+    try:
+        return Playlist[uuid.UUID(sid)]
+    except (ValueError, Playlist.DoesNotExist):
+        pass
+    if _valid_id(sid):
+        try:
+            return Playlist[ids.playlist_uuid(sid)]
+        except Playlist.DoesNotExist:
+            pass
+        return Playlist.select().where(Playlist.deezer_id == sid).first()
+    return None
+
+
+def _db_playlist_cover(tracks: list) -> str | None:
+    """Pick the first available album cover as the playlist's cover (Playlist
+    rows don't store a Deezer picture md5)."""
+    for t in tracks:
+        cover = (t.get("album") or {}).get("cover")
+        if cover:
+            return cover
+    return None
+
+
+def _ensure_track_row(provider, deezer_id, root, cache):
+    """Materialize (idempotently) the DB Track row for a Deezer track id, so a
+    freshly-added Deezer track can be referenced by a PlaylistTrack. Reuses the
+    same upsert path as the importer (deezer/library.upsert_track)."""
+    from ..deezer import library
+
+    data = provider.get_track_info(deezer_id)
+    return library.upsert_track(data, root, provider.default_quality, cache=cache)
+
+
+def _resolve_tracks(provider, raw_ids) -> list:
+    """Map universal track ids to Track rows: a UUID is a local/DB track, a
+    numeric id is a Deezer track whose row is created on demand."""
+    from ..deezer import library
+
+    root = None
+    cache = library.ImportCache()
+    out = []
+    for raw in raw_ids:
+        sid = str(raw)
+        try:
+            out.append(Track[uuid.UUID(sid)])
+            continue
+        except (ValueError, Track.DoesNotExist):
+            pass
+        if _valid_id(sid):
+            if root is None:
+                root = library.get_root_folder(provider.archive_dir)
+            try:
+                out.append(_ensure_track_row(provider, sid, root, cache))
+            except Exception:
+                logger.warning("could not materialize Deezer track %s", sid, exc_info=True)
+    return out
+
+
+def _mirror_playlist(provider, pl):
+    """Push the playlist's Deezer-track subset back to the Deezer account
+    (fail-soft: a Deezer error must never break the local edit)."""
+    from ..deezer import push
+
+    try:
+        push.reconcile_playlist(provider, pl)
+    except Exception:
+        logger.warning("playlist mirror failed for %s", pl.id, exc_info=True)
+
+
 # -- auth -------------------------------------------------------------------
 
 
@@ -576,6 +665,28 @@ def album(album_id):
 @webapi.route("/playlist/<playlist_id>")
 @login_required
 def playlist(playlist_id):
+    # A user playlist lives in the DB (editable, may contain local files); a
+    # recommendation/editorial playlist is read straight from Deezer (read-only).
+    pl = _resolve_db_playlist(playlist_id)
+    if pl is not None:
+        tracks = [_db_track(t) for t in pl.get_tracks()]
+        return jsonify(
+            {
+                "playlist": {
+                    "id": str(pl.id),
+                    "deezer_id": pl.deezer_id,
+                    "title": pl.name,
+                    "description": pl.comment or "",
+                    "cover": _db_playlist_cover(tracks),
+                    "nb_tracks": len(tracks),
+                    "owner": pl.user.name,
+                    "is_favorite": False,
+                    "editable": _is_admin(),
+                },
+                "tracks": tracks,
+            }
+        )
+
     provider, err = _need_provider()
     if err:
         return err
@@ -592,7 +703,9 @@ def playlist(playlist_id):
         songs = provider.get_playlist_tracks(playlist_id)
     except Exception:
         songs = (page.get("SONGS") or {}).get("data", [])
-    return jsonify({"playlist": _playlist(data), "tracks": _tracks(songs)})
+    out = _playlist(data)
+    out["editable"] = False
+    return jsonify({"playlist": out, "tracks": _tracks(songs)})
 
 
 @webapi.route("/artist/<artist_id>/discography")
@@ -782,22 +895,27 @@ def recommendations():
 @webapi.route("/me/playlists")
 @login_required
 def my_playlists():
+    # The playlists belong to the account owner (admin); guests don't see them.
     if not _is_admin():
-        return jsonify({"playlists": []})  # the Deezer playlists belong to the owner
-    provider, err = _need_provider()
-    if err:
-        return err
+        return jsonify({"playlists": []})
     out = []
-    for p in provider.get_user_playlists():
+    query = (
+        Playlist.select()
+        .where(
+            (Playlist.user == request.webuser) | (Playlist.deezer_id.is_null(False))
+        )
+        .order_by(Playlist.created.desc())
+    )
+    for pl in query:
+        tracks = pl.get_tracks()
         out.append(
             {
-                "deezer_id": str(p.get("id") or p.get("PLAYLIST_ID")),
-                "title": p.get("title") or p.get("TITLE", ""),
-                "cover": _image(
-                    (p.get("picture_type") or "playlist"),
-                    p.get("md5_image") or p.get("PLAYLIST_PICTURE"),
-                ),
-                "nb_tracks": p.get("nb_tracks") or p.get("NB_SONG"),
+                "id": str(pl.id),
+                "deezer_id": pl.deezer_id,
+                "title": pl.name,
+                "cover": _db_playlist_cover([_db_track(t) for t in tracks[:1]]),
+                "nb_tracks": len(tracks),
+                "editable": True,
             }
         )
     return jsonify({"playlists": out})
@@ -973,7 +1091,10 @@ def favorite_entity(kind):
     return jsonify({"ok": True, "favorite": on})
 
 
-# -- playlist management (Subsonic side stays in sync via importer) ----------
+# -- playlist management -----------------------------------------------------
+# All edits act on the DB Playlist (so local files are first-class) and then
+# mirror the Deezer-track subset back to the account fail-soft. A playlist id is
+# the Playlist UUID; a Deezer numeric id of an imported playlist also resolves.
 
 
 @webapi.route("/playlists", methods=["POST"])
@@ -987,11 +1108,13 @@ def create_playlist():
     title = (data.get("title") or "").strip()
     if not title:
         return jsonify({"error": "missing title"}), 400
-    songs = [str(s) for s in (data.get("tracks") or [])]
-    new_id = provider.create_playlist(
-        title, description=data.get("description"), songs=songs
+    pl = Playlist.create(
+        user=request.webuser, name=title, comment=(data.get("description") or None)
     )
-    return jsonify({"ok": True, "deezer_id": str(new_id)})
+    for track in _resolve_tracks(provider, data.get("tracks") or []):
+        pl.add(track)
+    _mirror_playlist(provider, pl)
+    return jsonify({"ok": True, "id": str(pl.id), "deezer_id": pl.deezer_id})
 
 
 @webapi.route("/playlist/<playlist_id>", methods=["PATCH"])
@@ -1001,10 +1124,21 @@ def edit_playlist(playlist_id):
     provider, err = _need_provider()
     if err:
         return err
+    pl = _resolve_db_playlist(playlist_id)
+    if pl is None:
+        return jsonify({"error": "not found"}), 404
     data = request.get_json(silent=True) or {}
-    provider.edit_playlist(
-        playlist_id, title=data.get("title"), description=data.get("description")
-    )
+    title = data.get("title")
+    if title is not None and title.strip():
+        pl.name = title.strip()
+    if "description" in data:
+        pl.comment = data.get("description") or None
+    pl.save()
+    if pl.deezer_id:
+        try:
+            provider.edit_playlist(pl.deezer_id, title=pl.name, description=pl.comment)
+        except Exception:
+            logger.warning("Deezer edit_playlist failed for %s", pl.id, exc_info=True)
     return jsonify({"ok": True})
 
 
@@ -1015,7 +1149,15 @@ def delete_playlist(playlist_id):
     provider, err = _need_provider()
     if err:
         return err
-    provider.delete_playlist(playlist_id)
+    pl = _resolve_db_playlist(playlist_id)
+    if pl is None:
+        return jsonify({"error": "not found"}), 404
+    dz = pl.deezer_id
+    pl.delete_instance(recursive=True)
+    if dz:
+        from ..deezer import push
+
+        push.delete_playlist(provider, dz)
     return jsonify({"ok": True})
 
 
@@ -1026,12 +1168,16 @@ def add_playlist_tracks(playlist_id):
     provider, err = _need_provider()
     if err:
         return err
-    data = request.get_json(silent=True) or {}
-    songs = [str(s) for s in (data.get("tracks") or [])]
-    if not songs:
+    pl = _resolve_db_playlist(playlist_id)
+    if pl is None:
+        return jsonify({"error": "not found"}), 404
+    tracks = _resolve_tracks(provider, (request.get_json(silent=True) or {}).get("tracks") or [])
+    if not tracks:
         return jsonify({"error": "no tracks"}), 400
-    provider.add_songs_to_playlist(playlist_id, songs)
-    return jsonify({"ok": True})
+    for track in tracks:
+        pl.add(track)
+    _mirror_playlist(provider, pl)
+    return jsonify({"ok": True, "added": len(tracks)})
 
 
 @webapi.route("/playlist/<playlist_id>/tracks", methods=["DELETE"])
@@ -1041,11 +1187,61 @@ def remove_playlist_tracks(playlist_id):
     provider, err = _need_provider()
     if err:
         return err
+    pl = _resolve_db_playlist(playlist_id)
+    if pl is None:
+        return jsonify({"error": "not found"}), 404
     data = request.get_json(silent=True) or {}
-    songs = [str(s) for s in (data.get("tracks") or [])]
-    if not songs:
+    indexes = data.get("indexes")
+    if indexes is None:
+        wanted = {str(s) for s in (data.get("tracks") or [])}
+        indexes = [
+            i for i, t in enumerate(pl.get_tracks())
+            if _track_uid(t) in wanted or str(t.id) in wanted
+        ]
+    indexes = [int(i) for i in indexes]
+    if not indexes:
         return jsonify({"error": "no tracks"}), 400
-    provider.remove_songs_from_playlist(playlist_id, songs)
+    pl.remove_at_indexes(indexes)
+    _mirror_playlist(provider, pl)
+    return jsonify({"ok": True})
+
+
+@webapi.route("/playlist/<playlist_id>/order", methods=["PUT"])
+@login_required
+@admin_required
+def reorder_playlist(playlist_id):
+    provider, err = _need_provider()
+    if err:
+        return err
+    pl = _resolve_db_playlist(playlist_id)
+    if pl is None:
+        return jsonify({"error": "not found"}), 404
+    order = [str(s) for s in ((request.get_json(silent=True) or {}).get("tracks") or [])]
+    if not order:
+        return jsonify({"error": "no order"}), 400
+    current = pl.get_tracks()
+    by_uid = {}
+    for t in current:
+        by_uid.setdefault(_track_uid(t), t)
+        by_uid.setdefault(str(t.id), t)
+    with db.atomic():
+        PlaylistTrack.delete().where(PlaylistTrack.playlist == pl).execute()
+        idx = 0
+        placed = set()
+        for uid in order:
+            t = by_uid.get(uid)
+            if t is None or t.id in placed:
+                continue
+            PlaylistTrack.create(playlist=pl, track=t.id, index=idx)
+            idx += 1
+            placed.add(t.id)
+        # Safety: keep any track the client omitted, appended at the end.
+        for t in current:
+            if t.id not in placed:
+                PlaylistTrack.create(playlist=pl, track=t.id, index=idx)
+                idx += 1
+                placed.add(t.id)
+    _mirror_playlist(provider, pl)
     return jsonify({"ok": True})
 
 

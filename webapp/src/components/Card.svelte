@@ -21,12 +21,16 @@
           ? "Mix"
           : item.owner || "Playlist");
 
+  // User playlists are addressed by their UUID (`id`); recommendation cards only
+  // have a Deezer numeric id.
+  $: routeId = item.id || item.deezer_id;
+
   function open() {
-    push((kind === "mix" ? "/mix/" : "/" + kind + "/") + item.deezer_id);
+    push((kind === "mix" ? "/mix/" : "/" + kind + "/") + routeId);
   }
   function play(e) {
     e.stopPropagation();
-    playEntity(kind, item.deezer_id);
+    playEntity(kind, routeId);
   }
   function menu(e) {
     openMenu(e, buildEntityMenu(kind, item, push));

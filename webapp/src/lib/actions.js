@@ -129,6 +129,8 @@ export async function startTrackRadio(track) {
 export async function addTrackToPlaylist(playlistId, trackId, playlistTitle) {
   try {
     await api.addToPlaylist(playlistId, [String(trackId)]);
+    // The sidebar/menu cache shows track counts — refresh on the next read.
+    invalidatePlaylists();
     toasts.push(`Ajouté à « ${playlistTitle} »`);
   } catch {
     toasts.push("Échec de l'ajout à la playlist", "error");
@@ -156,14 +158,17 @@ export async function playEntity(kind, id, context = null) {
 // Context menu for an album/artist/playlist/mix card.
 export function buildEntityMenu(kind, item, nav) {
   const route = kind === "mix" ? "/mix/" : "/" + kind + "/";
+  const routeId = item.id || item.deezer_id;
   const items = [
-    { label: "Lire", icon: "play", action: () => playEntity(kind, item.deezer_id) },
-    { label: "Ouvrir", icon: "open", action: () => nav(route + item.deezer_id) },
+    { label: "Lire", icon: "play", action: () => playEntity(kind, routeId) },
+    { label: "Ouvrir", icon: "open", action: () => nav(route + routeId) },
   ];
   // Favoriting an album/artist/playlist writes to the shared Deezer account, so
   // it's admin-only (guests don't mutate the owner's account).
   if (get(isAdmin)) {
-    if (kind === "album" || kind === "playlist")
+    // Only Deezer-backed entities can be favorited on the account (a user's own
+    // playlist has no Deezer favorite to add).
+    if ((kind === "album" || kind === "playlist") && item.deezer_id)
       items.push({
         label: "Ajouter aux favoris",
         icon: "heart",
@@ -189,10 +194,12 @@ export function buildTrackMenu(track, nav) {
   ];
   // Adding to a playlist edits the owner's Deezer playlists — admin-only.
   if (admin) {
+    // `track.deezer_id` is the universal track id — a numeric Deezer id, or the
+    // row UUID for local files — so this works for local tracks too.
     const playlistSub = (playlistCache || []).map((p) => ({
       label: p.title,
       icon: "music",
-      action: () => addTrackToPlaylist(p.deezer_id, track.deezer_id, p.title),
+      action: () => addTrackToPlaylist(p.id, track.deezer_id, p.title),
     }));
     items.push({ label: "Ajouter à une playlist", icon: "plus", sub: playlistSub });
   }
