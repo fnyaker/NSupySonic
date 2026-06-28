@@ -2,20 +2,54 @@
 // Session-cookie auth, so every request includes credentials.
 
 import { user } from "./stores.js";
+import { reportOnline, reportOffline } from "./net.js";
 
 const BASE = "/api";
 
-async function req(path, opts = {}) {
-  const res = await fetch(BASE + path, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-    ...opts,
-  });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Exponential backoff with jitter, capped — enough to ride out a brief blip
+// (lift, tunnel, wifi/cellular handover) without hammering the server.
+const backoff = (attempt) =>
+  Math.min(400 * 2 ** attempt, 6000) + Math.floor(Math.random() * 250);
+
+// Transient server states worth retrying a GET on (a restart, a cold worker).
+const TRANSIENT = new Set([502, 503, 504]);
+
+async function req(path, opts = {}, attempt = 0) {
+  const method = (opts.method || "GET").toUpperCase();
+  // Only GETs are safe to auto-retry: replaying a POST/PUT/DELETE could double
+  // a mutation. Mutations fail fast and let the optimistic UI roll back.
+  const retriable = method === "GET";
+
+  let res;
+  try {
+    res = await fetch(BASE + path, {
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      ...opts,
+    });
+  } catch (e) {
+    // Network-level failure: offline, DNS, reset, CORS-less abort.
+    reportOffline();
+    if (retriable && attempt < 5) {
+      await sleep(backoff(attempt));
+      return req(path, opts, attempt + 1);
+    }
+    throw { status: 0, message: "network", offline: true };
+  }
+
+  // We reached the server — we're online (a 401/4xx still proves reachability).
+  reportOnline();
+
   if (res.status === 401) {
     user.set(null);
     throw { status: 401, message: "unauthorized" };
   }
   if (!res.ok) {
+    if (retriable && TRANSIENT.has(res.status) && attempt < 3) {
+      await sleep(backoff(attempt));
+      return req(path, opts, attempt + 1);
+    }
     let message = res.statusText;
     try {
       message = (await res.json()).error || message;

@@ -279,14 +279,22 @@
 
   /* ----- Touch edit mode: a dedicated, finger-friendly layout ----- */
   @media (max-width: 640px) {
+    /* Three visible columns: play · title · more. The grip, duration and remove
+       button are out of the flow here (grip/remove only return in edit mode), so
+       the column count must match or the title gets squeezed to nothing. */
     .row {
-      grid-template-columns: 40px 40px 1fr 30px 28px;
+      grid-template-columns: 40px 1fr 30px;
     }
     .dur {
       display: none;
     }
     .more {
       opacity: 1;
+    }
+    /* Remove is an edit-mode-only action on touch; fully out of the flow
+       otherwise (opacity:0 alone would still steal a grid column). */
+    .remove {
+      display: none;
     }
     /* Hide the grip entirely when not editing (no hover on touch). */
     .grip {
@@ -308,6 +316,7 @@
       display: none;
     }
     .list.editing .remove {
+      display: flex;
       opacity: 1;
       width: 44px;
       height: 44px;
