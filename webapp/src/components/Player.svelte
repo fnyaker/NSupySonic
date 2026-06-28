@@ -15,6 +15,7 @@
     toasts,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
+  import { online } from "../lib/net.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import { wireAudio, resumeAudio } from "../lib/visualizer.js";
@@ -111,6 +112,9 @@
   let lastAdvance = 0;
   let recovering = false;
   let recoverAttempts = 0;
+  // True while playback is interrupted purely because the network is down: we
+  // hold the track + position and resume on reconnect instead of skipping.
+  let netWaiting = false;
 
   function startWatchdog() {
     stopWatchdog();
@@ -148,17 +152,30 @@
   function recoverPlayback() {
     const cur = get(current);
     if (!cur || !audio || switching || recovering) return;
+    // Network down: don't burn the retry budget or skip the track. Park it and
+    // let the reconnect handler resume from the same spot.
+    if (!navigator.onLine || !get(online)) {
+      netWaiting = true;
+      return;
+    }
     if (recoverAttempts >= 4) {
       failCurrentTrack(); // permanently broken stream — move on
       return;
     }
     recovering = true;
     recoverAttempts++;
-    const pos = audio.currentTime || get(player).currentTime || 0;
+    const pos =
+      audio.currentTime > 0.5
+        ? audio.currentTime
+        : lastKnownTime || get(player).currentTime || 0;
     audio.src = api.streamUrl(cur.deezer_id, curQ);
     audio.load();
-    const resume = () => {
-      audio.removeEventListener("loadedmetadata", resume);
+    const cleanup = () => {
+      audio.removeEventListener("loadedmetadata", onMeta);
+      audio.removeEventListener("error", onErr);
+    };
+    const onMeta = () => {
+      cleanup();
       try {
         if (pos > 0) audio.currentTime = pos;
       } catch {
@@ -168,7 +185,19 @@
       recovering = false;
       lastAdvance = Date.now();
     };
-    audio.addEventListener("loadedmetadata", resume);
+    // The reload itself failed (e.g. server 502): loadedmetadata never fires, so
+    // release `recovering` and schedule the next attempt with backoff. Once the
+    // budget is spent the next call skips the track (or parks it if offline).
+    const onErr = () => {
+      cleanup();
+      recovering = false;
+      const delay = Math.min(800 * recoverAttempts, 4000);
+      setTimeout(() => {
+        if (get(player).playing) recoverPlayback();
+      }, delay);
+    };
+    audio.addEventListener("loadedmetadata", onMeta);
+    audio.addEventListener("error", onErr);
   }
 
   function onElPlay(e) {
@@ -289,6 +318,17 @@
     player.setProgress(0, $current?.duration || get(player).duration || 0);
     recoverAttempts = 0;
     if (get(player).playing) audio.play().catch(() => {});
+  }
+
+  // Back online after a network drop: clear the wait, reset the retry budget and
+  // resume from the same position (the element may have emptied during the
+  // outage, so go through recoverPlayback to reload + reseek).
+  $: if ($online && netWaiting) resumeAfterNetwork();
+  function resumeAfterNetwork() {
+    netWaiting = false;
+    recoverAttempts = 0;
+    lastAdvance = Date.now();
+    if (audio && get(current) && get(player).playing) recoverPlayback();
   }
 
   // A track we couldn't play at all (no playable source / archiving failed /
@@ -421,6 +461,7 @@
         ? audio.duration
         : $current?.duration || 0;
     if (audio.currentTime > 0.25) lastKnownTime = audio.currentTime;
+    if (netWaiting) netWaiting = false; // progress resumed on its own
     player.setProgress(audio.currentTime, d);
     updatePositionState(audio.currentTime, d);
   }

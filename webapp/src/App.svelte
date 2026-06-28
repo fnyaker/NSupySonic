@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { user, authChecked, nowPlayingOpen, player } from "./lib/stores.js";
   import { api } from "./lib/api.js";
+  import { initConnectivity } from "./lib/net.js";
   import { loadFavorites } from "./lib/actions.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
@@ -11,6 +12,7 @@
   import NowPlaying from "./components/NowPlaying.svelte";
   import Toasts from "./components/Toasts.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
+  import NetworkIndicator from "./components/NetworkIndicator.svelte";
   import Login from "./routes/Login.svelte";
   import Home from "./routes/Home.svelte";
   import Search from "./routes/Search.svelte";
@@ -32,6 +34,7 @@
   };
 
   onMount(async () => {
+    initConnectivity();
     try {
       const r = await api.me();
       user.set(r.user);
@@ -97,6 +100,7 @@
 
 <Toasts />
 <ContextMenu />
+<NetworkIndicator />
 
 <style>
   .layout {
