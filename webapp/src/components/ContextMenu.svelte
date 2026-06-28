@@ -7,7 +7,8 @@
   let pos = { x: 0, y: 0 };
   let openSub = null;
 
-  // Clamp the menu inside the viewport once it's rendered.
+  // Clamp the menu inside the viewport once it's rendered (desktop floating
+  // menu only — on mobile it's a bottom-anchored sheet).
   $: if ($contextMenu) place($contextMenu);
 
   async function place(menu) {
@@ -15,6 +16,7 @@
     pos = { x: menu.x, y: menu.y };
     await tick();
     if (!el) return;
+    if (window.matchMedia("(max-width: 640px)").matches) return; // sheet: no clamp
     const r = el.getBoundingClientRect();
     const pad = 8;
     let x = menu.x;
@@ -24,23 +26,31 @@
     pos = { x: Math.max(pad, x), y: Math.max(pad, y) };
   }
 
+  function toggleSub(item) {
+    openSub = openSub === item ? null : item;
+  }
+
+  // A submenu opens on tap/click (works on touch, unlike the old hover); leaf
+  // items run their action and close the menu.
   function run(item) {
-    if (item.sub) return;
+    if (item.sub) {
+      toggleSub(item);
+      return;
+    }
     closeMenu();
     item.action?.();
   }
 </script>
 
-<svelte:window
-  on:click={() => $contextMenu && closeMenu()}
-  on:keydown={(e) => e.key === "Escape" && closeMenu()}
-  on:contextmenu={(e) => {
-    // Allow our own openMenu calls (they stopPropagation); close otherwise.
-    if ($contextMenu) closeMenu();
-  }}
-/>
+<svelte:window on:keydown={(e) => e.key === "Escape" && closeMenu()} />
 
 {#if $contextMenu}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+  <div
+    class="backdrop"
+    on:click={closeMenu}
+    on:contextmenu|preventDefault|stopPropagation={closeMenu}
+  ></div>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
   <div
     class="menu"
@@ -55,31 +65,31 @@
       {#if item === "divider"}
         <div class="divider"></div>
       {:else if item.sub}
-        <div
+        <button
+          type="button"
           class="item has-sub"
+          class:expanded={openSub === item}
           role="menuitem"
-          tabindex="0"
-          on:mouseenter={() => (openSub = item)}
-          on:focus={() => (openSub = item)}
+          on:click|stopPropagation={() => toggleSub(item)}
         >
           <span class="ic"><Icon name={item.icon} size={17} /></span>
           <span class="lbl">{item.label}</span>
           <span class="chev"><Icon name="chevronRight" size={15} /></span>
-          {#if openSub === item}
-            <div class="submenu" role="menu">
-              {#if item.sub.length}
-                {#each item.sub as sit}
-                  <button type="button" class="item" role="menuitem" on:click={() => run(sit)}>
-                    <span class="ic"><Icon name={sit.icon} size={17} /></span>
-                    <span class="lbl">{sit.label}</span>
-                  </button>
-                {/each}
-              {:else}
-                <div class="item empty">Aucune playlist</div>
-              {/if}
-            </div>
-          {/if}
-        </div>
+        </button>
+        {#if openSub === item}
+          <div class="submenu" role="menu">
+            {#if item.sub.length}
+              {#each item.sub as sit}
+                <button type="button" class="item sub" role="menuitem" on:click={() => run(sit)}>
+                  <span class="ic"><Icon name={sit.icon} size={17} /></span>
+                  <span class="lbl">{sit.label}</span>
+                </button>
+              {/each}
+            {:else}
+              <div class="item sub empty">Aucune playlist</div>
+            {/if}
+          </div>
+        {/if}
       {:else}
         <button type="button" class="item" role="menuitem" class:danger={item.danger} on:click={() => run(item)}>
           <span class="ic"><Icon name={item.icon} size={17} /></span>
@@ -91,10 +101,17 @@
 {/if}
 
 <style>
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 290;
+  }
   .menu {
     position: fixed;
     z-index: 300;
     min-width: 220px;
+    max-height: 70vh;
+    overflow-y: auto;
     background: #282433;
     border: 1px solid #3a3448;
     border-radius: 10px;
@@ -129,6 +146,14 @@
   .item.empty:hover {
     background: none;
   }
+  .has-sub .chev {
+    margin-left: auto;
+    color: var(--text-dim);
+    transition: transform 0.15s ease;
+  }
+  .has-sub.expanded .chev {
+    transform: rotate(90deg);
+  }
   .ic {
     width: 18px;
     text-align: center;
@@ -137,26 +162,56 @@
   .lbl {
     flex: 1;
   }
-  .chev {
-    color: var(--text-dim);
-  }
   .divider {
     height: 1px;
     background: #3a3448;
     margin: 5px 8px;
   }
+  /* Submenu expands inline (accordion) so it works the same with a mouse or a
+     finger — the old side-positioned, hover-only flyout was unusable on touch. */
   .submenu {
-    position: absolute;
-    left: 100%;
-    top: -6px;
-    margin-left: 2px;
-    min-width: 200px;
-    max-height: 320px;
+    max-height: 40vh;
     overflow-y: auto;
-    background: #282433;
-    border: 1px solid #3a3448;
-    border-radius: 10px;
-    padding: 6px;
-    box-shadow: 0 16px 50px rgba(0, 0, 0, 0.55);
+  }
+  .item.sub {
+    padding-left: 34px;
+  }
+
+  /* Phone: render as a bottom sheet with large tap targets. */
+  @media (max-width: 640px) {
+    .backdrop {
+      background: rgba(0, 0, 0, 0.5);
+    }
+    .menu {
+      left: 0 !important;
+      right: 0;
+      top: auto !important;
+      bottom: 0;
+      width: 100%;
+      min-width: 0;
+      max-height: 78vh;
+      border-radius: 16px 16px 0 0;
+      padding: 8px 8px calc(10px + env(safe-area-inset-bottom));
+      animation: sheet-up 0.18s ease;
+    }
+    .item {
+      padding: 14px 14px;
+      font-size: 1rem;
+      border-radius: 10px;
+    }
+    .item.sub {
+      padding-left: 40px;
+    }
+    .submenu {
+      max-height: 42vh;
+    }
+  }
+  @keyframes sheet-up {
+    from {
+      transform: translateY(100%);
+    }
+    to {
+      transform: none;
+    }
   }
 </style>

@@ -87,6 +87,14 @@ class DeezerImporter:
         """
         dz = str(deezer_id) if deezer_id else None
         with db.atomic():
+            # Collapse split-brain duplicates: stray rows pointing at the same
+            # Deezer playlist under a different (e.g. client-generated) id, from
+            # before client-created playlists adopted the canonical uuid5 id.
+            if dz:
+                for stray in Playlist.select().where(
+                    (Playlist.deezer_id == dz) & (Playlist.id != local_id)
+                ):
+                    stray.delete_instance(recursive=True)
             tracks = self._upsert_tracks(raw_tracks)
             try:
                 playlist = Playlist[local_id]

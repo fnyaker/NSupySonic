@@ -1,7 +1,7 @@
 <script>
   import { onMount } from "svelte";
-  import { player, favTracks, toasts, isAdmin } from "../lib/stores.js";
-  import { userPlaylists, loadMyFavorites } from "../lib/actions.js";
+  import { player, favTracks, toasts, isAdmin, syncing } from "../lib/stores.js";
+  import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
   import { api } from "../lib/api.js";
   import Card from "../components/Card.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
@@ -56,13 +56,25 @@
   function playLocal() {
     if (local?.length) player.playQueue(local, 0, { kind: "local" });
   }
+
+  // Manual "refresh from Deezer" (shared action), then refresh this page's list.
+  async function syncDeezer() {
+    if (await runDeezerSync()) playlists = await userPlaylists(true);
+  }
 </script>
 
 <div class="head">
   <h1>Ma bibliothèque</h1>
-  <button class="upload" on:click={() => fileInput.click()} disabled={uploading}>
-    <Icon name="upload" size={17} /> {uploading ? "Import…" : "Importer des fichiers"}
-  </button>
+  <div class="head-actions">
+    {#if $isAdmin}
+      <button class="upload" class:spin={$syncing} on:click={syncDeezer} disabled={$syncing} title="Synchroniser depuis Deezer">
+        <Icon name="refresh" size={17} /> {$syncing ? "Sync…" : "Synchroniser Deezer"}
+      </button>
+    {/if}
+    <button class="upload" on:click={() => fileInput.click()} disabled={uploading}>
+      <Icon name="upload" size={17} /> {uploading ? "Import…" : "Importer des fichiers"}
+    </button>
+  </div>
   <input
     bind:this={fileInput}
     type="file"
@@ -125,6 +137,12 @@
     gap: 12px;
     flex-wrap: wrap;
   }
+  .head-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
   .upload {
     display: inline-flex;
     align-items: center;
@@ -135,6 +153,14 @@
     color: var(--text);
     font-weight: 600;
     font-size: 0.9rem;
+  }
+  .upload.spin :global(svg) {
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .upload:hover {
     background: var(--bg-hover);

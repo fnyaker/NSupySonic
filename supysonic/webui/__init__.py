@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os.path
+import threading
 import uuid
 from functools import wraps
 
@@ -1108,12 +1109,41 @@ def create_playlist():
     title = (data.get("title") or "").strip()
     if not title:
         return jsonify({"error": "missing title"}), 400
-    pl = Playlist.create(
-        user=request.webuser, name=title, comment=(data.get("description") or None)
-    )
-    for track in _resolve_tracks(provider, data.get("tracks") or []):
+    description = data.get("description") or None
+    track_rows = _resolve_tracks(provider, data.get("tracks") or [])
+    deezer_ids = [t.deezer_id for t in track_rows if t.deezer_id]
+
+    # Create the playlist on Deezer FIRST, then key the local row by the canonical
+    # uuid5(deezer_id) — the very id the importer uses — so a client-created
+    # playlist and its later re-import are ONE row, not a split-brain duplicate.
+    # Only the Deezer-track subset is pushed; purely-local tracks are kept locally
+    # but ignored on Deezer.
+    from ..deezer import ids as dz_ids
+
+    dz_id = None
+    try:
+        dz_id = str(provider.dz.gw.create_playlist(title, description=description, songs=deezer_ids))
+    except Exception:
+        logger.warning("Deezer create_playlist failed; creating local-only", exc_info=True)
+
+    if dz_id:
+        pid = dz_ids.playlist_uuid(dz_id)
+        try:  # an importer run may already hold this canonical id — reuse it
+            pl = Playlist[pid]
+            pl.name, pl.comment, pl.deezer_id, pl.user = title, description, dz_id, request.webuser
+            pl.clear()
+            pl.save()
+        except Playlist.DoesNotExist:
+            pl = Playlist.create(
+                id=pid, user=request.webuser, name=title, comment=description, deezer_id=dz_id
+            )
+    else:
+        pl = Playlist.create(user=request.webuser, name=title, comment=description)
+
+    for track in track_rows:
         pl.add(track)
-    _mirror_playlist(provider, pl)
+    if not dz_id:
+        _mirror_playlist(provider, pl)  # offline fallback: push when reachable
     return jsonify({"ok": True, "id": str(pl.id), "deezer_id": pl.deezer_id})
 
 
@@ -1270,6 +1300,43 @@ def download_status():
     return jsonify({"pending": pf.download_pending if pf else 0})
 
 
+# A manual "refresh from Deezer" — the same job the auto-sync scheduler runs,
+# triggered on demand. Admin-only (it touches the shared account) and run in a
+# background thread so the request returns immediately; at most one at a time.
+_sync_thread: threading.Thread | None = None
+_sync_lock = threading.Lock()
+
+
+@webapi.route("/sync", methods=["POST"])
+@admin_required
+def trigger_sync():
+    provider, err = _need_provider()
+    if err:
+        return err
+    if not current_app.config["DEEZER"].get("sync_user"):
+        return jsonify({"error": "no sync user configured"}), 503
+
+    global _sync_thread
+    with _sync_lock:
+        if _sync_thread is not None and _sync_thread.is_alive():
+            return jsonify({"ok": True, "running": True})
+        from ..deezer.scheduler import _run_sync
+
+        app = current_app._get_current_object()
+        _sync_thread = threading.Thread(
+            target=_run_sync, args=(app,), name="deezer-sync-manual", daemon=True
+        )
+        _sync_thread.start()
+    return jsonify({"ok": True, "running": True})
+
+
+@webapi.route("/sync/status")
+@admin_required
+def sync_status():
+    running = _sync_thread is not None and _sync_thread.is_alive()
+    return jsonify({"running": running})
+
+
 @webapi.route("/upload", methods=["POST"])
 @login_required
 def upload():
@@ -1405,6 +1472,17 @@ def stream(deezer_id):
     """
     from ..deezer import archive
 
+    # Resolve the requested quality up front: it decides whether a cold track can
+    # take the stream-first (live FLAC) fast path or must be fully archived first.
+    quality = (request.args.get("q") or "").upper()  # e.g. OPUS_128
+    bitrate = None
+    if quality.startswith("OPUS_"):
+        try:
+            b = int(quality.split("_", 1)[1])
+            bitrate = b if b in _OPUS_BITRATES else 128
+        except ValueError:
+            bitrate = 128
+
     if _valid_id(deezer_id):
         track = archive.find_local_track(deezer_id)  # by Deezer id
     else:
@@ -1422,21 +1500,34 @@ def stream(deezer_id):
         if err:
             return err
         try:
-            track = archive.import_track(provider, deezer_id)
-            if not os.path.isfile(track.path):
-                archive.ensure_archived(provider, track)
+            if track is None:
+                # Metadata only (the DB row) — no audio download yet.
+                track = archive.import_track(provider, deezer_id)
         except Exception:
-            logger.warning("Stream fetch failed for %s", deezer_id, exc_info=True)
+            logger.warning("Stream metadata fetch failed for %s", deezer_id, exc_info=True)
             return jsonify({"error": "track unavailable"}), 502
 
-    quality = (request.args.get("q") or "").upper()  # e.g. OPUS_128
-    bitrate = None
-    if quality.startswith("OPUS_"):
-        try:
-            b = int(quality.split("_", 1)[1])
-            bitrate = b if b in _OPUS_BITRATES else 128
-        except ValueError:
-            bitrate = 128
+        if not os.path.isfile(track.path):
+            if not bitrate:
+                # FLAC (the default web-player quality): stream the archive AS it
+                # downloads so playback starts almost instantly; the archive is
+                # finalized inside the generator. If the client disconnects early,
+                # on_abort queues a normal background archive so it still caches.
+                pf = getattr(current_app, "deezer_prefetch", None)
+                on_abort = (lambda did=deezer_id: pf.download_ids([did])) if pf else None
+                try:
+                    mimetype, gen = archive.open_live_stream(provider, track, on_abort)
+                except Exception:
+                    logger.warning("Live stream failed for %s", deezer_id, exc_info=True)
+                    return jsonify({"error": "track unavailable"}), 502
+                return current_app.response_class(gen, mimetype=mimetype)
+
+            # Opus on a cold track needs the full FLAC master first.
+            try:
+                archive.ensure_archived(provider, track)
+            except Exception:
+                logger.warning("Stream fetch failed for %s", deezer_id, exc_info=True)
+                return jsonify({"error": "track unavailable"}), 502
 
     if bitrate:
         cache = current_app.transcode_cache
