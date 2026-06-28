@@ -2,7 +2,7 @@
   import { flip } from "svelte/animate";
   import { dragHandleZone, dragHandle } from "svelte-dnd-action";
   import { push } from "svelte-spa-router";
-  import { player, currentId, playing, openMenu } from "../lib/stores.js";
+  import { player, currentId, playing, openMenu, downloads } from "../lib/stores.js";
   import { buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Icon from "./Icon.svelte";
@@ -84,6 +84,7 @@
         <div class="meta">
           <div class="t">
             {#if track.local}<span class="local" title="Fichier local (pas sur Deezer)"><Icon name="cloudOff" size={13} /></span>{/if}
+            {#if $downloads.has(String(track.deezer_id))}<span class="dlbadge" title="Disponible hors-ligne"><Icon name="downloaded" size={13} /></span>{/if}
             {track.title}
             {#if track.explicit}<span class="explicit">E</span>{/if}
           </div>
@@ -192,6 +193,12 @@
     display: inline-flex;
     vertical-align: -2px;
     color: var(--text-dim);
+    margin-right: 3px;
+  }
+  .dlbadge {
+    display: inline-flex;
+    vertical-align: -2px;
+    color: var(--accent);
     margin-right: 3px;
   }
   .explicit {

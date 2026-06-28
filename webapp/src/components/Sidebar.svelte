@@ -62,6 +62,7 @@
     <li><a use:link href="/" class={active("/")}><Icon name="home" size={20} /> Accueil</a></li>
     <li><a use:link href="/search" class={active("/search")}><Icon name="search" size={20} /> Rechercher</a></li>
     <li><a use:link href="/library" class={active("/library")}><Icon name="library" size={20} /> Ma bibliothèque</a></li>
+    <li><a use:link href="/settings" class={active("/settings")}><Icon name="settings" size={20} /> Réglages</a></li>
   </ul>
 
   {#if $isAdmin}

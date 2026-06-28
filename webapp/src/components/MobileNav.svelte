@@ -19,6 +19,9 @@
   <a use:link href="/library" class={active("/library")}>
     <Icon name="library" size={22} /><span class="l">Biblio</span>
   </a>
+  <a use:link href="/settings" class={active("/settings")}>
+    <Icon name="settings" size={22} /><span class="l">Réglages</span>
+  </a>
 </nav>
 
 <style>
