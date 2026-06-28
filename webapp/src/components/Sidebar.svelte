@@ -2,9 +2,9 @@
   import { onMount } from "svelte";
   import { link, push } from "svelte-spa-router";
   import { location } from "../lib/router.js";
-  import { user, isAdmin } from "../lib/stores.js";
+  import { user, isAdmin, syncing } from "../lib/stores.js";
   import { api } from "../lib/api.js";
-  import { userPlaylists, invalidatePlaylists } from "../lib/actions.js";
+  import { userPlaylists, invalidatePlaylists, runDeezerSync } from "../lib/actions.js";
   import Icon from "./Icon.svelte";
 
   let q = "";
@@ -28,6 +28,11 @@
       /* ignore */
     }
     user.set(null);
+  }
+
+  // Manual "refresh from Deezer" (shared action), then refresh the sidebar list.
+  async function syncDeezer() {
+    if (await runDeezerSync()) playlists = await userPlaylists(true);
   }
 
   async function newPlaylist() {
@@ -62,7 +67,19 @@
   {#if $isAdmin}
     <div class="pl-head">
       <span>Playlists</span>
-      <button class="new" on:click={newPlaylist} aria-label="Nouvelle playlist"><Icon name="plus" size={18} /></button>
+      <div class="pl-actions">
+        <button
+          class="new"
+          class:spin={$syncing}
+          on:click={syncDeezer}
+          disabled={$syncing}
+          title="Synchroniser depuis Deezer"
+          aria-label="Synchroniser depuis Deezer"
+        >
+          <Icon name="refresh" size={16} />
+        </button>
+        <button class="new" on:click={newPlaylist} aria-label="Nouvelle playlist"><Icon name="plus" size={18} /></button>
+      </div>
     </div>
     <ul class="playlists">
       {#each playlists as p (p.id)}
@@ -141,6 +158,23 @@
   .new {
     display: flex;
     align-items: center;
+  }
+  .pl-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .new:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .new.spin :global(svg) {
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .nav a:hover,
   .nav a.active {

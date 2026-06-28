@@ -12,6 +12,7 @@
     pushRecent,
     quality,
     openMenu,
+    toasts,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
@@ -28,7 +29,11 @@
   let els = [];
   let curId = null; // deezer_id currently loaded on `audio`
   let curQ = null; // quality currently loaded on `audio`
+  let curSeq = -1; // player.seq the active element was (re)started for
   let switching = false;
+  // Last position we actually saw progress at, so we can restore it if the
+  // browser silently rewinds the element to 0 after a long suspend (mobile lock).
+  let lastKnownTime = 0;
 
   function makeEl() {
     const el = new Audio();
@@ -143,7 +148,10 @@
   function recoverPlayback() {
     const cur = get(current);
     if (!cur || !audio || switching || recovering) return;
-    if (recoverAttempts >= 4) return; // give up; user can hit play to retry
+    if (recoverAttempts >= 4) {
+      failCurrentTrack(); // permanently broken stream — move on
+      return;
+    }
     recovering = true;
     recoverAttempts++;
     const pos = audio.currentTime || get(player).currentTime || 0;
@@ -167,6 +175,10 @@
     if (e.target !== audio) return;
     wireAudio(audio); // lazy: first play is a user gesture, so the context starts
     resumeAudio();
+    // A long suspend (mobile lock) can silently rewind the element to 0. If we
+    // resume play near the start but knew a later position, restore it. The
+    // guard (knew > 2s, now ~0) keeps legit fresh starts at the beginning.
+    if (lastKnownTime > 2 && audio.currentTime < 0.5) safeSeek(lastKnownTime);
     if (!get(player).playing) player.play();
   }
   function onElPause(e) {
@@ -225,8 +237,13 @@
 
   $: fav = $current && $favorites.has(String($current.deezer_id));
 
-  // Load a new track onto the active element when the track changes.
-  $: if (audio && $current && $current.deezer_id !== curId) loadTrack($current);
+  // Load a new track onto the active element when the track changes — OR restart
+  // the current one when the player navigated to it deliberately even though it
+  // carries the same deezer id (a duplicate in the queue, a "restart" prev).
+  $: if (audio && $current) {
+    if ($current.deezer_id !== curId) loadTrack($current);
+    else if ($player.seq !== curSeq) restartCurrent();
+  }
   // A quality change for the SAME track is handed off gaplessly instead of
   // reloading the element in place.
   $: if (
@@ -244,6 +261,8 @@
     const resumeAt = firstLoad && $player.currentTime > 1 ? $player.currentTime : 0;
     curId = track.deezer_id;
     curQ = get(quality);
+    curSeq = get(player).seq;
+    lastKnownTime = resumeAt;
     recoverAttempts = 0; // fresh track, fresh recovery budget
     audio.src = api.streamUrl(track.deezer_id, curQ);
     audio.load();
@@ -255,6 +274,46 @@
     flushListen(track.deezer_id);
     pushRecent(track);
     updateMediaSession(track);
+  }
+
+  // Restart the already-loaded track from the top (same deezer id, new queue
+  // slot or a deliberate "restart"). Avoids a full reload of the element.
+  function restartCurrent() {
+    curSeq = get(player).seq;
+    lastKnownTime = 0;
+    try {
+      audio.currentTime = 0;
+    } catch {
+      /* not seekable yet */
+    }
+    player.setProgress(0, $current?.duration || get(player).duration || 0);
+    recoverAttempts = 0;
+    if (get(player).playing) audio.play().catch(() => {});
+  }
+
+  // A track we couldn't play at all (no playable source / archiving failed /
+  // repeated decode errors). Skip to the next one instead of freezing.
+  function failCurrentTrack() {
+    recovering = false;
+    switching = false;
+    const s = get(player);
+    toasts.push("Titre indisponible, passage au suivant", "error");
+    if (s.index < s.queue.length - 1) player.next();
+    else player.pause();
+  }
+
+  // Apply a target time, immediately if the element can already seek, else once
+  // its metadata is (re)loaded.
+  function safeSeek(t) {
+    try {
+      if (audio.readyState >= 1) {
+        audio.currentTime = t;
+        return;
+      }
+    } catch {
+      /* fall through to the deferred path */
+    }
+    seekOnceLoaded(t);
   }
 
   // Gapless quality switch: buffer the new bitrate on the idle element at the
@@ -361,6 +420,7 @@
       audio.duration && isFinite(audio.duration)
         ? audio.duration
         : $current?.duration || 0;
+    if (audio.currentTime > 0.25) lastKnownTime = audio.currentTime;
     player.setProgress(audio.currentTime, d);
     updatePositionState(audio.currentTime, d);
   }

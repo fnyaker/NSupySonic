@@ -84,6 +84,10 @@ export const api = {
     req("/playlist/" + id + "/order", { method: "PUT", body: body({ tracks }) }),
   download: (ids) => req("/download", { method: "POST", body: body({ ids }) }),
 
+  // manual Deezer refresh (admin) — kicks off a background sync, then poll status
+  sync: () => req("/sync", { method: "POST" }),
+  syncStatus: () => req("/sync/status"),
+
   // upload local audio files into the archive (multipart; let the browser set
   // the Content-Type/boundary, so this bypasses the JSON `req` helper).
   upload: async (files) => {

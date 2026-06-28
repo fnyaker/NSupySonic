@@ -44,6 +44,10 @@ export const seekTo = writable(null);
 // Web-player streaming quality (FLAC | MP3_320 | MP3_128).
 export const quality = persisted("player.quality", "FLAC");
 
+// True while a manual Deezer sync is running (shared so every entry point — the
+// sidebar button and the mobile library button — reflects/guards the same job).
+export const syncing = writable(false);
+
 // -- toasts -----------------------------------------------------------------
 
 function createToasts() {
@@ -150,6 +154,11 @@ function createPlayer() {
     playing: false, // never auto-resume audio without a user gesture
     currentTime: sess.currentTime || 0, // seek bar starts where we left off
     duration: 0,
+    // Bumped on every *deliberate* navigation (next/prev/jump/new queue). The
+    // audio owner watches it so it can restart a track even when the next slot
+    // holds the SAME deezer id (a duplicate in the queue, or a "restart current"
+    // prev), where a plain id-change check would miss the transition.
+    seq: 0,
     volume: get(savedVolume),
     muted: get(savedMuted),
     shuffle: get(savedShuffle),
@@ -212,7 +221,7 @@ function createPlayer() {
           queue = [cur, ...shuffled(queue.filter((_, i) => i !== index))];
           index = 0;
         }
-        return { ...s, queue, index, playing: true, context, _orig };
+        return { ...s, queue, index, playing: true, context, _orig, seq: s.seq + 1 };
       });
     },
 
@@ -232,6 +241,7 @@ function createPlayer() {
         playing: true,
         context,
         _orig: q,
+        seq: s.seq + 1,
       }));
     },
 
@@ -277,6 +287,7 @@ function createPlayer() {
         _orig: s._orig ? [...s._orig, ...extra] : null,
         index: s.index + 1,
         playing: true,
+        seq: s.seq + 1,
       }));
     },
 
@@ -311,8 +322,10 @@ function createPlayer() {
 
     next() {
       update((s) => {
-        if (s.index < s.queue.length - 1) return { ...s, index: s.index + 1, playing: true };
-        if (s.repeat === "all" && s.queue.length) return { ...s, index: 0, playing: true };
+        if (s.index < s.queue.length - 1)
+          return { ...s, index: s.index + 1, playing: true, seq: s.seq + 1 };
+        if (s.repeat === "all" && s.queue.length)
+          return { ...s, index: 0, playing: true, seq: s.seq + 1 };
         return { ...s, playing: false };
       });
     },
@@ -320,15 +333,17 @@ function createPlayer() {
     prev() {
       update((s) => {
         // restart current track if we're past 3s, else go back
-        if (s.currentTime > 3) return { ...s, currentTime: 0 };
-        if (s.index > 0) return { ...s, index: s.index - 1, playing: true };
-        return { ...s, currentTime: 0 };
+        if (s.currentTime > 3) return { ...s, currentTime: 0, seq: s.seq + 1 };
+        if (s.index > 0) return { ...s, index: s.index - 1, playing: true, seq: s.seq + 1 };
+        return { ...s, currentTime: 0, seq: s.seq + 1 };
       });
     },
 
     jump(i) {
       update((s) =>
-        i >= 0 && i < s.queue.length ? { ...s, index: i, playing: true } : s
+        i >= 0 && i < s.queue.length
+          ? { ...s, index: i, playing: true, seq: s.seq + 1 }
+          : s
       );
     },
 

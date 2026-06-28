@@ -20,6 +20,7 @@ import os.path
 import re
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from ..db import Album, Artist, Playlist, Track
 from . import ids, library
@@ -27,6 +28,22 @@ from .metadata import meta_from_gw, tag_file
 from .provider import EXT_FOR_FORMAT, NOMINAL_BITRATE, DeezerError
 
 logger = logging.getLogger(__name__)
+
+# Audio mimetype for an archived file, by extension (FLAC normally; MP3 when
+# Deezer had no lossless source for the track).
+_MIME_FOR_EXT = {".flac": "audio/flac", ".mp3": "audio/mpeg"}
+
+
+def _mime_for_path(path) -> str:
+    return _MIME_FOR_EXT.get(os.path.splitext(str(path))[1].lower(), "audio/flac")
+
+
+def _fixed_ext_path(path: str, fmt: str) -> str:
+    """The archive path's extension was guessed at import time; correct it to
+    match the format actually obtained (e.g. FLAC unavailable -> MP3)."""
+    ext = EXT_FOR_FORMAT.get(fmt, ".mp3")
+    base, cur_ext = os.path.splitext(path)
+    return base + ext if cur_ext.lower() != ext else path
 
 _LINK_RE = re.compile(
     r"(?:deezer\.com|deezer\.page\.link|dzr\.page\.link)/(?:[a-z]{2}/)?"
@@ -74,28 +91,93 @@ def ensure_archived(provider, track: Track) -> None:
             return
 
         url, fmt, info, used_id = provider.resolve(track.deezer_id)
-
-        # The path's extension was guessed at import time; fix it if the format
-        # we actually got differs (e.g. FLAC unavailable -> MP3).
-        ext = EXT_FOR_FORMAT.get(fmt, ".mp3")
-        base, cur_ext = os.path.splitext(track.path)
-        if cur_ext.lower() != ext:
-            track.path = base + ext
+        track.path = _fixed_ext_path(track.path, fmt)
 
         logger.info("Archiving Deezer track %s (%s) -> %s", track.deezer_id, fmt, track.path)
         provider.download_to(url, used_id, track.path)
+        _finalize_archive(provider, track, fmt, info)
 
-        meta = meta_from_gw(info)
-        cover = provider.fetch_cover(meta.get("md5_image"))
+
+def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
+    """Tag the freshly-archived file and update the Track row (bitrate / art)."""
+    meta = meta_from_gw(info)
+    cover = provider.fetch_cover(meta.get("md5_image"))
+    try:
+        tag_file(Path(track.path), meta, cover)
+    except Exception as exc:  # tagging must never break playback
+        logger.warning("Tagging failed for %s: %s", track.path, exc)
+
+    track.bitrate = _bitrate_for(track.path, fmt, track.duration)
+    track.has_art = bool(cover)
+    track.last_modification = int(time.time())
+    track.save()
+
+
+def open_live_stream(provider, track: Track, on_abort=None):
+    """Stream-first playback for a cold (not-yet-archived) track.
+
+    Resolves the source synchronously (fast — just URL/token calls), then returns
+    ``(mimetype, generator)``. The generator yields the decrypted audio to the
+    client **as it downloads it**, teeing every chunk to a temp file; on full
+    completion it atomically publishes + tags the archive, so the very next play
+    is served from disk (seekable, transcodable). This is what lets a clicked
+    track start almost immediately instead of waiting for the whole FLAC.
+
+    The first live play is not seekable (no Content-Length), exactly like the
+    existing live Opus transcode. If the client disconnects before the download
+    finishes, the partial is dropped and ``on_abort`` (if given) is called so the
+    track can still be archived in the background.
+    """
+    url, fmt, info, used_id = provider.resolve(track.deezer_id)
+    track.path = _fixed_ext_path(track.path, fmt)
+    dest = Path(track.path)
+    mimetype = _mime_for_path(dest)
+
+    def generate():
+        # Archived in the gap between resolve and first read? Serve from disk.
+        if dest.is_file():
+            with open(dest, "rb") as fh:
+                yield from iter(lambda: fh.read(65536), b"")
+            return
+
+        # Unique temp name so a concurrent prefetch of the same track can't write
+        # the same .part file; whoever finishes first publishes, the rest discard.
+        tmp = dest.with_name(f"{dest.name}.{uuid4().hex}.part")
+        complete = False
         try:
-            tag_file(Path(track.path), meta, cover)
-        except Exception as exc:  # tagging must never break playback
-            logger.warning("Tagging failed for %s: %s", track.path, exc)
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "wb") as fh:
+                for chunk in provider.iter_decrypted(url, used_id):
+                    fh.write(chunk)
+                    yield chunk
+            complete = True
+        finally:
+            try:
+                if complete and not dest.is_file():
+                    with provider.track_lock(track.deezer_id):
+                        if dest.is_file():
+                            _safe_unlink(tmp)
+                        else:
+                            os.replace(tmp, dest)
+                            _finalize_archive(provider, track, fmt, info)
+                else:
+                    _safe_unlink(tmp)
+                    # Client gave up mid-download — make sure it still gets cached.
+                    if not complete and not dest.is_file() and on_abort is not None:
+                        on_abort()
+            except Exception:
+                logger.warning(
+                    "Live archive finalize failed for %s", track.deezer_id, exc_info=True
+                )
 
-        track.bitrate = _bitrate_for(track.path, fmt, track.duration)
-        track.has_art = bool(cover)
-        track.last_modification = int(time.time())
-        track.save()
+    return mimetype, generate()
+
+
+def _safe_unlink(path) -> None:
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass
 
 
 # -- metadata import (Deezer -> supysonic rows) --------------------------

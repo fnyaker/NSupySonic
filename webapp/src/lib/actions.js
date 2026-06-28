@@ -3,9 +3,43 @@
 
 import { get } from "svelte/store";
 import { api } from "./api.js";
-import { favorites, favTracks, player, toasts, isAdmin } from "./stores.js";
+import { favorites, favTracks, player, toasts, isAdmin, syncing } from "./stores.js";
 
 let playlistCache = null;
+
+// Run a manual Deezer sync end-to-end: kick off the background job, poll until
+// it finishes, then refresh the playlist/favorite caches the UI reads. Shared by
+// the sidebar (desktop) and the library page (mobile); guarded against overlap
+// via the `syncing` store. Returns true on success.
+export async function runDeezerSync() {
+  if (get(syncing)) return false;
+  syncing.set(true);
+  toasts.push("Synchronisation Deezer lancée…");
+  try {
+    await api.sync();
+    await new Promise((resolve) => {
+      const tick = async () => {
+        try {
+          const s = await api.syncStatus();
+          if (!s.running) return resolve();
+        } catch {
+          return resolve();
+        }
+        setTimeout(tick, 3000);
+      };
+      setTimeout(tick, 3000);
+    });
+    invalidatePlaylists();
+    await loadFavorites(true);
+    toasts.push("Bibliothèque à jour");
+    return true;
+  } catch (e) {
+    toasts.push(e?.message || "Échec de la synchronisation", "error");
+    return false;
+  } finally {
+    syncing.set(false);
+  }
+}
 
 export async function userPlaylists(force = false) {
   if (playlistCache && !force) return playlistCache;

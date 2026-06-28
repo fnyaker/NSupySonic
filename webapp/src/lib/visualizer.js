@@ -49,14 +49,28 @@ export function getAnalyser() {
 // calls createVisualizer() once and then draw(canvas) per animation frame, so
 // the per-bar smoothing and auto-gain state stay isolated per view.
 //
-// Tuned for punch over a flat readout: a perceptual tilt pulls the bass down so
-// it doesn't swamp the strip, a steep gamma exaggerates the gap between loud and
-// quiet bands (more contrast), and a fast-attack / slow-release envelope keeps
-// the bars lively instead of parked in the middle.
+// Tuned for punch over a flat readout. Instead of one global auto-gain (which
+// lets loud mids/highs crush the gain and bury the bass), the spectrum is split
+// into THREE zones — bass / mid / high — each levelled by its own slow auto-gain
+// envelope, so every band keeps its own life. The per-bar gain is interpolated
+// across the zone centres so there's no visible seam where zones meet. A gamma
+// curve keeps the quiet/loud contrast; a fast-attack / slow-release envelope
+// keeps the bars lively instead of parked in the middle.
 export function createVisualizer() {
   let freq = null;
   let smoothed = null;
-  let agc = 0.15;
+  let agc = [0.15, 0.15, 0.15]; // bass, mid, high
+
+  // Zone gains sit at the centre of each third of the strip; blend linearly
+  // between them (and hold flat past the outer centres) for a seamless curve.
+  const CENTRES = [1 / 6, 0.5, 5 / 6];
+  function gainAt(gain, t) {
+    if (t <= CENTRES[0]) return gain[0];
+    if (t >= CENTRES[2]) return gain[2];
+    const z = t < CENTRES[1] ? 0 : 1;
+    const f = (t - CENTRES[z]) / (CENTRES[z + 1] - CENTRES[z]);
+    return gain[z] * (1 - f) + gain[z + 1] * f;
+  }
 
   return function draw(canvas) {
     const an = getAnalyser();
@@ -75,11 +89,14 @@ export function createVisualizer() {
 
     const bars = Math.max(24, Math.min(72, Math.floor(cw / 8)));
     if (!smoothed || smoothed.length !== bars) smoothed = new Float32Array(bars);
-    const minBin = 3; // skip DC/rumble
+    const minBin = 2; // skip DC/rumble (kept low so the bass still registers)
     const maxBin = Math.floor(bins * 0.78);
 
+    // Log-spaced band energies (NO perceptual tilt — each zone is levelled by
+    // its own AGC below, which is what keeps the low end on screen).
     const raw = new Float32Array(bars);
-    let frameSum = 0;
+    const zoneSum = [0, 0, 0];
+    const zoneN = [0, 0, 0];
     for (let i = 0; i < bars; i++) {
       const t = i / bars;
       const lo = Math.floor(minBin * Math.pow(maxBin / minBin, t));
@@ -93,19 +110,26 @@ export function createVisualizer() {
         sum += freq[b];
         n++;
       }
-      // perceptual tilt: ~0.45× on the low end, ~1.4× on the high end.
-      const r = ((n ? sum / n : 0) / 255) * (0.45 + 0.95 * t);
+      const r = (n ? sum / n : 0) / 255;
       raw[i] = r;
-      frameSum += r;
+      const z = t < 1 / 3 ? 0 : t < 2 / 3 ? 1 : 2;
+      zoneSum[z] += r;
+      zoneN[z] += 1;
     }
 
-    agc = agc * 0.93 + (frameSum / bars) * 0.07;
-    const gain = 0.6 / Math.max(0.12, agc);
+    // Each zone tracks its own slow level and derives its own gain.
+    const gain = [0, 0, 0];
+    for (let z = 0; z < 3; z++) {
+      const mean = zoneN[z] ? zoneSum[z] / zoneN[z] : 0;
+      agc[z] = agc[z] * 0.9 + mean * 0.1;
+      gain[z] = 0.62 / Math.max(0.1, agc[z]);
+    }
 
     const bw = cw / bars;
     for (let i = 0; i < bars; i++) {
-      let v = Math.min(1, raw[i] * gain);
-      v = Math.pow(v, 1.9); // steep gamma -> strong weak/loud contrast
+      const t = i / bars;
+      let v = Math.min(1, raw[i] * gainAt(gain, t));
+      v = Math.pow(v, 1.7); // gamma -> quiet/loud contrast
       const prev = smoothed[i];
       v = v > prev ? v * 0.7 + prev * 0.3 : v * 0.35 + prev * 0.65; // fast up, slow down
       smoothed[i] = v;
