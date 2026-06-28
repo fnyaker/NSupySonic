@@ -41,6 +41,11 @@ export const immersiveOpen = writable(false); // full-screen now-playing view
 // view can drive the transport without holding the element.
 export const seekTo = writable(null);
 
+// How far the current track is buffered ahead (seconds), published by the audio
+// owner so every seek bar can paint the loaded region. Seeking past it means a
+// re-buffer (a brief pause), so showing it makes that behaviour legible.
+export const buffered = writable(0);
+
 // Web-player streaming quality (FLAC | MP3_320 | MP3_128).
 export const quality = persisted("player.quality", "FLAC");
 

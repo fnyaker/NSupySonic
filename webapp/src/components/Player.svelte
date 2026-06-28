@@ -9,6 +9,7 @@
     nowPlayingOpen,
     immersiveOpen,
     seekTo,
+    buffered,
     pushRecent,
     quality,
     openMenu,
@@ -18,7 +19,7 @@
   import { online } from "../lib/net.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
-  import { wireAudio, resumeAudio } from "../lib/visualizer.js";
+  import { registerSource, resumeAudio } from "../lib/visualizer.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import ImmersivePlayer from "./ImmersivePlayer.svelte";
@@ -45,6 +46,7 @@
     el.addEventListener("pause", onElPause);
     el.addEventListener("error", onElError);
     el.addEventListener("stalled", onElStall);
+    el.addEventListener("progress", onProgress);
     return el;
   }
   onMount(() => {
@@ -69,10 +71,13 @@
   });
 
   // --- Screen wake lock ------------------------------------------------------
-  // Mobile browsers suspend a backgrounded/locked page after a few minutes,
-  // which silently kills playback. Holding a screen wake lock while we're
-  // actively playing keeps the tab alive. The lock is auto-dropped whenever the
-  // page is hidden, so we re-acquire it on visibilitychange if still playing.
+  // A SCREEN wake lock keeps the display on — costly, and useless for keeping
+  // background audio alive (it's auto-dropped the moment the page is hidden, and
+  // the browser/OS already holds the partial wake lock that audio playback needs
+  // — that one is battery-exempt). So we hold it ONLY while the full-screen
+  // player is open and visible, purely so the screen doesn't dim while the user
+  // is watching the now-playing view / visualizer — never just because audio is
+  // playing in the background.
   let wakeLock = null;
   async function requestWakeLock() {
     if (!("wakeLock" in navigator) || wakeLock) return;
@@ -95,10 +100,14 @@
   }
   function onVisibility() {
     if (document.visibilityState !== "visible") return;
-    if (get(player).playing) requestWakeLock();
+    // Coming back to the foreground: re-arm the visualizer's AudioContext (the
+    // OS may have suspended it while hidden) and re-take the screen lock if the
+    // full-screen player is still up.
+    resumeAudio();
+    if (get(immersiveOpen) && get(player).playing) requestWakeLock();
   }
-  // Hold the lock exactly while playing.
-  $: if ($player.playing) requestWakeLock();
+  // Keep the screen awake only while the full-screen player is open AND playing.
+  $: if ($immersiveOpen && $player.playing) requestWakeLock();
   else releaseWakeLock();
 
   // --- Playback watchdog / auto-recovery -------------------------------------
@@ -202,7 +211,7 @@
 
   function onElPlay(e) {
     if (e.target !== audio) return;
-    wireAudio(audio); // lazy: first play is a user gesture, so the context starts
+    registerSource(audio); // wires Web Audio only if a visualizer view wants it
     resumeAudio();
     // A long suspend (mobile lock) can silently rewind the element to 0. If we
     // resume play near the start but knew a later position, restore it. The
@@ -293,6 +302,7 @@
     curSeq = get(player).seq;
     lastKnownTime = resumeAt;
     recoverAttempts = 0; // fresh track, fresh recovery budget
+    buffered.set(0); // new source -> nothing loaded yet
     audio.src = api.streamUrl(track.deezer_id, curQ);
     audio.load();
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
@@ -399,7 +409,7 @@
       const old = audio;
       audio = incoming; // make it active BEFORE play so the handlers accept it
       curQ = newQ;
-      wireAudio(incoming);
+      registerSource(incoming);
       resumeAudio();
       if (wasPlaying) incoming.play().catch(() => {});
       old.pause();
@@ -463,7 +473,33 @@
     if (audio.currentTime > 0.25) lastKnownTime = audio.currentTime;
     if (netWaiting) netWaiting = false; // progress resumed on its own
     player.setProgress(audio.currentTime, d);
+    updateBuffered();
     updatePositionState(audio.currentTime, d);
+  }
+
+  // Publish how far we've buffered ahead of the playhead so the seek bars can
+  // paint the loaded region (seeking past it = a re-buffer pause). Fires on the
+  // element's `progress` events and every timeupdate.
+  function onProgress(e) {
+    if (e && e.target !== audio) return;
+    updateBuffered();
+  }
+  function updateBuffered() {
+    if (!audio) return;
+    let end = audio.currentTime;
+    try {
+      const b = audio.buffered;
+      for (let i = 0; i < b.length; i++) {
+        // The range covering (or just reached by) the playhead.
+        if (b.start(i) <= audio.currentTime + 0.25 && b.end(i) >= audio.currentTime) {
+          end = Math.max(end, b.end(i));
+          break;
+        }
+      }
+    } catch {
+      /* buffered may throw if the element isn't ready */
+    }
+    buffered.set(end);
   }
 
   // Feed the OS media notification a duration/position so it can draw a seek
@@ -605,6 +641,10 @@
   }
 
   $: progress = $player.duration ? ($player.currentTime / $player.duration) * 100 : 0;
+  // Buffered region (lighter fill), clamped to never read below the playhead.
+  $: bufferedPct = $player.duration
+    ? Math.min(100, Math.max(progress, ($buffered / $player.duration) * 100))
+    : 0;
   $: repeatIconName = $player.repeat === "one" ? "repeat1" : "repeat";
 </script>
 
@@ -646,7 +686,7 @@
     </button>
     <div class="seek">
       <span class="time">{fmtDuration($player.currentTime)}</span>
-      <input type="range" min="0" max={$player.duration || 0} value={$player.currentTime} on:input={seek} style={`--p:${progress}%`} />
+      <input type="range" min="0" max={$player.duration || 0} value={$player.currentTime} on:input={seek} style={`--p:${progress}%; --b:${bufferedPct}%`} />
       <span class="time">{fmtDuration($player.duration)}</span>
     </div>
   </div>
@@ -825,7 +865,13 @@
     cursor: pointer;
   }
   .seek input[type="range"] {
-    background: linear-gradient(90deg, var(--accent) var(--p, 0%), var(--bg-hover) var(--p, 0%));
+    background: linear-gradient(
+      90deg,
+      var(--accent) var(--p, 0%),
+      rgba(255, 255, 255, 0.28) var(--p, 0%),
+      rgba(255, 255, 255, 0.28) var(--b, 0%),
+      var(--bg-hover) var(--b, 0%)
+    );
   }
   input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;

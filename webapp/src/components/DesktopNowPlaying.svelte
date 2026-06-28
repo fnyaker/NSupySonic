@@ -12,11 +12,12 @@
     favorites,
     immersiveOpen,
     seekTo,
+    buffered,
     openMenu,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration, hiResCover } from "../lib/format.js";
-  import { createVisualizer } from "../lib/visualizer.js";
+  import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
@@ -54,6 +55,9 @@
 
   $: fav = $current && $favorites.has(String($current.deezer_id));
   $: progress = $player.duration ? ($player.currentTime / $player.duration) * 100 : 0;
+  $: bufferedPct = $player.duration
+    ? Math.min(100, Math.max(progress, ($buffered / $player.duration) * 100))
+    : 0;
   $: repeatIcon = $player.repeat === "one" ? "repeat1" : "repeat";
 
   function close() {
@@ -80,6 +84,7 @@
   }
   function start() {
     if (rafId || (typeof document !== "undefined" && document.hidden)) return;
+    requestAnalyser(); // wire Web Audio in now that the visualizer is on screen
     draw();
   }
   function stop() {
@@ -141,7 +146,7 @@
 
       <div class="seek">
         <span class="time">{fmtDuration($player.currentTime)}</span>
-        <input type="range" min="0" max={$player.duration || 0} value={$player.currentTime} on:input={seek} style={`--p:${progress}%`} />
+        <input type="range" min="0" max={$player.duration || 0} value={$player.currentTime} on:input={seek} style={`--p:${progress}%; --b:${bufferedPct}%`} />
         <span class="time">{fmtDuration($player.duration)}</span>
       </div>
 
@@ -374,6 +379,16 @@
     border-radius: 3px;
     flex: 1;
     background: linear-gradient(90deg, #fff var(--p, 0%), rgba(255, 255, 255, 0.25) var(--p, 0%));
+  }
+  /* Seek bar only (not volume): show the buffered region as a lighter fill. */
+  .seek input[type="range"] {
+    background: linear-gradient(
+      90deg,
+      #fff var(--p, 0%),
+      rgba(255, 255, 255, 0.5) var(--p, 0%),
+      rgba(255, 255, 255, 0.5) var(--b, 0%),
+      rgba(255, 255, 255, 0.25) var(--b, 0%)
+    );
   }
   input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
