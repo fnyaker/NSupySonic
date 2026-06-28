@@ -17,6 +17,7 @@
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
+  import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import { registerSource, resumeAudio } from "../lib/visualizer.js";
@@ -33,6 +34,11 @@
   let curQ = null; // quality currently loaded on `audio`
   let curSeq = -1; // player.seq the active element was (re)started for
   let switching = false;
+  // When the active track is served from an on-device download, its src is a
+  // blob: URL of a fixed quality — so quality switching / network recovery don't
+  // apply, and the object URL must be revoked when we move on.
+  let curBlobUrl = null;
+  let curIsBlob = false;
   // Last position we actually saw progress at, so we can restore it if the
   // browser silently rewinds the element to 0 after a long suspend (mobile lock).
   let lastKnownTime = 0;
@@ -59,6 +65,7 @@
     stopWatchdog();
     document.removeEventListener("visibilitychange", onVisibility);
     releaseWakeLock();
+    setBlobUrl(null); // revoke any live object URL
     for (const el of els) {
       try {
         el.pause();
@@ -289,11 +296,37 @@
     $current &&
     $current.deezer_id === curId &&
     $quality !== curQ &&
-    !switching
+    !switching &&
+    !curIsBlob // a downloaded track is a fixed-quality blob; ignore quality changes
   )
     switchQuality($quality);
 
-  function loadTrack(track) {
+  // Prefer an on-device download (instant, plays in airplane mode) over the
+  // network. Returns { url, blob } — blob true means a revocable object URL.
+  async function resolveSource(deezerId, q) {
+    if (isDownloaded(deezerId)) {
+      try {
+        const u = await getObjectURL(deezerId);
+        if (u) return { url: u, blob: true };
+      } catch {
+        /* fall back to the network */
+      }
+    }
+    return { url: api.streamUrl(deezerId, q), blob: false };
+  }
+
+  function setBlobUrl(url) {
+    if (curBlobUrl && curBlobUrl !== url) {
+      try {
+        URL.revokeObjectURL(curBlobUrl);
+      } catch {
+        /* ignore */
+      }
+    }
+    curBlobUrl = url;
+  }
+
+  async function loadTrack(track) {
     const firstLoad = curId === null;
     // On the very first (session-restored) load, resume the saved position.
     const resumeAt = firstLoad && $player.currentTime > 1 ? $player.currentTime : 0;
@@ -303,8 +336,25 @@
     lastKnownTime = resumeAt;
     recoverAttempts = 0; // fresh track, fresh recovery budget
     buffered.set(0); // new source -> nothing loaded yet
-    audio.src = api.streamUrl(track.deezer_id, curQ);
+
+    const src = await resolveSource(track.deezer_id, curQ);
+    // A newer load may have superseded us while reading the blob from IndexedDB.
+    if (curId !== track.deezer_id) {
+      if (src.blob) {
+        try {
+          URL.revokeObjectURL(src.url);
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+    setBlobUrl(src.blob ? src.url : null);
+    curIsBlob = src.blob;
+    audio.src = src.url;
     audio.load();
+    if (src.blob) touch(track.deezer_id); // bump LRU recency
+
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
     if ($player.playing) audio.play().catch(() => {});
     // Seed duration from metadata right away so the seek bar is correct before

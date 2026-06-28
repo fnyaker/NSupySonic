@@ -2,7 +2,7 @@
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { player, toasts, isAdmin } from "../lib/stores.js";
-  import { toggleEntityFavorite } from "../lib/actions.js";
+  import { toggleEntityFavorite, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -50,10 +50,7 @@
     if (dlBusy || !data?.tracks?.length) return;
     dlBusy = true;
     try {
-      const r = await api.download(data.tracks.map((t) => t.deezer_id).filter(Boolean));
-      toasts.push(`Téléchargement de ${r.queued} titres lancé`);
-    } catch {
-      toasts.push("Téléchargement impossible", "error");
+      await downloadTracks(data.tracks);
     } finally {
       dlBusy = false;
     }
@@ -91,7 +88,7 @@
       {#if $isAdmin}
         <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
       {/if}
-      <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger l'album" title="Télécharger (archiver) l'album"><Icon name="download" size={22} /></button>
+      <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger l'album" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
     </div>
 
     <TrackList tracks={data.tracks} numbered showAlbum={false} showCover={false} context={{ kind: "album", id }} />

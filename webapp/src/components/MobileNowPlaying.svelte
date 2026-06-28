@@ -244,10 +244,13 @@
     }
     if (nearest < curSlot && prevT) {
       swipeAdvance = true;
-      player.prev();
+      // Go to the adjacent track unconditionally — NOT player.prev(), whose
+      // "restart current if >3s" semantics (right for the button) would replay
+      // the same track while the carousel has already moved to the prev cover.
+      player.jump(idx - 1);
     } else if (nearest > curSlot && nextT) {
       swipeAdvance = true;
-      player.next();
+      player.jump(idx + 1);
     } else {
       // stayed on the current cover — proximity may leave it a little off, so
       // ease it back to centre (smoothly, no jerk) only if it actually drifted.

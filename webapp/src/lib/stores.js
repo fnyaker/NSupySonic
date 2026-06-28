@@ -49,6 +49,20 @@ export const buffered = writable(0);
 // Web-player streaming quality (FLAC | MP3_320 | MP3_128).
 export const quality = persisted("player.quality", "FLAC");
 
+// -- offline / downloads ----------------------------------------------------
+
+// Default quality used when downloading a track to the device (overridable per
+// download). Opus 320 is the sweet spot of quality vs on-device size.
+export const downloadQuality = persisted("offline.quality", "OPUS_320");
+// Max bytes the on-device audio cache may use before LRU eviction kicks in.
+export const cacheLimit = persisted("offline.cacheLimit", 4 * 1024 * 1024 * 1024);
+// Set of track ids currently stored on the device, and the total bytes used —
+// kept in memory (loaded from IndexedDB at startup) for instant UI state.
+export const downloads = writable(new Set());
+export const downloadsSize = writable(0);
+// Track ids whose download is in flight (for spinners / progress).
+export const downloading = writable(new Set());
+
 // True while a manual Deezer sync is running (shared so every entry point — the
 // sidebar button and the mobile library button — reflects/guards the same job).
 export const syncing = writable(false);

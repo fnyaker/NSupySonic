@@ -2,7 +2,7 @@
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { player, isAdmin, toasts } from "../lib/stores.js";
-  import { toggleEntityFavorite, invalidatePlaylists } from "../lib/actions.js";
+  import { toggleEntityFavorite, invalidatePlaylists, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
@@ -50,6 +50,16 @@
 
   function playAll() {
     if (data?.tracks?.length) player.playQueue(data.tracks, 0, { kind: "playlist", id });
+  }
+  let dlBusy = false;
+  async function downloadAll() {
+    if (dlBusy || !data?.tracks?.length) return;
+    dlBusy = true;
+    try {
+      await downloadTracks(data.tracks);
+    } finally {
+      dlBusy = false;
+    }
   }
   function shufflePlay() {
     if (data?.tracks?.length) player.shufflePlay(data.tracks, { kind: "playlist", id });
@@ -159,6 +169,7 @@
     <div class="row actions">
       <button class="pill" on:click={playAll}><Icon name="play" size={18} /> Lire</button>
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
+      <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger la playlist" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
 
       {#if editable}
         <button class="icon-btn" on:click={() => (showAdd = true)} aria-label="Ajouter des titres" title="Ajouter des titres"><Icon name="plus" size={24} /></button>

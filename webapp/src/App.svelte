@@ -3,7 +3,8 @@
   import { onMount } from "svelte";
   import { user, authChecked, nowPlayingOpen, player } from "./lib/stores.js";
   import { api } from "./lib/api.js";
-  import { initConnectivity } from "./lib/net.js";
+  import { initConnectivity, online } from "./lib/net.js";
+  import { loadOfflineIndex } from "./lib/offline.js";
   import { loadFavorites } from "./lib/actions.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
@@ -21,6 +22,7 @@
   import Playlist from "./routes/Playlist.svelte";
   import Mix from "./routes/Mix.svelte";
   import Library from "./routes/Library.svelte";
+  import Settings from "./routes/Settings.svelte";
 
   const routes = {
     "/": Home,
@@ -31,23 +33,75 @@
     "/playlist/:id": Playlist,
     "/mix/:id": Mix,
     "/library": Library,
+    "/settings": Settings,
   };
+
+  const SAVED_USER = "auth.user";
+  function savedUser() {
+    try {
+      return JSON.parse(localStorage.getItem(SAVED_USER) || "null");
+    } catch {
+      return null;
+    }
+  }
+
+  let bootedOffline = false;
 
   onMount(async () => {
     initConnectivity();
+    loadOfflineIndex();
+
+    // Airplane-mode launch: if we're offline but have a remembered session, boot
+    // straight into the (downloaded) library instead of stalling on the login
+    // screen; re-validate once we're back online.
+    const saved = savedUser();
+    if (saved && typeof navigator !== "undefined" && !navigator.onLine) {
+      user.set(saved);
+      bootedOffline = true;
+      authChecked.set(true);
+      return;
+    }
     try {
       const r = await api.me();
       user.set(r.user);
       loadFavorites();
-    } catch {
-      user.set(null);
+    } catch (e) {
+      // Network failure with a known session -> stay logged in (offline); a real
+      // 401/expired session clears it.
+      if (e && e.offline && saved) {
+        user.set(saved);
+        bootedOffline = true;
+      } else {
+        user.set(null);
+      }
     } finally {
       authChecked.set(true);
     }
   });
 
+  // Persist / clear the session so an offline launch can trust it.
+  $: try {
+    if ($user) localStorage.setItem(SAVED_USER, JSON.stringify($user));
+    else localStorage.removeItem(SAVED_USER);
+  } catch {
+    /* ignore */
+  }
+
   // Reload favorites whenever a user logs in.
   $: if ($user) loadFavorites();
+
+  // Re-validate the session once connectivity returns after an offline boot.
+  $: if (bootedOffline && $online) revalidate();
+  async function revalidate() {
+    bootedOffline = false;
+    try {
+      const r = await api.me();
+      user.set(r.user);
+      loadFavorites();
+    } catch (e) {
+      if (!(e && e.offline)) user.set(null); // genuine auth failure -> log out
+    }
+  }
 
   function onKey(e) {
     const tag = (e.target.tagName || "").toLowerCase();

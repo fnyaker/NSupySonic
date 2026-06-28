@@ -3,7 +3,26 @@
 
 import { get } from "svelte/store";
 import { api } from "./api.js";
-import { favorites, favTracks, player, toasts, isAdmin, syncing } from "./stores.js";
+import {
+  favorites,
+  favTracks,
+  player,
+  toasts,
+  isAdmin,
+  syncing,
+  downloadQuality,
+} from "./stores.js";
+import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
+
+// Quality choices offered in the "download as…" submenu.
+export const DL_QUALITIES = [
+  { id: "FLAC", label: "FLAC" },
+  { id: "OPUS_320", label: "Opus 320" },
+  { id: "OPUS_256", label: "Opus 256" },
+  { id: "OPUS_192", label: "Opus 192" },
+  { id: "OPUS_128", label: "Opus 128" },
+  { id: "OPUS_64", label: "Opus 64" },
+];
 
 let playlistCache = null;
 
@@ -171,6 +190,58 @@ export async function addTrackToPlaylist(playlistId, trackId, playlistTitle) {
   }
 }
 
+// -- offline downloads (device-local; available to every user) --------------
+
+export async function downloadTrackTo(track, quality = null) {
+  const q = quality || get(downloadQuality);
+  if (isDownloaded(track.deezer_id)) return;
+  toasts.push(`Téléchargement de « ${track.title} »…`);
+  const ok = await downloadTrack(track, q);
+  toasts.push(
+    ok ? `« ${track.title} » disponible hors-ligne` : "Échec du téléchargement",
+    ok ? "info" : "error"
+  );
+}
+
+export async function undownloadTrack(track) {
+  await removeTrack(track.deezer_id);
+  toasts.push("Téléchargement retiré");
+}
+
+// Download a set of tracks sequentially (fail-soft). Local-only and already
+// cached tracks are skipped. Used for whole albums / playlists.
+export async function downloadTracks(tracks, quality = null) {
+  const q = quality || get(downloadQuality);
+  const list = (tracks || []).filter(
+    (t) => t && t.deezer_id && !isDownloaded(t.deezer_id)
+  );
+  if (!list.length) {
+    toasts.push("Déjà disponible hors-ligne");
+    return;
+  }
+  toasts.push(`Téléchargement de ${list.length} titre(s)…`);
+  let ok = 0;
+  for (const t of list) {
+    if (await downloadTrack(t, q)) ok++;
+  }
+  toasts.push(
+    ok === list.length ? `${ok} titre(s) téléchargé(s)` : `${ok}/${list.length} téléchargé(s)`,
+    ok ? "info" : "error"
+  );
+}
+
+// Fetch an album/playlist's tracks, then download them all.
+export async function downloadEntity(kind, id, quality = null) {
+  try {
+    let tracks = [];
+    if (kind === "album") tracks = (await api.album(id)).tracks;
+    else if (kind === "playlist") tracks = (await api.playlist(id)).tracks;
+    await downloadTracks(tracks, quality);
+  } catch {
+    toasts.push("Téléchargement impossible", "error");
+  }
+}
+
 // Load and play an album/playlist/artist/mix as a queue.
 export async function playEntity(kind, id, context = null) {
   try {
@@ -197,6 +268,12 @@ export function buildEntityMenu(kind, item, nav) {
     { label: "Lire", icon: "play", action: () => playEntity(kind, routeId) },
     { label: "Ouvrir", icon: "open", action: () => nav(route + routeId) },
   ];
+  if (kind === "album" || kind === "playlist")
+    items.push({
+      label: "Télécharger",
+      icon: "download",
+      action: () => downloadEntity(kind, routeId),
+    });
   // Favoriting an album/artist/playlist writes to the shared Deezer account, so
   // it's admin-only (guests don't mutate the owner's account).
   if (get(isAdmin)) {
@@ -237,6 +314,30 @@ export function buildTrackMenu(track, nav) {
     }));
     items.push({ label: "Ajouter à une playlist", icon: "plus", sub: playlistSub });
   }
+  // Offline download — device-local, so available to everyone. A plain
+  // "Télécharger" at the default quality, plus a submenu to pick another.
+  const dl = isDownloaded(track.deezer_id);
+  items.push(
+    "divider",
+    dl
+      ? {
+          label: "Retirer le téléchargement",
+          icon: "downloaded",
+          action: () => undownloadTrack(track),
+        }
+      : { label: "Télécharger", icon: "download", action: () => downloadTrackTo(track) }
+  );
+  if (!dl)
+    items.push({
+      label: "Télécharger en…",
+      icon: "download",
+      sub: DL_QUALITIES.map((q) => ({
+        label: q.label,
+        icon: "download",
+        action: () => downloadTrackTo(track, q.id),
+      })),
+    });
+
   items.push(
     "divider",
     { label: "Lancer la radio", icon: "radio", action: () => startTrackRadio(track) },

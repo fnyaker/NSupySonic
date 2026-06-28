@@ -1,7 +1,8 @@
 <script>
   import { onMount } from "svelte";
-  import { player, favTracks, toasts, isAdmin, syncing } from "../lib/stores.js";
+  import { player, favTracks, toasts, isAdmin, syncing, downloads } from "../lib/stores.js";
   import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
+  import { listDownloads } from "../lib/offline.js";
   import { api } from "../lib/api.js";
   import Card from "../components/Card.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
@@ -13,6 +14,7 @@
   $: favorites = $favTracks;
   let playlists = null;
   let local = null;
+  let offline = null;
 
   let fileInput;
   let uploading = false;
@@ -22,6 +24,17 @@
     if ($isAdmin) userPlaylists().then((p) => (playlists = p));
     loadLocal();
   });
+
+  // Downloaded tracks come straight from IndexedDB, so this tab works offline.
+  async function loadOffline() {
+    offline = (await listDownloads()).map((m) => m.track).filter(Boolean);
+  }
+  // Refresh whenever the downloaded set changes (add / remove / evict).
+  $: $downloads, loadOffline();
+
+  function playOffline() {
+    if (offline?.length) player.playQueue(offline, 0, { kind: "downloads" });
+  }
 
   async function loadLocal() {
     try {
@@ -90,6 +103,7 @@
   {#if $isAdmin}
     <button class:active={tab === "playlists"} on:click={() => (tab = "playlists")}>Mes playlists</button>
   {/if}
+  <button class:active={tab === "downloaded"} on:click={() => (tab = "downloaded")}>Téléchargés</button>
   <button class:active={tab === "local"} on:click={() => (tab = "local")}>Mes fichiers</button>
 </div>
 
@@ -114,6 +128,18 @@
     <div class="grid">
       {#each playlists as p (p.id)}<Card item={p} kind="playlist" />{/each}
     </div>
+  {/if}
+{:else if tab === "downloaded"}
+  {#if offline === null}
+    <Skeleton kind="list" />
+  {:else if !offline.length}
+    <p class="muted hint">Aucun titre téléchargé. Utilisez le bouton de téléchargement sur un titre, un album ou une playlist pour les écouter hors-ligne (mode avion).</p>
+  {:else}
+    <div class="row fav-head">
+      <button class="pill" on:click={playOffline}><Icon name="play" size={18} /> Tout lire</button>
+      <span class="muted">{offline.length} titres · hors-ligne</span>
+    </div>
+    <TrackBrowser tracks={offline} context={{ kind: "downloads" }} downloadable={false} />
   {/if}
 {:else if tab === "local"}
   {#if local === null}

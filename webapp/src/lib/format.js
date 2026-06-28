@@ -9,6 +9,18 @@ export function artists(track) {
   return track && track.artist ? track.artist.name : "";
 }
 
+// Human-readable byte size, e.g. 1536 -> "1.5 Ko", 4e9 -> "3.7 Go".
+export function bytes(n) {
+  n = Number(n) || 0;
+  const units = ["o", "Ko", "Mo", "Go", "To"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
 // Deezer CDN covers embed their dimensions in the path, e.g.
 // .../cover/<md5>/500x500-000000-80-0-0.jpg. The API hands us 500px art, which
 // upscales (blurry) in the full-screen now-playing views, so bump the size in
