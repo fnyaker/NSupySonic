@@ -14,6 +14,30 @@ let analyser = null;
 // visualizer keeps working whichever one is currently playing.
 const wiredEls = new WeakSet();
 
+// Whichever <audio> element is currently active, and whether any visualizer
+// view actually needs the analyser yet.
+let currentEl = null;
+let analyserWanted = false;
+
+// The player registers the active element here on every play / quality switch,
+// but we deliberately DON'T route it through an AudioContext yet: once an
+// element feeds a MediaElementSource, all its audio flows through the context,
+// and a backgrounded tab suspends that context — which silently CUTS playback
+// and wastes battery. So normal (and background) listening keeps a pure audio
+// path; we only wire Web Audio in once a visualizer view asks for it.
+export function registerSource(el) {
+  currentEl = el;
+  if (analyserWanted && el) wireAudio(el);
+}
+
+// Called by a visualizer view when it mounts: from now on we need the analyser,
+// so wire the current element (and future ones) and make sure the context runs.
+export function requestAnalyser() {
+  analyserWanted = true;
+  if (currentEl) wireAudio(currentEl);
+  resumeAudio();
+}
+
 export function wireAudio(el) {
   if (!el || wiredEls.has(el)) return;
   const AC = window.AudioContext || window.webkitAudioContext;
