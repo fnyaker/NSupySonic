@@ -239,6 +239,37 @@ class DeezerTestCase(TestBase):
         self.assertEqual(Playlist.select().where(Playlist.deezer_id == "100").count(), 1)
         self.assertEqual(len(pl.get_tracks()), 2)
 
+    def test_sync_keeps_archived_track_gone_from_deezer(self):
+        # A downloaded (archived) track that Deezer stops returning — e.g. it went
+        # unavailable — must stay in the playlist; a dropped track we never
+        # archived is correctly removed.
+        gw = self.provider._dz.gw
+        gw.playlists = [{"id": "100", "title": "Mix", "description": None}]
+        gw.playlist_tracks["100"] = [
+            raw_track(1, "Keep", num=1),
+            raw_track(2, "Stay", num=2),
+            raw_track(3, "Drop", num=3),
+        ]
+
+        imp = importer.DeezerImporter(self.provider, "alice")
+        imp.sync_playlists()
+
+        # Archive track 1 only (a real file on disk).
+        t1 = Track.get(Track.deezer_id == "1")
+        os.makedirs(os.path.dirname(t1.path), exist_ok=True)
+        with open(t1.path, "wb") as fh:
+            fh.write(b"flac")
+
+        # Deezer now returns only track 2 (1 went unavailable, 3 was removed).
+        gw.playlist_tracks["100"] = [raw_track(2, "Stay", num=2)]
+        imp.sync_playlists()
+
+        pl = Playlist.get(Playlist.deezer_id == "100")
+        got = [t.deezer_id for t in pl.get_tracks()]
+        self.assertIn("1", got)  # archived → preserved
+        self.assertIn("2", got)  # still on Deezer
+        self.assertNotIn("3", got)  # dropped and not archived → removed
+
     def test_sync_large_playlist_is_fast(self):
         import time
 

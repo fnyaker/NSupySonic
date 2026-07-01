@@ -18,6 +18,7 @@ never echoes back to Deezer through the Phase 3 push hooks.
 from __future__ import annotations
 
 import logging
+import os.path
 import re
 from uuid import uuid4
 
@@ -95,7 +96,36 @@ class DeezerImporter:
                     (Playlist.deezer_id == dz) & (Playlist.id != local_id)
                 ):
                     stray.delete_instance(recursive=True)
+
+            # For a real Deezer playlist (the synthetic recommendation lists have
+            # no deezer_id and are meant to refresh wholesale), snapshot the
+            # tracks it currently holds. Deezer sometimes stops returning a track
+            # that went *unavailable* (rights pulled, geo-blocked) — in the
+            # response that's indistinguishable from a real removal — and a blind
+            # mirror would drop it. We keep any vanished track we've already
+            # archived on disk, so a downloaded track is never lost from your
+            # playlist just because Deezer hid the source.
+            old_tracks = []
+            if dz:
+                try:
+                    old_tracks = Playlist[local_id].get_tracks()
+                except Playlist.DoesNotExist:
+                    old_tracks = []
+
             tracks = self._upsert_tracks(raw_tracks)
+            new_ids = {t.id for t in tracks}
+            preserved = [
+                ot
+                for ot in old_tracks
+                if ot.id not in new_ids and ot.deezer_id and os.path.isfile(ot.path)
+            ]
+            if preserved:
+                logger.info(
+                    "Playlist %s: keeping %d archived track(s) Deezer no longer returns",
+                    name,
+                    len(preserved),
+                )
+
             try:
                 playlist = Playlist[local_id]
                 playlist.name = name
@@ -108,6 +138,10 @@ class DeezerImporter:
                     id=local_id, user=self.user, name=name, comment=comment, deezer_id=dz
                 )
 
+            # Deezer's current order first, then the preserved-but-vanished
+            # archived tracks appended (their original slot is unknown once
+            # Deezer drops them).
+            final = tracks + preserved
             rows = [
                 {
                     "id": uuid4(),
@@ -115,11 +149,11 @@ class DeezerImporter:
                     "track": t.id,
                     "index": i,
                 }
-                for i, t in enumerate(tracks)
+                for i, t in enumerate(final)
             ]
             if rows:
                 PlaylistTrack.insert_many(rows).execute()
-        return playlist, len(tracks)
+        return playlist, len(final)
 
     # -- playlists -------------------------------------------------------
 
