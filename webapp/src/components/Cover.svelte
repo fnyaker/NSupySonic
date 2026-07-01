@@ -8,12 +8,15 @@
   export let size = null; // optional fixed px size
 
   let loaded = false;
+  let failed = false;
   let img;
   // A few-KB downscaled version of the same cover, shown blurred underneath
   // until the full-size art finishes loading (null for non-Deezer covers).
   $: low = loResCover(src);
-  // Reset the fade when the source changes (e.g. recycled rows in a long list).
-  $: src, (loaded = false);
+  // Reset the fade + error state when the source changes (recycled rows, or an
+  // offline→online swap). On error we fall back to the placeholder instead of a
+  // broken image — covers are remote (Deezer CDN), so they fail in airplane mode.
+  $: src, ((loaded = false), (failed = false));
   // …but if the new image is already cached, mark it loaded before the browser
   // paints, so swapping to an already-seen cover doesn't flash (no re-fade).
   afterUpdate(() => {
@@ -26,7 +29,7 @@
   class:round
   style={size ? `width:${size}px;height:${size}px` : ""}
 >
-  {#if src}
+  {#if src && !failed}
     {#if low && !loaded}
       <img class="low" src={low} alt="" aria-hidden="true" decoding="async" />
     {/if}
@@ -38,7 +41,7 @@
       decoding="async"
       class:loaded
       on:load={() => (loaded = true)}
-      on:error={() => (loaded = true)}
+      on:error={() => (failed = true)}
     />
   {:else}
     <div class="ph"><Icon name="music" size={28} /></div>

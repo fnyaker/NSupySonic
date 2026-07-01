@@ -911,7 +911,8 @@ def discography(artist_id):
             albums = Album.select(Album, Artist).join(Artist).where(Album.artist == ar)
             cards = [_db_album_card(a) for a in albums]
             cards.sort(key=lambda x: str(x.get("year") or ""), reverse=True)
-            return jsonify({"discography": {"albums": cards} if cards else {}})
+            # Keys the Artist page reads: `album` (grid) and `all` (latest shelf).
+            return jsonify({"discography": {"album": cards, "all": cards} if cards else {}})
     out = {}
     for tab, releases in (tabs or {}).items():
         items = [
