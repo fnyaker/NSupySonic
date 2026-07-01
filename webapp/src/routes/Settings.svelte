@@ -5,9 +5,12 @@
     downloadQuality,
     downloads,
     downloadsSize,
+    playCacheLimit,
+    playCacheSize,
     toasts,
   } from "../lib/stores.js";
   import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
+  import { clearPlayCache, enforce } from "../lib/playcache.js";
   import { bytes as fmtBytes, duration as fmtDuration } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
@@ -20,25 +23,44 @@
     { id: "OPUS_128", label: "Opus 128", hint: "Standard, léger" },
     { id: "OPUS_64", label: "Opus 64", hint: "Données réduites" },
   ];
+  // Size caps for the playback cache (the prefetch buffer, not downloads).
+  const CACHE_LIMITS = [
+    { v: 256 * 1024 ** 2, label: "256 Mo" },
+    { v: 512 * 1024 ** 2, label: "512 Mo" },
+    { v: 1 * 1024 ** 3, label: "1 Go" },
+    { v: 2 * 1024 ** 3, label: "2 Go" },
+    { v: 4 * 1024 ** 3, label: "4 Go" },
+  ];
+
   let items = [];
   async function refresh() {
     items = await listDownloads();
   }
   onMount(refresh);
-  // Reload the list whenever the downloaded set changes (add / remove / evict).
+  // Reload the list whenever the downloaded set changes (add / remove).
   $: $downloads, refresh();
 
   $: qualityLabel = (id) => QUALITIES.find((q) => q.id === id)?.label || id;
+  $: cachePct = $playCacheLimit ? Math.min(100, ($playCacheSize / $playCacheLimit) * 100) : 0;
+
+  function setCacheLimit(v) {
+    playCacheLimit.set(v);
+    enforce(v); // lowering the cap trims the cache right away
+  }
+  async function wipeCache() {
+    await clearPlayCache();
+    toasts.push("Cache de lecture vidé");
+  }
 
   async function remove(id, title) {
     await removeTrack(id);
-    toasts.push(`« ${title} » retiré du cache`);
+    toasts.push(`« ${title} » retiré des téléchargements`);
   }
   async function wipe() {
     if (!items.length) return;
     if (!window.confirm("Supprimer tous les titres téléchargés ?")) return;
     await clearAll();
-    toasts.push("Cache vidé");
+    toasts.push("Téléchargements supprimés");
   }
 </script>
 
@@ -67,6 +89,30 @@
   <div class="gauge-txt">
     <span><strong>{fmtBytes($downloadsSize)}</strong> utilisés sur cet appareil</span>
     <span class="muted">{items.length} titre{items.length > 1 ? "s" : ""}</span>
+  </div>
+</section>
+
+<section class="card">
+  <div class="dl-head">
+    <h2>Cache de lecture</h2>
+    {#if $playCacheSize > 0}
+      <button class="wipe" on:click={wipeCache}><Icon name="trash" size={16} /> Vider</button>
+    {/if}
+  </div>
+  <p class="muted sub">Pendant la lecture, le titre suivant est préchargé ici (audio + pochette). La lecture est vérifiée d'abord en local, donc une coupure réseau ne l'interrompt pas. C'est un cache : les plus anciens sont supprimés automatiquement au-delà de la limite.</p>
+
+  <div class="gauge">
+    <div class="bar"><span style={`width:${cachePct}%`} class:warn={cachePct > 90}></span></div>
+    <div class="gauge-txt">
+      <span>{fmtBytes($playCacheSize)} en cache</span>
+      <span class="muted">limite {fmtBytes($playCacheLimit)}</span>
+    </div>
+  </div>
+
+  <div class="limits">
+    {#each CACHE_LIMITS as l}
+      <button class="lim" class:sel={$playCacheLimit === l.v} on:click={() => setCacheLimit(l.v)}>{l.label}</button>
+    {/each}
   </div>
 </section>
 
@@ -147,10 +193,48 @@
     right: 10px;
     color: var(--accent);
   }
+  .gauge {
+    margin-bottom: 14px;
+  }
+  .bar {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bg-hover);
+    overflow: hidden;
+  }
+  .bar span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.25s ease;
+  }
+  .bar span.warn {
+    background: var(--accent-2);
+  }
   .gauge-txt {
     display: flex;
     justify-content: space-between;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
+    margin-top: 6px;
+  }
+  .limits {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .lim {
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: var(--bg);
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .lim.sel {
+    background: #fff;
+    color: #111;
+    border-color: #fff;
   }
   .dl-head {
     display: flex;

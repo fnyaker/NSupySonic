@@ -5,6 +5,7 @@
   import { api } from "./lib/api.js";
   import { initConnectivity, online } from "./lib/net.js";
   import { loadOfflineIndex, loadCoverCache } from "./lib/offline.js";
+  import { initPlayCache } from "./lib/playcache.js";
   import { loadFavorites } from "./lib/actions.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
@@ -51,6 +52,7 @@
     initConnectivity();
     loadOfflineIndex();
     loadCoverCache();
+    initPlayCache();
 
     // Airplane-mode launch: if we're offline but have a remembered session, boot
     // straight into the (downloaded) library instead of stalling on the login

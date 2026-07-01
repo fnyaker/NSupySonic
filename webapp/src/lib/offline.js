@@ -107,7 +107,8 @@ export async function loadCoverCache() {
     for (const r of rows) {
       if (r && r.url && r.blob) map[r.url] = URL.createObjectURL(r.blob);
     }
-    offlineCovers.set(map);
+    // Merge (don't clobber) — the playback cache also feeds this map.
+    offlineCovers.update((m) => ({ ...map, ...m }));
   } catch {
     /* IndexedDB unavailable — covers just fall back to the network URL */
   }
@@ -293,6 +294,10 @@ export async function removeTrack(id) {
 export async function clearAll() {
   try {
     const db = await openDB();
+    // Grab our cover URLs first so we only revoke OUR entries in the shared map
+    // (the playback cache owns its own covers there).
+    const coverRows = await reqp(tx(db, "covers", "readonly").objectStore("covers").getAll());
+    const urls = coverRows.map((r) => r.url).filter(Boolean);
     const t = tx(db, ["meta", "audio", "covers"], "readwrite");
     t.objectStore("meta").clear();
     t.objectStore("audio").clear();
@@ -300,16 +305,19 @@ export async function clearAll() {
     await done(t);
     downloads.set(new Set());
     downloadsSize.set(0);
-    // Revoke and drop all cached cover object URLs.
     offlineCovers.update((m) => {
-      for (const u of Object.values(m)) {
-        try {
-          URL.revokeObjectURL(u);
-        } catch {
-          /* ignore */
+      const n = { ...m };
+      for (const url of urls) {
+        if (n[url]) {
+          try {
+            URL.revokeObjectURL(n[url]);
+          } catch {
+            /* ignore */
+          }
+          delete n[url];
         }
       }
-      return {};
+      return n;
     });
     return true;
   } catch {
