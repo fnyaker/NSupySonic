@@ -72,6 +72,9 @@ export const offlineCovers = writable({});
 // managed — evicted oldest-first once over the cap.
 export const playCacheLimit = persisted("cache.limit", 1024 * 1024 * 1024); // 1 GB
 export const playCacheSize = writable(0);
+// Whether to prefetch the next track into the cache during playback. On by
+// default (resilience); can be turned off to save mobile data.
+export const prefetchEnabled = persisted("cache.prefetch", true);
 // Track ids currently held in the playback cache (in-memory mirror for instant,
 // synchronous lookups on the play path).
 export const cachedIds = writable(new Set());

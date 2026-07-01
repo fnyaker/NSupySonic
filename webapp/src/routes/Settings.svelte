@@ -7,6 +7,7 @@
     downloadsSize,
     playCacheLimit,
     playCacheSize,
+    prefetchEnabled,
     toasts,
   } from "../lib/stores.js";
   import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
@@ -100,6 +101,14 @@
     {/if}
   </div>
   <p class="muted sub">Pendant la lecture, le titre suivant est préchargé ici (audio + pochette). La lecture est vérifiée d'abord en local, donc une coupure réseau ne l'interrompt pas. C'est un cache : les plus anciens sont supprimés automatiquement au-delà de la limite.</p>
+
+  <button class="toggle" role="switch" aria-checked={$prefetchEnabled} on:click={() => prefetchEnabled.set(!$prefetchEnabled)}>
+    <span class="tg-txt">
+      <span class="tg-title">Précharger le titre suivant</span>
+      <span class="tg-hint muted">Désactivez pour économiser les données mobiles.</span>
+    </span>
+    <span class="sw" class:on={$prefetchEnabled}><span class="knob"></span></span>
+  </button>
 
   <div class="gauge">
     <div class="bar"><span style={`width:${cachePct}%`} class:warn={cachePct > 90}></span></div>
@@ -235,6 +244,51 @@
     background: #fff;
     color: #111;
     border-color: #fff;
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    width: 100%;
+    text-align: left;
+    padding: 4px 0 16px;
+  }
+  .tg-txt {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .tg-title {
+    font-weight: 600;
+  }
+  .tg-hint {
+    font-size: 0.78rem;
+  }
+  .sw {
+    flex: none;
+    width: 44px;
+    height: 26px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    position: relative;
+    transition: background 0.15s ease;
+  }
+  .sw.on {
+    background: var(--accent);
+  }
+  .knob {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s ease;
+  }
+  .sw.on .knob {
+    transform: translateX(18px);
   }
   .dl-head {
     display: flex;

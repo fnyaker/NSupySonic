@@ -14,6 +14,7 @@
     quality,
     openMenu,
     toasts,
+    prefetchEnabled,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
@@ -688,8 +689,8 @@
       prefetchedId = nextId;
       api.download([nextId]).catch(() => {}); // server-side pre-archive (FLAC)
       // Also pull the next track's audio + cover into the on-device playback
-      // cache, so the track change survives a network drop.
-      prefetchTrack(nextTrack, get(quality)).catch(() => {});
+      // cache (unless disabled), so the track change survives a network drop.
+      if ($prefetchEnabled) prefetchTrack(nextTrack, get(quality)).catch(() => {});
     }
   }
 
