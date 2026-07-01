@@ -8,6 +8,7 @@
     playCacheLimit,
     playCacheSize,
     prefetchEnabled,
+    offlineOnlyDownloaded,
     toasts,
   } from "../lib/stores.js";
   import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
@@ -91,6 +92,14 @@
     <span><strong>{fmtBytes($downloadsSize)}</strong> utilisés sur cet appareil</span>
     <span class="muted">{items.length} titre{items.length > 1 ? "s" : ""}</span>
   </div>
+
+  <button class="toggle" role="switch" aria-checked={$offlineOnlyDownloaded} on:click={() => offlineOnlyDownloaded.set(!$offlineOnlyDownloaded)}>
+    <span class="tg-txt">
+      <span class="tg-title">Hors-ligne : ne lire que les titres téléchargés</span>
+      <span class="tg-hint muted">Lancer une playlist hors-ligne ne met en file que ce qui est dispo sur l'appareil, sans sauter les manquants. Désactivez pour tenter de tout lire.</span>
+    </span>
+    <span class="sw" class:on={$offlineOnlyDownloaded}><span class="knob"></span></span>
+  </button>
 </section>
 
 <section class="card">
