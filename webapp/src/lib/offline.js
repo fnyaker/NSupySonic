@@ -1,15 +1,15 @@
-// On-device download cache for offline playback.
+// On-device downloads for offline playback.
 //
-// Audio is stored as Blobs in IndexedDB (seekable, size-accountable, survives
-// reloads) split across two stores: `meta` (light — listed/sorted for the UI and
-// LRU eviction) and `audio` (the heavy blob, read only on playback). The set of
-// downloaded ids and the total size are mirrored into Svelte stores at startup
-// so the UI has instant state without touching IndexedDB on every render.
+// These are PERMANENT, user-chosen downloads — not an evictable cache. Audio is
+// stored as Blobs in IndexedDB (seekable, survives reloads) split across stores:
+// `meta` (light — listed/sorted for the UI), `audio` (the heavy blob, read only
+// on playback) and `covers` (art). A download is only ever removed by the user
+// (per-track or "clear all"). The set of downloaded ids and total size are
+// mirrored into Svelte stores at startup so the UI has instant state.
 
 import { get } from "svelte/store";
 import { api } from "./api.js";
 import {
-  cacheLimit,
   downloads,
   downloadsSize,
   downloading,
@@ -260,7 +260,6 @@ export async function downloadTrack(track, quality, onProgress = null) {
     downloadsSize.update((n) => n + blob.size);
     // Also cache the archived cover so the pochette shows offline.
     await cacheCover(track.album?.cover, id);
-    await enforceQuota(get(cacheLimit));
     return true;
   } catch (e) {
     return false;
@@ -318,22 +317,3 @@ export async function clearAll() {
   }
 }
 
-// Evict least-recently-played downloads until we're under `limit` bytes. Never
-// removes a track that's currently downloading (it isn't stored yet anyway).
-export async function enforceQuota(limit) {
-  if (!limit || limit <= 0) return;
-  try {
-    let metas = await listDownloads(); // newest first
-    let size = metas.reduce((n, m) => n + (m.size || 0), 0);
-    if (size <= limit) return;
-    // Oldest first for eviction.
-    metas = metas.reverse();
-    for (const m of metas) {
-      if (size <= limit) break;
-      await removeTrack(m.id);
-      size -= m.size || 0;
-    }
-  } catch {
-    /* best effort */
-  }
-}

@@ -3,12 +3,11 @@
   import { push } from "svelte-spa-router";
   import {
     downloadQuality,
-    cacheLimit,
     downloads,
     downloadsSize,
     toasts,
   } from "../lib/stores.js";
-  import { listDownloads, removeTrack, clearAll, enforceQuota } from "../lib/offline.js";
+  import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
   import { bytes as fmtBytes, duration as fmtDuration } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
@@ -21,15 +20,6 @@
     { id: "OPUS_128", label: "Opus 128", hint: "Standard, léger" },
     { id: "OPUS_64", label: "Opus 64", hint: "Données réduites" },
   ];
-  const LIMITS = [
-    { v: 1 * 1024 ** 3, label: "1 Go" },
-    { v: 2 * 1024 ** 3, label: "2 Go" },
-    { v: 4 * 1024 ** 3, label: "4 Go" },
-    { v: 8 * 1024 ** 3, label: "8 Go" },
-    { v: 16 * 1024 ** 3, label: "16 Go" },
-    { v: 32 * 1024 ** 3, label: "32 Go" },
-  ];
-
   let items = [];
   async function refresh() {
     items = await listDownloads();
@@ -38,13 +28,7 @@
   // Reload the list whenever the downloaded set changes (add / remove / evict).
   $: $downloads, refresh();
 
-  $: usedPct = $cacheLimit ? Math.min(100, ($downloadsSize / $cacheLimit) * 100) : 0;
   $: qualityLabel = (id) => QUALITIES.find((q) => q.id === id)?.label || id;
-
-  function setLimit(v) {
-    cacheLimit.set(v);
-    enforceQuota(v); // lowering the cap evicts the oldest right away
-  }
 
   async function remove(id, title) {
     await removeTrack(id);
@@ -77,21 +61,12 @@
 </section>
 
 <section class="card">
-  <h2>Cache local</h2>
-  <p class="muted sub">Espace maximal utilisé sur cet appareil par les titres téléchargés. Au-delà, les plus anciens écoutés sont supprimés automatiquement.</p>
+  <h2>Stockage des téléchargements</h2>
+  <p class="muted sub">Vos téléchargements sont permanents : ils restent disponibles hors-ligne jusqu'à ce que vous les retiriez vous-même. Ce n'est pas un cache — rien n'est supprimé automatiquement.</p>
 
-  <div class="gauge">
-    <div class="bar"><span style={`width:${usedPct}%`} class:warn={usedPct > 90}></span></div>
-    <div class="gauge-txt">
-      <span>{fmtBytes($downloadsSize)} utilisés</span>
-      <span class="muted">sur {fmtBytes($cacheLimit)}</span>
-    </div>
-  </div>
-
-  <div class="limits">
-    {#each LIMITS as l}
-      <button class="lim" class:sel={$cacheLimit === l.v} on:click={() => setLimit(l.v)}>{l.label}</button>
-    {/each}
+  <div class="gauge-txt">
+    <span><strong>{fmtBytes($downloadsSize)}</strong> utilisés sur cet appareil</span>
+    <span class="muted">{items.length} titre{items.length > 1 ? "s" : ""}</span>
   </div>
 </section>
 
@@ -172,48 +147,10 @@
     right: 10px;
     color: var(--accent);
   }
-  .gauge {
-    margin-bottom: 14px;
-  }
-  .bar {
-    height: 8px;
-    border-radius: 4px;
-    background: var(--bg-hover);
-    overflow: hidden;
-  }
-  .bar span {
-    display: block;
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.25s ease;
-  }
-  .bar span.warn {
-    background: var(--accent-2);
-  }
   .gauge-txt {
     display: flex;
     justify-content: space-between;
-    font-size: 0.82rem;
-    margin-top: 6px;
-  }
-  .limits {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .lim {
-    padding: 7px 14px;
-    border-radius: 999px;
-    background: var(--bg);
-    border: 1px solid var(--bg-hover);
-    color: var(--text-dim);
-    font-weight: 600;
-    font-size: 0.85rem;
-  }
-  .lim.sel {
-    background: #fff;
-    color: #111;
-    border-color: #fff;
+    font-size: 0.9rem;
   }
   .dl-head {
     display: flex;
