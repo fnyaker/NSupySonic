@@ -99,7 +99,7 @@ class DeezerPrefetcher:
 
     def _dl_worker(self) -> None:
         from ..db import db
-        from .archive import ensure_archived, import_track
+        from .archive import ensure_archived, find_local_track, import_track
 
         try:
             db.connect(reuse_if_open=True)
@@ -111,7 +111,11 @@ class DeezerPrefetcher:
             try:
                 if did is None:
                     return
-                track = import_track(self.provider, did)
+                # Cheap DB lookup first (no network): if we already imported this
+                # track, reuse the row and let ensure_archived skip the audio when
+                # the file is on disk — so an already-archived track costs nothing.
+                # Only hit Deezer for metadata when the track is genuinely new.
+                track = find_local_track(did) or import_track(self.provider, did)
                 ensure_archived(self.provider, track)
             except Exception as exc:
                 logger.info("Download failed for Deezer track %s: %s", did, exc)
