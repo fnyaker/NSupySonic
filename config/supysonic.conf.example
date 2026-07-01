@@ -65,6 +65,8 @@ report_listens = no
 scan_local = yes
 preload = yes
 preload_count = 2
+; Parallel workers for "download now" batch pre-archiving (offline downloads).
+download_workers = 4
 ; Auto-sync: runs on startup and then automatically. Daily at this time…
 sync_on_start = yes
 sync_at = 04:00

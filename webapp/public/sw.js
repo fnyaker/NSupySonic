@@ -8,24 +8,40 @@
  * so they always go straight to the network — never cached.
  */
 
-const CACHE = "nsupysonic-shell-v1";
+const CACHE = "nsupysonic-shell-v2";
 const SCOPE_PATH = "/app/";
 
+// Precache the shell + its hashed JS/CSS so an airplane-mode launch actually
+// boots. The asset filenames are content-hashed (unknown ahead of time), so we
+// fetch the freshly-served index.html and pull the /app/... asset URLs out of
+// it — without this the offline shell loads but the scripts it needs don't, and
+// offline mode never works until the app happens to be reloaded online twice.
+async function precache() {
+  const cache = await caches.open(CACHE);
+  await cache
+    .addAll([
+      "/app/",
+      "/app/manifest.webmanifest",
+      "/app/icon-192.png",
+      "/app/icon-512.png",
+    ])
+    .catch(() => {});
+  try {
+    const res = await fetch("/app/", { cache: "no-store" });
+    const html = await res.text();
+    const urls = new Set();
+    const re =
+      /(?:href|src)="(\/app\/[^"]+\.(?:js|mjs|css|woff2?|ttf|png|svg|webmanifest))"/g;
+    let m;
+    while ((m = re.exec(html))) urls.add(m[1]);
+    if (urls.size) await cache.addAll([...urls]).catch(() => {});
+  } catch {
+    /* offline during install — assets fall back to first online fetch */
+  }
+}
+
 self.addEventListener("install", (event) => {
-  // Precache the icons/manifest; the hashed JS/CSS are picked up at runtime.
-  event.waitUntil(
-    caches
-      .open(CACHE)
-      .then((c) =>
-        c.addAll([
-          "/app/",
-          "/app/manifest.webmanifest",
-          "/app/icon-192.png",
-          "/app/icon-512.png",
-        ])
-      )
-      .catch(() => {})
-  );
+  event.waitUntil(precache());
   self.skipWaiting();
 });
 

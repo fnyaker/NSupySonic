@@ -81,7 +81,15 @@ def create_application(config=None):
         from .deezer.prefetch import DeezerPrefetcher
 
         count = int(app.config["DEEZER"].get("preload_count") or 2)
-        app.deezer_prefetch = DeezerPrefetcher(app.deezer, workers=min(max(1, count), 4))
+        # Parallel workers for explicit "download this now" requests (whole
+        # album/playlist pre-archiving). Higher than the play-ahead preloader so
+        # a batch download of a playlist finishes in a fraction of the time.
+        dl_count = int(app.config["DEEZER"].get("download_workers") or 4)
+        app.deezer_prefetch = DeezerPrefetcher(
+            app.deezer,
+            workers=min(max(1, count), 4),
+            dl_workers=min(max(1, dl_count), 8),
+        )
 
     if app.deezer is not None and not app.testing:
         from .deezer.scheduler import maybe_start

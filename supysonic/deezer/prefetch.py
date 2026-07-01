@@ -23,7 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 class DeezerPrefetcher:
-    def __init__(self, provider, workers: int = 2, max_queue: int = 256):
+    def __init__(
+        self,
+        provider,
+        workers: int = 2,
+        max_queue: int = 256,
+        dl_workers: int = 4,
+    ):
         self.provider = provider
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
         self._seen: set = set()
@@ -35,11 +41,18 @@ class DeezerPrefetcher:
             self._workers.append(t)
 
         # Separate, unbounded queue for explicit "download this playlist now"
-        # requests (archive the whole thing ahead of any playback).
+        # requests (archive the whole thing ahead of any playback). Served by a
+        # small POOL of workers so a full album/playlist downloads several tracks
+        # at once instead of trickling through a single thread — each track is
+        # still serialized per id by ``ensure_archived``'s per-track lock, so
+        # parallel workers never fetch the same track twice.
         self._dl_queue: queue.Queue = queue.Queue()
-        dl = threading.Thread(target=self._dl_worker, name="deezer-download", daemon=True)
-        dl.start()
-        self._workers.append(dl)
+        for _ in range(max(1, dl_workers)):
+            dl = threading.Thread(
+                target=self._dl_worker, name="deezer-download", daemon=True
+            )
+            dl.start()
+            self._workers.append(dl)
 
     def enqueue(self, track) -> None:
         """Queue a single Track for background archiving (best-effort)."""
