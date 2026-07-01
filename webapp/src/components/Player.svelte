@@ -14,10 +14,12 @@
     quality,
     openMenu,
     toasts,
+    prefetchEnabled,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
+  import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import { registerSource, resumeAudio } from "../lib/visualizer.js";
@@ -334,14 +336,26 @@
   // Prefer an on-device download (instant, plays in airplane mode) over the
   // network. Returns { url, blob } — blob true means a revocable object URL.
   async function resolveSource(deezerId, q) {
+    // 1) A permanent download (fixed quality, plays in airplane mode).
     if (isDownloaded(deezerId)) {
       try {
         const u = await getObjectURL(deezerId);
         if (u) return { url: u, blob: true };
       } catch {
+        /* fall back to the cache / network */
+      }
+    }
+    // 2) The playback cache (prefetched next track) — check before the network
+    //    so a drop right at the track change doesn't stall playback.
+    if (isCached(deezerId)) {
+      try {
+        const u = await getCachedAudioURL(deezerId);
+        if (u) return { url: u, blob: true };
+      } catch {
         /* fall back to the network */
       }
     }
+    // 3) Stream from the server.
     return { url: api.streamUrl(deezerId, q), blob: false };
   }
 
@@ -666,13 +680,17 @@
   // re-tune. Keeping it to a single track avoids hammering the archiver.
   let prefetchedId = null;
   $: {
-    const nextId =
-      $player.index >= 0 ? $player.queue[$player.index + 1]?.deezer_id : null;
-    // Skip server-side pre-archiving when offline or when the next track is
-    // already on the device (it'll play from its local blob anyway).
+    const nextTrack =
+      $player.index >= 0 ? $player.queue[$player.index + 1] : null;
+    const nextId = nextTrack?.deezer_id;
+    // Skip when offline or when the next track is already on the device (it'll
+    // play from its local blob anyway).
     if (nextId && nextId !== prefetchedId && $online && !isDownloaded(nextId)) {
       prefetchedId = nextId;
-      api.download([nextId]).catch(() => {});
+      api.download([nextId]).catch(() => {}); // server-side pre-archive (FLAC)
+      // Also pull the next track's audio + cover into the on-device playback
+      // cache (unless disabled), so the track change survives a network drop.
+      if ($prefetchEnabled) prefetchTrack(nextTrack, get(quality)).catch(() => {});
     }
   }
 

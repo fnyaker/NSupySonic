@@ -54,18 +54,30 @@ export const quality = persisted("player.quality", "FLAC");
 // Default quality used when downloading a track to the device (overridable per
 // download). Opus 320 is the sweet spot of quality vs on-device size.
 export const downloadQuality = persisted("offline.quality", "OPUS_320");
-// Max bytes the on-device audio cache may use before LRU eviction kicks in.
-export const cacheLimit = persisted("offline.cacheLimit", 4 * 1024 * 1024 * 1024);
 // Set of track ids currently stored on the device, and the total bytes used —
 // kept in memory (loaded from IndexedDB at startup) for instant UI state.
 export const downloads = writable(new Set());
 export const downloadsSize = writable(0);
 // Track ids whose download is in flight (for spinners / progress).
 export const downloading = writable(new Set());
-// Cached cover art for downloaded tracks: maps the remote cover URL (what the UI
-// renders) to a local blob: object URL, so pochettes show offline. Populated from
-// IndexedDB at startup; Cover.svelte resolves through it.
+// Cached cover art (from BOTH permanent downloads and the playback cache): maps
+// a remote cover URL (what the UI renders) to a local blob: object URL, so
+// pochettes show offline. Populated from IndexedDB at startup; both offline.js
+// and playcache.js merge into it, and Cover.svelte resolves through it.
 export const offlineCovers = writable({});
+
+// -- playback cache (ephemeral, LRU, capped) --------------------------------
+// Distinct from downloads: the next track is prefetched here during playback so
+// a network drop doesn't interrupt it, and re-buffers are served locally. Auto-
+// managed — evicted oldest-first once over the cap.
+export const playCacheLimit = persisted("cache.limit", 1024 * 1024 * 1024); // 1 GB
+export const playCacheSize = writable(0);
+// Whether to prefetch the next track into the cache during playback. On by
+// default (resilience); can be turned off to save mobile data.
+export const prefetchEnabled = persisted("cache.prefetch", true);
+// Track ids currently held in the playback cache (in-memory mirror for instant,
+// synchronous lookups on the play path).
+export const cachedIds = writable(new Set());
 
 // True while a manual Deezer sync is running (shared so every entry point — the
 // sidebar button and the mobile library button — reflects/guards the same job).
