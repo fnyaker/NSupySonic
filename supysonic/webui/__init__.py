@@ -20,6 +20,7 @@ import uuid
 from functools import wraps
 
 from flask import Blueprint, current_app, jsonify, request, send_file, session
+from peewee import fn
 
 from ..db import Album, Artist, Playlist, PlaylistTrack, StarredTrack, Track, User, db, now
 from ..managers.user import UserManager
@@ -364,6 +365,110 @@ def _db_track(t: Track) -> dict:
     }
 
 
+# -- DB fallbacks for browse pages (work when Deezer is unreachable) ---------
+# Everything imported/archived is a normal DB row, so an album/artist/mix page
+# can be rebuilt straight from the DB — no Deezer call — for offline browsing.
+
+
+def _db_album_card(alb: Album) -> dict:
+    """A compact album entry (grid card), matching ``_album_api``'s shape."""
+    return {
+        "deezer_id": str(alb.deezer_id or ""),
+        "title": alb.name,
+        "cover": _image("cover", alb.cover_md5),
+        "artist": {"deezer_id": str(alb.artist.deezer_id or ""), "name": alb.artist.name},
+        "nb_tracks": alb.tracks.count(),
+        "year": alb.tracks.select(fn.min(Track.year)).scalar() or None,
+    }
+
+
+def _db_album_tracks(alb: Album) -> list:
+    q = (
+        Track.select(Track, Album, Artist)
+        .join(Album)
+        .switch(Track)
+        .join(Artist)
+        .where(Track.album == alb)
+        .order_by(Track.disc, Track.number)
+    )
+    return [_db_track(t) for t in q]
+
+
+def _db_album_response(alb: Album) -> dict:
+    tracks = _db_album_tracks(alb)
+    return {
+        "album": {
+            "deezer_id": str(alb.deezer_id or ""),
+            "title": alb.name,
+            "cover": _image("cover", alb.cover_md5),
+            "artist": {
+                "deezer_id": str(alb.artist.deezer_id or ""),
+                "name": alb.artist.name,
+            },
+            "nb_tracks": len(tracks),
+            "year": alb.tracks.select(fn.min(Track.year)).scalar() or None,
+        },
+        "tracks": tracks,
+    }
+
+
+def _db_artist_response(ar: Artist) -> dict:
+    albums = (
+        Album.select(Album, Artist)
+        .join(Artist)
+        .where(Album.artist == ar)
+        .order_by(Album.name)
+    )
+    cards = [_db_album_card(a) for a in albums]
+    # A few of the artist's tracks as a stand-in "top" shelf (DB order).
+    top_q = (
+        Track.select(Track, Album, Artist)
+        .join(Album)
+        .switch(Track)
+        .join(Artist)
+        .where(Track.artist == ar)
+        .order_by(Track.play_count.desc())
+        .limit(15)
+    )
+    return {
+        "artist": {
+            "deezer_id": str(ar.deezer_id or ""),
+            "name": ar.name,
+            "picture": None,  # not stored locally
+            "nb_fan": None,
+        },
+        "bio": None,
+        "top": [_db_track(t) for t in top_q],
+        "albums": cards,
+        "related": [],
+    }
+
+
+def _db_mix_for(sid: str):
+    """The synced 'Deezer · <title>' DB playlist for a smart-tracklist id, or None."""
+    from ..deezer import ids as dz_ids
+
+    try:
+        pl = Playlist[dz_ids.playlist_uuid("smart:" + str(sid))]
+    except Playlist.DoesNotExist:
+        return None
+    return pl
+
+
+def _deezer_starred() -> list:
+    """The current user's starred *Deezer* tracks (from the DB), newest first."""
+    return list(
+        Track.select(Track, Album, Artist)
+        .join(Album)
+        .switch(Track)
+        .join(Artist)
+        .switch(Track)
+        .join(StarredTrack, on=(StarredTrack.starred == Track.id))
+        .where(StarredTrack.user == request.webuser, Track.deezer_id.is_null(False))
+        .order_by(StarredTrack.date.desc())
+    )
+
+
 # -- DB-backed playlists ----------------------------------------------------
 # The web app's *user* playlists live in supysonic's own Playlist/PlaylistTrack
 # tables (ordered by PlaylistTrack.index), exactly like the Subsonic side. This
@@ -422,6 +527,8 @@ def _resolve_tracks(provider, raw_ids) -> list:
     numeric id is a Deezer track whose row is created on demand."""
     from ..deezer import library
 
+    from ..deezer import archive
+
     root = None
     cache = library.ImportCache()
     out = []
@@ -433,6 +540,12 @@ def _resolve_tracks(provider, raw_ids) -> list:
         except (ValueError, Track.DoesNotExist):
             pass
         if _valid_id(sid):
+            # Known Deezer track? Reuse the DB row (no network) so adding an
+            # already-imported track to a playlist works even when Deezer is down.
+            known = archive.find_local_track(sid)
+            if known is not None:
+                out.append(known)
+                continue
             if root is None:
                 root = library.get_root_folder(provider.archive_dir)
             try:
@@ -512,35 +625,53 @@ def home():
     """Card-based home: personalized mixes (smart tracklists), no track dump."""
     if not _is_admin():
         return jsonify({"mixes": []})  # guests get no personalized Deezer mixes
-    provider, err = _need_provider()
-    if err:
-        return err
+    provider = _provider()
     from ..deezer.importer import smart_ids_from_config
 
     mixes = []
     for sid in smart_ids_from_config(current_app.config["DEEZER"]):
-        try:
-            res = provider.get_smart_tracklist(sid)
-        except Exception:
+        res = None
+        if provider is not None:
+            try:
+                res = provider.get_smart_tracklist(sid)
+            except Exception:
+                res = None
+        if res:
+            data = (res or {}).get("DATA") or {}
+            songs = ((res or {}).get("SONGS") or {}).get("data", [])
+            if not songs:
+                continue
+            artists = []
+            for s in songs[:4]:
+                name = s.get("ART_NAME")
+                if name and name not in artists:
+                    artists.append(name)
+            subtitle = data.get("DESCRIPTION") or (
+                "Avec " + ", ".join(artists) if artists else ""
+            )
+            mixes.append(
+                {
+                    "id": sid,
+                    "title": data.get("TITLE") or sid,
+                    "subtitle": subtitle,
+                    "cover": _smart_cover(data),
+                }
+            )
             continue
-        data = (res or {}).get("DATA") or {}
-        songs = ((res or {}).get("SONGS") or {}).get("data", [])
-        if not songs:
+        # Deezer down/disabled: rebuild the mix card from its last synced DB copy.
+        pl = _db_mix_for(sid)
+        if pl is None:
             continue
-        artists = []
-        for s in songs[:4]:
-            name = s.get("ART_NAME")
-            if name and name not in artists:
-                artists.append(name)
-        subtitle = data.get("DESCRIPTION") or (
-            "Avec " + ", ".join(artists) if artists else ""
-        )
+        tracks = pl.get_tracks()
+        if not tracks:
+            continue
+        title = pl.name[len("Deezer · "):] if pl.name.startswith("Deezer · ") else pl.name
         mixes.append(
             {
                 "id": sid,
-                "title": data.get("TITLE") or sid,
-                "subtitle": subtitle,
-                "cover": _smart_cover(data),
+                "title": title,
+                "subtitle": pl.comment or "",
+                "cover": _db_playlist_cover([_db_track(tracks[0])]),
             }
         )
     return jsonify({"mixes": mixes})
@@ -549,28 +680,46 @@ def home():
 @webapi.route("/smarttracklist/<sid>")
 @login_required
 def smarttracklist(sid):
-    provider, err = _need_provider()
-    if err:
-        return err
-    try:
-        res = provider.get_smart_tracklist(sid)
-    except Exception:
-        logger.warning("smart tracklist %s failed", sid, exc_info=True)
-        return jsonify({"error": "not found"}), 404
-    data = (res or {}).get("DATA") or {}
-    songs = (res or {}).get("SONGS") or {}
-    return jsonify(
-        {
-            "playlist": {
-                "deezer_id": sid,
-                "title": data.get("TITLE") or sid,
-                "description": data.get("SUBTITLE") or data.get("DESCRIPTION") or "",
-                "cover": _smart_cover(data),
-                "nb_tracks": songs.get("total") or len(songs.get("data", [])),
-            },
-            "tracks": _tracks(songs.get("data", [])),
-        }
-    )
+    provider = _provider()
+    if provider is not None:
+        try:
+            res = provider.get_smart_tracklist(sid)
+            data = (res or {}).get("DATA") or {}
+            songs = (res or {}).get("SONGS") or {}
+            return jsonify(
+                {
+                    "playlist": {
+                        "deezer_id": sid,
+                        "title": data.get("TITLE") or sid,
+                        "description": data.get("SUBTITLE") or data.get("DESCRIPTION") or "",
+                        "cover": _smart_cover(data),
+                        "nb_tracks": songs.get("total") or len(songs.get("data", [])),
+                    },
+                    "tracks": _tracks(songs.get("data", [])),
+                }
+            )
+        except Exception:
+            logger.warning("smart tracklist %s failed; trying local DB", sid, exc_info=True)
+    # Deezer down/disabled: serve the last synced copy of this mix from the DB.
+    pl = _db_mix_for(sid)
+    if pl is not None:
+        tracks = [_db_track(t) for t in pl.get_tracks()]
+        title = pl.name[len("Deezer · "):] if pl.name.startswith("Deezer · ") else pl.name
+        return jsonify(
+            {
+                "playlist": {
+                    "deezer_id": sid,
+                    "title": title,
+                    "description": pl.comment or "",
+                    "cover": _db_playlist_cover(tracks),
+                    "nb_tracks": len(tracks),
+                },
+                "tracks": tracks,
+            }
+        )
+    if provider is None:
+        return jsonify({"error": "Deezer proxy disabled"}), 503
+    return jsonify({"error": "not found"}), 404
 
 
 def _data(fn):
@@ -631,51 +780,71 @@ def search():
 @login_required
 def artist(artist_id):
     """Artist page via the public API (the gateway pageArtist is legacy)."""
-    provider, err = _need_provider()
-    if err:
-        return err
-    dzapi = provider.dz.api
-    try:
-        info = dzapi.get_artist(artist_id)
-    except Exception:
-        logger.warning("artist %s lookup failed", artist_id, exc_info=True)
-        info = None
-    if not info or not info.get("id"):
-        return jsonify({"error": "not found"}), 404
-    top = [_track_api(t) for t in _data(lambda: dzapi.get_artist_top(artist_id, limit=15))]
-    albums = [_album_api(a) for a in _data(lambda: dzapi.get_artist_albums(artist_id, limit=50))]
-    related = [_artist_api(a) for a in _data(lambda: dzapi.get_artist_related(artist_id, limit=20))]
-    return jsonify(
-        {
-            "artist": _artist_api(info),
-            "bio": None,
-            "top": [x for x in top if x],
-            "albums": [x for x in albums if x],
-            "related": [x for x in related if x],
-        }
+    provider = _provider()
+    if provider is not None:
+        dzapi = provider.dz.api
+        try:
+            info = dzapi.get_artist(artist_id)
+        except Exception:
+            logger.warning("artist %s lookup failed; trying local DB", artist_id, exc_info=True)
+            info = None
+        if info and info.get("id"):
+            top = [_track_api(t) for t in _data(lambda: dzapi.get_artist_top(artist_id, limit=15))]
+            albums = [_album_api(a) for a in _data(lambda: dzapi.get_artist_albums(artist_id, limit=50))]
+            related = [_artist_api(a) for a in _data(lambda: dzapi.get_artist_related(artist_id, limit=20))]
+            return jsonify(
+                {
+                    "artist": _artist_api(info),
+                    "bio": None,
+                    "top": [x for x in top if x],
+                    "albums": [x for x in albums if x],
+                    "related": [x for x in related if x],
+                }
+            )
+    # Fall back to the imported/archived artist in the DB (offline browsing).
+    ar = (
+        Artist.select().where(Artist.deezer_id == str(artist_id)).first()
+        if _valid_id(artist_id)
+        else None
     )
+    if ar is not None:
+        return jsonify(_db_artist_response(ar))
+    if provider is None:
+        return jsonify({"error": "Deezer proxy disabled"}), 503
+    return jsonify({"error": "not found"}), 404
+
+
+def _db_album_by_id(album_id):
+    """The DB Album for a Deezer numeric id, or None (no network)."""
+    if not _valid_id(album_id):
+        return None
+    return Album.select().where(Album.deezer_id == str(album_id)).first()
 
 
 @webapi.route("/album/<album_id>")
 @login_required
 def album(album_id):
-    provider, err = _need_provider()
-    if err:
-        return err
-    try:
-        page = provider.dz.gw.get_album_page(album_id) or {}
-    except Exception:
-        logger.warning("album %s page failed", album_id, exc_info=True)
-        return jsonify({"error": "not found"}), 404
-    data = page.get("DATA") or {}
-    if not data.get("ALB_ID"):
-        return jsonify({"error": "not found"}), 404
-    # The page only carries the first batch of songs; fetch the whole tracklist.
-    try:
-        songs = provider.get_album_tracks(album_id)
-    except Exception:
-        songs = (page.get("SONGS") or {}).get("data", [])
-    return jsonify({"album": _album(data), "tracks": _tracks(songs)})
+    provider = _provider()
+    if provider is not None:
+        try:
+            page = provider.dz.gw.get_album_page(album_id) or {}
+            data = page.get("DATA") or {}
+            if data.get("ALB_ID"):
+                try:
+                    songs = provider.get_album_tracks(album_id)
+                except Exception:
+                    songs = (page.get("SONGS") or {}).get("data", [])
+                return jsonify({"album": _album(data), "tracks": _tracks(songs)})
+        except Exception:
+            logger.warning("album %s page failed; trying local DB", album_id, exc_info=True)
+    # Deezer disabled/unreachable (or the album isn't on Deezer): serve the
+    # imported/archived copy from the DB so downloaded albums browse offline.
+    alb = _db_album_by_id(album_id)
+    if alb is not None:
+        return jsonify(_db_album_response(alb))
+    if provider is None:
+        return jsonify({"error": "Deezer proxy disabled"}), 503
+    return jsonify({"error": "not found"}), 404
 
 
 @webapi.route("/playlist/<playlist_id>")
@@ -727,14 +896,22 @@ def playlist(playlist_id):
 @webapi.route("/artist/<artist_id>/discography")
 @login_required
 def discography(artist_id):
-    provider, err = _need_provider()
-    if err:
-        return err
-    try:
-        tabs = provider.get_artist_discography(artist_id)
-    except Exception:
-        logger.warning("discography %s failed", artist_id, exc_info=True)
-        tabs = {}
+    provider = _provider()
+    tabs = {}
+    if provider is not None:
+        try:
+            tabs = provider.get_artist_discography(artist_id)
+        except Exception:
+            logger.warning("discography %s failed; trying local DB", artist_id, exc_info=True)
+            tabs = {}
+    # Deezer gave nothing (down/disabled): list the artist's archived albums.
+    if not tabs and _valid_id(artist_id):
+        ar = Artist.select().where(Artist.deezer_id == str(artist_id)).first()
+        if ar is not None:
+            albums = Album.select(Album, Artist).join(Artist).where(Album.artist == ar)
+            cards = [_db_album_card(a) for a in albums]
+            cards.sort(key=lambda x: str(x.get("year") or ""), reverse=True)
+            return jsonify({"discography": {"albums": cards} if cards else {}})
     out = {}
     for tab, releases in (tabs or {}).items():
         items = [
@@ -759,9 +936,11 @@ def discography(artist_id):
 @webapi.route("/lyrics/<track_id>")
 @login_required
 def lyrics(track_id):
-    provider, err = _need_provider()
-    if err:
-        return err
+    # Lyrics are a Deezer-only nicety (not stored locally): degrade to "no
+    # lyrics" when Deezer is disabled or unreachable rather than erroring.
+    provider = _provider()
+    if provider is None:
+        return jsonify({"lyrics": None})
     try:
         raw = provider.get_lyrics(track_id)
     except Exception:
@@ -947,12 +1126,18 @@ def my_favorite_ids():
         return jsonify({"ids": ids})
     ids = [str(t.id) for t in _local_starred()]  # local stars (UUIDs)
     provider = _provider()
+    live_ok = False
     if provider is not None:
         try:
             raw = provider.dz.gw.get_user_favorite_ids(limit=100000)
             ids += [str(x.get("SNG_ID")) for x in (raw.get("data") or []) if x.get("SNG_ID")]
+            live_ok = True
         except Exception:
             pass
+    if not live_ok:
+        # Deezer unreachable: use the Deezer stars already mirrored in the DB so
+        # heart state stays correct offline.
+        ids += [str(t.deezer_id) for t in _deezer_starred() if t.deezer_id]
     return jsonify({"ids": ids})
 
 
@@ -979,19 +1164,26 @@ def my_favorites():
     # Guests: their own private stars only (no Deezer-account favorites).
     if not _is_admin():
         return jsonify({"tracks": [_db_track(t) for t in _user_starred()]})
-    # Locally-starred files first (always available), then Deezer favorites.
-    tracks = [_local_track(t) for t in _local_starred()]
+    # Prefer the live Deezer favorites (they carry the "added" date and any
+    # brand-new stars not yet synced), but never let a Deezer outage 500 the
+    # route — fall back to the favorites already mirrored into the DB.
     provider = _provider()
     if provider is not None:
-        # ``get_my_favorite_tracks`` returns public-API-shaped dicts, so reuse
-        # ``_track_api``.
-        for t in provider.get_my_favorite_tracks():
-            tr = _track_api(t)
-            if not tr:
-                continue
-            tr["added"] = int(t.get("time_add") or t.get("DATE_ADD") or 0)
-            tracks.append(tr)
-    return jsonify({"tracks": tracks})
+        try:
+            tracks = [_local_track(t) for t in _local_starred()]
+            # ``get_my_favorite_tracks`` returns public-API-shaped dicts, so reuse
+            # ``_track_api``.
+            for t in provider.get_my_favorite_tracks():
+                tr = _track_api(t)
+                if not tr:
+                    continue
+                tr["added"] = int(t.get("time_add") or t.get("DATE_ADD") or 0)
+                tracks.append(tr)
+            return jsonify({"tracks": tracks})
+        except Exception:
+            logger.warning("Deezer favorites fetch failed; serving from DB", exc_info=True)
+    # Deezer disabled or unreachable: every star from the DB (local + synced).
+    return jsonify({"tracks": [_db_track(t) for t in _user_starred()]})
 
 
 # -- favorites & playback ---------------------------------------------------
@@ -1019,13 +1211,16 @@ def report_listen():
     next_id = str(next_id) if _valid_id(next_id) else None
     ctx = data.get("context") or {}
     context = {"id": ctx.get("id", ""), "t": ctx.get("kind", "")}
-    provider.report_listen(
-        deezer_id,
-        listened=int(data.get("listened") or 0),
-        next_id=next_id,
-        context=context,
-        is_shuffle=bool(data.get("shuffle")),
-    )
+    try:
+        provider.report_listen(
+            deezer_id,
+            listened=int(data.get("listened") or 0),
+            next_id=next_id,
+            context=context,
+            is_shuffle=bool(data.get("shuffle")),
+        )
+    except Exception:  # telemetry is best-effort; a Deezer outage must not 500
+        logger.warning("report_listen failed", exc_info=True)
     return ("", 204)
 
 
@@ -1058,14 +1253,23 @@ def favorite():
         _set_star(track, on)
         return jsonify({"ok": True, "favorite": on, "local": True})
 
-    provider, err = _need_provider()
-    if err:
-        return err
     from ..deezer import archive
 
-    track = archive.import_track(provider, deezer_id)
+    provider = _provider()
+    # A track we already know (imported/archived) is starred with no Deezer call,
+    # so favoriting works offline. Only an unknown track needs Deezer to fetch its
+    # metadata row.
+    track = archive.find_local_track(deezer_id)
+    if track is None:
+        if provider is None:
+            return jsonify({"error": "Deezer proxy disabled"}), 503
+        try:
+            track = archive.import_track(provider, deezer_id)
+        except Exception:
+            logger.warning("favorite: metadata fetch failed for %s", deezer_id, exc_info=True)
+            return jsonify({"error": "track unavailable"}), 502
     # Guests keep favorites private/local — never mirror them to the Deezer account.
-    if _is_admin():
+    if _is_admin() and provider is not None:
         try:
             if on:
                 provider.dz.gw.add_song_to_favorites(deezer_id)
@@ -1202,7 +1406,10 @@ def delete_playlist(playlist_id):
     if dz:
         from ..deezer import push
 
-        push.delete_playlist(provider, dz)
+        try:  # local delete already done; a Deezer outage must not 500 it
+            push.delete_playlist(provider, dz)
+        except Exception:
+            logger.warning("Deezer delete_playlist failed for %s", dz, exc_info=True)
     return jsonify({"ok": True})
 
 

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from supysonic.config import DefaultConfig
-from supysonic.db import StarredTrack, User, release_database
+from supysonic.db import Playlist, StarredTrack, Track, User, release_database
 from supysonic.managers.user import UserManager
 from supysonic.web import create_application
 
@@ -590,6 +590,77 @@ class WebUITestCase(unittest.TestCase):
         self._make_deezer_track(sng_id="42", title="Ghost Only", archived=False)
         data = self.client.get("/api/search?q=Ghost").get_json()
         self.assertFalse(any(x["deezer_id"] == "42" for x in data["tracks"]))
+
+    def _deezer_down(self):
+        """Simulate a Deezer outage: the provider stays set but every call fails,
+        so routes must fall back to the local DB (the 'Deezer disappeared' case)."""
+
+        class Boom:
+            def __getattr__(self, _name):
+                def f(*a, **k):
+                    raise RuntimeError("deezer unreachable")
+
+                return f
+
+        self.app.deezer._dz = Boom()
+
+    def test_album_offline_from_db(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self._deezer_down()
+        rv = self.client.get("/api/album/600")  # ALB_ID from _make_deezer_track
+        self.assertEqual(rv.status_code, 200)
+        data = rv.get_json()
+        self.assertEqual(data["album"]["title"], "Archived Album")
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1"])
+
+    def test_artist_offline_from_db(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self._deezer_down()
+        rv = self.client.get("/api/artist/500")  # ART_ID from _make_deezer_track
+        self.assertEqual(rv.status_code, 200)
+        data = rv.get_json()
+        self.assertEqual(data["artist"]["name"], "Archived Artist")
+        self.assertIn("600", [a["deezer_id"] for a in data["albums"]])
+
+    def test_mix_offline_from_db(self):
+        from supysonic.deezer import ids as dz_ids
+
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        pl = Playlist.create(
+            id=dz_ids.playlist_uuid("smart:new-releases"),
+            user=User.get(name="alice"),
+            name="Deezer · Nouveautés",
+        )
+        pl.add(Track.get(Track.deezer_id == "1"))
+        self._deezer_down()
+        rv = self.client.get("/api/smarttracklist/new-releases")
+        self.assertEqual(rv.status_code, 200)
+        data = rv.get_json()
+        self.assertEqual(data["playlist"]["title"], "Nouveautés")
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1"])
+
+    def test_favorites_offline_from_db(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        # Star it while "online" (goes through the DB either way).
+        self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        self._deezer_down()
+        rv = self.client.get("/api/me/favorites")
+        self.assertEqual(rv.status_code, 200)  # must not 500 on a Deezer outage
+        self.assertIn("1", [t["deezer_id"] for t in rv.get_json()["tracks"]])
+        ids = self.client.get("/api/me/favorite-ids").get_json()["ids"]
+        self.assertIn("1", ids)
+
+    def test_favorite_known_track_offline(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self._deezer_down()
+        rv = self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        self.assertEqual(rv.status_code, 200)
+        self.assertTrue(rv.get_json()["favorite"])
 
     def test_stream_local_track_by_uuid(self):
         self._login()
