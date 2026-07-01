@@ -3,6 +3,7 @@
 
 import { user } from "./stores.js";
 import { reportOnline, reportOffline } from "./net.js";
+import { isCacheable, cacheGet, cachePut } from "./apicache.js";
 
 const BASE = "/api";
 
@@ -20,6 +21,9 @@ async function req(path, opts = {}, attempt = 0) {
   // Only GETs are safe to auto-retry: replaying a POST/PUT/DELETE could double
   // a mutation. Mutations fail fast and let the optimistic UI roll back.
   const retriable = method === "GET";
+  // Content GETs are mirrored to an offline cache so playlists/albums/etc. stay
+  // browsable without a network (served only when the fetch fails).
+  const cacheable = method === "GET" && isCacheable(path);
 
   let res;
   try {
@@ -34,6 +38,11 @@ async function req(path, opts = {}, attempt = 0) {
     if (retriable && attempt < 5) {
       await sleep(backoff(attempt));
       return req(path, opts, attempt + 1);
+    }
+    // Offline: fall back to the last cached copy of this response, if any.
+    if (cacheable) {
+      const cached = await cacheGet(path);
+      if (cached != null) return cached;
     }
     throw { status: 0, message: "network", offline: true };
   }
@@ -59,7 +68,10 @@ async function req(path, opts = {}, attempt = 0) {
     throw { status: res.status, message };
   }
   if (res.status === 204) return null;
-  return res.json();
+  const data = await res.json();
+  // Refresh the offline cache with the fresh copy (fire-and-forget).
+  if (cacheable) cachePut(path, data).catch(() => {});
+  return data;
 }
 
 const body = (b) => (b === undefined ? undefined : JSON.stringify(b));
