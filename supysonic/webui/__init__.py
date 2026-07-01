@@ -284,23 +284,35 @@ def _local_track(t: Track) -> dict:
 
 
 def _local_search_tracks(query: str, limit: int) -> list:
+    """Search the on-device library so downloaded music is findable even when
+    Deezer is unreachable. Covers uploaded local files (deezer_id NULL, always on
+    disk) *and* archived Deezer tracks (file present) — anything playable without
+    a Deezer call. Imported-but-not-yet-archived rows are skipped: they'd need
+    Deezer to stream, so they surface through the live Deezer search instead.
+    """
     q = (
         Track.select(Track, Album, Artist)
         .join(Album)
         .switch(Track)
         .join(Artist)
         .where(
-            Track.deezer_id.is_null(True)
-            & (
-                Track.title.contains(query)
-                | Album.name.contains(query)
-                | Artist.name.contains(query)
-            )
+            Track.title.contains(query)
+            | Album.name.contains(query)
+            | Artist.name.contains(query)
         )
         .order_by(Track.title)
-        .limit(limit)
+        # Over-fetch, then keep only offline-playable rows up to `limit` (an
+        # archived-state filter can't be expressed cleanly in SQL here).
+        .limit(min(limit * 5, 200))
     )
-    return [_local_track(t) for t in q]
+    out = []
+    for t in q:
+        if t.deezer_id is not None and not os.path.isfile(t.path):
+            continue  # imported metadata only — not on disk, needs Deezer
+        out.append(_db_track(t))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _local_starred() -> list:
@@ -602,9 +614,12 @@ def search():
     playlists = [
         _playlist_api(p) for p in _data(lambda: dzapi.search_playlist(query, limit=limit))
     ]
+    # Downloaded/local tracks lead (they play from disk); drop the live-search
+    # duplicates of the same Deezer ids so a track isn't listed twice.
+    have = {t["deezer_id"] for t in local_tracks}
     return jsonify(
         {
-            "tracks": local_tracks + [x for x in tracks if x],
+            "tracks": local_tracks + [x for x in tracks if x and x["deezer_id"] not in have],
             "albums": [x for x in albums if x],
             "artists": [x for x in artists if x],
             "playlists": [x for x in playlists if x],

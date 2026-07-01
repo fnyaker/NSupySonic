@@ -545,6 +545,52 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(match[0]["deezer_id"], str(t.id))
         self.assertEqual(match[0]["artist"]["name"], "Local Band")
 
+    def _make_deezer_track(self, sng_id="1", title="Archived Song", archived=True):
+        """Create a DB row for a Deezer track (deezer_id set). When `archived`,
+        also drop a file at its archive path so it's playable without Deezer."""
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        t = library.upsert_track(
+            {
+                "SNG_ID": sng_id,
+                "SNG_TITLE": title,
+                "ART_NAME": "Archived Artist",
+                "ART_ID": "500",
+                "ALB_TITLE": "Archived Album",
+                "ALB_ID": "600",
+                "DURATION": "200",
+                "TRACK_NUMBER": "1",
+                "DISK_NUMBER": "1",
+            },
+            root,
+        )
+        if archived:
+            os.makedirs(os.path.dirname(t.path), exist_ok=True)
+            with open(t.path, "wb") as fh:
+                fh.write(b"flacdata")
+        return t
+
+    def test_search_includes_archived_deezer_tracks(self):
+        # A downloaded (archived) Deezer track must be findable locally — even
+        # if Deezer vanishes — and must not be listed twice alongside the live
+        # Deezer search hit for the same id.
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        data = self.client.get("/api/search?q=Archived").get_json()
+        match = [x for x in data["tracks"] if x["deezer_id"] == "1"]
+        self.assertEqual(len(match), 1)  # deduped against MockApi.search (id 1)
+        self.assertEqual(match[0]["title"], "Archived Song")
+        self.assertFalse(match[0].get("local"))  # a Deezer track, not an upload
+
+    def test_search_excludes_unarchived_deezer_tracks(self):
+        # An imported-but-not-yet-archived row has no file on disk, so it can't
+        # play without Deezer — keep it out of the local (offline) results.
+        self._login()
+        self._make_deezer_track(sng_id="42", title="Ghost Only", archived=False)
+        data = self.client.get("/api/search?q=Ghost").get_json()
+        self.assertFalse(any(x["deezer_id"] == "42" for x in data["tracks"]))
+
     def test_stream_local_track_by_uuid(self):
         self._login()
         t = self._make_local_track()
