@@ -6,6 +6,7 @@
   import { initConnectivity, online } from "./lib/net.js";
   import { loadOfflineIndex, loadCoverCache } from "./lib/offline.js";
   import { initPlayCache } from "./lib/playcache.js";
+  import { initQueueFilter } from "./lib/playfilter.js";
   import { loadFavorites } from "./lib/actions.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
@@ -53,6 +54,7 @@
 
   onMount(async () => {
     initConnectivity();
+    initQueueFilter();
     loadOfflineIndex();
     loadCoverCache();
     initPlayCache();

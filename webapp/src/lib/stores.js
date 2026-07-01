@@ -75,6 +75,22 @@ export const playCacheSize = writable(0);
 // Whether to prefetch the next track into the cache during playback. On by
 // default (resilience); can be turned off to save mobile data.
 export const prefetchEnabled = persisted("cache.prefetch", true);
+
+// When offline, only queue tracks that are actually available on the device
+// (downloaded / local) instead of trying — and skipping through — unplayable
+// ones. On by default; the toggle is for people who'd rather queue everything.
+export const offlineOnlyDownloaded = persisted("offline.onlyDownloaded", true);
+
+// Filter applied to a queue when starting playback (play-all / shuffle / tap).
+// Injected at startup (playfilter.js) so the offline-availability logic stays
+// out of the store. Default identity — no effect until registered.
+let _queueFilter = (tracks) => tracks;
+export function setQueueFilter(fn) {
+  _queueFilter = typeof fn === "function" ? fn : (t) => t;
+}
+export function filterQueue(tracks) {
+  return _queueFilter(tracks);
+}
 // Track ids currently held in the playback cache (in-memory mirror for instant,
 // synchronous lookups on the play path).
 export const cachedIds = writable(new Set());
@@ -247,7 +263,13 @@ function createPlayer() {
     playQueue(tracks, start = 0, context = null) {
       let queue = clean(tracks);
       if (!queue.length) return;
-      let index = Math.min(Math.max(start, 0), queue.length - 1);
+      // Remember the tapped track, then drop anything unplayable (offline), and
+      // resume from the tapped track's new position (or the first available).
+      const startTrack = queue[Math.min(Math.max(start, 0), queue.length - 1)];
+      queue = filterQueue(queue);
+      if (!queue.length) return;
+      let index = queue.indexOf(startTrack);
+      if (index < 0) index = 0;
       let _orig = null;
       update((s) => {
         if (s.shuffle) {
@@ -265,7 +287,7 @@ function createPlayer() {
     },
 
     shufflePlay(tracks, context = null) {
-      const q = clean(tracks);
+      const q = filterQueue(clean(tracks));
       if (!q.length) return;
       savedShuffle.set(true);
       update((s) => ({
