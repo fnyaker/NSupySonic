@@ -62,6 +62,10 @@ export const downloads = writable(new Set());
 export const downloadsSize = writable(0);
 // Track ids whose download is in flight (for spinners / progress).
 export const downloading = writable(new Set());
+// Cached cover art for downloaded tracks: maps the remote cover URL (what the UI
+// renders) to a local blob: object URL, so pochettes show offline. Populated from
+// IndexedDB at startup; Cover.svelte resolves through it.
+export const offlineCovers = writable({});
 
 // True while a manual Deezer sync is running (shared so every entry point — the
 // sidebar button and the mobile library button — reflects/guards the same job).

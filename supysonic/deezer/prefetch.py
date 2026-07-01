@@ -23,7 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 class DeezerPrefetcher:
-    def __init__(self, provider, workers: int = 2, max_queue: int = 256):
+    def __init__(
+        self,
+        provider,
+        workers: int = 2,
+        max_queue: int = 256,
+        dl_workers: int = 4,
+    ):
         self.provider = provider
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
         self._seen: set = set()
@@ -35,11 +41,18 @@ class DeezerPrefetcher:
             self._workers.append(t)
 
         # Separate, unbounded queue for explicit "download this playlist now"
-        # requests (archive the whole thing ahead of any playback).
+        # requests (archive the whole thing ahead of any playback). Served by a
+        # small POOL of workers so a full album/playlist downloads several tracks
+        # at once instead of trickling through a single thread — each track is
+        # still serialized per id by ``ensure_archived``'s per-track lock, so
+        # parallel workers never fetch the same track twice.
         self._dl_queue: queue.Queue = queue.Queue()
-        dl = threading.Thread(target=self._dl_worker, name="deezer-download", daemon=True)
-        dl.start()
-        self._workers.append(dl)
+        for _ in range(max(1, dl_workers)):
+            dl = threading.Thread(
+                target=self._dl_worker, name="deezer-download", daemon=True
+            )
+            dl.start()
+            self._workers.append(dl)
 
     def enqueue(self, track) -> None:
         """Queue a single Track for background archiving (best-effort)."""
@@ -86,7 +99,7 @@ class DeezerPrefetcher:
 
     def _dl_worker(self) -> None:
         from ..db import db
-        from .archive import ensure_archived, import_track
+        from .archive import ensure_archived, find_local_track, import_track
 
         try:
             db.connect(reuse_if_open=True)
@@ -98,7 +111,11 @@ class DeezerPrefetcher:
             try:
                 if did is None:
                     return
-                track = import_track(self.provider, did)
+                # Cheap DB lookup first (no network): if we already imported this
+                # track, reuse the row and let ensure_archived skip the audio when
+                # the file is on disk — so an already-archived track costs nothing.
+                # Only hit Deezer for metadata when the track is genuinely new.
+                track = find_local_track(did) or import_track(self.provider, did)
                 ensure_archived(self.provider, track)
             except Exception as exc:
                 logger.info("Download failed for Deezer track %s: %s", did, exc)

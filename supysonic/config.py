@@ -87,6 +87,9 @@ class DefaultConfig:
         "report_listens": False,
         "preload": True,
         "preload_count": 2,
+        # Parallel workers for explicit "download now" batch pre-archiving
+        # (whole album/playlist offline downloads). Capped at 8 in web.py.
+        "download_workers": 4,
         # Auto-sync: on by default once a sync_user is set. Daily at sync_at
         # (default 04:00) unless sync_interval (minutes) is set, plus a run on
         # startup. The web app drives this; no cron/manual step needed.

@@ -63,6 +63,7 @@
   });
   onDestroy(() => {
     stopWatchdog();
+    cancelPauseMirror();
     document.removeEventListener("visibilitychange", onVisibility);
     releaseWakeLock();
     setBlobUrl(null); // revoke any live object URL
@@ -169,8 +170,10 @@
     const cur = get(current);
     if (!cur || !audio || switching || recovering) return;
     // Network down: don't burn the retry budget or skip the track. Park it and
-    // let the reconnect handler resume from the same spot.
-    if (!navigator.onLine || !get(online)) {
+    // let the reconnect handler resume from the same spot. A downloaded track
+    // plays from a local blob, so the network is irrelevant — recover it in
+    // place (reloading the object URL) instead of parking or hitting the net.
+    if (!curIsBlob && (!navigator.onLine || !get(online))) {
       netWaiting = true;
       return;
     }
@@ -184,7 +187,8 @@
       audio.currentTime > 0.5
         ? audio.currentTime
         : lastKnownTime || get(player).currentTime || 0;
-    audio.src = api.streamUrl(cur.deezer_id, curQ);
+    audio.src =
+      curIsBlob && curBlobUrl ? curBlobUrl : api.streamUrl(cur.deezer_id, curQ);
     audio.load();
     const cleanup = () => {
       audio.removeEventListener("loadedmetadata", onMeta);
@@ -216,8 +220,26 @@
     audio.addEventListener("error", onErr);
   }
 
+  // A buffer underrun makes some browsers fire a transient `pause` (immediately
+  // followed by `play` once data arrives). Mirroring that blip straight into the
+  // store makes the transport block react and fight the element, which can spin
+  // into a rapid play/pause oscillation — and once the store reads paused the
+  // watchdog bails, so a stuck stream never recovers on its own (you have to
+  // restart it by hand). So we DEFER mirroring a pause: only reflect it if the
+  // element is still paused a moment later (a genuine, sustained pause — audio
+  // focus lost, user paused from the OS), and cancel the pending mirror the
+  // instant playback resumes.
+  let pauseMirrorTimer = null;
+  function cancelPauseMirror() {
+    if (pauseMirrorTimer) {
+      clearTimeout(pauseMirrorTimer);
+      pauseMirrorTimer = null;
+    }
+  }
+
   function onElPlay(e) {
     if (e.target !== audio) return;
+    cancelPauseMirror(); // resumed — the pause (if any) was just a rebuffer blip
     registerSource(audio); // wires Web Audio only if a visualizer view wants it
     resumeAudio();
     // A long suspend (mobile lock) can silently rewind the element to 0. If we
@@ -228,7 +250,15 @@
   }
   function onElPause(e) {
     if (e.target !== audio) return;
-    if (get(player).playing) player.pause();
+    if (!get(player).playing) return; // already paused in the store (our own doing)
+    if (audio.ended) return; // end-of-track is handled by onEnded, not here
+    cancelPauseMirror();
+    pauseMirrorTimer = setTimeout(() => {
+      pauseMirrorTimer = null;
+      // Still paused, still active, not at the end and still meant to be playing
+      // → a real pause (a rebuffer would have fired `play` and cancelled this).
+      if (audio && audio.paused && !audio.ended && get(player).playing) player.pause();
+    }, 300);
   }
 
   const QUALITIES = ["FLAC", "OPUS_320", "OPUS_256", "OPUS_192", "OPUS_128", "OPUS_64"];
@@ -335,6 +365,7 @@
     curSeq = get(player).seq;
     lastKnownTime = resumeAt;
     recoverAttempts = 0; // fresh track, fresh recovery budget
+    cancelPauseMirror(); // drop a deferred pause from the outgoing track
     buffered.set(0); // new source -> nothing loaded yet
 
     const src = await resolveSource(track.deezer_id, curQ);
@@ -498,7 +529,7 @@
   // is paused while the store may still read playing=true for a tick, and an
   // unconditional play() gets cut off again → a rapid play/pause loop. Guarding
   // on audio.paused makes each direction idempotent and breaks the oscillation.
-  $: if (audio && curId) {
+  $: if (audio && curId && !switching && !recovering) {
     if ($player.playing && audio.paused) audio.play().catch(() => {});
     else if (!$player.playing && !audio.paused) audio.pause();
   }
@@ -605,6 +636,7 @@
   // Keep the queue topped up so Flow / radio play endlessly without a gap.
   let extending = false;
   async function ensureUpcoming() {
+    if (!get(online)) return; // radio/flow need the network — skip while offline
     const s = get(player);
     if (!s.autoplay || s.index < 0) return;
     if (s.index < s.queue.length - 3) return; // still buffered
@@ -636,7 +668,9 @@
   $: {
     const nextId =
       $player.index >= 0 ? $player.queue[$player.index + 1]?.deezer_id : null;
-    if (nextId && nextId !== prefetchedId) {
+    // Skip server-side pre-archiving when offline or when the next track is
+    // already on the device (it'll play from its local blob anyway).
+    if (nextId && nextId !== prefetchedId && $online && !isDownloaded(nextId)) {
       prefetchedId = nextId;
       api.download([nextId]).catch(() => {});
     }

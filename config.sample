@@ -173,6 +173,10 @@ scan_local = yes
 ; Pre-fetch & archive upcoming tracks (playlist/album in progress).
 preload = yes
 preload_count = 2
+; Parallel workers for explicit "download now" requests (whole album/playlist
+; pre-archiving, e.g. the web player's offline downloads). Higher = faster batch
+; downloads. Capped at 8. Default: 4
+download_workers = 4
 
 ; Auto-sync (runs from the web app — no cron needed). When a sync_user is set,
 ; a full sync runs on startup and then automatically; it refreshes playlists,

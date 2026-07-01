@@ -208,7 +208,12 @@ export async function undownloadTrack(track) {
   toasts.push("Téléchargement retiré");
 }
 
-// Download a set of tracks sequentially (fail-soft). Local-only and already
+// How many track downloads to run in parallel for a whole album/playlist. The
+// server archives each in its own worker (see download_workers), so a few
+// concurrent requests cut the wait dramatically without swamping the device.
+const DL_CONCURRENCY = 4;
+
+// Download a set of tracks (fail-soft), a few at a time. Local-only and already
 // cached tracks are skipped. Used for whole albums / playlists.
 export async function downloadTracks(tracks, quality = null) {
   const q = quality || get(downloadQuality);
@@ -220,10 +225,20 @@ export async function downloadTracks(tracks, quality = null) {
     return;
   }
   toasts.push(`Téléchargement de ${list.length} titre(s)…`);
+  // Bounded worker pool: DL_CONCURRENCY consumers pull from a shared cursor so
+  // several tracks archive + download at once instead of strictly one by one.
   let ok = 0;
-  for (const t of list) {
-    if (await downloadTrack(t, q)) ok++;
+  let cursor = 0;
+  async function worker() {
+    for (;;) {
+      const i = cursor++;
+      if (i >= list.length) return;
+      if (await downloadTrack(list[i], q)) ok++;
+    }
   }
+  await Promise.all(
+    Array.from({ length: Math.min(DL_CONCURRENCY, list.length) }, worker)
+  );
   toasts.push(
     ok === list.length ? `${ok} titre(s) téléchargé(s)` : `${ok}/${list.length} téléchargé(s)`,
     ok ? "info" : "error"

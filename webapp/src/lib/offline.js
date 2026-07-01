@@ -13,10 +13,11 @@ import {
   downloads,
   downloadsSize,
   downloading,
+  offlineCovers,
 } from "./stores.js";
 
 const DB_NAME = "nsupy-offline";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise = null;
 
 function openDB() {
@@ -27,6 +28,8 @@ function openDB() {
       const db = req.result;
       if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "id" });
       if (!db.objectStoreNames.contains("audio")) db.createObjectStore("audio", { keyPath: "id" });
+      // v2: cover art blobs, keyed by the remote cover URL the UI renders.
+      if (!db.objectStoreNames.contains("covers")) db.createObjectStore("covers", { keyPath: "url" });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -86,6 +89,81 @@ export async function loadOfflineIndex() {
 
 export function isDownloaded(id) {
   return get(downloads).has(String(id));
+}
+
+// -- offline cover art ------------------------------------------------------
+// Covers are archived on the server (embedded in the audio file). When a track
+// is downloaded we also fetch its archived cover (same-origin /api/cover/<id>,
+// no CDN/CORS) and store the blob keyed by the remote URL the UI renders, so
+// pochettes show in airplane mode. The URL->objectURL map is mirrored into a
+// store at startup for synchronous, no-flicker rendering in Cover.svelte.
+
+// Build object URLs for every cached cover and publish them. Call once at start.
+export async function loadCoverCache() {
+  try {
+    const db = await openDB();
+    const rows = await reqp(tx(db, "covers", "readonly").objectStore("covers").getAll());
+    const map = {};
+    for (const r of rows) {
+      if (r && r.url && r.blob) map[r.url] = URL.createObjectURL(r.blob);
+    }
+    offlineCovers.set(map);
+  } catch {
+    /* IndexedDB unavailable — covers just fall back to the network URL */
+  }
+}
+
+// Download + store the archived cover for a track (best-effort, idempotent).
+async function cacheCover(coverUrl, deezerId) {
+  if (!coverUrl) return;
+  if (get(offlineCovers)[coverUrl]) return; // already cached this session
+  try {
+    const db = await openDB();
+    const existing = await reqp(
+      tx(db, "covers", "readonly").objectStore("covers").get(coverUrl)
+    );
+    if (existing && existing.blob) {
+      offlineCovers.update((m) => ({ ...m, [coverUrl]: URL.createObjectURL(existing.blob) }));
+      return;
+    }
+    const res = await fetch(api.coverUrl(deezerId), { credentials: "include" });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    if (!blob || !blob.size) return;
+    const t = tx(db, "covers", "readwrite");
+    t.objectStore("covers").put({ url: coverUrl, blob });
+    await done(t);
+    offlineCovers.update((m) => ({ ...m, [coverUrl]: URL.createObjectURL(blob) }));
+  } catch {
+    /* best effort — a missing cover never fails the download */
+  }
+}
+
+// Drop a cover blob + its object URL if no remaining download still uses it.
+async function gcCover(coverUrl) {
+  if (!coverUrl) return;
+  try {
+    const db = await openDB();
+    const metas = await reqp(tx(db, "meta", "readonly").objectStore("meta").getAll());
+    if (metas.some((m) => m.track?.album?.cover === coverUrl)) return; // still used
+    const t = tx(db, "covers", "readwrite");
+    t.objectStore("covers").delete(coverUrl);
+    await done(t);
+    offlineCovers.update((m) => {
+      const n = { ...m };
+      if (n[coverUrl]) {
+        try {
+          URL.revokeObjectURL(n[coverUrl]);
+        } catch {
+          /* ignore */
+        }
+        delete n[coverUrl];
+      }
+      return n;
+    });
+  } catch {
+    /* best effort */
+  }
 }
 
 export async function getMeta(id) {
@@ -180,6 +258,8 @@ export async function downloadTrack(track, quality, onProgress = null) {
 
     downloads.update((s) => new Set(s).add(id));
     downloadsSize.update((n) => n + blob.size);
+    // Also cache the archived cover so the pochette shows offline.
+    await cacheCover(track.album?.cover, id);
     await enforceQuota(get(cacheLimit));
     return true;
   } catch (e) {
@@ -204,6 +284,7 @@ export async function removeTrack(id) {
       return n;
     });
     if (meta) downloadsSize.update((n) => Math.max(0, n - (meta.size || 0)));
+    await gcCover(meta?.track?.album?.cover); // drop the cover if now unused
     return true;
   } catch {
     return false;
@@ -213,12 +294,24 @@ export async function removeTrack(id) {
 export async function clearAll() {
   try {
     const db = await openDB();
-    const t = tx(db, ["meta", "audio"], "readwrite");
+    const t = tx(db, ["meta", "audio", "covers"], "readwrite");
     t.objectStore("meta").clear();
     t.objectStore("audio").clear();
+    t.objectStore("covers").clear();
     await done(t);
     downloads.set(new Set());
     downloadsSize.set(0);
+    // Revoke and drop all cached cover object URLs.
+    offlineCovers.update((m) => {
+      for (const u of Object.values(m)) {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {
+          /* ignore */
+        }
+      }
+      return {};
+    });
     return true;
   } catch {
     return false;

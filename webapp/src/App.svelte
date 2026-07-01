@@ -4,7 +4,7 @@
   import { user, authChecked, nowPlayingOpen, player } from "./lib/stores.js";
   import { api } from "./lib/api.js";
   import { initConnectivity, online } from "./lib/net.js";
-  import { loadOfflineIndex } from "./lib/offline.js";
+  import { loadOfflineIndex, loadCoverCache } from "./lib/offline.js";
   import { loadFavorites } from "./lib/actions.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
@@ -50,6 +50,7 @@
   onMount(async () => {
     initConnectivity();
     loadOfflineIndex();
+    loadCoverCache();
 
     // Airplane-mode launch: if we're offline but have a remembered session, boot
     // straight into the (downloaded) library instead of stalling on the login

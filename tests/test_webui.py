@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from supysonic.config import DefaultConfig
-from supysonic.db import StarredTrack, User, release_database
+from supysonic.db import Playlist, StarredTrack, Track, User, release_database
 from supysonic.managers.user import UserManager
 from supysonic.web import create_application
 
@@ -544,6 +544,139 @@ class WebUITestCase(unittest.TestCase):
         self.assertTrue(match[0]["local"])
         self.assertEqual(match[0]["deezer_id"], str(t.id))
         self.assertEqual(match[0]["artist"]["name"], "Local Band")
+
+    def _make_deezer_track(self, sng_id="1", title="Archived Song", archived=True):
+        """Create a DB row for a Deezer track (deezer_id set). When `archived`,
+        also drop a file at its archive path so it's playable without Deezer."""
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        t = library.upsert_track(
+            {
+                "SNG_ID": sng_id,
+                "SNG_TITLE": title,
+                "ART_NAME": "Archived Artist",
+                "ART_ID": "500",
+                "ALB_TITLE": "Archived Album",
+                "ALB_ID": "600",
+                "DURATION": "200",
+                "TRACK_NUMBER": "1",
+                "DISK_NUMBER": "1",
+            },
+            root,
+        )
+        if archived:
+            os.makedirs(os.path.dirname(t.path), exist_ok=True)
+            with open(t.path, "wb") as fh:
+                fh.write(b"flacdata")
+        return t
+
+    def test_search_includes_archived_deezer_tracks(self):
+        # A downloaded (archived) Deezer track must be findable locally — even
+        # if Deezer vanishes — and must not be listed twice alongside the live
+        # Deezer search hit for the same id.
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        data = self.client.get("/api/search?q=Archived").get_json()
+        match = [x for x in data["tracks"] if x["deezer_id"] == "1"]
+        self.assertEqual(len(match), 1)  # deduped against MockApi.search (id 1)
+        self.assertEqual(match[0]["title"], "Archived Song")
+        self.assertFalse(match[0].get("local"))  # a Deezer track, not an upload
+
+    def test_search_excludes_unarchived_deezer_tracks(self):
+        # An imported-but-not-yet-archived row has no file on disk, so it can't
+        # play without Deezer — keep it out of the local (offline) results.
+        self._login()
+        self._make_deezer_track(sng_id="42", title="Ghost Only", archived=False)
+        data = self.client.get("/api/search?q=Ghost").get_json()
+        self.assertFalse(any(x["deezer_id"] == "42" for x in data["tracks"]))
+
+    def _deezer_down(self):
+        """Simulate a Deezer outage: the provider stays set but every call fails,
+        so routes must fall back to the local DB (the 'Deezer disappeared' case)."""
+
+        class Boom:
+            def __getattr__(self, _name):
+                def f(*a, **k):
+                    raise RuntimeError("deezer unreachable")
+
+                return f
+
+        self.app.deezer._dz = Boom()
+
+    def test_album_offline_from_db(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self._deezer_down()
+        rv = self.client.get("/api/album/600")  # ALB_ID from _make_deezer_track
+        self.assertEqual(rv.status_code, 200)
+        data = rv.get_json()
+        self.assertEqual(data["album"]["title"], "Archived Album")
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1"])
+
+    def test_artist_offline_from_db(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self._deezer_down()
+        rv = self.client.get("/api/artist/500")  # ART_ID from _make_deezer_track
+        self.assertEqual(rv.status_code, 200)
+        data = rv.get_json()
+        self.assertEqual(data["artist"]["name"], "Archived Artist")
+        self.assertIn("600", [a["deezer_id"] for a in data["albums"]])
+
+    def test_mix_offline_from_db(self):
+        from supysonic.deezer import ids as dz_ids
+
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        pl = Playlist.create(
+            id=dz_ids.playlist_uuid("smart:new-releases"),
+            user=User.get(name="alice"),
+            name="Deezer · Nouveautés",
+        )
+        pl.add(Track.get(Track.deezer_id == "1"))
+        self._deezer_down()
+        rv = self.client.get("/api/smarttracklist/new-releases")
+        self.assertEqual(rv.status_code, 200)
+        data = rv.get_json()
+        self.assertEqual(data["playlist"]["title"], "Nouveautés")
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1"])
+
+    def test_favorites_offline_from_db(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        # Star it while "online" (goes through the DB either way).
+        self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        self._deezer_down()
+        rv = self.client.get("/api/me/favorites")
+        self.assertEqual(rv.status_code, 200)  # must not 500 on a Deezer outage
+        self.assertIn("1", [t["deezer_id"] for t in rv.get_json()["tracks"]])
+        ids = self.client.get("/api/me/favorite-ids").get_json()["ids"]
+        self.assertIn("1", ids)
+
+    def test_favorite_known_track_offline(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self._deezer_down()
+        rv = self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        self.assertEqual(rv.status_code, 200)
+        self.assertTrue(rv.get_json()["favorite"])
+
+    def test_cover_by_deezer_id_from_archive(self):
+        # /api/cover/<deezer_id> resolves the archived track and serves its cover
+        # same-origin (so the web player can cache it offline). Pre-seed the cover
+        # cache to exercise routing + serving without a real embedded image.
+        self._login()
+        t = self._make_deezer_track(sng_id="1", archived=True)
+        with self.app.app_context():
+            self.app.cache.set(f"localcover-{t.id}", b"JPEGDATA")
+        rv = self.client.get("/api/cover/1")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_data(), b"JPEGDATA")
+
+    def test_cover_unknown_id_404(self):
+        self._login()
+        self.assertEqual(self.client.get("/api/cover/999999").status_code, 404)
 
     def test_stream_local_track_by_uuid(self):
         self._login()
