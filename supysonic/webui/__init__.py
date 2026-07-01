@@ -1642,15 +1642,9 @@ def _opus_generator(flac_path, bitrate):
         proc.wait()
 
 
-@webapi.route("/localcover/<track_id>")
-@login_required
-def local_cover(track_id):
-    """Cover art for a local (imported) track: embedded image, else folder art."""
-    try:
-        track = Track[uuid.UUID(str(track_id))]
-    except (ValueError, Track.DoesNotExist):
-        return jsonify({"error": "not found"}), 404
-
+def _serve_embedded_cover(track):
+    """Serve a track's archived cover: the image embedded in the audio file
+    (tagged at archive time), else a cover file in its folder. Cached on disk."""
     cache = current_app.cache
     key = f"localcover-{track.id}"
     if cache.has(key):
@@ -1681,6 +1675,38 @@ def local_cover(track_id):
     except Exception:
         pass
     return jsonify({"error": "no cover"}), 404
+
+
+@webapi.route("/localcover/<track_id>")
+@login_required
+def local_cover(track_id):
+    """Cover art for a local (imported) track: embedded image, else folder art."""
+    try:
+        track = Track[uuid.UUID(str(track_id))]
+    except (ValueError, Track.DoesNotExist):
+        return jsonify({"error": "not found"}), 404
+    return _serve_embedded_cover(track)
+
+
+@webapi.route("/cover/<cid>")
+@login_required
+def cover(cid):
+    """Archived cover art for ANY track — a Deezer numeric id or a local UUID —
+    served same-origin from the file's embedded image. Lets the web player cache
+    a downloaded track's cover for offline playback without hitting the Deezer
+    CDN (and without CORS). 404 until the track is archived (has a file)."""
+    from ..deezer import archive
+
+    if _valid_id(cid):
+        track = archive.find_local_track(cid)
+    else:
+        try:
+            track = Track[uuid.UUID(str(cid))]
+        except (ValueError, Track.DoesNotExist):
+            track = None
+    if track is None or not os.path.isfile(track.path):
+        return jsonify({"error": "not found"}), 404
+    return _serve_embedded_cover(track)
 
 
 @webapi.route("/stream/<deezer_id>")

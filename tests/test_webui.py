@@ -662,6 +662,22 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(rv.status_code, 200)
         self.assertTrue(rv.get_json()["favorite"])
 
+    def test_cover_by_deezer_id_from_archive(self):
+        # /api/cover/<deezer_id> resolves the archived track and serves its cover
+        # same-origin (so the web player can cache it offline). Pre-seed the cover
+        # cache to exercise routing + serving without a real embedded image.
+        self._login()
+        t = self._make_deezer_track(sng_id="1", archived=True)
+        with self.app.app_context():
+            self.app.cache.set(f"localcover-{t.id}", b"JPEGDATA")
+        rv = self.client.get("/api/cover/1")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_data(), b"JPEGDATA")
+
+    def test_cover_unknown_id_404(self):
+        self._login()
+        self.assertEqual(self.client.get("/api/cover/999999").status_code, 404)
+
     def test_stream_local_track_by_uuid(self):
         self._login()
         t = self._make_local_track()

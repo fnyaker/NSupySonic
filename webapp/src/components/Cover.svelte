@@ -2,6 +2,7 @@
   import { afterUpdate } from "svelte";
   import Icon from "./Icon.svelte";
   import { loResCover } from "../lib/format.js";
+  import { offlineCovers } from "../lib/stores.js";
   export let src = null;
   export let alt = "";
   export let round = false;
@@ -10,13 +11,16 @@
   let loaded = false;
   let failed = false;
   let img;
+  // Prefer a downloaded cover blob (plays/paints in airplane mode) over the
+  // remote URL. `offlineCovers` maps the remote URL to a local object URL.
+  $: resolved = (src && $offlineCovers[src]) || src;
   // A few-KB downscaled version of the same cover, shown blurred underneath
-  // until the full-size art finishes loading (null for non-Deezer covers).
-  $: low = loResCover(src);
+  // until the full-size art finishes loading (null for a local blob / non-Deezer).
+  $: low = loResCover(resolved);
   // Reset the fade + error state when the source changes (recycled rows, or an
   // offline→online swap). On error we fall back to the placeholder instead of a
-  // broken image — covers are remote (Deezer CDN), so they fail in airplane mode.
-  $: src, ((loaded = false), (failed = false));
+  // broken image — remote covers fail in airplane mode.
+  $: resolved, ((loaded = false), (failed = false));
   // …but if the new image is already cached, mark it loaded before the browser
   // paints, so swapping to an already-seen cover doesn't flash (no re-fade).
   afterUpdate(() => {
@@ -29,13 +33,13 @@
   class:round
   style={size ? `width:${size}px;height:${size}px` : ""}
 >
-  {#if src && !failed}
+  {#if resolved && !failed}
     {#if low && !loaded}
       <img class="low" src={low} alt="" aria-hidden="true" decoding="async" />
     {/if}
     <img
       bind:this={img}
-      {src}
+      src={resolved}
       {alt}
       loading="lazy"
       decoding="async"

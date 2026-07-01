@@ -146,4 +146,8 @@ export const api = {
   // playback (returned as a URL for the <audio> element)
   streamUrl: (id, quality) =>
     BASE + "/stream/" + id + (quality && quality !== "FLAC" ? "?q=" + quality : ""),
+
+  // archived cover art (same-origin) for any track id — used to cache pochettes
+  // for offline playback.
+  coverUrl: (id) => BASE + "/cover/" + id,
 };
