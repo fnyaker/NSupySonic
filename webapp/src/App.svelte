@@ -45,6 +45,9 @@
       return null;
     }
   }
+  // Snapshot the persisted session at module init — before any reactive block
+  // could touch localStorage — so the offline boot always sees it.
+  const bootSaved = savedUser();
 
   let bootedOffline = false;
 
@@ -57,7 +60,7 @@
     // Airplane-mode launch: if we're offline but have a remembered session, boot
     // straight into the (downloaded) library instead of stalling on the login
     // screen; re-validate once we're back online.
-    const saved = savedUser();
+    const saved = bootSaved;
     if (saved && typeof navigator !== "undefined" && !navigator.onLine) {
       user.set(saved);
       bootedOffline = true;
@@ -82,12 +85,18 @@
     }
   });
 
-  // Persist / clear the session so an offline launch can trust it.
-  $: try {
-    if ($user) localStorage.setItem(SAVED_USER, JSON.stringify($user));
-    else localStorage.removeItem(SAVED_USER);
-  } catch {
-    /* ignore */
+  // Persist / clear the session so an offline launch can trust it. Guard on
+  // authChecked: this reactive block runs once at init with $user still null
+  // (before onMount), and without the guard it would wipe the saved session
+  // right before onMount reads it — so an offline launch fell back to the login
+  // screen. Only touch storage once auth has actually been resolved.
+  $: if ($authChecked) {
+    try {
+      if ($user) localStorage.setItem(SAVED_USER, JSON.stringify($user));
+      else localStorage.removeItem(SAVED_USER);
+    } catch {
+      /* ignore */
+    }
   }
 
   // Reload favorites whenever a user logs in.
