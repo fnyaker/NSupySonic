@@ -10,22 +10,35 @@
 
   let loaded = false;
   let failed = false;
+  let usingBlob = false;
   let img;
-  // Prefer a downloaded cover blob (plays/paints in airplane mode) over the
-  // remote URL. `offlineCovers` maps the remote URL to a local object URL.
-  $: resolved = (src && $offlineCovers[src]) || src;
+  // Render the remote URL normally (fast, browser/SW-cached) — the downloaded
+  // cover blob is only a FALLBACK for when the remote fails to load (airplane
+  // mode). This keeps covers showing online while still working offline.
+  $: blob = src ? $offlineCovers[src] : null;
+  $: shown = usingBlob && blob ? blob : src;
   // A few-KB downscaled version of the same cover, shown blurred underneath
   // until the full-size art finishes loading (null for a local blob / non-Deezer).
-  $: low = loResCover(resolved);
-  // Reset the fade + error state when the source changes (recycled rows, or an
-  // offline→online swap). On error we fall back to the placeholder instead of a
-  // broken image — remote covers fail in airplane mode.
-  $: resolved, ((loaded = false), (failed = false));
+  $: low = loResCover(shown);
+  // Reset the fade + fallback state when the source changes (recycled rows, or
+  // an offline↔online swap).
+  $: src, ((loaded = false), (failed = false), (usingBlob = false));
   // …but if the new image is already cached, mark it loaded before the browser
   // paints, so swapping to an already-seen cover doesn't flash (no re-fade).
   afterUpdate(() => {
     if (!loaded && img && img.complete && img.naturalWidth > 0) loaded = true;
   });
+
+  // The image failed to load: first try the downloaded blob (offline), and only
+  // then fall back to the placeholder — never leave a broken image.
+  function onError() {
+    if (!usingBlob && blob) {
+      usingBlob = true;
+      loaded = false;
+    } else {
+      failed = true;
+    }
+  }
 </script>
 
 <div
@@ -33,19 +46,19 @@
   class:round
   style={size ? `width:${size}px;height:${size}px` : ""}
 >
-  {#if resolved && !failed}
+  {#if shown && !failed}
     {#if low && !loaded}
       <img class="low" src={low} alt="" aria-hidden="true" decoding="async" />
     {/if}
     <img
       bind:this={img}
-      src={resolved}
+      src={shown}
       {alt}
       loading="lazy"
       decoding="async"
       class:loaded
       on:load={() => (loaded = true)}
-      on:error={() => (failed = true)}
+      on:error={onError}
     />
   {:else}
     <div class="ph"><Icon name="music" size={28} /></div>
