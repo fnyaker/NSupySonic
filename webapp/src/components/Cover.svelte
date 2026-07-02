@@ -1,7 +1,7 @@
 <script>
   import { afterUpdate } from "svelte";
   import Icon from "./Icon.svelte";
-  import { loResCover } from "../lib/format.js";
+  import { loResCover, coverKey } from "../lib/format.js";
   import { offlineCovers } from "../lib/stores.js";
   export let src = null;
   export let alt = "";
@@ -15,7 +15,7 @@
   // Render the remote URL normally (fast, browser/SW-cached) — the downloaded
   // cover blob is only a FALLBACK for when the remote fails to load (airplane
   // mode). This keeps covers showing online while still working offline.
-  $: blob = src ? $offlineCovers[src] : null;
+  $: blob = src ? $offlineCovers[coverKey(src)] : null;
   $: shown = usingBlob && blob ? blob : src;
   // A few-KB downscaled version of the same cover, shown blurred underneath
   // until the full-size art finishes loading (null for a local blob / non-Deezer).

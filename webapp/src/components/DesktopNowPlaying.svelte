@@ -14,9 +14,14 @@
     seekTo,
     buffered,
     openMenu,
+    offlineCovers,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
-  import { duration as fmtDuration, hiResCover } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
+
+  // Background art resolves through the offline cache so it shows in airplane
+  // mode (CSS backgrounds can't fall back via Cover.svelte).
+  $: bgSrc = resolveCover($offlineCovers, $current?.album?.cover) || "";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
@@ -106,7 +111,7 @@
 </script>
 
 <div class="d" transition:fade={{ duration: 150 }}>
-  <div class="bg" style={`background-image:url(${$current.album?.cover || ""})`}></div>
+  <div class="bg" style={`background-image:url(${bgSrc})`}></div>
   <div class="scrim"></div>
 
   <header>
@@ -126,7 +131,7 @@
       </div>
 
       <div class="cover">
-        <div class="glow" style={`background-image:url(${$current.album?.cover || ""})`}></div>
+        <div class="glow" style={`background-image:url(${bgSrc})`}></div>
         {#key $current.deezer_id}
           <div class="cover-fade" in:fade={{ duration: 260 }} out:fade={{ duration: 260 }}>
             <Cover src={hiResCover($current.album?.cover, 1500)} alt={$current.title} />
