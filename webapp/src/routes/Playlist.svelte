@@ -33,19 +33,26 @@
   $: editable = !!data?.playlist?.editable && $isAdmin;
   $: existingIds = new Set((data?.tracks || []).map((t) => String(t.deezer_id)));
 
+  // Sequence guard: a delayed earlier response must not overwrite the page
+  // after a quick navigation to another playlist.
+  let loadSeq = 0;
   async function load(plId) {
+    const mine = ++loadSeq;
     loading = true;
     data = null;
     editing = false;
     editingMeta = false;
     showAdd = false;
     try {
-      data = await api.playlist(plId);
-      fav = !!data.playlist?.is_favorite;
+      const r = await api.playlist(plId);
+      if (mine === loadSeq) {
+        data = r;
+        fav = !!r.playlist?.is_favorite;
+      }
     } catch {
-      data = null;
+      if (mine === loadSeq) data = null;
     }
-    loading = false;
+    if (mine === loadSeq) loading = false;
   }
 
   function playAll() {

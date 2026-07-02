@@ -22,15 +22,20 @@
     load(id);
   }
 
+  // Sequence guard: navigating quickly between albums must not let an EARLIER
+  // response (delayed by the network / offline retries) overwrite the page.
+  let loadSeq = 0;
   async function load(albumId) {
+    const mine = ++loadSeq;
     loading = true;
     data = null;
     try {
-      data = await api.album(albumId);
+      const r = await api.album(albumId);
+      if (mine === loadSeq) data = r;
     } catch {
-      data = null;
+      if (mine === loadSeq) data = null;
     }
-    loading = false;
+    if (mine === loadSeq) loading = false;
   }
 
   function playAll() {

@@ -1,14 +1,23 @@
 <script>
   import { dominantColor, rgb, darken } from "../lib/color.js";
+  import { resolveCover } from "../lib/format.js";
+  import { offlineCovers } from "../lib/stores.js";
 
   export let cover = null;
 
   let bg = "linear-gradient(180deg, #3a2a55, var(--bg) 70%)";
+  let colorSeq = 0;
 
-  $: updateColor(cover);
+  // Resolve through the offline cover cache so the gradient still gets a real
+  // color in airplane mode (a downloaded blob canvas isn't CORS-tainted).
+  $: updateColor(resolveCover($offlineCovers, cover));
 
   async function updateColor(url) {
+    // Sequence guard: on a cover change, a slower earlier extraction must not
+    // overwrite the newer color.
+    const mine = ++colorSeq;
     const c = await dominantColor(url);
+    if (mine !== colorSeq) return;
     bg = `linear-gradient(180deg, ${rgb(c, 0.9)} 0%, ${rgb(darken(c, 0.55), 1)} 55%, var(--bg) 100%)`;
   }
 </script>

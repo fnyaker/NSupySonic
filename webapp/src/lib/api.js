@@ -30,7 +30,13 @@ function refreshInBackground(path) {
     .catch(() => {});
 }
 
-async function req(path, opts = {}, attempt = 0) {
+// `wasOnline` records whether we believed the network was up when the FIRST
+// attempt started, and is threaded through the retries: a blip that began
+// online gets the full backoff budget, but a request started while already
+// known-offline fails fast (retrying into a dead network just burned ~12s per
+// call — one per track change for lyrics, for instance).
+async function req(path, opts = {}, attempt = 0, wasOnline = null) {
+  if (wasOnline === null) wasOnline = get(online);
   const method = (opts.method || "GET").toUpperCase();
   // Only GETs are safe to auto-retry: replaying a POST/PUT/DELETE could double
   // a mutation. Mutations fail fast and let the optimistic UI roll back.
@@ -69,9 +75,9 @@ async function req(path, opts = {}, attempt = 0) {
     // navigator.onLine === false is definitive (airplane mode): retries are
     // pointless, fail fast so the UI can settle into its offline state.
     const hardOffline = typeof navigator !== "undefined" && navigator.onLine === false;
-    if (retriable && !hardOffline && attempt < 3) {
+    if (retriable && !hardOffline && wasOnline && attempt < 3) {
       await sleep(backoff(attempt));
-      return req(path, opts, attempt + 1);
+      return req(path, opts, attempt + 1, wasOnline);
     }
     throw { status: 0, message: "network", offline: true };
   }
@@ -86,7 +92,7 @@ async function req(path, opts = {}, attempt = 0) {
   if (!res.ok) {
     if (retriable && TRANSIENT.has(res.status) && attempt < 3) {
       await sleep(backoff(attempt));
-      return req(path, opts, attempt + 1);
+      return req(path, opts, attempt + 1, true); // the server IS reachable
     }
     let message = res.statusText;
     try {

@@ -1,5 +1,4 @@
 <script>
-  import { onMount } from "svelte";
   import { link, push } from "svelte-spa-router";
   import { location } from "../lib/router.js";
   import { user, isAdmin, syncing } from "../lib/stores.js";
@@ -10,10 +9,14 @@
   let q = "";
   let playlists = [];
 
-  onMount(async () => {
-    // Deezer playlists belong to the account owner — guests don't see them.
+  // Deezer playlists belong to the account owner — guests don't see them.
+  // Refreshed on every navigation so a rename/delete/create done from a
+  // playlist page shows up here; cheap, since userPlaylists() returns its
+  // shared cache untouched unless something invalidated it.
+  $: $location, refreshPlaylists();
+  async function refreshPlaylists() {
     if ($isAdmin) playlists = await userPlaylists();
-  });
+  }
 
   function submitSearch(e) {
     e.preventDefault();

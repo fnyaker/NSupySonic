@@ -45,6 +45,9 @@ const CACHE_PREFIXES = [
   "/smarttracklist/",
   "/home",
   "/recommendations",
+  // Lyrics are fetched on every track change — caching them makes the Paroles
+  // panel work offline and skips the doomed refetch for known tracks.
+  "/lyrics/",
 ];
 
 export function isCacheable(path) {
