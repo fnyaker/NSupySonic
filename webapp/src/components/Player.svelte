@@ -15,13 +15,14 @@
     openMenu,
     toasts,
     prefetchEnabled,
+    offlineCovers,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
-  import { duration as fmtDuration } from "../lib/format.js";
+  import { duration as fmtDuration, resolveCover } from "../lib/format.js";
   import { registerSource, resumeAudio } from "../lib/visualizer.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
@@ -44,6 +45,10 @@
   // Last position we actually saw progress at, so we can restore it if the
   // browser silently rewinds the element to 0 after a long suspend (mobile lock).
   let lastKnownTime = 0;
+  // True from the moment a track change starts until its new source is attached.
+  // The outgoing element can still fire `timeupdate` during that (async) gap, so
+  // this flag makes onTime ignore those stale, previous-track positions.
+  let loadingTrack = false;
 
   function makeEl() {
     const el = new Audio();
@@ -66,7 +71,9 @@
   onDestroy(() => {
     stopWatchdog();
     cancelPauseMirror();
+    cancelPendingSeek();
     clearTimeout(prefetchTimer);
+    clearTimeout(archiveTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     releaseWakeLock();
     setBlobUrl(null); // revoke any live object URL
@@ -140,7 +147,7 @@
     stopWatchdog();
     lastAdvance = Date.now();
     watchdog = setInterval(() => {
-      if (!audio || switching || recovering) return;
+      if (!audio || switching || recovering || loadingTrack) return;
       const s = get(player);
       if (!s.playing || audio.paused) return; // not trying to play / cleanly paused
       if (audio.currentTime !== lastPos) {
@@ -160,6 +167,7 @@
 
   function onElError(e) {
     if (e && e.target !== audio) return;
+    if (loadingTrack) return; // stale error from the outgoing source
     if (get(player).playing) recoverPlayback();
   }
   function onElStall(e) {
@@ -171,7 +179,7 @@
   // permanently broken stream can't spin in a reload loop.
   function recoverPlayback() {
     const cur = get(current);
-    if (!cur || !audio || switching || recovering) return;
+    if (!cur || !audio || switching || recovering || loadingTrack) return;
     // Network down: don't burn the retry budget or skip the track. Park it and
     // let the reconnect handler resume from the same spot. A downloaded track
     // plays from a local blob, so the network is irrelevant — recover it in
@@ -190,6 +198,9 @@
       audio.currentTime > 0.5
         ? audio.currentTime
         : lastKnownTime || get(player).currentTime || 0;
+    // The element may still carry preload=none from a paused restore — with it,
+    // load() defers fetching and loadedmetadata below would never fire.
+    audio.preload = "auto";
     audio.src =
       curIsBlob && curBlobUrl ? curBlobUrl : api.streamUrl(cur.deezer_id, curQ);
     audio.load();
@@ -289,11 +300,23 @@
 
   // Play telemetry: when the track changes, report how long the previous one
   // was played (feeds Deezer recommendations; server no-ops unless enabled).
+  // Only time actually spent PLAYING counts — wall time used to include pauses
+  // (an hour paused reported as an hour listened).
   let listenId = null;
-  let listenStart = 0;
+  let listenAccum = 0; // ms played so far for the current track
+  let listenMark = 0; // timestamp playback last resumed at (0 = paused)
+  $: trackListenState($player.playing);
+  function trackListenState(p) {
+    if (p && !listenMark) listenMark = Date.now();
+    else if (!p && listenMark) {
+      listenAccum += Date.now() - listenMark;
+      listenMark = 0;
+    }
+  }
   function flushListen(nextId = null) {
     if (listenId && listenId !== nextId) {
-      const listened = Math.max(0, Math.round((Date.now() - listenStart) / 1000));
+      const played = listenAccum + (listenMark ? Date.now() - listenMark : 0);
+      const listened = Math.max(0, Math.round(played / 1000));
       const s = get(player);
       api.reportListen({
         deezer_id: listenId,
@@ -304,13 +327,16 @@
       });
     }
     listenId = nextId;
-    listenStart = Date.now();
+    listenAccum = 0;
+    listenMark = get(player).playing ? Date.now() : 0;
   }
 
-  // Seek requests from other views (e.g. the immersive player).
+  // Seek requests from other views (e.g. the immersive player). Applied via
+  // safeSeek so a not-yet-seekable element defers instead of throwing.
   $: if (audio && $seekTo != null) {
-    audio.currentTime = $seekTo;
+    const t = $seekTo;
     seekTo.set(null);
+    safeSeek(t);
   }
 
   $: fav = $current && $favorites.has(String($current.deezer_id));
@@ -347,10 +373,11 @@
       }
     }
     // 2) The playback cache (prefetched next track) — check before the network
-    //    so a drop right at the track change doesn't stall playback.
+    //    so a drop right at the track change doesn't stall playback. The cached
+    //    bitrate must match the asked quality while online (else stream fresh).
     if (isCached(deezerId)) {
       try {
-        const u = await getCachedAudioURL(deezerId);
+        const u = await getCachedAudioURL(deezerId, q);
         if (u) return { url: u, blob: true };
       } catch {
         /* fall back to the network */
@@ -381,7 +408,13 @@
     lastKnownTime = resumeAt;
     recoverAttempts = 0; // fresh track, fresh recovery budget
     cancelPauseMirror(); // drop a deferred pause from the outgoing track
+    cancelPendingSeek(); // a stale seek must never land on this new track
     buffered.set(0); // new source -> nothing loaded yet
+    // Reset the seek bar NOW — before the (possibly async) source resolve — so a
+    // skip never leaves the outgoing track's position/duration on screen, and
+    // gate onTime so a late timeupdate from the old source can't write it back.
+    loadingTrack = true;
+    player.setProgress(resumeAt, track.duration || 0);
 
     const src = await resolveSource(track.deezer_id, curQ);
     // A newer load may have superseded us while reading the blob from IndexedDB.
@@ -393,12 +426,17 @@
           /* ignore */
         }
       }
-      return;
+      return; // the superseding load owns loadingTrack from here
     }
     setBlobUrl(src.blob ? src.url : null);
     curIsBlob = src.blob;
+    // A paused session-restore boot must not buffer audio in the background —
+    // that silently burned data on EVERY app launch. preload=none defers the
+    // fetch until the user actually presses play (play() triggers the load).
+    audio.preload = firstLoad && !get(player).playing ? "none" : "auto";
     audio.src = src.url;
     audio.load();
+    loadingTrack = false; // new source attached — accept its timeupdates again
     if (src.blob) touch(track.deezer_id); // bump LRU recency
 
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
@@ -416,6 +454,7 @@
   function restartCurrent() {
     curSeq = get(player).seq;
     lastKnownTime = 0;
+    cancelPendingSeek(); // a pending resume-seek would undo the restart
     try {
       audio.currentTime = 0;
     } catch {
@@ -469,11 +508,19 @@
     const cur = get(current);
     const incoming = els.find((e) => e !== audio);
     if (!audio || !cur || !incoming) return;
+    // No network: the preload below could never succeed. Keep the current
+    // stream playing and adopt the new quality for the next load — also aligns
+    // curQ so the reactive block doesn't re-trigger this on every store change.
+    if (!get(online)) {
+      curQ = newQ;
+      return;
+    }
     switching = true;
     const pos = audio.currentTime;
     const wasPlaying = !audio.paused && get(player).playing;
     incoming.volume = audio.volume;
     incoming.muted = audio.muted;
+    incoming.preload = "auto"; // may carry preload=none from a paused restore
     incoming.src = api.streamUrl(cur.deezer_id, newQ);
     incoming.load();
 
@@ -486,12 +533,34 @@
         /* not seekable yet */
       }
     };
-    const swap = () => {
-      if (done) return;
-      done = true;
+    const cleanup = () => {
       clearTimeout(failTimer);
       incoming.removeEventListener("loadedmetadata", onMeta);
       incoming.removeEventListener("canplay", swap);
+      incoming.removeEventListener("error", abort);
+    };
+    // The preload failed (404/network) or stalled past the deadline: DON'T hand
+    // playback to a dead element (that used to kill the audio outright) — keep
+    // playing at the old bitrate and apply the new quality on the next load.
+    const abort = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      try {
+        incoming.pause();
+        incoming.removeAttribute("src");
+        incoming.load();
+      } catch {
+        /* ignore */
+      }
+      curQ = newQ; // next load uses it; avoids an instant retry loop
+      switching = false;
+      toasts.push("Qualité appliquée au prochain titre", "info");
+    };
+    const swap = () => {
+      if (done) return;
+      done = true;
+      cleanup();
       // Bail if the track changed underneath us while preloading.
       if (get(current)?.deezer_id !== cur.deezer_id) {
         switching = false;
@@ -519,22 +588,37 @@
     };
     incoming.addEventListener("loadedmetadata", onMeta);
     incoming.addEventListener("canplay", swap); // enough buffered at `pos` to start
-    // Safety net so a stalled preload can't lock the quality picker forever.
-    failTimer = setTimeout(swap, 8000);
+    incoming.addEventListener("error", abort); // dead source -> abort, don't swap
+    // Deadline: a preload that can't get ready in time is abandoned (it used to
+    // force-swap onto a possibly broken element and kill playback).
+    failTimer = setTimeout(abort, 8000);
   }
 
   // Apply a target time once the freshly-loaded source can seek. Cached/archived
   // files honour range requests; a live transcode may ignore it (best-effort).
+  // The armed listener is tracked so a track change can CANCEL it — otherwise a
+  // pending seek (e.g. the session-restore position) fires on the NEXT track's
+  // metadata and teleports it to the old position (possibly near its end).
+  let pendingSeek = null; // { el, fn } of the armed loadedmetadata handler
+  function cancelPendingSeek() {
+    if (pendingSeek) {
+      pendingSeek.el.removeEventListener("loadedmetadata", pendingSeek.fn);
+      pendingSeek = null;
+    }
+  }
   function seekOnceLoaded(t) {
+    cancelPendingSeek();
+    const el = audio;
     const apply = () => {
       try {
-        audio.currentTime = t;
+        el.currentTime = t;
       } catch {
         /* not seekable yet */
       }
-      audio.removeEventListener("loadedmetadata", apply);
+      cancelPendingSeek();
     };
-    audio.addEventListener("loadedmetadata", apply);
+    pendingSeek = { el, fn: apply };
+    el.addEventListener("loadedmetadata", apply);
   }
 
   // Reflect transport state onto the element, but ONLY on a real mismatch.
@@ -545,8 +629,12 @@
   // unconditional play() gets cut off again → a rapid play/pause loop. Guarding
   // on audio.paused makes each direction idempotent and breaks the oscillation.
   $: if (audio && curId && !switching && !recovering) {
-    if ($player.playing && audio.paused) audio.play().catch(() => {});
-    else if (!$player.playing && !audio.paused) audio.pause();
+    if ($player.playing && audio.paused) {
+      // Playback starts: restore eager buffering if the paused-restore load
+      // deferred it (play() fetches regardless, but rebuffers stay eager too).
+      if (audio.preload !== "auto") audio.preload = "auto";
+      audio.play().catch(() => {});
+    } else if (!$player.playing && !audio.paused) audio.pause();
   }
   $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
 
@@ -556,6 +644,7 @@
 
   function onTime(e) {
     if (e && e.target !== audio) return; // ignore the idle/preloading element
+    if (loadingTrack) return; // a track change is mid-flight — position is stale
     // Healthy progress: clear the recovery budget so a later, unrelated stall
     // gets its full retry allowance again.
     if (recoverAttempts && audio.currentTime > lastPos) recoverAttempts = 0;
@@ -617,6 +706,9 @@
 
   async function onEnded(e) {
     if (e && e.target !== audio) return; // ignore the idle/preloading element
+    // A track change is mid-flight: this `ended` comes from the OUTGOING source
+    // finishing during the load gap — acting on it would double-advance.
+    if (loadingTrack) return;
     const s = get(player);
     const cur = $current;
     if (s.repeat === "one") {
@@ -681,11 +773,22 @@
   // re-tune. Keeping it to a single track avoids hammering the archiver.
   let prefetchedId = null;
   let prefetchTimer = null;
+  let archiveTimer = null;
+  // Debounce before asking the server to pre-archive the next track. Without
+  // it, zapping through a playlist queued one FLAC archive job PER SKIP on the
+  // server — only a "next" that survives the debounce gets archived.
+  const ARCHIVE_DELAY = 4000;
   // Delay before pulling the next track's audio into the on-device cache. It
   // gives the CURRENT track's buffering first claim on the bandwidth, and it
   // means skipping through a playlist doesn't fire a full audio download per
   // skip — only a "next" that survives the delay gets fetched.
   const PREFETCH_DELAY = 12000;
+  // Still the upcoming track at fire time? A skip meanwhile changed `next`
+  // (and rescheduled us).
+  function stillNext(id) {
+    const s = get(player);
+    return s.index >= 0 && s.queue[s.index + 1]?.deezer_id === id;
+  }
   $: {
     const nextTrack =
       $player.index >= 0 ? $player.queue[$player.index + 1] : null;
@@ -694,14 +797,14 @@
     // play from its local blob anyway).
     if (nextId && nextId !== prefetchedId && $online && !isDownloaded(nextId)) {
       prefetchedId = nextId;
-      api.download([nextId]).catch(() => {}); // server-side pre-archive (cheap call)
+      clearTimeout(archiveTimer);
+      archiveTimer = setTimeout(() => {
+        if (stillNext(nextId) && get(online))
+          api.download([nextId]).catch(() => {}); // server-side pre-archive
+      }, ARCHIVE_DELAY);
       clearTimeout(prefetchTimer);
       prefetchTimer = setTimeout(() => {
-        // Re-check at fire time: still the upcoming track, still online, still
-        // wanted. A skip meanwhile changed `next` (and rescheduled us).
-        const s = get(player);
-        const stillNext = s.index >= 0 && s.queue[s.index + 1]?.deezer_id === nextId;
-        if (stillNext && get(online) && get(prefetchEnabled))
+        if (stillNext(nextId) && get(online) && get(prefetchEnabled))
           prefetchTrack(nextTrack, get(quality)).catch(() => {});
       }, PREFETCH_DELAY);
     }
@@ -723,13 +826,14 @@
   function updateMediaSession(track) {
     if (!("mediaSession" in navigator) || !track) return;
     try {
+      // Resolve through the offline cover cache so the OS notification art
+      // shows in airplane mode too (it used to rely on the HTTP cache alone).
+      const art = resolveCover(get(offlineCovers), track.album?.cover);
       navigator.mediaSession.metadata = new MediaMetadata({
         title: track.title,
         artist: track.artist?.name,
         album: track.album?.title,
-        artwork: track.album?.cover
-          ? [{ src: track.album.cover, sizes: "500x500", type: "image/jpeg" }]
-          : [],
+        artwork: art ? [{ src: art, sizes: "500x500", type: "image/jpeg" }] : [],
       });
       navigator.mediaSession.setActionHandler("play", () => player.play());
       navigator.mediaSession.setActionHandler("pause", () => player.pause());

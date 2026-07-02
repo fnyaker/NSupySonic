@@ -68,17 +68,40 @@
     };
   });
 
-  // Background crossfade: each new cover is stacked ON TOP of the previous one
-  // (which stays fully opaque) and fades in, then the old layers are dropped.
-  // No opacity dip -> the page behind never shows through.
+  // Background crossfade: each new cover is PRELOADED first and only stacked
+  // once decoded, ON TOP of the previous one (which stays fully opaque) — then
+  // the covered layers are dropped after the fade. Preloading matters: stacking
+  // a still-loading URL and dropping the old layer on a fixed timer used to
+  // blank the backdrop on slow networks. Resolved through the offline cache so
+  // the background also shows in airplane mode.
   let bgLayers = [];
   let bgN = 0;
   let bgTimer;
-  // Resolve through the offline cache so the background shows in airplane mode.
+  let bgLoader = null;
   $: setBg(resolveCover($offlineCovers, $current?.album?.cover) || "");
   function setBg(url) {
+    if (!url) return; // no art: keep the previous backdrop rather than blanking
     const top = bgLayers[bgLayers.length - 1];
     if (top && top.src === url) return;
+    if (bgLoader && bgLoader.__url === url) return; // already preloading it
+    if (bgLoader) {
+      bgLoader.onload = bgLoader.onerror = null;
+      bgLoader.src = "";
+    }
+    const im = new Image();
+    im.__url = url;
+    bgLoader = im;
+    im.onload = () => {
+      if (bgLoader !== im) return; // a newer cover superseded this one
+      bgLoader = null;
+      pushBgLayer(url);
+    };
+    im.onerror = () => {
+      if (bgLoader === im) bgLoader = null; // keep the previous backdrop
+    };
+    im.src = url;
+  }
+  function pushBgLayer(url) {
     const id = ++bgN;
     bgLayers = [...bgLayers, { id, src: url }];
     clearTimeout(bgTimer);
@@ -177,14 +200,18 @@
   }
 
   // -- cover carousel (native scroll-snap) ----------------------------------
-  // [prev?, current, next?] keyed by track id, so advancing the queue REUSES
-  // each cover's DOM node (no reload, no fade flash). We then re-centre on the
-  // reused current node, which cancels the reorder -> seamless, glitch-free.
+  // [prev?, current, next?] keyed by queue position + track id: the position
+  // keeps the key STABLE as the window slides (advancing reuses each cover's
+  // DOM node — no reload, no fade flash) and the composite stays unique even
+  // when the same track appears twice in a row in the queue (a duplicate id
+  // alone would crash the keyed each). We then re-centre on the reused current
+  // node, which cancels the reorder -> seamless, glitch-free.
   $: slots = (() => {
     const s = [];
-    if (idx > 0) s.push(q[idx - 1]);
-    if (idx >= 0) s.push(q[idx]);
-    if (idx >= 0 && idx < q.length - 1) s.push(q[idx + 1]);
+    if (idx < 0) return s;
+    for (const i of [idx - 1, idx, idx + 1]) {
+      if (i >= 0 && i < q.length) s.push({ track: q[i], key: i + ":" + q[i].deezer_id });
+    }
     return s;
   })();
   $: curSlot = idx > 0 ? 1 : 0; // index of the current cover within `slots`
@@ -288,9 +315,17 @@
   onDestroy(() => {
     clearTimeout(settleTimer);
     clearTimeout(bgTimer);
+    if (bgLoader) {
+      bgLoader.onload = bgLoader.onerror = null;
+      bgLoader.src = "";
+      bgLoader = null;
+    }
   });
 </script>
 
+<!-- The touch handlers implement swipe-down-to-dismiss on the whole sheet — a
+     purely gestural affordance (the close button is the accessible path). -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="m"
   class:dragging
@@ -321,8 +356,8 @@
     </div>
 
     <div class="scroller" bind:this={scroller} on:scroll|passive={onScroll}>
-      {#each slots as s (s.deezer_id)}
-        <div class="slide"><Cover src={hiResCover(s.album?.cover, 1000)} alt={s.title} /></div>
+      {#each slots as s (s.key)}
+        <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} /></div>
       {/each}
     </div>
 

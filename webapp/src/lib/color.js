@@ -2,12 +2,18 @@
 // gradient headers. Deezer CDN images are CORS-enabled, so the canvas isn't
 // tainted; if extraction fails for any reason we fall back to a neutral purple.
 
+import { loResCover } from "./format.js";
+
 const cache = new Map();
 const FALLBACK = [60, 40, 90];
 
 export function dominantColor(url) {
   if (!url) return Promise.resolve(FALLBACK);
   if (cache.has(url)) return Promise.resolve(cache.get(url));
+  // The canvas below is 24px — the tiny Deezer variant (a few KB) is plenty.
+  // Fetching the full 500px in CORS mode re-downloaded the whole cover just
+  // for this. Non-Deezer URLs (local art, blobs) pass through unchanged.
+  const fetchUrl = loResCover(url, 96) || url;
 
   return new Promise((resolve) => {
     const img = new Image();
@@ -58,7 +64,7 @@ export function dominantColor(url) {
       }
     };
     img.onerror = () => resolve(FALLBACK);
-    img.src = url;
+    img.src = fetchUrl;
   });
 }
 

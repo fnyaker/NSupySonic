@@ -225,9 +225,21 @@ function createPlayer() {
   let lastStructKey = "";
   let latest = null;
   function snapshot(s) {
+    // Cap the persisted queue with a window AROUND the playing track — a plain
+    // head slice restored the wrong track whenever the index was past the cap.
+    let queue = s.queue;
+    let index = s.index;
+    if (queue.length > SESSION_CAP) {
+      const start = Math.min(
+        Math.max(0, index - (SESSION_CAP >> 1)),
+        queue.length - SESSION_CAP
+      );
+      queue = queue.slice(start, start + SESSION_CAP);
+      index = index - start; // still -1 when nothing was playing (start is 0)
+    }
     return {
-      queue: s.queue.slice(0, SESSION_CAP),
-      index: Math.min(s.index, SESSION_CAP - 1),
+      queue,
+      index,
       currentTime: s.currentTime,
       context: s.context,
       shuffle: s.shuffle,
@@ -446,10 +458,11 @@ function createPlayer() {
           return { ...s, shuffle, queue, index: 0, _orig };
         }
         const base = s._orig || s.queue;
-        const index = Math.max(
-          0,
-          base.findIndex((t) => t.deezer_id === cur?.deezer_id)
-        );
+        // Find the playing track by IDENTITY first — an id lookup could point
+        // at another copy when the queue holds the same track twice.
+        let index = base.indexOf(cur);
+        if (index < 0) index = base.findIndex((t) => t.deezer_id === cur?.deezer_id);
+        index = Math.max(0, index);
         return { ...s, shuffle, queue: base, index, _orig: null };
       });
     },

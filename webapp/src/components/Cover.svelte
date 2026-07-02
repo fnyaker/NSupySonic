@@ -1,5 +1,5 @@
 <script>
-  import { afterUpdate } from "svelte";
+  import { afterUpdate, onDestroy } from "svelte";
   import Icon from "./Icon.svelte";
   import { loResCover, coverKey, baseCover } from "../lib/format.js";
   import { offlineCovers } from "../lib/stores.js";
@@ -11,39 +11,96 @@
   let loaded = false;
   let failed = false;
   let usingBlob = false;
-  let usingBase = false;
   let img;
-  // Render the remote URL normally (fast, browser/SW-cached) — the downloaded
-  // cover blob is only a FALLBACK for when the remote fails to load (airplane
-  // mode). This keeps covers showing online while still working offline.
+  // Progressive hi-res: when `src` asks for more than the canonical 500px (the
+  // full-screen views do), we render the 500px IMMEDIATELY — it's the exact URL
+  // the lists already fetched, so it comes straight from the HTTP cache — and
+  // preload the hi-res in the background, swapping it in only once it's fully
+  // decoded. Deezer generates the big sizes on the fly, which can be slow or
+  // hang outright, so the hi-res may only ever *improve* the picture — never
+  // delay or blank it.
+  let hiUrl = null; // decoded hi-res upgrade (only when src is a hi-res URL)
+  let hiLoader = null; // in-flight preloader, cancelled on src change
+  let stallTimer = null;
+
+  // Downloaded/cached cover blob for this art (any resolution) — the offline
+  // fallback when the network URL fails or stalls.
   $: blob = src ? $offlineCovers[coverKey(src)] : null;
-  // The base-size (500px) URL of the same art. The full-screen views request a
-  // hi-res URL that was never fetched online (not HTTP-cached), so offline it
-  // can't load; the 500px cover shown everywhere else usually IS cached, so we
-  // fall back to it when there's no downloaded blob. Same URL for base art -> null.
-  $: base = baseCover(src);
-  $: shown = usingBlob && blob ? blob : usingBase && base ? base : src;
+  // What actually renders: offline blob (fallback) > decoded hi-res > base art.
+  $: shown = usingBlob && blob ? blob : hiUrl || baseCover(src);
   // A few-KB downscaled version of the same cover, shown blurred underneath
   // until the full-size art finishes loading (null for a local blob / non-Deezer).
   $: low = loResCover(shown);
+  $: onSrcChange(src);
+
   // Reset the fade + fallback state when the source changes (recycled rows, or
-  // an offline↔online swap).
-  $: src, ((loaded = false), (failed = false), (usingBlob = false), (usingBase = false));
+  // an offline↔online swap), and arm the progressive upgrade / stall watchdog.
+  function onSrcChange(s) {
+    loaded = false;
+    failed = false;
+    usingBlob = false;
+    hiUrl = null;
+    cancelHi();
+    clearTimeout(stallTimer);
+    stallTimer = null;
+    if (!s) return;
+    if (baseCover(s) !== s) preloadHi(s);
+    // A dead-network fetch can hang without ever firing load OR error, leaving
+    // the art blank forever. If a downloaded blob exists, fall back to it.
+    stallTimer = setTimeout(() => {
+      if (!loaded && !usingBlob && blob) {
+        usingBlob = true;
+        loaded = false;
+      }
+    }, 5000);
+  }
+
+  function preloadHi(url) {
+    const im = new Image();
+    im.decoding = "async";
+    hiLoader = im;
+    im.onload = () => {
+      if (hiLoader !== im) return; // superseded by a newer src
+      hiLoader = null;
+      // decode() before swapping so the upgrade paints in one clean frame.
+      const apply = () => {
+        if (src === url) hiUrl = url;
+      };
+      if (im.decode) im.decode().then(apply, apply);
+      else apply();
+    };
+    im.onerror = () => {
+      if (hiLoader === im) hiLoader = null; // hi-res unavailable — keep the base
+    };
+    im.src = url;
+  }
+  function cancelHi() {
+    if (hiLoader) {
+      hiLoader.onload = null;
+      hiLoader.onerror = null;
+      hiLoader.src = ""; // abort the in-flight fetch
+      hiLoader = null;
+    }
+  }
+  onDestroy(() => {
+    cancelHi();
+    clearTimeout(stallTimer);
+  });
+
   // …but if the new image is already cached, mark it loaded before the browser
   // paints, so swapping to an already-seen cover doesn't flash (no re-fade).
   afterUpdate(() => {
     if (!loaded && img && img.complete && img.naturalWidth > 0) loaded = true;
   });
 
-  // The image failed to load: step through the fallback chain — the downloaded
-  // blob (offline), then the base-size cover (HTTP-cached from elsewhere), and
-  // only then the placeholder — never leave a broken image.
+  // The image failed to load: step through the fallback chain — drop a failed
+  // hi-res back to the base, then the downloaded blob (offline), and only then
+  // the placeholder — never leave a broken image.
   function onError() {
-    if (!usingBlob && blob) {
+    if (hiUrl) {
+      hiUrl = null;
+    } else if (!usingBlob && blob) {
       usingBlob = true;
-      loaded = false;
-    } else if (!usingBase && base && base !== src) {
-      usingBase = true;
       loaded = false;
     } else {
       failed = true;

@@ -9,6 +9,7 @@
 
 import { get } from "svelte/store";
 import { api } from "./api.js";
+import { online } from "./net.js";
 import { coverKey } from "./format.js";
 import {
   cachedIds,
@@ -95,12 +96,16 @@ export function isCached(id) {
 }
 
 // Read a cached audio blob → object URL (caller revokes). Bumps LRU recency.
-export async function getCachedAudioURL(id) {
+// Pass the desired `quality` to reject a mismatched bitrate while ONLINE (the
+// user changed quality since the prefetch — stream fresh instead of silently
+// playing the old bitrate); offline, any cached bitrate still beats silence.
+export async function getCachedAudioURL(id, quality = null) {
   id = String(id);
   try {
     const db = await openDB();
     const rec = await reqp(tx(db, "audio", "readonly").objectStore("audio").get(id));
     if (!rec || !rec.blob) return null;
+    if (quality && rec.quality !== quality && get(online)) return null;
     // Best-effort recency bump (don't block playback on it).
     touchAudio(id).catch(() => {});
     return URL.createObjectURL(rec.blob);

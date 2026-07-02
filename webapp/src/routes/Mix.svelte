@@ -19,15 +19,20 @@
     load(id);
   }
 
+  // Sequence guard: a delayed earlier response must not overwrite the page
+  // after a quick navigation to another mix.
+  let loadSeq = 0;
   async function load(mixId) {
+    const mine = ++loadSeq;
     loading = true;
     data = null;
     try {
-      data = await api.smartTracklist(mixId);
+      const r = await api.smartTracklist(mixId);
+      if (mine === loadSeq) data = r;
     } catch {
-      data = null;
+      if (mine === loadSeq) data = null;
     }
-    loading = false;
+    if (mine === loadSeq) loading = false;
   }
 
   function playAll() {

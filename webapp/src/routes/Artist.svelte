@@ -22,21 +22,30 @@
     load(id);
   }
 
+  // Sequence guard: a delayed earlier response (network / offline retries)
+  // must not overwrite the page after a quick navigation to another artist.
+  let loadSeq = 0;
   async function load(artistId) {
+    const mine = ++loadSeq;
     loading = true;
     data = null;
     disco = null;
     fav = false;
     try {
-      data = await api.artist(artistId);
+      const r = await api.artist(artistId);
+      if (mine === loadSeq) data = r;
     } catch {
-      data = null;
+      if (mine === loadSeq) data = null;
     }
-    loading = false;
+    if (mine === loadSeq) loading = false;
     api
       .discography(artistId)
-      .then((r) => (disco = r.discography))
-      .catch(() => (disco = null));
+      .then((r) => {
+        if (mine === loadSeq) disco = r.discography;
+      })
+      .catch(() => {
+        if (mine === loadSeq) disco = null;
+      });
   }
 
   function playTop() {
