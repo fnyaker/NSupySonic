@@ -9,6 +9,7 @@
 
 import { get } from "svelte/store";
 import { api } from "./api.js";
+import { coverKey } from "./format.js";
 import {
   downloads,
   downloadsSize,
@@ -105,7 +106,7 @@ export async function loadCoverCache() {
     const rows = await reqp(tx(db, "covers", "readonly").objectStore("covers").getAll());
     const map = {};
     for (const r of rows) {
-      if (r && r.url && r.blob) map[r.url] = URL.createObjectURL(r.blob);
+      if (r && r.url && r.blob) map[coverKey(r.url)] = URL.createObjectURL(r.blob);
     }
     // Merge (don't clobber) — the playback cache also feeds this map.
     offlineCovers.update((m) => ({ ...map, ...m }));
@@ -117,14 +118,15 @@ export async function loadCoverCache() {
 // Download + store the archived cover for a track (best-effort, idempotent).
 async function cacheCover(coverUrl, deezerId) {
   if (!coverUrl) return;
-  if (get(offlineCovers)[coverUrl]) return; // already cached this session
+  const key = coverKey(coverUrl);
+  if (get(offlineCovers)[key]) return; // already cached this session
   try {
     const db = await openDB();
     const existing = await reqp(
       tx(db, "covers", "readonly").objectStore("covers").get(coverUrl)
     );
     if (existing && existing.blob) {
-      offlineCovers.update((m) => ({ ...m, [coverUrl]: URL.createObjectURL(existing.blob) }));
+      offlineCovers.update((m) => ({ ...m, [key]: URL.createObjectURL(existing.blob) }));
       return;
     }
     const res = await fetch(api.coverUrl(deezerId), { credentials: "include" });
@@ -134,7 +136,7 @@ async function cacheCover(coverUrl, deezerId) {
     const t = tx(db, "covers", "readwrite");
     t.objectStore("covers").put({ url: coverUrl, blob });
     await done(t);
-    offlineCovers.update((m) => ({ ...m, [coverUrl]: URL.createObjectURL(blob) }));
+    offlineCovers.update((m) => ({ ...m, [key]: URL.createObjectURL(blob) }));
   } catch {
     /* best effort — a missing cover never fails the download */
   }
@@ -150,15 +152,16 @@ async function gcCover(coverUrl) {
     const t = tx(db, "covers", "readwrite");
     t.objectStore("covers").delete(coverUrl);
     await done(t);
+    const key = coverKey(coverUrl);
     offlineCovers.update((m) => {
       const n = { ...m };
-      if (n[coverUrl]) {
+      if (n[key]) {
         try {
-          URL.revokeObjectURL(n[coverUrl]);
+          URL.revokeObjectURL(n[key]);
         } catch {
           /* ignore */
         }
-        delete n[coverUrl];
+        delete n[key];
       }
       return n;
     });
@@ -297,7 +300,7 @@ export async function clearAll() {
     // Grab our cover URLs first so we only revoke OUR entries in the shared map
     // (the playback cache owns its own covers there).
     const coverRows = await reqp(tx(db, "covers", "readonly").objectStore("covers").getAll());
-    const urls = coverRows.map((r) => r.url).filter(Boolean);
+    const keys = coverRows.map((r) => coverKey(r.url)).filter(Boolean);
     const t = tx(db, ["meta", "audio", "covers"], "readwrite");
     t.objectStore("meta").clear();
     t.objectStore("audio").clear();
@@ -307,14 +310,14 @@ export async function clearAll() {
     downloadsSize.set(0);
     offlineCovers.update((m) => {
       const n = { ...m };
-      for (const url of urls) {
-        if (n[url]) {
+      for (const key of keys) {
+        if (n[key]) {
           try {
-            URL.revokeObjectURL(n[url]);
+            URL.revokeObjectURL(n[key]);
           } catch {
             /* ignore */
           }
-          delete n[url];
+          delete n[key];
         }
       }
       return n;

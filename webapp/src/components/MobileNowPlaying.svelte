@@ -15,9 +15,10 @@
     seekTo,
     buffered,
     openMenu,
+    offlineCovers,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
-  import { duration as fmtDuration, hiResCover } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import { followScroll } from "../lib/scroll.js";
@@ -73,7 +74,8 @@
   let bgLayers = [];
   let bgN = 0;
   let bgTimer;
-  $: setBg($current?.album?.cover || "");
+  // Resolve through the offline cache so the background shows in airplane mode.
+  $: setBg(resolveCover($offlineCovers, $current?.album?.cover) || "");
   function setBg(url) {
     const top = bgLayers[bgLayers.length - 1];
     if (top && top.src === url) return;

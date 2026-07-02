@@ -9,6 +9,7 @@
 
 import { get } from "svelte/store";
 import { api } from "./api.js";
+import { coverKey } from "./format.js";
 import {
   cachedIds,
   offlineCovers,
@@ -75,9 +76,10 @@ export async function initPlayCache() {
     const add = {};
     for (const c of covers) {
       size += c.size || 0;
-      if (c.url && c.blob && !get(offlineCovers)[c.url]) {
-        add[c.url] = URL.createObjectURL(c.blob);
-        ownedCovers.add(c.url);
+      const k = c.url ? coverKey(c.url) : null;
+      if (k && c.blob && !get(offlineCovers)[k]) {
+        add[k] = URL.createObjectURL(c.blob);
+        ownedCovers.add(k);
       }
     }
     cachedIds.set(ids);
@@ -154,7 +156,9 @@ async function putAudio(id, blob, quality, type) {
 // Cache a cover (from the same-origin archived-cover route), unless a permanent
 // download already provides it. Keyed by the remote URL the UI renders.
 async function cacheCover(coverUrl, deezerId) {
-  if (!coverUrl || get(offlineCovers)[coverUrl]) return;
+  if (!coverUrl) return;
+  const key = coverKey(coverUrl);
+  if (get(offlineCovers)[key]) return;
   try {
     const res = await fetch(api.coverUrl(deezerId), { credentials: "include" });
     if (!res.ok) return;
@@ -165,8 +169,8 @@ async function cacheCover(coverUrl, deezerId) {
     t.objectStore("covers").put({ url: coverUrl, blob, size: blob.size, ts: Date.now() });
     await done(t);
     playCacheSize.update((n) => n + blob.size);
-    ownedCovers.add(coverUrl);
-    offlineCovers.update((m) => ({ ...m, [coverUrl]: URL.createObjectURL(blob) }));
+    ownedCovers.add(key);
+    offlineCovers.update((m) => ({ ...m, [key]: URL.createObjectURL(blob) }));
   } catch {
     /* best effort */
   }
@@ -213,17 +217,18 @@ async function evictEntry(e) {
     const t = tx(db, "covers", "readwrite");
     t.objectStore("covers").delete(e.key);
     await done(t);
-    if (ownedCovers.has(e.key)) {
-      ownedCovers.delete(e.key);
+    const key = coverKey(e.key);
+    if (ownedCovers.has(key)) {
+      ownedCovers.delete(key);
       offlineCovers.update((m) => {
         const n = { ...m };
-        if (n[e.key]) {
+        if (n[key]) {
           try {
-            URL.revokeObjectURL(n[e.key]);
+            URL.revokeObjectURL(n[key]);
           } catch {
             /* ignore */
           }
-          delete n[e.key];
+          delete n[key];
         }
         return n;
       });

@@ -30,6 +30,23 @@ export function hiResCover(url, size = 1000) {
   return url.replace(/\/\d+x\d+(-[^/]*\.(?:jpg|jpeg|png|webp))/i, `/${size}x${size}$1`);
 }
 
+// A resolution-independent key for a Deezer cover: collapses the embedded WxH
+// so every size of the same art (the 500px we cache, the 1000/1500px the
+// full-screen views request) maps to ONE offline-cache entry. Non-Deezer URLs
+// (local covers) are returned unchanged.
+export function coverKey(url) {
+  if (!url || typeof url !== "string") return url;
+  return url.replace(/\/\d+x\d+(-[^/]*\.(?:jpg|jpeg|png|webp))/i, "/x$1");
+}
+
+// Resolve a cover URL to the best available source: the offline cache blob for
+// that art (any resolution) if we have it, else the URL itself. `covers` is the
+// offlineCovers map. Used for CSS backgrounds that can't go through Cover.svelte.
+export function resolveCover(covers, url) {
+  if (!url) return url;
+  return (covers && covers[coverKey(url)]) || url;
+}
+
 // A tiny variant of a Deezer cover, used as an instant low-quality placeholder
 // while the full-size art loads (it downloads in a few KB). Returns null when
 // the URL has no Deezer dimensions to shrink (local / non-Deezer covers), so
