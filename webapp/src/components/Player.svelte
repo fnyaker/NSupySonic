@@ -198,6 +198,9 @@
       audio.currentTime > 0.5
         ? audio.currentTime
         : lastKnownTime || get(player).currentTime || 0;
+    // The element may still carry preload=none from a paused restore — with it,
+    // load() defers fetching and loadedmetadata below would never fire.
+    audio.preload = "auto";
     audio.src =
       curIsBlob && curBlobUrl ? curBlobUrl : api.streamUrl(cur.deezer_id, curQ);
     audio.load();
@@ -517,6 +520,7 @@
     const wasPlaying = !audio.paused && get(player).playing;
     incoming.volume = audio.volume;
     incoming.muted = audio.muted;
+    incoming.preload = "auto"; // may carry preload=none from a paused restore
     incoming.src = api.streamUrl(cur.deezer_id, newQ);
     incoming.load();
 
@@ -625,8 +629,12 @@
   // unconditional play() gets cut off again → a rapid play/pause loop. Guarding
   // on audio.paused makes each direction idempotent and breaks the oscillation.
   $: if (audio && curId && !switching && !recovering) {
-    if ($player.playing && audio.paused) audio.play().catch(() => {});
-    else if (!$player.playing && !audio.paused) audio.pause();
+    if ($player.playing && audio.paused) {
+      // Playback starts: restore eager buffering if the paused-restore load
+      // deferred it (play() fetches regardless, but rebuffers stay eager too).
+      if (audio.preload !== "auto") audio.preload = "auto";
+      audio.play().catch(() => {});
+    } else if (!$player.playing && !audio.paused) audio.pause();
   }
   $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
 
