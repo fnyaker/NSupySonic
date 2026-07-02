@@ -19,9 +19,47 @@
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
   import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
 
-  // Background art resolves through the offline cache so it shows in airplane
-  // mode (CSS backgrounds can't fall back via Cover.svelte).
-  $: bgSrc = resolveCover($offlineCovers, $current?.album?.cover) || "";
+  // Blurred backdrop, as a stack of crossfading layers. Each new cover is
+  // PRELOADED first and only stacked once decoded, ON TOP of the previous layer
+  // (which stays painted meanwhile) — so a skip on a slow network never leaves
+  // a bare backdrop with the page showing through. Resolves through the offline
+  // cache so it also works in airplane mode.
+  let bgLayers = [];
+  let bgN = 0;
+  let bgTimer;
+  let bgLoader = null;
+  $: setBg(resolveCover($offlineCovers, $current?.album?.cover) || "");
+  function setBg(url) {
+    if (!url) return; // no art: keep the previous backdrop rather than blanking
+    const top = bgLayers[bgLayers.length - 1];
+    if (top && top.src === url) return;
+    if (bgLoader && bgLoader.__url === url) return; // already preloading it
+    if (bgLoader) {
+      bgLoader.onload = bgLoader.onerror = null;
+      bgLoader.src = "";
+    }
+    const im = new Image();
+    im.__url = url;
+    bgLoader = im;
+    im.onload = () => {
+      if (bgLoader !== im) return; // a newer cover superseded this one
+      bgLoader = null;
+      pushBgLayer(url);
+    };
+    im.onerror = () => {
+      if (bgLoader === im) bgLoader = null; // keep the previous backdrop
+    };
+    im.src = url;
+  }
+  function pushBgLayer(url) {
+    const id = ++bgN;
+    bgLayers = [...bgLayers, { id, src: url }];
+    // Drop the covered-up layers once the fade-in has finished.
+    clearTimeout(bgTimer);
+    bgTimer = setTimeout(() => (bgLayers = bgLayers.filter((l) => l.id === id)), 420);
+  }
+  // The cover glow reuses the last *decoded* backdrop (never a loading URL).
+  $: glowSrc = bgLayers.length ? bgLayers[bgLayers.length - 1].src : "";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
@@ -107,11 +145,19 @@
     stop();
     if (typeof document !== "undefined")
       document.removeEventListener("visibilitychange", onVisibility);
+    clearTimeout(bgTimer);
+    if (bgLoader) {
+      bgLoader.onload = bgLoader.onerror = null;
+      bgLoader.src = "";
+      bgLoader = null;
+    }
   });
 </script>
 
 <div class="d" transition:fade={{ duration: 150 }}>
-  <div class="bg" style={`background-image:url(${bgSrc})`}></div>
+  {#each bgLayers as layer (layer.id)}
+    <div class="bg" style={`background-image:url(${layer.src})`} in:fade={{ duration: 350 }}></div>
+  {/each}
   <div class="scrim"></div>
 
   <header>
@@ -131,10 +177,13 @@
       </div>
 
       <div class="cover">
-        <div class="glow" style={`background-image:url(${bgSrc})`}></div>
+        <div class="glow" style={`background-image:url(${glowSrc})`}></div>
         {#key $current.deezer_id}
           <div class="cover-fade" in:fade={{ duration: 260 }} out:fade={{ duration: 260 }}>
-            <Cover src={hiResCover($current.album?.cover, 1500)} alt={$current.title} />
+            <!-- 1000px: 1500 is 2-3× the bytes for a marginal gain, and the CDN
+                 generates big sizes on demand (slow). Cover.svelte shows the
+                 cached 500px instantly and upgrades when this one is decoded. -->
+            <Cover src={hiResCover($current.album?.cover, 1000)} alt={$current.title} />
           </div>
         {/key}
       </div>

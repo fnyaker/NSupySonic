@@ -70,6 +70,7 @@
   onDestroy(() => {
     stopWatchdog();
     cancelPauseMirror();
+    cancelPendingSeek();
     clearTimeout(prefetchTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     releaseWakeLock();
@@ -144,7 +145,7 @@
     stopWatchdog();
     lastAdvance = Date.now();
     watchdog = setInterval(() => {
-      if (!audio || switching || recovering) return;
+      if (!audio || switching || recovering || loadingTrack) return;
       const s = get(player);
       if (!s.playing || audio.paused) return; // not trying to play / cleanly paused
       if (audio.currentTime !== lastPos) {
@@ -164,6 +165,7 @@
 
   function onElError(e) {
     if (e && e.target !== audio) return;
+    if (loadingTrack) return; // stale error from the outgoing source
     if (get(player).playing) recoverPlayback();
   }
   function onElStall(e) {
@@ -175,7 +177,7 @@
   // permanently broken stream can't spin in a reload loop.
   function recoverPlayback() {
     const cur = get(current);
-    if (!cur || !audio || switching || recovering) return;
+    if (!cur || !audio || switching || recovering || loadingTrack) return;
     // Network down: don't burn the retry budget or skip the track. Park it and
     // let the reconnect handler resume from the same spot. A downloaded track
     // plays from a local blob, so the network is irrelevant — recover it in
@@ -385,6 +387,7 @@
     lastKnownTime = resumeAt;
     recoverAttempts = 0; // fresh track, fresh recovery budget
     cancelPauseMirror(); // drop a deferred pause from the outgoing track
+    cancelPendingSeek(); // a stale seek must never land on this new track
     buffered.set(0); // new source -> nothing loaded yet
     // Reset the seek bar NOW — before the (possibly async) source resolve — so a
     // skip never leaves the outgoing track's position/duration on screen, and
@@ -426,6 +429,7 @@
   function restartCurrent() {
     curSeq = get(player).seq;
     lastKnownTime = 0;
+    cancelPendingSeek(); // a pending resume-seek would undo the restart
     try {
       audio.currentTime = 0;
     } catch {
@@ -535,16 +539,29 @@
 
   // Apply a target time once the freshly-loaded source can seek. Cached/archived
   // files honour range requests; a live transcode may ignore it (best-effort).
+  // The armed listener is tracked so a track change can CANCEL it — otherwise a
+  // pending seek (e.g. the session-restore position) fires on the NEXT track's
+  // metadata and teleports it to the old position (possibly near its end).
+  let pendingSeek = null; // { el, fn } of the armed loadedmetadata handler
+  function cancelPendingSeek() {
+    if (pendingSeek) {
+      pendingSeek.el.removeEventListener("loadedmetadata", pendingSeek.fn);
+      pendingSeek = null;
+    }
+  }
   function seekOnceLoaded(t) {
+    cancelPendingSeek();
+    const el = audio;
     const apply = () => {
       try {
-        audio.currentTime = t;
+        el.currentTime = t;
       } catch {
         /* not seekable yet */
       }
-      audio.removeEventListener("loadedmetadata", apply);
+      cancelPendingSeek();
     };
-    audio.addEventListener("loadedmetadata", apply);
+    pendingSeek = { el, fn: apply };
+    el.addEventListener("loadedmetadata", apply);
   }
 
   // Reflect transport state onto the element, but ONLY on a real mismatch.
@@ -628,6 +645,9 @@
 
   async function onEnded(e) {
     if (e && e.target !== audio) return; // ignore the idle/preloading element
+    // A track change is mid-flight: this `ended` comes from the OUTGOING source
+    // finishing during the load gap — acting on it would double-advance.
+    if (loadingTrack) return;
     const s = get(player);
     const cur = $current;
     if (s.repeat === "one") {
