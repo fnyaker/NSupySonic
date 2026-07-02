@@ -1,8 +1,9 @@
 // Thin wrapper around the Deezer-native /api backend.
 // Session-cookie auth, so every request includes credentials.
 
+import { get } from "svelte/store";
 import { user } from "./stores.js";
-import { reportOnline, reportOffline } from "./net.js";
+import { online, reportOnline, reportOffline } from "./net.js";
 import { isCacheable, cacheGet, cachePut } from "./apicache.js";
 
 const BASE = "/api";
@@ -16,14 +17,38 @@ const backoff = (attempt) =>
 // Transient server states worth retrying a GET on (a restart, a cold worker).
 const TRANSIENT = new Set([502, 503, 504]);
 
+// Refresh a cached GET in the background (stale-while-revalidate): if it
+// succeeds we're back online and the cache gets the fresh copy for next time.
+function refreshInBackground(path) {
+  fetch(BASE + path, { credentials: "include" })
+    .then(async (res) => {
+      reportOnline(); // any response at all proves the server is reachable
+      if (!res.ok) return;
+      const data = await res.json();
+      cachePut(path, data).catch(() => {});
+    })
+    .catch(() => {});
+}
+
 async function req(path, opts = {}, attempt = 0) {
   const method = (opts.method || "GET").toUpperCase();
   // Only GETs are safe to auto-retry: replaying a POST/PUT/DELETE could double
   // a mutation. Mutations fail fast and let the optimistic UI roll back.
   const retriable = method === "GET";
   // Content GETs are mirrored to an offline cache so playlists/albums/etc. stay
-  // browsable without a network (served only when the fetch fails).
+  // browsable without a network.
   const cacheable = method === "GET" && isCacheable(path);
+
+  // Known offline: serve the cached copy INSTANTLY (no fetch, no retries — the
+  // old path burned ~12s of backoff before even looking at the cache), and
+  // revalidate in the background so recovery is picked up without blocking.
+  if (cacheable && !get(online)) {
+    const cached = await cacheGet(path);
+    if (cached != null) {
+      refreshInBackground(path);
+      return cached;
+    }
+  }
 
   let res;
   try {
@@ -35,14 +60,18 @@ async function req(path, opts = {}, attempt = 0) {
   } catch (e) {
     // Network-level failure: offline, DNS, reset, CORS-less abort.
     reportOffline();
-    if (retriable && attempt < 5) {
-      await sleep(backoff(attempt));
-      return req(path, opts, attempt + 1);
-    }
-    // Offline: fall back to the last cached copy of this response, if any.
+    // Serve the last cached copy right away rather than retrying into the void;
+    // the next online request refreshes it.
     if (cacheable) {
       const cached = await cacheGet(path);
       if (cached != null) return cached;
+    }
+    // navigator.onLine === false is definitive (airplane mode): retries are
+    // pointless, fail fast so the UI can settle into its offline state.
+    const hardOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+    if (retriable && !hardOffline && attempt < 3) {
+      await sleep(backoff(attempt));
+      return req(path, opts, attempt + 1);
     }
     throw { status: 0, message: "network", offline: true };
   }
@@ -149,11 +178,14 @@ export const api = {
   },
 
   // telemetry — fire-and-forget; never let it break playback. A no-op server
-  // side unless report_listens is enabled in the config.
-  reportListen: (payload) =>
-    req("/listen", { method: "POST", keepalive: true, body: body(payload) }).catch(
+  // side unless report_listens is enabled in the config. Skipped entirely while
+  // offline (a doomed POST per track change is just noise).
+  reportListen: (payload) => {
+    if (!get(online)) return Promise.resolve();
+    return req("/listen", { method: "POST", keepalive: true, body: body(payload) }).catch(
       () => {}
-    ),
+    );
+  },
 
   // playback (returned as a URL for the <audio> element)
   streamUrl: (id, quality) =>

@@ -37,6 +37,8 @@ function reqp(request) {
 const CACHE_PREFIXES = [
   "/me/playlists",
   "/me/favorites",
+  "/me/favorite-ids",
+  "/me/local",
   "/playlist/",
   "/album/",
   "/artist/",
@@ -77,13 +79,18 @@ export async function cachePut(path, data) {
   }
 }
 
-// Keep the cache bounded: drop the oldest entries past MAX_ENTRIES.
+// Keep the cache bounded: drop the oldest entries past MAX_ENTRIES. Guarded by
+// a cheap count() so the (heavy) getAll only runs when actually over the cap —
+// this runs after every cached GET, so it must cost ~nothing in the usual case.
 async function prune() {
   const db = await openDB();
+  const count = await reqp(
+    db.transaction("responses", "readonly").objectStore("responses").count()
+  );
+  if (count <= MAX_ENTRIES) return;
   const all = await reqp(
     db.transaction("responses", "readonly").objectStore("responses").getAll()
   );
-  if (all.length <= MAX_ENTRIES) return;
   const doomed = all
     .sort((a, b) => (a.ts || 0) - (b.ts || 0))
     .slice(0, all.length - MAX_ENTRIES);

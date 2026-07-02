@@ -43,9 +43,11 @@ async function probeOnce() {
   }
 }
 
-function startProbe() {
-  if (probeTimer) return;
-  let delay = 2000;
+let probeDelay = 2000;
+
+function startProbe(immediate = false) {
+  if (probeTimer && !immediate) return;
+  clearTimeout(probeTimer);
   const tick = async () => {
     probeTimer = null;
     if (get(online)) return;
@@ -53,10 +55,10 @@ function startProbe() {
       reportOnline();
       return;
     }
-    delay = Math.min(Math.round(delay * 1.6), 15000);
-    probeTimer = setTimeout(tick, delay);
+    probeDelay = Math.min(Math.round(probeDelay * 1.6), 30000);
+    probeTimer = setTimeout(tick, probeDelay);
   };
-  probeTimer = setTimeout(tick, delay);
+  probeTimer = setTimeout(tick, immediate ? 0 : probeDelay);
 }
 
 function stopProbe() {
@@ -64,13 +66,22 @@ function stopProbe() {
     clearTimeout(probeTimer);
     probeTimer = null;
   }
+  probeDelay = 2000;
 }
 
 export function initConnectivity() {
   if (typeof window === "undefined") return;
   // The browser events are a fast hint; the probe confirms real reachability.
   window.addEventListener("online", () => {
-    if (navigator.onLine) startProbe(); // verify before declaring us back
+    if (navigator.onLine) startProbe(true); // verify before declaring us back
   });
   window.addEventListener("offline", reportOffline);
+  // Coming back to the app while offline: check right away instead of waiting
+  // out the (backed-off) probe interval — recovery feels instant.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && !get(online)) startProbe(true);
+  });
+  // Booting offline: arm the probe now, otherwise nothing would ever notice the
+  // network coming back (no request fails, so reportOffline never fires).
+  if (!navigator.onLine) reportOffline();
 }

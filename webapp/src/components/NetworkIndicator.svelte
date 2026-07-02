@@ -1,25 +1,37 @@
 <script>
-  // A quiet, non-blocking pill that appears while we're offline and briefly
-  // confirms the recovery — premium feel: no error spam, the player keeps its
-  // state and resumes on its own. Driven entirely by the shared `online` store.
+  // Transient connectivity notices. Going offline shows a compact pill for a
+  // few seconds, then it fades away — the app keeps working offline (downloads,
+  // cached pages), so a permanent alarming banner is wrong; state is conveyed
+  // contextually (toasts, offline queue filtering). Recovery flashes briefly.
   import { fly } from "svelte/transition";
   import { online, reconnectedAt } from "../lib/net.js";
 
+  let showOffline = false;
+  let offTimer = null;
   let justReconnected = false;
-  let timer = null;
+  let reTimer = null;
 
-  // Flash a short "Reconnecté" once we come back, then fade out.
+  // Fires only on transitions of the store value, not continuously.
+  $: if (!$online) {
+    showOffline = true;
+    clearTimeout(offTimer);
+    offTimer = setTimeout(() => (showOffline = false), 4000);
+  } else {
+    clearTimeout(offTimer);
+    showOffline = false;
+  }
+
   $: if ($reconnectedAt) {
     justReconnected = true;
-    clearTimeout(timer);
-    timer = setTimeout(() => (justReconnected = false), 2200);
+    clearTimeout(reTimer);
+    reTimer = setTimeout(() => (justReconnected = false), 2200);
   }
 </script>
 
-{#if !$online}
-  <div class="net offline" role="status" aria-live="polite" transition:fly={{ y: -16, duration: 200 }}>
+{#if !$online && showOffline}
+  <div class="net off" role="status" aria-live="polite" transition:fly={{ y: -16, duration: 200 }}>
     <span class="dot"></span>
-    Hors ligne — reconnexion…
+    Hors ligne — lecture locale disponible
   </div>
 {:else if justReconnected}
   <div class="net back" role="status" transition:fly={{ y: -16, duration: 200 }}>
@@ -38,28 +50,26 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 16px;
+    padding: 7px 14px;
     border-radius: 999px;
-    font-size: 0.84rem;
+    font-size: 0.8rem;
     font-weight: 600;
-    color: #fff;
+    color: var(--text, #fff);
+    background: var(--bg-elev, #221f29);
+    border: 1px solid var(--bg-hover, #322e3c);
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
     pointer-events: none;
-  }
-  .offline {
-    background: #b23b3b;
-  }
-  .back {
-    background: #2c8a4a;
+    white-space: nowrap;
   }
   .dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.9);
+    background: #e0a83e;
     animation: pulse 1.1s ease-in-out infinite;
   }
   .dot.ok {
+    background: #3fbf6a;
     animation: none;
   }
   @keyframes pulse {

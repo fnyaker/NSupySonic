@@ -55,9 +55,11 @@
   onMount(async () => {
     initConnectivity();
     initQueueFilter();
-    loadOfflineIndex();
+    // The queue filter and library views read these indexes synchronously, so
+    // load them BEFORE the UI mounts — otherwise an offline launch briefly sees
+    // "nothing downloaded" and filters every track out. Fast: IDB metadata only.
+    await Promise.all([loadOfflineIndex(), initPlayCache()]);
     loadCoverCache();
-    initPlayCache();
 
     // Airplane-mode launch: if we're offline but have a remembered session, boot
     // straight into the (downloaded) library instead of stalling on the login

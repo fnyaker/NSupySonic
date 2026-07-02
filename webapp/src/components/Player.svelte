@@ -66,6 +66,7 @@
   onDestroy(() => {
     stopWatchdog();
     cancelPauseMirror();
+    clearTimeout(prefetchTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     releaseWakeLock();
     setBlobUrl(null); // revoke any live object URL
@@ -679,6 +680,12 @@
   // whenever that upcoming track changes — a skip, a queue extension, or a Flow
   // re-tune. Keeping it to a single track avoids hammering the archiver.
   let prefetchedId = null;
+  let prefetchTimer = null;
+  // Delay before pulling the next track's audio into the on-device cache. It
+  // gives the CURRENT track's buffering first claim on the bandwidth, and it
+  // means skipping through a playlist doesn't fire a full audio download per
+  // skip — only a "next" that survives the delay gets fetched.
+  const PREFETCH_DELAY = 12000;
   $: {
     const nextTrack =
       $player.index >= 0 ? $player.queue[$player.index + 1] : null;
@@ -687,10 +694,16 @@
     // play from its local blob anyway).
     if (nextId && nextId !== prefetchedId && $online && !isDownloaded(nextId)) {
       prefetchedId = nextId;
-      api.download([nextId]).catch(() => {}); // server-side pre-archive (FLAC)
-      // Also pull the next track's audio + cover into the on-device playback
-      // cache (unless disabled), so the track change survives a network drop.
-      if ($prefetchEnabled) prefetchTrack(nextTrack, get(quality)).catch(() => {});
+      api.download([nextId]).catch(() => {}); // server-side pre-archive (cheap call)
+      clearTimeout(prefetchTimer);
+      prefetchTimer = setTimeout(() => {
+        // Re-check at fire time: still the upcoming track, still online, still
+        // wanted. A skip meanwhile changed `next` (and rescheduled us).
+        const s = get(player);
+        const stillNext = s.index >= 0 && s.queue[s.index + 1]?.deezer_id === nextId;
+        if (stillNext && get(online) && get(prefetchEnabled))
+          prefetchTrack(nextTrack, get(quality)).catch(() => {});
+      }, PREFETCH_DELAY);
     }
   }
 

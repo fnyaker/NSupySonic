@@ -8,7 +8,7 @@
  * so they always go straight to the network — never cached.
  */
 
-const CACHE = "nsupysonic-shell-v2";
+const CACHE = "nsupysonic-shell-v3";
 const SCOPE_PATH = "/app/";
 
 // Precache the shell + its hashed JS/CSS so an airplane-mode launch actually
@@ -80,16 +80,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Navigations + the shell: network-first so a redeploy is picked up, with the
-  // cached shell as an offline fallback.
+  // Navigations + the shell: network-first so a redeploy is picked up, but
+  // RACED against a short timeout — on a connected-but-dead network the fetch
+  // can hang for tens of seconds, so after 3s we serve the cached shell and let
+  // the fetch finish in the background (still refreshing the cache for next time).
   if (request.mode === "navigate" || url.pathname === SCOPE_PATH) {
+    const networked = fetch(request).then((res) => {
+      const copy = res.clone();
+      caches.open(CACHE).then((c) => c.put("/app/", copy));
+      return res;
+    });
+    networked.catch(() => {}); // don't surface as unhandled when we serve cache
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 3000));
     event.respondWith(
-      fetch(request)
-        .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put("/app/", copy));
-          return res;
-        })
+      Promise.race([networked, timeout])
+        .then((res) => res || caches.match("/app/").then((hit) => hit || networked))
         .catch(() => caches.match("/app/").then((hit) => hit || caches.match(request)))
     );
     return;
