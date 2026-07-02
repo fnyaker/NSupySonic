@@ -30,6 +30,15 @@ export function hiResCover(url, size = 1000) {
   return url.replace(/\/\d+x\d+(-[^/]*\.(?:jpg|jpeg|png|webp))/i, `/${size}x${size}$1`);
 }
 
+// The canonical rendered size of a Deezer cover — the 500px art the API hands
+// out and that the browser HTTP-caches from browsing/notifications. Used as an
+// offline fallback for the full-screen views' hi-res URL, whose bumped size was
+// never fetched online and so isn't in the cache. Non-Deezer URLs pass through.
+export function baseCover(url, size = 500) {
+  if (!url || typeof url !== "string") return url;
+  return url.replace(/\/\d+x\d+(-[^/]*\.(?:jpg|jpeg|png|webp))/i, `/${size}x${size}$1`);
+}
+
 // A resolution-independent key for a Deezer cover: collapses the embedded WxH
 // so every size of the same art (the 500px we cache, the 1000/1500px the
 // full-screen views request) maps to ONE offline-cache entry. Non-Deezer URLs
