@@ -212,6 +212,11 @@
     z-index: 200;
     color: #fff;
     overflow: hidden;
+    /* Opaque base under the blurred cover art: on a skip the new art needs a
+       moment to load, and the .bg layer is transparent until it does — without
+       this base the semi-transparent scrim would let the page behind show
+       through. Matches the mobile full-screen player. */
+    background: #0b0910;
   }
   .bg {
     position: absolute;

@@ -44,6 +44,10 @@
   // Last position we actually saw progress at, so we can restore it if the
   // browser silently rewinds the element to 0 after a long suspend (mobile lock).
   let lastKnownTime = 0;
+  // True from the moment a track change starts until its new source is attached.
+  // The outgoing element can still fire `timeupdate` during that (async) gap, so
+  // this flag makes onTime ignore those stale, previous-track positions.
+  let loadingTrack = false;
 
   function makeEl() {
     const el = new Audio();
@@ -382,6 +386,11 @@
     recoverAttempts = 0; // fresh track, fresh recovery budget
     cancelPauseMirror(); // drop a deferred pause from the outgoing track
     buffered.set(0); // new source -> nothing loaded yet
+    // Reset the seek bar NOW — before the (possibly async) source resolve — so a
+    // skip never leaves the outgoing track's position/duration on screen, and
+    // gate onTime so a late timeupdate from the old source can't write it back.
+    loadingTrack = true;
+    player.setProgress(resumeAt, track.duration || 0);
 
     const src = await resolveSource(track.deezer_id, curQ);
     // A newer load may have superseded us while reading the blob from IndexedDB.
@@ -393,12 +402,13 @@
           /* ignore */
         }
       }
-      return;
+      return; // the superseding load owns loadingTrack from here
     }
     setBlobUrl(src.blob ? src.url : null);
     curIsBlob = src.blob;
     audio.src = src.url;
     audio.load();
+    loadingTrack = false; // new source attached — accept its timeupdates again
     if (src.blob) touch(track.deezer_id); // bump LRU recency
 
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
@@ -556,6 +566,7 @@
 
   function onTime(e) {
     if (e && e.target !== audio) return; // ignore the idle/preloading element
+    if (loadingTrack) return; // a track change is mid-flight — position is stale
     // Healthy progress: clear the recovery budget so a later, unrelated stall
     // gets its full retry allowance again.
     if (recoverAttempts && audio.currentTime > lastPos) recoverAttempts = 0;
