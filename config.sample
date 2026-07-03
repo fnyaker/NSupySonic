@@ -151,6 +151,13 @@ sync_favorites = yes
 import_new_releases = yes
 import_flow = yes
 
+; Refresh subscribed podcasts (shows) on each sync, and how many recent episodes
+; to import per show. Subscribe via the Subsonic getPodcasts/createPodcastChannel
+; endpoints or `supysonic-cli deezer import <deezer show url>`. Episode audio is
+; archived on first play (MP3, from the podcast host — no FLAC/transcode-from-FLAC).
+sync_podcasts = yes
+podcast_episodes = 30
+
 ; Personalized "smart tracklists" exposed as "Deezer · <title>" playlists
 ; (requires import_new_releases). Space/comma separated ids. Leave unset for the
 ; default set. Known ids: new-releases, discovery, monthly-top, inspired-by-1

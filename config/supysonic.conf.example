@@ -55,6 +55,9 @@ sync_playlists = yes
 sync_favorites = yes
 import_new_releases = yes
 import_flow = yes
+; Refresh subscribed podcasts (shows) on each sync + episodes kept per show.
+sync_podcasts = yes
+podcast_episodes = 30
 ; Smart tracklists -> "Deezer · <title>" playlists. Unset = default set
 ; (new-releases discovery monthly-top inspired-by-1..5).
 ;smart_tracklists = new-releases discovery monthly-top inspired-by-1 inspired-by-2 inspired-by-3 inspired-by-4 inspired-by-5

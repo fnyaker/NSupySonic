@@ -20,6 +20,8 @@ NS_TRACK = uuid.uuid5(NS_DEEZER, "track")
 NS_ALBUM = uuid.uuid5(NS_DEEZER, "album")
 NS_ARTIST = uuid.uuid5(NS_DEEZER, "artist")
 NS_PLAYLIST = uuid.uuid5(NS_DEEZER, "playlist")
+NS_SHOW = uuid.uuid5(NS_DEEZER, "show")
+NS_EPISODE = uuid.uuid5(NS_DEEZER, "episode")
 
 
 def track_uuid(deezer_id) -> uuid.UUID:
@@ -36,6 +38,14 @@ def artist_uuid(deezer_id) -> uuid.UUID:
 
 def playlist_uuid(deezer_id) -> uuid.UUID:
     return uuid.uuid5(NS_PLAYLIST, str(deezer_id))
+
+
+def show_uuid(deezer_id) -> uuid.UUID:
+    return uuid.uuid5(NS_SHOW, str(deezer_id))
+
+
+def episode_uuid(deezer_id) -> uuid.UUID:
+    return uuid.uuid5(NS_EPISODE, str(deezer_id))
 
 
 # Local (non-Deezer) files dropped in the archive: deterministic ids too, so a

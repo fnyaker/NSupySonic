@@ -1,6 +1,14 @@
 # Plan — support des podcasts Deezer
 
-État des lieux : **rien n'existe** côté podcasts. Supysonic n'implémente aucun endpoint
+> **Statut : implémenté (backend + Subsonic REST).** Phases 1–6 livrées et testées
+> (`tests/test_podcast.py`, 15 tests). deezerpy (api+gw), tables
+> `PodcastChannel`/`PodcastEpisode` + migrations, provider/archive, sync + CLI,
+> endpoints `/rest` podcast + interception du streaming. **Reste (phase 5 web UI
+> Svelte)** : pages `/app` non incluses ici — le player web existant sert d'appui,
+> à ajouter séparément. La sonde « lister ses shows favoris » (§1.5) reste
+> optionnelle (la DB locale fait foi pour les abonnements).
+
+État des lieux initial : **rien n'existait** côté podcasts. Supysonic n'implémente aucun endpoint
 `getPodcasts*` (ils ne sont même pas dans `unsupported.py`), il n'y a pas de table
 podcast en base, et `deezerpy` n'expose que `get_chart_podcasts` (`deezerpy/api.py:121`).
 Deezer appelle les podcasts des **shows** en interne (`SHOW_ID`, `EPISODE_ID`).

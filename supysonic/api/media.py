@@ -25,7 +25,7 @@ from xml.etree import ElementTree
 from zipstream import ZipStream
 
 from ..cache import CacheMiss
-from ..db import Track, Album, Artist, Folder, now
+from ..db import Track, Album, Artist, Folder, PodcastEpisode, now
 from ..covers import EXTENSIONS
 
 from . import get_entity, get_entity_id, api_routing
@@ -57,6 +57,44 @@ def _ensure_deezer_archived(res):
     except Exception as e:
         logger.warning("Deezer archiving failed for track %s: %s", res.id, e)
         raise ServerError("Could not fetch track from Deezer")
+
+
+def _ensure_episode_archived(episode):
+    """Lazily fetch+archive a podcast episode's MP3 on first access."""
+    provider = getattr(current_app, "deezer", None)
+    if provider is None:
+        raise ServerError("Deezer proxy is not enabled")
+    if episode.path and os.path.isfile(episode.path):
+        return
+    from ..deezer.archive import ensure_episode_archived
+
+    try:
+        ensure_episode_archived(provider, episode)
+    except Exception as e:
+        logger.warning("Deezer archiving failed for episode %s: %s", episode.id, e)
+        raise ServerError("Could not fetch episode from Deezer")
+
+
+def _resolve_stream_entity():
+    """Resolve a stream/download id to an archived Track or PodcastEpisode.
+
+    Tracks are tried first (the common case); a Deezer-backed track or podcast
+    episode is fetched+archived here so the rest of the pipeline serves a local
+    file exactly as for any other media.
+    """
+    uid = get_entity_id(Track, request.values["id"])
+    try:
+        res = Track[uid]
+        _ensure_deezer_archived(res)
+        return res
+    except Track.DoesNotExist:
+        pass
+    try:
+        episode = PodcastEpisode[uid]
+    except PodcastEpisode.DoesNotExist as e:
+        raise NotFound("Track") from e
+    _ensure_episode_archived(episode)
+    return episode
 
 
 def _prefetch_next(res):
@@ -105,8 +143,7 @@ def prepare_transcoding_cmdline(
 
 @api_routing("/stream")
 def stream_media():
-    res = get_entity(Track)
-    _ensure_deezer_archived(res)
+    res = _resolve_stream_entity()
 
     if "timeOffset" in request.values:
         raise UnsupportedParameter("timeOffset")
@@ -265,16 +302,19 @@ def stream_media():
     else:
         response = send_file(res.path, mimetype=dst_mimetype, conditional=True)
 
-    res.play_count = res.play_count + 1
-    res.last_play = now()
-    res.save()
+    # Play bookkeeping + album prefetch only apply to real Tracks; podcast
+    # episodes aren't part of the play-history / last_play FK model.
+    if isinstance(res, Track):
+        res.play_count = res.play_count + 1
+        res.last_play = now()
+        res.save()
 
-    user = request.user
-    user.last_play = res
-    user.last_play_date = now()
-    user.save()
+        user = request.user
+        user.last_play = res
+        user.last_play_date = now()
+        user.save()
 
-    _prefetch_next(res)
+        _prefetch_next(res)
 
     return response
 
@@ -301,6 +341,14 @@ def download_media():
             _ensure_deezer_archived(rv)
             return send_file(rv.path, mimetype=rv.mimetype, conditional=True)
         except Track.DoesNotExist:
+            try:  # Podcast episode -> single file
+                episode = PodcastEpisode[uid]
+                _ensure_episode_archived(episode)
+                return send_file(
+                    episode.path, mimetype=episode.mimetype, conditional=True
+                )
+            except PodcastEpisode.DoesNotExist:
+                pass
             try:  # Album -> stream zipped tracks
                 rv = Album[uid]
             except Album.DoesNotExist as e:
