@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--album", default="302127")
     ap.add_argument("--track", default="3135556")
     ap.add_argument("--playlist", default="908622995")
+    ap.add_argument("--show", default="436902", help="Deezer podcast (show) id")
+    ap.add_argument("--episode", default=None, help="episode id; auto-extracted from the show page if omitted")
     args = ap.parse_args()
     if not args.arl:
         ap.error("provide --arl or set ARL env var")
@@ -51,7 +53,18 @@ def main():
         print("ARL login failed", file=sys.stderr)
         sys.exit(1)
     uid = dz.current_user.get("id")
-    A, AL, T, PL = args.artist, args.album, args.track, args.playlist
+    A, AL, T, PL, SH = args.artist, args.album, args.track, args.playlist, args.show
+
+    # Podcasts: Deezer calls them "shows" internally. Method names below are the
+    # web-player candidates (unconfirmed publicly) — this probe is how we confirm
+    # them. If --episode isn't given, pull one from the show page when it answers.
+    EP = args.episode
+    if not EP:
+        try:
+            page = dz.gw.api_call("deezer.pageShow", {"SHOW_ID": SH, "lang": "en", "nb": 1, "start": 0})
+            EP = page["EPISODES"]["data"][0]["EPISODE_ID"]
+        except Exception:
+            EP = "0"
 
     # (label, gw method, args)  -- READ-ONLY methods only.
     probes = [
@@ -81,6 +94,12 @@ def main():
         ("user recommended artists", "artist.getRecommendedArtists", {"nb": 10}),
         ("user recommended tracks", "song.getRecommendedSongs", {"nb": 10}),
         ("genres", "deezer.pageGenres", {}),
+        ("show page (podcast)", "deezer.pageShow", {"SHOW_ID": SH, "lang": "en", "nb": 5, "start": 0}),
+        ("show episodes", "episode.getListByShow", {"SHOW_ID": SH, "NB": 5, "START": 0}),
+        ("episode data (stream url?)", "episode.getData", {"EPISODE_ID": EP}),
+        ("profile podcasts tab", "deezer.pageProfile", {"USER_ID": uid, "tab": "podcasts", "nb": 10}),
+        ("search shows", "search.music", {"query": "tech", "filter": "ALL", "output": "SHOW", "start": 0, "nb": 5}),
+        ("search episodes", "search.music", {"query": "tech", "filter": "ALL", "output": "EPISODE", "start": 0, "nb": 5}),
         ("home page.get", "page.get", {"gateway_input": json.dumps({"PAGE": "home", "VERSION": "2.5", "SUPPORT": {}, "LANG": "en"})}),
     ]
 
