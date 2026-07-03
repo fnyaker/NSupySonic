@@ -55,13 +55,13 @@ def main():
     uid = dz.current_user.get("id")
     A, AL, T, PL, SH = args.artist, args.album, args.track, args.playlist, args.show
 
-    # Podcasts: Deezer calls them "shows" internally. Method names below are the
-    # web-player candidates (unconfirmed publicly) — this probe is how we confirm
-    # them. If --episode isn't given, pull one from the show page when it answers.
+    # Podcasts: Deezer calls them "shows" internally. Method names/args below are
+    # confirmed from a HAR capture of the web player (see docs/plan-podcasts.md).
+    # If --episode isn't given, pull one from the show page when it answers.
     EP = args.episode
     if not EP:
         try:
-            page = dz.gw.api_call("deezer.pageShow", {"SHOW_ID": SH, "lang": "en", "nb": 1, "start": 0})
+            page = dz.gw.api_call("deezer.pageShow", {"show_id": SH, "lang": "en", "nb": 1, "start": 0})
             EP = page["EPISODES"]["data"][0]["EPISODE_ID"]
         except Exception:
             EP = "0"
@@ -94,12 +94,13 @@ def main():
         ("user recommended artists", "artist.getRecommendedArtists", {"nb": 10}),
         ("user recommended tracks", "song.getRecommendedSongs", {"nb": 10}),
         ("genres", "deezer.pageGenres", {}),
-        ("show page (podcast)", "deezer.pageShow", {"SHOW_ID": SH, "lang": "en", "nb": 5, "start": 0}),
-        ("show episodes", "episode.getListByShow", {"SHOW_ID": SH, "NB": 5, "START": 0}),
-        ("episode data (stream url?)", "episode.getData", {"EPISODE_ID": EP}),
-        ("profile podcasts tab", "deezer.pageProfile", {"USER_ID": uid, "tab": "podcasts", "nb": 10}),
-        ("search shows", "search.music", {"query": "tech", "filter": "ALL", "output": "SHOW", "start": 0, "nb": 5}),
-        ("search episodes", "search.music", {"query": "tech", "filter": "ALL", "output": "EPISODE", "start": 0, "nb": 5}),
+        # Podcasts (confirmed method names/args). pageShow returns the show DATA
+        # plus a paginated EPISODES list (each with EPISODE_DIRECT_STREAM_URL).
+        ("show page + episodes", "deezer.pageShow", {"show_id": SH, "lang": "en", "nb": 5, "start": 0}),
+        # Still-unconfirmed: how to list the user's subscribed shows (§1.5).
+        ("profile podcasts tab?", "deezer.pageProfile", {"USER_ID": uid, "tab": "podcasts", "nb": 10}),
+        ("search shows?", "search.music", {"query": "tech", "filter": "ALL", "output": "SHOW", "start": 0, "nb": 5}),
+        ("search episodes?", "search.music", {"query": "tech", "filter": "ALL", "output": "EPISODE", "start": 0, "nb": 5}),
         ("home page.get", "page.get", {"gateway_input": json.dumps({"PAGE": "home", "VERSION": "2.5", "SUPPORT": {}, "LANG": "en"})}),
     ]
 
