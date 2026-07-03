@@ -1,16 +1,18 @@
 <script>
   import { onDestroy } from "svelte";
   import { api } from "../lib/api.js";
+  import { isAdmin } from "../lib/stores.js";
   import Card from "../components/Card.svelte";
+  import PodcastCard from "../components/PodcastCard.svelte";
   import TrackList from "../components/TrackList.svelte";
   import Skeleton from "../components/Skeleton.svelte";
 
   export let params = {};
 
   let q = "";
-  let results = { artists: [], albums: [], tracks: [], playlists: [] };
+  let results = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [] };
   let loading = false;
-  let tab = "all"; // all | tracks | albums | artists | playlists
+  let tab = "all"; // all | tracks | albums | artists | playlists | podcasts
   let timer;
   let seq = 0;
 
@@ -34,7 +36,7 @@
   async function run(term) {
     const mine = ++seq;
     if (!term) {
-      results = { artists: [], albums: [], tracks: [], playlists: [] };
+      results = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [] };
       loading = false;
       return;
     }
@@ -42,9 +44,10 @@
     try {
       const r = await api.search(term);
       if (mine !== seq) return; // a newer query already started
-      results = { artists: [], albums: [], tracks: [], playlists: [], ...r };
+      results = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [], ...r };
     } catch {
-      if (mine === seq) results = { artists: [], albums: [], tracks: [], playlists: [] };
+      if (mine === seq)
+        results = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [] };
     } finally {
       if (mine === seq) loading = false;
     }
@@ -56,7 +59,8 @@
     results.artists?.length ||
     results.albums?.length ||
     results.tracks?.length ||
-    results.playlists?.length;
+    results.playlists?.length ||
+    (results.podcasts?.length && $isAdmin);
 </script>
 
 <div class="bar fade-in">
@@ -76,6 +80,9 @@
     <button class:active={tab === "albums"} on:click={() => (tab = "albums")}>Albums</button>
     <button class:active={tab === "artists"} on:click={() => (tab = "artists")}>Artistes</button>
     <button class:active={tab === "playlists"} on:click={() => (tab = "playlists")}>Playlists</button>
+    {#if $isAdmin}
+      <button class:active={tab === "podcasts"} on:click={() => (tab = "podcasts")}>Podcasts</button>
+    {/if}
   </div>
 {/if}
 
@@ -111,6 +118,13 @@
   {#if (tab === "all" || tab === "tracks") && results.tracks?.length}
     <h2>Titres</h2>
     <TrackList tracks={results.tracks} />
+  {/if}
+
+  {#if $isAdmin && (tab === "all" || tab === "podcasts") && results.podcasts?.length}
+    <h2>Podcasts</h2>
+    <div class={tab === "podcasts" ? "grid" : "shelf"}>
+      {#each results.podcasts as p (p.deezer_id)}<PodcastCard item={p} />{/each}
+    </div>
   {/if}
 {/if}
 

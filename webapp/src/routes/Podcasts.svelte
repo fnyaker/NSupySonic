@@ -1,18 +1,26 @@
 <script>
   import { push } from "svelte-spa-router";
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { api } from "../lib/api.js";
   import { isAdmin, toasts } from "../lib/stores.js";
+  import { subscribeToPodcast } from "../lib/actions.js";
   import Cover from "../components/Cover.svelte";
+  import PodcastCard from "../components/PodcastCard.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
 
   let channels = [];
   let loading = true;
-  let url = "";
-  let busy = false;
+
+  // search
+  let q = "";
+  let searchResults = [];
+  let searching = false;
+  let timer;
+  let seq = 0;
 
   onMount(load);
+  onDestroy(() => clearTimeout(timer));
 
   async function load() {
     loading = true;
@@ -25,20 +33,42 @@
     loading = false;
   }
 
-  async function subscribe() {
-    const value = url.trim();
-    if (!value || busy) return;
-    busy = true;
+  function onInput() {
+    clearTimeout(timer);
+    const term = q.trim();
+    if (!term) {
+      searchResults = [];
+      searching = false;
+      return;
+    }
+    searching = true;
+    timer = setTimeout(() => runSearch(term), 300);
+  }
+
+  async function runSearch(term) {
+    const mine = ++seq;
     try {
-      const c = await api.subscribePodcast(value);
-      url = "";
+      const r = await api.searchPodcasts(term);
+      if (mine === seq) searchResults = r?.podcasts || [];
+    } catch {
+      if (mine === seq) searchResults = [];
+    } finally {
+      if (mine === seq) searching = false;
+    }
+  }
+
+  // Allow pasting a direct Deezer show URL and pressing Enter to add it.
+  async function onSubmit() {
+    const term = q.trim();
+    if (!term || !/deezer\.com\/.*(show|episode)\//.test(term)) return;
+    try {
+      const c = await api.subscribePodcast(term);
       toasts.push("Podcast ajouté");
+      q = "";
+      searchResults = [];
       if (c?.id) push("/podcast/" + c.id);
-      else await load();
     } catch (e) {
       toasts.push(e?.message || "Échec de l'ajout", "error");
-    } finally {
-      busy = false;
     }
   }
 </script>
@@ -49,25 +79,39 @@
   </div>
 
   {#if $isAdmin}
-    <form class="add" on:submit|preventDefault={subscribe}>
+    <form class="search" on:submit|preventDefault={onSubmit}>
       <input
-        placeholder="Coller une URL de podcast Deezer (deezer.com/show/…)"
-        bind:value={url}
+        placeholder="Rechercher un podcast (ou coller une URL Deezer)…"
+        bind:value={q}
+        on:input={onInput}
       />
-      <button class="pill" disabled={busy || !url.trim()}>
-        <Icon name="plus" size={18} /> Ajouter
-      </button>
     </form>
+
+    {#if q.trim()}
+      {#if searching}
+        <Skeleton kind="list" />
+      {:else if searchResults.length}
+        <h2>Résultats</h2>
+        <div class="grid">
+          {#each searchResults as p (p.deezer_id)}
+            <PodcastCard item={p} />
+          {/each}
+        </div>
+      {:else}
+        <p class="muted empty">Aucun podcast pour « {q} ».</p>
+      {/if}
+    {/if}
   {/if}
 
+  <h2 class:hidden={$isAdmin && q.trim()}>Mes podcasts</h2>
   {#if loading}
     <Skeleton kind="list" />
   {:else if !channels.length}
     <p class="muted empty">
-      Aucun podcast pour l'instant.{#if $isAdmin} Ajoutez-en un avec une URL Deezer ci-dessus.{/if}
+      Aucun abonnement pour l'instant.{#if $isAdmin} Cherchez un podcast ci-dessus pour vous abonner.{/if}
     </p>
   {:else}
-    <div class="grid">
+    <div class="grid" class:hidden={$isAdmin && q.trim()}>
       {#each channels as c (c.id)}
         <div
           class="card"
@@ -98,13 +142,17 @@
     font-size: clamp(1.6rem, 4vw, 2.4rem);
     margin-bottom: 16px;
   }
-  .add {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 22px;
+  h2 {
+    margin: 20px 0 12px;
   }
-  .add input {
-    flex: 1;
+  h2.hidden {
+    display: none;
+  }
+  .search {
+    margin-bottom: 6px;
+  }
+  .search input {
+    width: 100%;
     padding: 11px 14px;
     border-radius: var(--radius);
     border: 1px solid transparent;
@@ -112,22 +160,19 @@
     color: var(--text);
     outline: none;
   }
-  .add input:focus {
+  .search input:focus {
     border-color: var(--accent);
   }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-  }
   .empty {
-    margin-top: 40px;
+    margin-top: 20px;
   }
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 16px;
+  }
+  .grid.hidden {
+    display: none;
   }
   .card {
     padding: 12px;

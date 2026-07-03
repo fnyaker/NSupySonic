@@ -300,35 +300,47 @@ class DeezerImporter:
     # -- podcasts --------------------------------------------------------
 
     def sync_podcasts(self, episode_limit=30) -> int:
-        """Refresh every subscribed podcast's metadata + recent episodes.
+        """Import/refresh subscribed podcasts + their recent episodes.
 
-        The local PodcastChannel rows are the source of truth for subscriptions
-        (added via createPodcastChannel / CLI import); this just re-fetches each
-        show's latest episodes. Audio is still fetched on demand.
+        Subscriptions come from two places, merged and de-duplicated:
+          * local PodcastChannel rows (added via createPodcastChannel / CLI /
+            web UI) — the source of truth going forward, and
+          * the account's favorite shows on Deezer (``pageProfile`` podcasts tab),
+            so shows you favorited in the Deezer app show up here too.
+        Audio is still fetched on demand.
         """
         from .archive import import_show
 
-        channels = list(
-            PodcastChannel.select().where(PodcastChannel.user == self.user)
-        )
-        if channels:
-            self._progress(f"Refreshing {len(channels)} podcast(s)...")
+        show_ids = []
+        seen = set()
+
+        def _add(sid):
+            sid = str(sid or "")
+            if sid and sid not in seen:
+                seen.add(sid)
+                show_ids.append(sid)
+
+        for channel in PodcastChannel.select().where(PodcastChannel.user == self.user):
+            _add(channel.deezer_id)
+        try:
+            for s in self.provider.get_user_shows():
+                _add(s.get("SHOW_ID"))
+        except Exception as exc:
+            logger.warning("Could not list Deezer favorite shows: %s", exc)
+
+        if show_ids:
+            self._progress(f"Refreshing {len(show_ids)} podcast(s)...")
         count = 0
-        for channel in channels:
-            if not channel.deezer_id:
-                continue
+        for sid in show_ids:
             try:
-                import_show(
-                    self.provider, self.user, channel.deezer_id,
-                    episode_limit=episode_limit,
+                channel = import_show(
+                    self.provider, self.user, sid, episode_limit=episode_limit
                 )
                 self._progress(f"  • {channel.title}")
                 count += 1
             except Exception as exc:  # one bad show shouldn't abort the sync
-                logger.warning("Failed to refresh podcast %s: %s", channel.deezer_id, exc)
-                channel.error_message = str(exc)[:255]
-                channel.save()
-                self._progress(f"  ! podcast {channel.deezer_id} failed: {exc}")
+                logger.warning("Failed to refresh podcast %s: %s", sid, exc)
+                self._progress(f"  ! podcast {sid} failed: {exc}")
         return count
 
     # -- orchestration ---------------------------------------------------

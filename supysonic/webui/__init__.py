@@ -743,11 +743,27 @@ def _data(fn):
         return []
 
 
+def _podcast_card(p):
+    """A public-API podcast (show) search result, shaped as a card."""
+    if not p or not p.get("id"):
+        return None
+    return {
+        "deezer_id": str(p.get("id")),
+        "title": p.get("title", "") or "",
+        "description": p.get("description", "") or "",
+        "cover": p.get("picture_xl")
+        or p.get("picture_big")
+        or p.get("picture_medium")
+        or p.get("picture"),
+        "fans": int(p.get("nb_fan") or p.get("fans") or 0),
+    }
+
+
 @webapi.route("/search")
 @login_required
 def search():
     query = request.args.get("q", "").strip()
-    empty = {"artists": [], "albums": [], "tracks": [], "playlists": []}
+    empty = {"artists": [], "albums": [], "tracks": [], "playlists": [], "podcasts": []}
     if not query:
         return jsonify(empty)
     try:
@@ -775,6 +791,9 @@ def search():
     playlists = [
         _playlist_api(p) for p in _data(lambda: dzapi.search_playlist(query, limit=limit))
     ]
+    podcasts = [
+        _podcast_card(p) for p in _data(lambda: dzapi.search_podcast(query, limit=limit))
+    ]
     # Downloaded/local tracks lead (they play from disk); drop the live-search
     # duplicates of the same Deezer ids so a track isn't listed twice.
     have = {t["deezer_id"] for t in local_tracks}
@@ -784,8 +803,27 @@ def search():
             "albums": [x for x in albums if x],
             "artists": [x for x in artists if x],
             "playlists": [x for x in playlists if x],
+            "podcasts": [x for x in podcasts if x],
         }
     )
+
+
+@webapi.route("/search/podcasts")
+@login_required
+def search_podcasts():
+    query = request.args.get("q", "").strip()
+    provider = _provider()
+    if not query or provider is None:
+        return jsonify({"podcasts": []})
+    try:
+        limit = max(1, min(int(request.args.get("limit", 25)), 50))
+    except (TypeError, ValueError):
+        limit = 25
+    res = [
+        _podcast_card(p)
+        for p in _data(lambda: provider.dz.api.search_podcast(query, limit=limit))
+    ]
+    return jsonify({"podcasts": [x for x in res if x]})
 
 
 @webapi.route("/artist/<artist_id>")

@@ -56,21 +56,40 @@ def episode_obj(eid, title="Episode", ts=1782660730, url="https://host.example/e
 
 
 class MockPublicApi:
-    def __init__(self, episode_to_show):
+    def __init__(self, episode_to_show, search_results=None):
         self._episode_to_show = episode_to_show
+        self._search_results = search_results or []
 
     def get_episode(self, episode_id):
         return {"podcast": {"id": self._episode_to_show.get(str(episode_id))}}
+
+    def search_podcast(self, query, limit=25):
+        return {"data": self._search_results[:limit]}
+
+    # The combined /api/search also probes these; the mock only cares about
+    # podcasts, so the rest come back empty.
+    def search(self, query, limit=25):
+        return {"data": []}
+
+    def search_album(self, query, limit=25):
+        return {"data": []}
+
+    def search_artist(self, query, limit=25):
+        return {"data": []}
+
+    def search_playlist(self, query, limit=25):
+        return {"data": []}
 
 
 class MockProvider:
     """Enough of DeezerProvider for the podcast code paths, fully offline."""
 
-    def __init__(self, archive_dir, shows):
+    def __init__(self, archive_dir, shows, favorite_show_ids=None, search_results=None):
         self.archive_dir = archive_dir
         self.default_quality = "MP3_128"
         # shows: {show_id: (data_dict, [episode_objs])}
         self.shows = {str(k): v for k, v in shows.items()}
+        self.favorite_show_ids = [str(s) for s in (favorite_show_ids or [])]
         self.fav_added = []
         self.fav_removed = []
         self.downloaded = []
@@ -80,7 +99,19 @@ class MockProvider:
             for sid, (_d, eps) in self.shows.items()
             for e in eps
         }
-        self.dz = types.SimpleNamespace(api=MockPublicApi(episode_to_show))
+        self.dz = types.SimpleNamespace(
+            api=MockPublicApi(episode_to_show, search_results)
+        )
+
+    def get_user_shows(self):
+        return [
+            {"SHOW_ID": sid, "SHOW_NAME": self.shows[sid][0]["SHOW_NAME"]}
+            for sid in self.favorite_show_ids
+            if sid in self.shows
+        ]
+
+    def search_podcasts(self, query, limit=25):
+        return self.dz.api.search_podcast(query, limit=limit)["data"]
 
     def get_show_page(self, show_id, nb=40, start=0):
         data, eps = self.shows[str(show_id)]
@@ -217,6 +248,24 @@ class PodcastLibraryTestCase(TestBase):
         self.assertEqual(
             PodcastChannel[ids.show_uuid("1002156761")].episodes.count(), 3
         )
+
+    def test_sync_podcasts_imports_deezer_favorites(self):
+        # A show favorited on Deezer (no local row yet) is imported by sync,
+        # closing the "list my favorite shows" gap.
+        from supysonic.deezer.importer import DeezerImporter
+
+        eps = [episode_obj(i, f"Ep {i}") for i in range(1, 3)]
+        provider = MockProvider(
+            self.archive_dir,
+            {"1002156761": (show_data(), eps)},
+            favorite_show_ids=["1002156761"],
+        )
+        self.assertEqual(PodcastChannel.select().count(), 0)
+        importer = DeezerImporter(provider, "alice")
+        n = importer.sync_podcasts(episode_limit=30)
+        self.assertEqual(n, 1)
+        self.assertEqual(PodcastChannel.select().count(), 1)
+        self.assertEqual(PodcastEpisode.select().count(), 2)
 
     def test_parse_deezer_ref_show_and_episode(self):
         self.assertEqual(
@@ -465,3 +514,29 @@ class PodcastWebUITestCase(unittest.TestCase):
         self.client.post("/api/login", json={"username": "bob", "password": "B0b"})
         rv = self._subscribe()
         self.assertEqual(rv.status_code, 403)
+
+    def test_search_podcasts(self):
+        self._login()
+        self.provider.dz.api._search_results = [
+            {
+                "id": 42,
+                "title": "Found Cast",
+                "description": "d",
+                "picture_xl": "http://img/xl.jpg",
+                "nb_fan": 10,
+            }
+        ]
+        r = self.client.get("/api/search/podcasts?q=found").get_json()
+        self.assertEqual(len(r["podcasts"]), 1)
+        self.assertEqual(r["podcasts"][0]["deezer_id"], "42")
+        self.assertEqual(r["podcasts"][0]["cover"], "http://img/xl.jpg")
+
+        # Also surfaced in the combined search (other sections just come back
+        # empty since the mock only implements podcast search).
+        r2 = self.client.get("/api/search?q=found").get_json()
+        self.assertTrue(any(p["deezer_id"] == "42" for p in r2["podcasts"]))
+
+    def test_search_podcasts_empty_query(self):
+        self._login()
+        r = self.client.get("/api/search/podcasts?q=").get_json()
+        self.assertEqual(r["podcasts"], [])

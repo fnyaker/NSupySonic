@@ -1,13 +1,15 @@
 # Plan — support des podcasts Deezer
 
-> **Statut : implémenté (backend + Subsonic REST + web UI Svelte).** Phases 1–6
-> livrées et testées (`tests/test_podcast.py`, 20 tests). deezerpy (api+gw), tables
-> `PodcastChannel`/`PodcastEpisode` + migrations, provider/archive, sync + CLI,
-> endpoints `/rest` podcast + interception du streaming, **et** les pages `/app`
-> (`/api/podcasts`, `/api/podcast/<id>`, abonnement/désabonnement, streaming des
-> épisodes via `/api/stream/<uuid>` ; pages Svelte `Podcasts` + `Show`, entrées de
-> nav desktop & mobile). La sonde « lister ses shows favoris » (§1.5) reste
-> optionnelle (la DB locale fait foi pour les abonnements).
+> **Statut : implémenté (backend + Subsonic REST + web UI Svelte, avec recherche).**
+> Phases 1–6 livrées et testées (`tests/test_podcast.py`, 23 tests). deezerpy
+> (api+gw), tables `PodcastChannel`/`PodcastEpisode` + migrations, provider/archive,
+> sync + CLI, endpoints `/rest` podcast + interception du streaming, pages `/app`
+> (`/api/podcasts`, `/api/podcast/<id>`, abonnement/désabonnement, streaming via
+> `/api/stream/<uuid>` ; pages Svelte `Podcasts` + `Show`, nav desktop & mobile).
+> **Recherche** de podcasts (API publique `search/podcast`) exposée dans
+> `/api/search` + `/api/search/podcasts`, avec abonnement en un clic (composant
+> `PodcastCard`). **§1.5 résolu** : `deezer.pageProfile tab:podcasts` importe aussi
+> les shows déjà favoris côté Deezer lors du sync.
 
 État des lieux initial : **rien n'existait** côté podcasts. Supysonic n'implémente aucun endpoint
 `getPodcasts*` (ils ne sont même pas dans `unsupported.py`), il n'y a pas de table
@@ -123,22 +125,21 @@ La requête audio ne porte **aucun cookie, aucun `Authorization`** — juste
   non rencontré dans la capture — fallback `media.deezer.com` via token à traiter le
   jour où on en croise un).
 
-### 1.5 Reste une seule inconnue — lister les shows favoris de l'utilisateur
+### 1.5 RÉSOLU — lister les shows favoris + recherche
 
-La capture ouvre un show directement ; elle **ne contient pas** l'appel qui liste
-« mes podcasts abonnés ». Deux voies, sans re-capture obligatoire :
+Confirmés par une seconde capture HAR (`capture2`) :
 
-- **Contourner** : notre DB est la source de vérité des abonnements
-  (`createPodcastChannel` → `show.addFavorite` **et** ligne `PodcastChannel` locale).
-  Le sync se contente alors de rafraîchir les épisodes des channels connus. Suffisant
-  pour la v1.
-- **Import initial des shows déjà en favori** (confort) : à confirmer par une petite
-  sonde — candidats `deezer.pageProfile {USER_ID, tab:"podcasts"}` ou un
-  `page.get PAGE="favorites"`. Non bloquant.
-
-La recherche de podcasts passe côté player par le GraphQL `pipe.deezer.com`
-(`SearchFull`, `Show(id)`) ; le gw `search.music` avec `output:"SHOW"/"EPISODE"`
-est l'alternative probable mais non capturée. À sonder au besoin.
+- **Shows favoris** : `deezer.pageProfile {user_id, tab:"podcasts", nb}` →
+  `TAB.shows.data` = liste des shows favoris (objets `SHOW_ID` / `SHOW_NAME` /
+  `SHOW_ART_MD5` / `SHOW_DESCRIPTION`, mêmes clés que `deezer.pageShow`). Implémenté
+  en `gw.get_user_shows` / `provider.get_user_shows` ; `importer.sync_podcasts`
+  fusionne les channels locaux **et** ces favoris (dé-dupliqués) — un show favorisé
+  dans l'app Deezer apparaît donc automatiquement.
+- **Recherche** : le player web passe par le GraphQL `SearchFull` (pipe.deezer.com),
+  mais l'**API publique** `GET /search/podcast?q=` (déjà dans `deezerpy/api.py`)
+  fait le même travail sans JWT, renvoie des résultats typés avec images, et
+  fonctionne avec l'ARL. Retenue pour sa simplicité — exposée via `/api/search`
+  (section `podcasts`) et `/api/search/podcasts`, abonnement en un clic.
 
 ## 2. Modèle de données
 
