@@ -194,6 +194,15 @@ class DeezerProvider:
     def get_show_episodes(self, show_id) -> list[dict]:
         return self.dz.gw.get_show_episodes(show_id)
 
+    def search_podcasts(self, query, limit=25) -> list[dict]:
+        """Search podcasts via the public API (typed, returns image URLs)."""
+        res = self.dz.api.search_podcast(query, limit=limit)
+        return (res or {}).get("data", []) or []
+
+    def get_user_shows(self) -> list[dict]:
+        """The user's favorite podcasts (shows) from their Deezer profile."""
+        return self.dz.gw.get_user_shows(self.user_id)
+
     def add_favorite_show(self, show_id):
         return self.dz.gw.add_show_to_favorites(show_id)
 

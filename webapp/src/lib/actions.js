@@ -167,6 +167,22 @@ export async function toggleEntityFavorite(kind, id, on) {
   }
 }
 
+// Subscribe to a podcast from a search result (its Deezer show id): imports the
+// show + episodes on the server (archived on first play) and returns the local
+// channel, so the caller can open it.
+export async function subscribeToPodcast(showDeezerId) {
+  try {
+    const c = await api.subscribePodcast(
+      "https://www.deezer.com/show/" + showDeezerId
+    );
+    toasts.push("Podcast ajouté");
+    return c;
+  } catch (e) {
+    toasts.push(e?.message || "Échec de l'ajout du podcast", "error");
+    return null;
+  }
+}
+
 export async function startTrackRadio(track) {
   try {
     const r = await api.trackRadio(track.deezer_id);

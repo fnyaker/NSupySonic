@@ -502,3 +502,12 @@ class GW:
             'DURATION': float(duration),
             'ISHEARD': 1 if is_heard else 0,
         })
+
+    def get_user_shows(self, user_id, limit=2000):
+        """The user's favorite podcasts (shows). Confirmed from a HAR capture:
+        ``deezer.pageProfile`` tab ``podcasts`` -> ``TAB.shows.data`` (each a show
+        object with SHOW_ID / SHOW_NAME / SHOW_ART_MD5 / SHOW_DESCRIPTION)."""
+        page = self.api_call('deezer.pageProfile', {
+            'user_id': user_id, 'tab': 'podcasts', 'nb': limit,
+        })
+        return page.get('TAB', {}).get('shows', {}).get('data', [])

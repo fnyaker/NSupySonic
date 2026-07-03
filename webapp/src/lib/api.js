@@ -142,6 +142,7 @@ export const api = {
   // podcasts
   podcasts: () => req("/podcasts"),
   podcast: (id) => req("/podcast/" + id),
+  searchPodcasts: (q) => req("/search/podcasts?q=" + encodeURIComponent(q)),
   subscribePodcast: (url) =>
     req("/podcasts", { method: "POST", body: body({ url }) }),
   unsubscribePodcast: (id) => req("/podcast/" + id, { method: "DELETE" }),
