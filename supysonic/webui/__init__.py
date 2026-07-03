@@ -1740,6 +1740,7 @@ _sync_lock = threading.Lock()
 
 
 @webapi.route("/sync", methods=["POST"])
+@login_required
 @admin_required
 def trigger_sync():
     provider, err = _need_provider()
@@ -1763,6 +1764,7 @@ def trigger_sync():
 
 
 @webapi.route("/sync/status")
+@login_required
 @admin_required
 def sync_status():
     running = _sync_thread is not None and _sync_thread.is_alive()

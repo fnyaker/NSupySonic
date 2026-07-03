@@ -377,6 +377,22 @@ class WebUITestCase(unittest.TestCase):
         )
         self.assertEqual(rv.status_code, 401)
 
+    def test_sync_requires_login(self):
+        self.assertEqual(self.client.post("/api/sync").status_code, 401)
+        self.assertEqual(self.client.get("/api/sync/status").status_code, 401)
+
+    def test_sync_admin_not_forbidden(self):
+        # admin_required must see the logged-in admin (it reads request.webuser,
+        # which only login_required sets) — never a blanket 403.
+        self._login()
+        rv = self.client.get("/api/sync/status")
+        self.assertEqual(rv.status_code, 200)
+        self.assertIn("running", rv.get_json())
+        # No sync_user configured in tests: auth passes, the config check 503s.
+        rv = self.client.post("/api/sync")
+        self.assertEqual(rv.status_code, 503)
+        self.assertEqual(rv.get_json()["error"], "no sync user configured")
+
     # -- discovery -------------------------------------------------------
 
     def test_home(self):
@@ -1088,6 +1104,11 @@ class WebUIGuestTestCase(unittest.TestCase):
         self.assertEqual(self.client.get("/api/album/302127").status_code, 200)
         self.assertEqual(self.client.get("/api/radio/track/3").status_code, 200)
         self.assertEqual(self.client.get("/api/search?q=foo").status_code, 200)
+
+    def test_sync_forbidden_for_guests(self):
+        self._login()
+        self.assertEqual(self.client.post("/api/sync").status_code, 403)
+        self.assertEqual(self.client.get("/api/sync/status").status_code, 403)
 
 
 if __name__ == "__main__":
