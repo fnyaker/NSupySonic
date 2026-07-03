@@ -72,6 +72,8 @@ class DefaultConfig:
         "sync_user": None,  # supysonic user owning imported playlists/favorites
         "sync_playlists": True,
         "sync_favorites": True,
+        "sync_podcasts": True,  # refresh subscribed podcasts' episodes on each sync
+        "podcast_episodes": 30,  # recent episodes to import per podcast
         "import_new_releases": True,  # import the smart tracklists below
         "import_flow": True,
         # Smart tracklists to expose as "Deezer · ..." playlists (None = default

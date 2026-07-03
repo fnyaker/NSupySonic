@@ -121,6 +121,24 @@ class API:
     def get_chart_podcasts(self, genre_id=0, index=0, limit=10):
         return self.api_call(f'chart/{str(genre_id)}/podcasts', {'index': index, 'limit': limit})
 
+    # -- podcasts (Deezer calls them "shows") ----------------------------
+
+    def get_podcast(self, podcast_id):
+        return self.api_call(f'podcast/{str(podcast_id)}')
+
+    def get_podcast_episodes(self, podcast_id, index=0, limit=-1):
+        return self.api_call(f'podcast/{str(podcast_id)}/episodes', {'index': index, 'limit': limit})
+
+    def get_episode(self, episode_id):
+        return self.api_call(f'episode/{str(episode_id)}')
+
+    def search_podcast(self, query, strict=False, order=None, index=0, limit=25):
+        args = self._generate_search_args(query, strict, order, index, limit)
+        return self.api_call('search/podcast', args)
+
+    def get_genre_podcasts(self, genre_id=0, index=0, limit=10):
+        return self.api_call(f'genre/{str(genre_id)}/podcasts', {'index': index, 'limit': limit})
+
     def get_comment(self, comment_id):
         return self.api_call(f'comment/{str(comment_id)}')
 

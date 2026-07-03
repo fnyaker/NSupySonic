@@ -400,10 +400,11 @@ def deezer_login_test(config):
 @click.argument("ref")
 @click.pass_obj
 def deezer_import(config, ref):
-    """Import a Deezer TRACK, ALBUM or PLAYLIST into the library.
+    """Import a Deezer TRACK, ALBUM, PLAYLIST or SHOW (podcast) into the library.
 
-    REF is a deezer.com URL or a 'track|album|playlist <id>' reference. The
-    audio is fetched lazily on first play; this only imports the metadata.
+    REF is a deezer.com URL or a 'track|album|playlist|show|episode <id>'
+    reference. The audio is fetched lazily on first play; this only imports the
+    metadata. Importing a podcast (show/episode) requires 'sync_user' to be set.
     """
 
     provider = _require_provider(config)
@@ -412,12 +413,24 @@ def deezer_import(config, ref):
         import_track,
         import_album,
         import_playlist_tracks,
+        import_show,
     )
 
     try:
         kind, did = parse_deezer_ref(ref)
     except ValueError as e:
         raise ClickException(str(e)) from e
+
+    def _podcast_owner():
+        sync_user = config.DEEZER.get("sync_user")
+        if not sync_user:
+            raise ClickException(
+                "Importing a podcast requires 'sync_user' in the [deezer] config."
+            )
+        try:
+            return User.get(name=sync_user)
+        except User.DoesNotExist as e:
+            raise ClickException(f"sync_user '{sync_user}' does not exist.") from e
 
     try:
         if kind == "track":
@@ -429,8 +442,22 @@ def deezer_import(config, ref):
         elif kind == "playlist":
             tracks = import_playlist_tracks(provider, did)
             click.echo(f"Imported playlist {did}: {len(tracks)} tracks")
+        elif kind in ("show", "episode"):
+            user = _podcast_owner()
+            show_id = did
+            if kind == "episode":
+                # Resolve the parent show; importing it pulls in this episode.
+                info = provider.dz.api.get_episode(did)
+                show_id = (info.get("podcast") or {}).get("id") or info.get("podcast_id")
+                if not show_id:
+                    raise ClickException(f"Could not resolve show for episode {did}")
+            channel = import_show(provider, user, show_id)
+            n = channel.episodes.count()
+            click.echo(f"Imported podcast '{channel.title}' ({n} episodes)")
         else:
             raise ClickException(f"Cannot import a Deezer {kind}")
+    except ClickException:
+        raise
     except Exception as e:
         raise ClickException(str(e)) from e
 

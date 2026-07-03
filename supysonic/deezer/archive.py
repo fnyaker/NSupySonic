@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from ..db import Album, Artist, Playlist, Track
+from ..db import Album, Artist, Playlist, Track, PodcastChannel, PodcastEpisode
 from . import ids, library
 from .metadata import meta_from_gw, tag_file
 from .provider import EXT_FOR_FORMAT, NOMINAL_BITRATE, DeezerError
@@ -47,7 +47,7 @@ def _fixed_ext_path(path: str, fmt: str) -> str:
 
 _LINK_RE = re.compile(
     r"(?:deezer\.com|deezer\.page\.link|dzr\.page\.link)/(?:[a-z]{2}/)?"
-    r"(track|album|playlist|artist)/(\d+)"
+    r"(track|album|playlist|artist|show|episode)/(\d+)"
 )
 
 
@@ -57,7 +57,7 @@ def parse_deezer_ref(ref: str):
     m = _LINK_RE.search(ref)
     if m:
         return m.group(1), m.group(2)
-    m = re.fullmatch(r"(track|album|playlist|artist)[ :/](\d+)", ref)
+    m = re.fullmatch(r"(track|album|playlist|artist|show|episode)[ :/](\d+)", ref)
     if m:
         return m.group(1), m.group(2)
     if ref.isdigit():
@@ -111,6 +111,67 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
     track.has_art = bool(cover)
     track.last_modification = int(time.time())
     track.save()
+
+
+def ensure_episode_archived(provider, episode: PodcastEpisode) -> None:
+    """Fetch a podcast episode's MP3 into its archive path (idempotent).
+
+    Same contract as ``ensure_archived`` but for spoken-word episodes: the
+    source is an external MP3 (no FLAC, no Blowfish), archived once then served
+    locally. Serialized per Deezer episode id.
+    """
+    if episode.path and os.path.isfile(episode.path):
+        return
+
+    with provider.track_lock(f"ep:{episode.deezer_id}"):
+        if episode.path and os.path.isfile(episode.path):
+            return
+
+        path = library.episode_archive_path(
+            provider.archive_dir,
+            episode.channel.title,
+            episode.publish_date,
+            episode.title,
+        )
+        episode.status = "downloading"
+        episode.save()
+        logger.info("Archiving Deezer episode %s -> %s", episode.deezer_id, path)
+        try:
+            url = provider.resolve_episode(episode)
+            provider.download_episode_to(url, path)
+        except Exception:
+            episode.status = "error"
+            episode.save()
+            raise
+
+        episode.path = path
+        episode.bitrate = _bitrate_for(path, "MP3_128", episode.duration)
+        episode.status = "completed"
+        episode.save()
+
+
+def find_local_episode(episode_id) -> PodcastEpisode | None:
+    """The already-imported PodcastEpisode for a Deezer episode id, or None."""
+    try:
+        return PodcastEpisode[ids.episode_uuid(episode_id)]
+    except PodcastEpisode.DoesNotExist:
+        return None
+
+
+def import_show(provider, user, show_id, episode_limit=None) -> PodcastChannel:
+    """Import a Deezer show + its episodes (metadata only) as rows.
+
+    ``episode_limit`` caps how many recent episodes to import (None = all).
+    """
+    page = provider.get_show_page(show_id, nb=episode_limit or 200)
+    channel = library.upsert_channel(user, library.normalize_show(page["DATA"]))
+    if episode_limit:
+        raw_eps = page.get("EPISODES", {}).get("data", [])[:episode_limit]
+    else:
+        raw_eps = provider.get_show_episodes(show_id)
+    for raw in raw_eps:
+        library.upsert_episode(channel, library.normalize_episode(raw))
+    return channel
 
 
 def open_live_stream(provider, track: Track, on_abort=None):
@@ -252,7 +313,20 @@ def deezer_cover_path(provider, cache, eid: str):
                         else None
                     )
                 except Track.DoesNotExist:
-                    return None
+                    try:
+                        ch = PodcastChannel[key]
+                        data = (
+                            provider.fetch_cover(ch.cover_art_md5)
+                            if ch.cover_art_md5
+                            else None
+                        )
+                    except PodcastChannel.DoesNotExist:
+                        try:
+                            ep = PodcastEpisode[key]
+                            md5 = ep.image_md5 or ep.channel.cover_art_md5
+                            data = provider.fetch_cover(md5) if md5 else None
+                        except PodcastEpisode.DoesNotExist:
+                            return None
 
     if not data:
         return None

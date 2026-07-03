@@ -24,6 +24,8 @@
   import Playlist from "./routes/Playlist.svelte";
   import Mix from "./routes/Mix.svelte";
   import Library from "./routes/Library.svelte";
+  import Podcasts from "./routes/Podcasts.svelte";
+  import Show from "./routes/Show.svelte";
   import Settings from "./routes/Settings.svelte";
 
   const routes = {
@@ -35,6 +37,8 @@
     "/playlist/:id": Playlist,
     "/mix/:id": Mix,
     "/library": Library,
+    "/podcasts": Podcasts,
+    "/podcast/:id": Show,
     "/settings": Settings,
   };
 

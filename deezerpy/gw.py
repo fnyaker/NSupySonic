@@ -450,3 +450,55 @@ class GW:
     def get_channel(self, channel_name):
         """A specific channel page, e.g. ``channels/rock``."""
         return self.get_page(channel_name)
+
+    # -- podcasts (Deezer calls them "shows") ----------------------------
+
+    def get_show_page(self, show_id, nb=40, start=0):
+        """A podcast (show) page: ``DATA`` (show), ``EPISODES.data`` (paginated),
+        ``FAVORITE_STATUS``. Confirmed method/args from a web-player HAR capture.
+
+        Each episode carries its own ``EPISODE_DIRECT_STREAM_URL`` (a plain MP3
+        served by the podcast host), so no separate per-episode call is needed.
+        """
+        return self.api_call('deezer.pageShow', {
+            'show_id': show_id,
+            'lang': 'en',
+            'nb': nb,
+            'start': start,
+        })
+
+    def get_show_episodes(self, show_id, page_size=200):
+        """Every episode of a show, paging through ``EPISODES`` until ``total``."""
+        first = self.get_show_page(show_id, nb=page_size, start=0)
+        episodes = list(first.get('EPISODES', {}).get('data', []))
+        total = first.get('EPISODES', {}).get('total', len(episodes))
+        start = len(episodes)
+        while start < total:
+            page = self.get_show_page(show_id, nb=page_size, start=start)
+            data = page.get('EPISODES', {}).get('data', [])
+            if not data:
+                break
+            episodes.extend(data)
+            start += len(data)
+        return episodes
+
+    def add_show_to_favorites(self, show_id):
+        return self.api_call('show.addFavorite', {
+            'SHOW_ID': show_id,
+            'CTXT': {'id': str(show_id), 't': 'show_page'},
+        })
+
+    def remove_show_from_favorites(self, show_id):
+        return self.api_call('show.deleteFavorite', {
+            'SHOW_ID': show_id,
+            'CTXT': {'id': str(show_id), 't': 'show_page'},
+        })
+
+    def set_episode_bookmark(self, episode_id, offset, duration, is_heard=False):
+        """Sync an episode's playback position to Deezer (resume across devices)."""
+        return self.api_call('episode.bookmarkSet', {
+            'EPISODE_ID': episode_id,
+            'OFFSET': int(offset),
+            'DURATION': float(duration),
+            'ISHEARD': 1 if is_heard else 0,
+        })

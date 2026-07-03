@@ -186,6 +186,11 @@
   {:else if name === "downloaded"}
     <circle cx="12" cy="12" r="10" />
     <polyline points="8 12 11 15 16 9" />
+  {:else if name === "mic"}
+    <rect x="9" y="2" width="6" height="12" rx="3" />
+    <path d="M5 10a7 7 0 0 0 14 0" />
+    <line x1="12" y1="17" x2="12" y2="21" />
+    <line x1="8" y1="21" x2="16" y2="21" />
   {/if}
 </svg>
 

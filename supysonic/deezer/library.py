@@ -16,12 +16,14 @@ from __future__ import annotations
 import os
 import os.path
 import re
+from datetime import datetime
 
-from ..db import Folder, Artist, Album, Track
+from ..db import Folder, Artist, Album, Track, PodcastChannel, PodcastEpisode
 from . import ids
 from .provider import EXT_FOR_FORMAT, NOMINAL_BITRATE
 
 DEEZER_ROOT_NAME = "Deezer"
+PODCAST_DIR_NAME = "Podcasts"
 
 _ILLEGAL = re.compile(r'[/\\:*?"<>|]')
 
@@ -196,3 +198,124 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
             root_folder=root,
             folder=folder,
         )
+
+
+# -- podcasts (shows / episodes) -----------------------------------------
+
+_DESC_MAX = 4096
+
+
+def _trunc(s, limit=_DESC_MAX):
+    if s and len(s) > limit:
+        return s[:limit]
+    return s or None
+
+
+def podcast_root_path(archive_dir: str) -> str:
+    base = os.path.abspath(os.path.expanduser(archive_dir))
+    return os.path.join(base, PODCAST_DIR_NAME)
+
+
+def episode_archive_path(archive_dir, channel_title, publish_date, title) -> str:
+    """Deterministic ``<archive>/Podcasts/<Show>/<YYYY-MM-DD - Title>.mp3`` path."""
+    datestr = publish_date.strftime("%Y-%m-%d") if publish_date else "0000-00-00"
+    fname = f"{datestr} - {sanitize(title)}.mp3"
+    return os.path.join(
+        podcast_root_path(archive_dir), sanitize(channel_title or "Podcast"), fname
+    )
+
+
+def normalize_show(data: dict) -> dict:
+    """Flatten a gateway ``deezer.pageShow`` ``DATA`` (show) object."""
+    return {
+        "show_id": str(data.get("SHOW_ID")),
+        "title": data.get("SHOW_NAME") or "[unknown podcast]",
+        "description": _trunc(data.get("SHOW_DESCRIPTION")),
+        "cover_md5": data.get("SHOW_ART_MD5") or None,
+    }
+
+
+def normalize_episode(ep: dict) -> dict:
+    """Flatten a gateway show-page episode object."""
+    ts = ep.get("EPISODE_PUBLISHED_TS")
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        ts = 0
+    return {
+        "episode_id": str(ep.get("EPISODE_ID")),
+        "title": ep.get("EPISODE_TITLE") or "[untitled episode]",
+        "description": _trunc(ep.get("EPISODE_DESCRIPTION")),
+        "duration": int(ep.get("DURATION") or 0),
+        "stream_url": ep.get("EPISODE_DIRECT_STREAM_URL") or None,
+        "image_md5": ep.get("EPISODE_IMAGE_MD5") or ep.get("SHOW_ART_MD5") or None,
+        "publish_date": datetime.fromtimestamp(ts) if ts else None,
+        "available": bool(ep.get("AVAILABLE", True)),
+    }
+
+
+def show_url(show_id) -> str:
+    return f"https://www.deezer.com/show/{show_id}"
+
+
+def upsert_channel(user, show: dict, url=None) -> PodcastChannel:
+    """Create or refresh the PodcastChannel row for a normalized show dict."""
+    cid = ids.show_uuid(show["show_id"])
+    url = url or show_url(show["show_id"])
+    try:
+        channel = PodcastChannel[cid]
+        channel.title = show["title"]
+        channel.description = show["description"]
+        channel.cover_art_md5 = show["cover_md5"]
+        channel.deezer_id = show["show_id"]
+        channel.url = url
+        channel.error_message = None
+        channel.last_fetched = now_dt()
+        channel.save()
+    except PodcastChannel.DoesNotExist:
+        channel = PodcastChannel.create(
+            id=cid,
+            user=user,
+            deezer_id=show["show_id"],
+            url=url,
+            title=show["title"],
+            description=show["description"],
+            cover_art_md5=show["cover_md5"],
+            last_fetched=now_dt(),
+        )
+    return channel
+
+
+def upsert_episode(channel: PodcastChannel, ep: dict) -> PodcastEpisode:
+    """Create or refresh a PodcastEpisode row (metadata only; audio on demand)."""
+    eid = ids.episode_uuid(ep["episode_id"])
+    try:
+        episode = PodcastEpisode[eid]
+        # Refresh mutable metadata; keep path/status/bitrate/play_offset.
+        episode.title = ep["title"]
+        episode.description = ep["description"]
+        episode.duration = ep["duration"]
+        episode.stream_url = ep["stream_url"]
+        episode.image_md5 = ep["image_md5"]
+        episode.publish_date = ep["publish_date"]
+        episode.save()
+        return episode
+    except PodcastEpisode.DoesNotExist:
+        return PodcastEpisode.create(
+            id=eid,
+            channel=channel,
+            deezer_id=ep["episode_id"],
+            title=ep["title"],
+            description=ep["description"],
+            duration=ep["duration"],
+            publish_date=ep["publish_date"],
+            stream_url=ep["stream_url"],
+            image_md5=ep["image_md5"],
+            status="new",
+        )
+
+
+def now_dt():
+    from ..db import now
+
+    return now()

@@ -90,10 +90,24 @@ Three Deezer code layers, from low to high:
 archives the FLAC, then the existing transcode/cache/`send_file` path runs unchanged. The permanent
 FLAC archive is separate from supysonic's capped `transcode_cache`.
 
+**Podcasts** are Deezer *shows*/*episodes*, kept in dedicated `PodcastChannel`/`PodcastEpisode` tables
+(not Track rows — episodes have no artist/album and map onto Subsonic's podcast types). The gw methods
+(`deezer.pageShow`, `show.add/deleteFavorite`, `episode.bookmarkSet`) were confirmed from a HAR capture;
+see `docs/plan-podcasts.md`. Episodes stream as **plain MP3 straight from the podcast host** (no FLAC,
+no Blowfish — `provider.download_episode_to` just follows redirects), archived under
+`archive_dir/Podcasts/<Show>/` on first play. Subsonic endpoints live in `supysonic/api/podcast.py`
+(`getPodcasts`, `getNewestPodcasts`, `createPodcastChannel`, `refreshPodcasts`, `delete*`,
+`downloadPodcastEpisode`); `media.py` resolves a stream/download id to a Track **or** a `PodcastEpisode`.
+The local channel rows are the source of truth for subscriptions; `importer.sync_podcasts` refreshes them.
+
 **Web app** (`webapp/`): Svelte 4 + Vite 5 SPA, hash routing (svelte-spa-router), consuming `/api`.
 Builds into `supysonic/webui/dist`. No emoji in the UI — all glyphs go through
 `src/components/Icon.svelte` (Lucide-style SVG). Home is **card-based** (mixes / recommended
-playlists / albums / artists), not track shelves.
+playlists / albums / artists), not track shelves. Podcasts have their own pages
+(`routes/Podcasts.svelte` grid + subscribe, `routes/Show.svelte` episode list) consuming
+`/api/podcasts`, `/api/podcast/<id>` and streaming episodes through `/api/stream/<episode-uuid>`
+(an episode is shaped like a track whose `deezer_id` is its UUID, so the existing queue/player
+plays it unchanged).
 
 ## Database / schema
 

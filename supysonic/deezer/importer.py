@@ -22,7 +22,16 @@ import os.path
 import re
 from uuid import uuid4
 
-from ..db import Playlist, PlaylistTrack, StarredTrack, Track, User, db, now
+from ..db import (
+    Playlist,
+    PlaylistTrack,
+    PodcastChannel,
+    StarredTrack,
+    Track,
+    User,
+    db,
+    now,
+)
 from . import ids, library
 
 logger = logging.getLogger(__name__)
@@ -288,6 +297,40 @@ class DeezerImporter:
                 logger.warning("Flow import failed (needs OAuth on some accounts): %s", exc)
         return result
 
+    # -- podcasts --------------------------------------------------------
+
+    def sync_podcasts(self, episode_limit=30) -> int:
+        """Refresh every subscribed podcast's metadata + recent episodes.
+
+        The local PodcastChannel rows are the source of truth for subscriptions
+        (added via createPodcastChannel / CLI import); this just re-fetches each
+        show's latest episodes. Audio is still fetched on demand.
+        """
+        from .archive import import_show
+
+        channels = list(
+            PodcastChannel.select().where(PodcastChannel.user == self.user)
+        )
+        if channels:
+            self._progress(f"Refreshing {len(channels)} podcast(s)...")
+        count = 0
+        for channel in channels:
+            if not channel.deezer_id:
+                continue
+            try:
+                import_show(
+                    self.provider, self.user, channel.deezer_id,
+                    episode_limit=episode_limit,
+                )
+                self._progress(f"  • {channel.title}")
+                count += 1
+            except Exception as exc:  # one bad show shouldn't abort the sync
+                logger.warning("Failed to refresh podcast %s: %s", channel.deezer_id, exc)
+                channel.error_message = str(exc)[:255]
+                channel.save()
+                self._progress(f"  ! podcast {channel.deezer_id} failed: {exc}")
+        return count
+
     # -- orchestration ---------------------------------------------------
 
     def sync(self, cfg: dict) -> dict:
@@ -296,6 +339,8 @@ class DeezerImporter:
             out["playlists"] = self.sync_playlists()
         if cfg.get("sync_favorites"):
             out["favorites"] = self.sync_favorites()
+        if cfg.get("sync_podcasts"):
+            out["podcasts"] = self.sync_podcasts(int(cfg.get("podcast_episodes") or 30))
         if cfg.get("import_new_releases") or cfg.get("import_flow"):
             out["recommendations"] = self.sync_recommendations(
                 smart_ids=smart_ids_from_config(cfg) if cfg.get("import_new_releases") else None,

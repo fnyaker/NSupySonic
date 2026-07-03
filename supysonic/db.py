@@ -30,7 +30,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260614"
+SCHEMA_VERSION = "20260703"
 
 
 def now():
@@ -479,7 +479,7 @@ class User(_Model):
             "playlistRole": True,
             "coverArtRole": False,
             "commentRole": False,
-            "podcastRole": False,
+            "podcastRole": self.admin,
             "streamRole": True,
             "jukeboxRole": self.admin or self.jukebox,
             "shareRole": False,
@@ -660,6 +660,115 @@ class RadioStation(_Model):
         return info
 
 
+class PodcastChannel(_Model):
+    id = PrimaryKeyField()
+    user = ForeignKeyField(User, backref="podcast_channels")
+    deezer_id = CharField(null=True)
+    url = CharField(4096)
+    title = CharField(null=True)
+    description = CharField(4096, null=True)
+    cover_art_md5 = CharField(null=True)
+    created = DateTimeField(default=now)
+    last_fetched = DateTimeField(null=True)
+    error_message = CharField(null=True)
+
+    def as_subsonic_channel(self, user, prefs=None, include_episodes=True):
+        info = {
+            "id": str(self.id),
+            "url": self.url,
+            "title": self.title or "",
+            "status": "error" if self.error_message else "completed",
+        }
+        if self.description:
+            info["description"] = self.description
+        if self.cover_art_md5:
+            info["coverArt"] = str(self.id)
+        if self.error_message:
+            info["errorMessage"] = self.error_message
+        if include_episodes:
+            info["episode"] = [
+                e.as_subsonic_episode(user, prefs)
+                for e in self.episodes.order_by(
+                    PodcastEpisode.publish_date.desc(), PodcastEpisode.created.desc()
+                )
+            ]
+        return info
+
+
+class PodcastEpisode(_Model):
+    id = PrimaryKeyField()
+    channel = ForeignKeyField(PodcastChannel, backref="episodes")
+    deezer_id = CharField(null=True)
+    title = CharField()
+    description = CharField(4096, null=True)
+    duration = IntegerField(default=0)
+    publish_date = DateTimeField(null=True)
+    stream_url = CharField(4096, null=True)  # EPISODE_DIRECT_STREAM_URL
+    image_md5 = CharField(null=True)
+    path = CharField(4096, null=True)  # NULL until archived on first play/download
+    bitrate = IntegerField(null=True)
+    status = CharField(16, default="new")  # new|downloading|completed|error
+    play_offset = IntegerField(default=0)  # seconds, mirrors Deezer bookmarks
+    created = DateTimeField(default=now)
+
+    def suffix(self):
+        if self.path:
+            return os.path.splitext(self.path)[1][1:].lower()
+        return "mp3"
+
+    @property
+    def mimetype(self):
+        if self.path:
+            return (
+                mimetypes.guess_type(self.path, False)[0] or "application/octet-stream"
+            )
+        return "audio/mpeg"
+
+    def as_subsonic_episode(self, user, prefs=None):
+        suffix = self.suffix()
+        size = (
+            os.path.getsize(self.path)
+            if self.path and os.path.isfile(self.path)
+            else -1
+        )
+        info = {
+            "id": str(self.id),
+            "streamId": str(self.id),
+            "channelId": str(self.channel_id),
+            "isDir": False,
+            "title": self.title,
+            "album": self.channel.title or "",
+            "artist": self.channel.title or "",
+            "status": self.status,
+            "type": "podcast",
+            "isVideo": False,
+            "suffix": suffix,
+            "contentType": self.mimetype,
+            "size": size,
+            "duration": self.duration,
+        }
+        if self.bitrate:
+            info["bitRate"] = self.bitrate
+        if self.description:
+            info["description"] = self.description
+        if self.publish_date:
+            info["publishDate"] = self.publish_date.isoformat()
+        if self.created:
+            info["created"] = self.created.isoformat()
+        if self.play_offset:
+            info["bookmarkPosition"] = self.play_offset * 1000
+        if self.image_md5 or self.channel.cover_art_md5:
+            info["coverArt"] = str(self.id)
+
+        if prefs is not None and prefs.format is not None and prefs.format != suffix:
+            info["transcodedSuffix"] = prefs.format
+            info["transcodedContentType"] = (
+                mimetypes.guess_type("dummyname." + prefs.format, False)[0]
+                or "application/octet-stream"
+            )
+        return info
+
+
 def get_resource_text(respath):
     return importlib.resources.files(__package__).joinpath(respath).read_text("utf-8")
 
@@ -791,6 +900,8 @@ def _migration_order():
         Playlist,
         PlaylistTrack,
         RadioStation,
+        PodcastChannel,
+        PodcastEpisode,
     ]
 
 

@@ -186,6 +186,64 @@ class DeezerProvider:
     def get_artist_radio(self, art_id) -> dict:
         return self.dz.gw.get_artist_radio(art_id)
 
+    # -- podcasts (shows / episodes) -------------------------------------
+
+    def get_show_page(self, show_id, nb=40, start=0) -> dict:
+        return self.dz.gw.get_show_page(show_id, nb=nb, start=start)
+
+    def get_show_episodes(self, show_id) -> list[dict]:
+        return self.dz.gw.get_show_episodes(show_id)
+
+    def add_favorite_show(self, show_id):
+        return self.dz.gw.add_show_to_favorites(show_id)
+
+    def remove_favorite_show(self, show_id):
+        return self.dz.gw.remove_show_from_favorites(show_id)
+
+    def resolve_episode(self, episode) -> str:
+        """Return a playable URL for a podcast episode.
+
+        Podcasts are ``SHOW_IS_DIRECT_STREAM=1``: the episode's
+        ``EPISODE_DIRECT_STREAM_URL`` (captured at import) is a plain MP3 served
+        by the podcast host — no token, no Blowfish. We stored it on the row, so
+        resolution is a no-op lookup. (A Deezer-hosted exclusive show would need
+        the media.deezer.com token path; none observed in practice.)
+        """
+        url = getattr(episode, "stream_url", None)
+        if not url:
+            raise DeezerError(f"no stream URL for episode {getattr(episode, 'deezer_id', '?')}")
+        return url
+
+    def download_episode_to(self, url: str, dest: Path) -> None:
+        """Stream a podcast episode's MP3 into ``dest`` (atomic .part temp file).
+
+        Plain HTTP: follows redirects (rss.com -> CDN), no decryption. A Referer
+        matching the web player is sent since some hosts gate on it.
+        """
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        headers = dict(self.dz.http_headers)
+        headers["Referer"] = "https://www.deezer.com/"
+        with self.dz.session.get(
+            url, headers=headers, stream=True, timeout=(10, 120), allow_redirects=True
+        ) as resp:
+            resp.raise_for_status()
+            with open(tmp, "wb") as fh:
+                for chunk in resp.iter_content(65536):
+                    if chunk:
+                        fh.write(chunk)
+        tmp.replace(dest)
+
+    def set_episode_position(self, episode_id, offset, duration, is_heard=False) -> bool:
+        """Best-effort push of an episode playback position to Deezer."""
+        try:
+            self.dz.gw.set_episode_bookmark(episode_id, offset, duration, is_heard)
+            return True
+        except Exception:
+            logger.debug("episode.bookmarkSet failed for %s", episode_id, exc_info=True)
+            return False
+
     # -- customizable Flow (GraphQL pipe.deezer.com) ---------------------
 
     def flow_clusters(self) -> list:
