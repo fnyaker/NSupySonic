@@ -72,6 +72,7 @@
     stopWatchdog();
     cancelPauseMirror();
     cancelPendingSeek();
+    cancelSeekChase();
     clearTimeout(prefetchTimer);
     clearTimeout(archiveTimer);
     document.removeEventListener("visibilitychange", onVisibility);
@@ -147,7 +148,7 @@
     stopWatchdog();
     lastAdvance = Date.now();
     watchdog = setInterval(() => {
-      if (!audio || switching || recovering || loadingTrack) return;
+      if (!audio || switching || recovering || loadingTrack || chasing) return;
       const s = get(player);
       if (!s.playing || audio.paused) return; // not trying to play / cleanly paused
       if (audio.currentTime !== lastPos) {
@@ -168,6 +169,9 @@
   function onElError(e) {
     if (e && e.target !== audio) return;
     if (loadingTrack) return; // stale error from the outgoing source
+    // A failing chase reload (network dropped mid-chase): fold back into the
+    // normal recovery path, which parks offline / resumes at the last position.
+    if (chasing) cancelSeekChase();
     if (get(player).playing) recoverPlayback();
   }
   function onElStall(e) {
@@ -211,7 +215,10 @@
     const onMeta = () => {
       cleanup();
       try {
-        if (pos > 0) audio.currentTime = pos;
+        // Only seek when the reloaded source actually allows it: forcing it on
+        // a still-generating (rangeless) stream made the browser restart the
+        // fetch and bounce playback to 0.
+        if (pos > 0 && seekableAt(audio, pos)) audio.currentTime = pos;
       } catch {
         /* not seekable yet */
       }
@@ -266,6 +273,7 @@
     if (e.target !== audio) return;
     if (!get(player).playing) return; // already paused in the store (our own doing)
     if (audio.ended) return; // end-of-track is handled by onEnded, not here
+    if (chasing) return; // our own programmatic pause while chasing a seek
     cancelPauseMirror();
     pauseMirrorTimer = setTimeout(() => {
       pauseMirrorTimer = null;
@@ -331,12 +339,12 @@
     listenMark = get(player).playing ? Date.now() : 0;
   }
 
-  // Seek requests from other views (e.g. the immersive player). Applied via
-  // safeSeek so a not-yet-seekable element defers instead of throwing.
+  // Seek requests from other views (e.g. the immersive player). Routed through
+  // performSeek so non-seekable live streams are chased instead of reset to 0.
   $: if (audio && $seekTo != null) {
     const t = $seekTo;
     seekTo.set(null);
-    safeSeek(t);
+    performSeek(t);
   }
 
   $: fav = $current && $favorites.has(String($current.deezer_id));
@@ -409,6 +417,7 @@
     recoverAttempts = 0; // fresh track, fresh recovery budget
     cancelPauseMirror(); // drop a deferred pause from the outgoing track
     cancelPendingSeek(); // a stale seek must never land on this new track
+    cancelSeekChase(); // ditto for a chase targeting the outgoing track
     buffered.set(0); // new source -> nothing loaded yet
     // Reset the seek bar NOW — before the (possibly async) source resolve — so a
     // skip never leaves the outgoing track's position/duration on screen, and
@@ -455,6 +464,7 @@
     curSeq = get(player).seq;
     lastKnownTime = 0;
     cancelPendingSeek(); // a pending resume-seek would undo the restart
+    cancelSeekChase(); // so would a chase still aiming at an old target
     try {
       audio.currentTime = 0;
     } catch {
@@ -501,6 +511,104 @@
     seekOnceLoaded(t);
   }
 
+  // -- robust seeking ---------------------------------------------------------
+  // A FIRST play streams from a live source (the archive downloading, or a
+  // transcode being generated): no Content-Length, no range support. Setting
+  // currentTime outside its buffered region makes the browser re-fetch the URL,
+  // get a fresh full stream back, and reset playback to 0 — the "seek snaps
+  // back to the start" bug (then the stall watchdog reloaded and lost the
+  // position again). So every user seek goes through performSeek: an in-range
+  // target seeks immediately; otherwise we CHASE it — keep playing while the
+  // growing buffer reaches the target, and after a few seconds reload the URL
+  // once (the server archives/caches WHILE it streams, so by then it usually
+  // serves a finished file WITH range support) and land the seek as soon as
+  // the element allows it.
+  let chase = null; // { t, el, onAvail, reloadTimer, capTimer }
+  let chasing = false; // gates transport auto-play / pause mirroring / onTime
+
+  function seekableAt(el, t) {
+    try {
+      const s = el.seekable;
+      for (let i = 0; i < s.length; i++) {
+        if (t >= s.start(i) && t <= s.end(i)) return true;
+      }
+    } catch {
+      /* element not ready yet */
+    }
+    return false;
+  }
+
+  function performSeek(t) {
+    if (!audio || !curId) return;
+    const dur = get(player).duration;
+    t = Math.max(0, dur ? Math.min(t, Math.max(0, dur - 0.2)) : t);
+    cancelSeekChase(); // a new seek supersedes a chase in progress
+    // Reflect the intent on the bar right away (also stops the thumb snapping
+    // back under the pointer between input events while dragging).
+    player.setProgress(t, dur);
+    // Blobs and range-supporting sources seek directly; an element without
+    // metadata yet defers through safeSeek's loadedmetadata path.
+    if (curIsBlob || audio.readyState < 1 || seekableAt(audio, t)) {
+      safeSeek(t);
+      return;
+    }
+    startSeekChase(t);
+  }
+
+  function startSeekChase(t) {
+    const el = audio;
+    const onAvail = () => {
+      if (!chase || !seekableAt(chase.el, t)) return;
+      const target = chase.el;
+      cancelSeekChase();
+      try {
+        target.currentTime = t;
+      } catch {
+        /* lost the race — give up quietly */
+      }
+      if (get(player).playing) target.play().catch(() => {});
+    };
+    chase = { t, el, onAvail, reloadTimer: null, capTimer: null };
+    chasing = true;
+    // Listeners live on the ELEMENT, so they survive the reload's src change.
+    el.addEventListener("progress", onAvail);
+    el.addEventListener("canplay", onAvail);
+    el.addEventListener("timeupdate", onAvail);
+    // One reload, a few seconds in: covers backward seeks (a forward-only
+    // stream never re-buffers what's behind) and picks up the server-side
+    // archive/transcode if it finished meanwhile (a reload then serves a
+    // seekable file).
+    chase.reloadTimer = setTimeout(reloadForChase, 8000);
+    // Give up silently after a while — the bar falls back to the real position.
+    chase.capTimer = setTimeout(cancelSeekChase, 45000);
+    onAvail(); // in case it became seekable between the check and now
+  }
+
+  function reloadForChase() {
+    if (!chase) return;
+    const cur = get(current);
+    // No network (or a blob, which never needs this): keep waiting on the
+    // buffer we already have instead of killing the stream.
+    if (!cur || curIsBlob || !get(online)) return;
+    const el = chase.el;
+    el.pause(); // don't audibly replay from 0 while buffering toward the target
+    el.preload = "auto";
+    el.src = api.streamUrl(cur.deezer_id, curQ);
+    el.load();
+  }
+
+  function cancelSeekChase() {
+    if (!chase) return;
+    const { el, onAvail, reloadTimer, capTimer } = chase;
+    el.removeEventListener("progress", onAvail);
+    el.removeEventListener("canplay", onAvail);
+    el.removeEventListener("timeupdate", onAvail);
+    clearTimeout(reloadTimer);
+    clearTimeout(capTimer);
+    chase = null;
+    chasing = false;
+  }
+
   // Gapless quality switch: buffer the new bitrate on the idle element at the
   // current position, then swap playback over once it can play through. Keeps
   // the position to the element's full precision so there's no audible jump.
@@ -515,6 +623,7 @@
       curQ = newQ;
       return;
     }
+    cancelSeekChase(); // the swap changes elements — a chase would misfire
     switching = true;
     const pos = audio.currentTime;
     const wasPlaying = !audio.paused && get(player).playing;
@@ -630,10 +739,14 @@
   // on audio.paused makes each direction idempotent and breaks the oscillation.
   $: if (audio && curId && !switching && !recovering) {
     if ($player.playing && audio.paused) {
-      // Playback starts: restore eager buffering if the paused-restore load
-      // deferred it (play() fetches regardless, but rebuffers stay eager too).
-      if (audio.preload !== "auto") audio.preload = "auto";
-      audio.play().catch(() => {});
+      // While chasing a seek the element is deliberately paused (post-reload
+      // buffering toward the target) — the chase resumes it when it lands.
+      if (!chasing) {
+        // Playback starts: restore eager buffering if the paused-restore load
+        // deferred it (play() fetches regardless, but rebuffers stay eager too).
+        if (audio.preload !== "auto") audio.preload = "auto";
+        audio.play().catch(() => {});
+      }
     } else if (!$player.playing && !audio.paused) audio.pause();
   }
   $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
@@ -645,6 +758,7 @@
   function onTime(e) {
     if (e && e.target !== audio) return; // ignore the idle/preloading element
     if (loadingTrack) return; // a track change is mid-flight — position is stale
+    if (chasing) return; // chasing a seek — hold the bar at the target
     // Healthy progress: clear the recovery budget so a later, unrelated stall
     // gets its full retry allowance again.
     if (recoverAttempts && audio.currentTime > lastPos) recoverAttempts = 0;
@@ -820,7 +934,9 @@
   }
 
   function seek(e) {
-    if (audio && audio.duration) audio.currentTime = +e.target.value;
+    // The old direct currentTime set silently no-oped on live streams (NaN
+    // duration) and reset them to 0 otherwise — performSeek handles both.
+    performSeek(+e.target.value);
   }
 
   function updateMediaSession(track) {
@@ -839,20 +955,16 @@
       navigator.mediaSession.setActionHandler("pause", () => player.pause());
       navigator.mediaSession.setActionHandler("nexttrack", () => player.next());
       navigator.mediaSession.setActionHandler("previoustrack", () => player.prev());
-      // Scrubbing + skip from the OS notification / lock screen.
+      // Scrubbing + skip from the OS notification / lock screen. All through
+      // performSeek so live streams are chased instead of reset to 0.
       navigator.mediaSession.setActionHandler("seekto", (d) => {
-        if (audio && d.seekTime != null) audio.currentTime = d.seekTime;
+        if (audio && d.seekTime != null) performSeek(d.seekTime);
       });
       navigator.mediaSession.setActionHandler("seekbackward", (d) => {
-        if (audio)
-          audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10));
+        if (audio) performSeek(Math.max(0, audio.currentTime - (d.seekOffset || 10)));
       });
       navigator.mediaSession.setActionHandler("seekforward", (d) => {
-        if (audio)
-          audio.currentTime = Math.min(
-            audio.duration || $current?.duration || 0,
-            audio.currentTime + (d.seekOffset || 10)
-          );
+        if (audio) performSeek(audio.currentTime + (d.seekOffset || 10));
       });
     } catch {
       /* ignore */
