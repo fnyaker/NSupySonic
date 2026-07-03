@@ -22,7 +22,19 @@ from functools import wraps
 from flask import Blueprint, current_app, jsonify, request, send_file, session
 from peewee import fn
 
-from ..db import Album, Artist, Playlist, PlaylistTrack, StarredTrack, Track, User, db, now
+from ..db import (
+    Album,
+    Artist,
+    Playlist,
+    PlaylistTrack,
+    PodcastChannel,
+    PodcastEpisode,
+    StarredTrack,
+    Track,
+    User,
+    db,
+    now,
+)
 from ..managers.user import UserManager
 from ..ratelimit import auth_limiter
 
@@ -1187,6 +1199,165 @@ def my_favorites():
     return jsonify({"tracks": [_db_track(t) for t in _user_starred()]})
 
 
+# -- podcasts ---------------------------------------------------------------
+
+
+def _podcast_owner():
+    """Owner of imported podcast channels: the configured sync_user if any, else
+    the requesting user."""
+    sync_user = current_app.config["DEEZER"].get("sync_user")
+    if sync_user:
+        try:
+            return User.get(name=sync_user)
+        except User.DoesNotExist:
+            pass
+    return request.webuser
+
+
+def _channel(c, with_episodes=False):
+    info = {
+        "id": str(c.id),
+        "deezer_id": c.deezer_id,
+        "title": c.title or "",
+        "description": c.description or "",
+        "cover": _image("talk", c.cover_art_md5),
+        "episode_count": c.episodes.count(),
+        "status": "error" if c.error_message else "ok",
+    }
+    if with_episodes:
+        info["episodes"] = [
+            _episode(e, c)
+            for e in c.episodes.order_by(
+                PodcastEpisode.publish_date.desc(), PodcastEpisode.created.desc()
+            )
+        ]
+    return info
+
+
+def _episode(e, channel=None):
+    """A podcast episode shaped like a playable track for the web player.
+
+    Its universal stream id (``deezer_id``) is the episode UUID — the same
+    convention local tracks use — so the existing queue/player machinery plays
+    it unchanged via ``/api/stream/<uuid>``.
+    """
+    channel = channel or e.channel
+    cover = _image("talk", e.image_md5 or channel.cover_art_md5)
+    return {
+        "deezer_id": str(e.id),
+        "podcast": True,
+        "title": e.title,
+        "description": e.description or "",
+        "duration": e.duration or 0,
+        "published": int(e.publish_date.timestamp()) if e.publish_date else 0,
+        "status": e.status,
+        "explicit": False,
+        "channel_id": str(channel.id),
+        "artist": {"deezer_id": str(channel.id), "name": channel.title or ""},
+        "album": {
+            "deezer_id": str(channel.id),
+            "title": channel.title or "",
+            "cover": cover,
+        },
+        "cover": cover,
+    }
+
+
+@webapi.route("/podcasts")
+@login_required
+def podcasts():
+    channels = PodcastChannel.select().order_by(fn.lower(PodcastChannel.title))
+    return jsonify({"podcasts": [_channel(c) for c in channels]})
+
+
+@webapi.route("/podcast/<pid>")
+@login_required
+def podcast(pid):
+    try:
+        c = PodcastChannel[uuid.UUID(str(pid))]
+    except (ValueError, PodcastChannel.DoesNotExist):
+        return jsonify({"error": "not found"}), 404
+    return jsonify(_channel(c, with_episodes=True))
+
+
+@webapi.route("/podcasts", methods=["POST"])
+@login_required
+def subscribe_podcast():
+    if not _is_admin():
+        return jsonify({"error": "forbidden"}), 403
+    provider, err = _need_provider()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "missing url"}), 400
+
+    from ..deezer.archive import parse_deezer_ref, import_show
+
+    try:
+        kind, did = parse_deezer_ref(url)
+    except ValueError:
+        return jsonify({"error": "unsupported url"}), 400
+    if kind not in ("show", "episode"):
+        return jsonify({"error": "not a podcast url"}), 400
+
+    show_id = did
+    if kind == "episode":
+        try:
+            info = provider.dz.api.get_episode(did)
+            show_id = (info.get("podcast") or {}).get("id") or info.get("podcast_id")
+        except Exception:
+            show_id = None
+        if not show_id:
+            return jsonify({"error": "could not resolve show"}), 400
+
+    cfg = current_app.config["DEEZER"]
+    if cfg.get("push_to_deezer", True):
+        try:
+            provider.add_favorite_show(show_id)
+        except Exception:
+            logger.debug("show.addFavorite failed for %s", show_id, exc_info=True)
+
+    try:
+        c = import_show(
+            provider, _podcast_owner(), show_id,
+            episode_limit=int(cfg.get("podcast_episodes") or 30),
+        )
+    except Exception:
+        logger.warning("Podcast import failed for %s", show_id, exc_info=True)
+        return jsonify({"error": "import failed"}), 502
+    return jsonify(_channel(c, with_episodes=True))
+
+
+@webapi.route("/podcast/<pid>", methods=["DELETE"])
+@login_required
+def unsubscribe_podcast(pid):
+    if not _is_admin():
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        c = PodcastChannel[uuid.UUID(str(pid))]
+    except (ValueError, PodcastChannel.DoesNotExist):
+        return jsonify({"error": "not found"}), 404
+
+    provider = _provider()
+    cfg = current_app.config["DEEZER"]
+    if provider is not None and c.deezer_id and cfg.get("push_to_deezer", True):
+        try:
+            provider.remove_favorite_show(c.deezer_id)
+        except Exception:
+            logger.debug("show.deleteFavorite failed for %s", c.deezer_id, exc_info=True)
+
+    for e in c.episodes:
+        if e.path and os.path.isfile(e.path):
+            try:
+                os.remove(e.path)
+            except OSError:
+                pass
+    c.delete_instance(recursive=True)
+    return ("", 204)
+
+
 # -- favorites & playback ---------------------------------------------------
 
 
@@ -1642,6 +1813,33 @@ def _opus_generator(flac_path, bitrate):
         proc.wait()
 
 
+def _stream_episode(episode, bitrate):
+    """Stream a podcast episode: archived MP3 from disk, Opus-transcoded on
+    request (cached), archiving from the podcast host on first play."""
+    from ..deezer import archive
+
+    if not (episode.path and os.path.isfile(episode.path)):
+        provider, err = _need_provider()
+        if err:
+            return err
+        try:
+            archive.ensure_episode_archived(provider, episode)
+        except Exception:
+            logger.warning("Episode fetch failed for %s", episode.id, exc_info=True)
+            return jsonify({"error": "episode unavailable"}), 502
+
+    if bitrate:
+        cache = current_app.transcode_cache
+        key = f"episode-{episode.id}-opus{bitrate}.ogg"
+        if cache.has(key):
+            return send_file(cache.get(key), mimetype="audio/ogg", conditional=True)
+        return current_app.response_class(
+            cache.set_generated(key, lambda: _opus_generator(episode.path, bitrate)),
+            mimetype="audio/ogg",
+        )
+    return send_file(episode.path, mimetype=episode.mimetype, conditional=True)
+
+
 def _serve_embedded_cover(track):
     """Serve a track's archived cover: the image embedded in the audio file
     (tagged at archive time), else a cover file in its folder. Cached on disk."""
@@ -1735,11 +1933,20 @@ def stream(deezer_id):
     if _valid_id(deezer_id):
         track = archive.find_local_track(deezer_id)  # by Deezer id
     else:
-        # A UUID -> a local (or already-imported) track, served from disk only.
+        # A UUID -> a local/imported track, or a podcast episode. Both are served
+        # from disk (episodes are archived from the podcast host on first play).
         try:
-            track = Track[uuid.UUID(deezer_id)]
-        except (ValueError, Track.DoesNotExist):
+            key = uuid.UUID(deezer_id)
+        except ValueError:
             return jsonify({"error": "invalid id"}), 400
+        try:
+            track = Track[key]
+        except Track.DoesNotExist:
+            try:
+                episode = PodcastEpisode[key]
+            except PodcastEpisode.DoesNotExist:
+                return jsonify({"error": "invalid id"}), 400
+            return _stream_episode(episode, bitrate)
 
     if track is None or not os.path.isfile(track.path):
         if not _valid_id(deezer_id):

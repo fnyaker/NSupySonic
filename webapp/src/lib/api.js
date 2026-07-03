@@ -139,6 +139,13 @@ export const api = {
   trackRadio: (id) => req("/radio/track/" + id),
   artistRadio: (id) => req("/radio/artist/" + id),
 
+  // podcasts
+  podcasts: () => req("/podcasts"),
+  podcast: (id) => req("/podcast/" + id),
+  subscribePodcast: (url) =>
+    req("/podcasts", { method: "POST", body: body({ url }) }),
+  unsubscribePodcast: (id) => req("/podcast/" + id, { method: "DELETE" }),
+
   // library
   myPlaylists: () => req("/me/playlists"),
   myFavorites: () => req("/me/favorites"),

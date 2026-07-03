@@ -16,10 +16,14 @@ import shutil
 import tempfile
 import threading
 import types
+import unittest
 from pathlib import Path
 
-from supysonic.db import PodcastChannel, PodcastEpisode, User
+from supysonic.config import DefaultConfig
+from supysonic.db import PodcastChannel, PodcastEpisode, User, release_database
 from supysonic.deezer import archive, ids, library
+from supysonic.managers.user import UserManager
+from supysonic.web import create_application
 
 from .testbase import TestBase
 from .api.apitestbase import ApiTestBase
@@ -362,3 +366,102 @@ class PodcastApiTestCase(ApiTestBase):
         self.assertEqual(PodcastEpisode.select().count(), 0)
         self._make_request("refreshPodcasts")
         self.assertEqual(PodcastEpisode.select().count(), 3)
+
+
+# -- web UI /api endpoints ------------------------------------------------
+
+
+class PodcastWebUITestCase(unittest.TestCase):
+    def setUp(self):
+        self.__db = tempfile.mkstemp()
+        self.__dir = tempfile.mkdtemp()
+        self.archive = tempfile.mkdtemp()
+        db_path = self.__db[1]
+        cache = self.__dir
+
+        class Config(DefaultConfig):
+            TESTING = True
+
+            def __init__(self):
+                super().__init__()
+                self.BASE = dict(self.BASE, database_uri="sqlite:///" + db_path)
+                self.WEBAPP = dict(
+                    self.WEBAPP, cache_dir=cache, mount_webui=True, mount_api=True
+                )
+
+        self.app = create_application(Config())
+        UserManager.add("alice", "Alic3", admin=True)
+
+        eps = [episode_obj(i, f"Ep {i}", ts=1782660730 + i) for i in range(1, 4)]
+        self.provider = MockProvider(self.archive, {"1002156761": (show_data(), eps)})
+        self.app.deezer = self.provider
+        self.app.config["DEEZER"] = dict(self.app.config["DEEZER"])
+        self.app.config["DEEZER"].update(
+            {"sync_user": "alice", "push_to_deezer": True, "podcast_episodes": 30}
+        )
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        release_database()
+        shutil.rmtree(self.__dir, ignore_errors=True)
+        shutil.rmtree(self.archive, ignore_errors=True)
+        os.close(self.__db[0])
+        os.remove(self.__db[1])
+
+    def _login(self):
+        return self.client.post(
+            "/api/login", json={"username": "alice", "password": "Alic3"}
+        )
+
+    def _subscribe(self):
+        return self.client.post(
+            "/api/podcasts", json={"url": "https://www.deezer.com/show/1002156761"}
+        )
+
+    def test_requires_login(self):
+        self.assertEqual(self.client.get("/api/podcasts").status_code, 401)
+
+    def test_subscribe_list_and_get(self):
+        self._login()
+        rv = self._subscribe()
+        self.assertEqual(rv.status_code, 200)
+        self.assertIn("1002156761", self.provider.fav_added)
+        body = rv.get_json()
+        self.assertEqual(body["title"], "Test Podcast")
+        self.assertEqual(len(body["episodes"]), 3)
+
+        lst = self.client.get("/api/podcasts").get_json()["podcasts"]
+        self.assertEqual(len(lst), 1)
+        self.assertEqual(lst[0]["episode_count"], 3)
+
+        cid = str(ids.show_uuid("1002156761"))
+        detail = self.client.get("/api/podcast/" + cid).get_json()
+        self.assertEqual(len(detail["episodes"]), 3)
+        # Episodes are playable "tracks": their stream id is the episode UUID.
+        ep = detail["episodes"][0]
+        self.assertTrue(ep["podcast"])
+        self.assertEqual(ep["deezer_id"], str(ids.episode_uuid("3")))
+
+    def test_stream_archives_episode(self):
+        self._login()
+        self._subscribe()
+        eid = str(ids.episode_uuid("1"))
+        rv = self.client.get("/api/stream/" + eid)
+        self.assertEqual(rv.status_code, 200)
+        self.assertTrue(rv.data.startswith(b"ID3"))
+        self.assertEqual(PodcastEpisode[ids.episode_uuid("1")].status, "completed")
+
+    def test_unsubscribe(self):
+        self._login()
+        self._subscribe()
+        cid = str(ids.show_uuid("1002156761"))
+        rv = self.client.delete("/api/podcast/" + cid)
+        self.assertEqual(rv.status_code, 204)
+        self.assertIn("1002156761", self.provider.fav_removed)
+        self.assertEqual(PodcastChannel.select().count(), 0)
+
+    def test_subscribe_requires_admin(self):
+        UserManager.add("bob", "B0b")
+        self.client.post("/api/login", json={"username": "bob", "password": "B0b"})
+        rv = self._subscribe()
+        self.assertEqual(rv.status_code, 403)

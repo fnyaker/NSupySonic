@@ -103,7 +103,11 @@ The local channel rows are the source of truth for subscriptions; `importer.sync
 **Web app** (`webapp/`): Svelte 4 + Vite 5 SPA, hash routing (svelte-spa-router), consuming `/api`.
 Builds into `supysonic/webui/dist`. No emoji in the UI — all glyphs go through
 `src/components/Icon.svelte` (Lucide-style SVG). Home is **card-based** (mixes / recommended
-playlists / albums / artists), not track shelves.
+playlists / albums / artists), not track shelves. Podcasts have their own pages
+(`routes/Podcasts.svelte` grid + subscribe, `routes/Show.svelte` episode list) consuming
+`/api/podcasts`, `/api/podcast/<id>` and streaming episodes through `/api/stream/<episode-uuid>`
+(an episode is shaped like a track whose `deezer_id` is its UUID, so the existing queue/player
+plays it unchanged).
 
 ## Database / schema
 
