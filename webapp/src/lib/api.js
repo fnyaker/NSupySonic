@@ -111,6 +111,13 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
 
 const body = (b) => (b === undefined ? undefined : JSON.stringify(b));
 
+// Serialize an optional { offset, limit } paging spec into a query string.
+function _page(opts) {
+  if (!opts || opts.limit == null) return "";
+  const off = opts.offset || 0;
+  return `?offset=${off}&limit=${opts.limit}`;
+}
+
 export const api = {
   // auth
   login: (username, password) =>
@@ -132,7 +139,9 @@ export const api = {
   artist: (id) => req("/artist/" + id),
   discography: (id) => req("/artist/" + id + "/discography"),
   album: (id) => req("/album/" + id),
-  playlist: (id) => req("/playlist/" + id),
+  // Optional { offset, limit } for progressive loading; omit for the full list
+  // (play / download / offline still get every track).
+  playlist: (id, opts) => req("/playlist/" + id + _page(opts)),
   lyrics: (id) => req("/lyrics/" + id),
 
   // radios
@@ -149,7 +158,7 @@ export const api = {
 
   // library
   myPlaylists: () => req("/me/playlists"),
-  myFavorites: () => req("/me/favorites"),
+  myFavorites: (opts) => req("/me/favorites" + _page(opts)),
   myLocal: () => req("/me/local"),
   favoriteIds: () => req("/me/favorite-ids"),
 

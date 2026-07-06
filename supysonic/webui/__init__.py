@@ -275,6 +275,34 @@ def _valid_id(value):
     return value.lstrip("-").isdigit()
 
 
+def _page_args():
+    """Parse ``offset``/``limit`` query params for progressive list loading.
+
+    Returns ``(offset, limit)`` where ``limit`` is ``None`` when the caller
+    wants the whole list (no ``limit`` param) — so play/download paths that
+    need every track keep working unchanged, and only the paged UI opts in."""
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    raw = request.args.get("limit")
+    if raw is None:
+        return offset, None
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return offset, None
+    return offset, max(0, min(limit, 1000))
+
+
+def _slice(items, offset, limit):
+    """Slice a full list for one page; always returns ``(page, total)``."""
+    total = len(items)
+    if limit is None:
+        return items, total
+    return items[offset : offset + limit], total
+
+
 # -- local (non-Deezer) tracks ----------------------------------------------
 # Files imported from the archive directory have no Deezer id; their universal
 # id (for streaming, etc.) is the Track UUID, and they carry `local: true` so
@@ -999,9 +1027,22 @@ def album(album_id):
 def playlist(playlist_id):
     # A user playlist lives in the DB (editable, may contain local files); a
     # recommendation/editorial playlist is read straight from Deezer (read-only).
+    # Both support ?offset=&limit= for progressive loading; no limit -> full list
+    # (so play/download/offline paths keep getting every track).
+    offset, limit = _page_args()
     pl = _resolve_db_playlist(playlist_id)
     if pl is not None:
-        tracks = [_db_track(t) for t in _db_playlist_track_rows(pl)]
+        total = PlaylistTrack.select().where(PlaylistTrack.playlist == pl).count()
+        q = _db_playlist_track_rows(pl)
+        if limit is not None:
+            q = q.offset(offset).limit(limit)
+        tracks = [_db_track(t) for t in q]
+        # Cover always comes from the first track, even on a later page.
+        if offset == 0:
+            cover = _db_playlist_cover(tracks)
+        else:
+            first = _db_playlist_track_rows(pl).limit(1).first()
+            cover = _db_playlist_cover([_db_track(first)]) if first else None
         return jsonify(
             {
                 "playlist": {
@@ -1009,13 +1050,14 @@ def playlist(playlist_id):
                     "deezer_id": pl.deezer_id,
                     "title": pl.name,
                     "description": pl.comment or "",
-                    "cover": _db_playlist_cover(tracks),
-                    "nb_tracks": len(tracks),
+                    "cover": cover,
+                    "nb_tracks": total,
                     "owner": pl.user.name,
                     "is_favorite": False,
                     "editable": _is_admin(),
                 },
                 "tracks": tracks,
+                "total": total,
             }
         )
 
@@ -1037,7 +1079,8 @@ def playlist(playlist_id):
         songs = (page.get("SONGS") or {}).get("data", [])
     out = _playlist(data)
     out["editable"] = False
-    return jsonify({"playlist": out, "tracks": _tracks(songs)})
+    page_songs, total = _slice(songs, offset, limit)
+    return jsonify({"playlist": out, "tracks": _tracks(page_songs), "total": total})
 
 
 @webapi.route("/artist/<artist_id>/discography")
@@ -1310,15 +1353,14 @@ def my_local():
     return jsonify({"tracks": [_local_track(t) for t in q]})
 
 
-@webapi.route("/me/favorites")
-@login_required
-def my_favorites():
-    # Guests: their own private stars only (no Deezer-account favorites).
+def _favorites_full() -> list:
+    """The full, ordered favorites list (newest first). Guests get their own
+    private stars; the admin gets the Deezer account favorites (with the local
+    stars ahead of them), falling back to the DB-mirrored stars on any Deezer
+    outage. The provider caches the Deezer metadata by checksum, so rebuilding
+    this per page request is cheap after the first call."""
     if not _is_admin():
-        return jsonify({"tracks": [_db_track(t) for t in _user_starred()]})
-    # Prefer the live Deezer favorites (they carry the "added" date and any
-    # brand-new stars not yet synced), but never let a Deezer outage 500 the
-    # route — fall back to the favorites already mirrored into the DB.
+        return [_db_track(t) for t in _user_starred()]
     provider = _provider()
     if provider is not None:
         try:
@@ -1331,11 +1373,22 @@ def my_favorites():
                     continue
                 tr["added"] = int(t.get("time_add") or t.get("DATE_ADD") or 0)
                 tracks.append(tr)
-            return jsonify({"tracks": tracks})
+            return tracks
         except Exception:
             logger.warning("Deezer favorites fetch failed; serving from DB", exc_info=True)
     # Deezer disabled or unreachable: every star from the DB (local + synced).
-    return jsonify({"tracks": [_db_track(t) for t in _user_starred()]})
+    return [_db_track(t) for t in _user_starred()]
+
+
+@webapi.route("/me/favorites")
+@login_required
+def my_favorites():
+    # Paginated for progressive loading: the UI pulls the first block, then more
+    # as you scroll / when you play. No ``limit`` param -> the whole list (so
+    # older callers and offline play are unaffected).
+    offset, limit = _page_args()
+    page, total = _slice(_favorites_full(), offset, limit)
+    return jsonify({"tracks": page, "total": total})
 
 
 # -- podcasts ---------------------------------------------------------------
