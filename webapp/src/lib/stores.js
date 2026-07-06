@@ -177,10 +177,59 @@ const savedVolume = persisted("player.volume", 1);
 const savedMuted = persisted("player.muted", false);
 const savedShuffle = persisted("player.shuffle", false);
 const savedRepeat = persisted("player.repeat", "off"); // off | all | one
-// Last session (queue/index/position/context), so a reload resumes where you
-// left off. Capped so a huge queue (e.g. all favorites) can't blow the quota.
-const savedSession = persisted("player.session", null);
-const SESSION_CAP = 300;
+// Last session (queue/index/position/context), so a reload — or Android
+// killing the backgrounded tab — resumes where you left off. Written through
+// writeSession (not the `persisted` helper) so a quota failure can retry with
+// a tighter queue window instead of silently saving nothing.
+const SESSION_KEY = "player.session";
+// The playhead position lives in its OWN tiny key ({index, id, time}, ~60
+// bytes). During plain playback only this key is refreshed — re-serializing
+// the whole queue (potentially hundreds of KB) 30×/min just to move the
+// position was a pointless CPU/storage cost. The full session is only written
+// on real actions: track/queue changes and play/pause.
+const POS_KEY = "player.pos";
+// Persisted-queue caps: keep as much of the queue as the quota allows (~1000
+// tracks is well under localStorage limits), fall back to a tight window
+// around the playing track if the write still fails.
+const SESSION_CAP = 1000;
+const SESSION_CAP_MIN = 100;
+
+function readJSON(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw !== null ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeJSON(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function readSession() {
+  const sess = readJSON(SESSION_KEY);
+  if (!sess) return null;
+  // Overlay the position tick when it's FRESHER than the full snapshot (both
+  // carry a write timestamp) and belongs to the same track the session says
+  // is playing — during playback the tick is the up-to-date one, right after
+  // a pause/seek the full snapshot is.
+  const pos = readJSON(POS_KEY);
+  if (
+    pos &&
+    pos.i === sess.index &&
+    sess.queue?.[sess.index]?.deezer_id === pos.id &&
+    typeof pos.t === "number" &&
+    (pos.at || 0) >= (sess.at || 0)
+  )
+    sess.currentTime = pos.t;
+  return sess;
+}
 
 function shuffled(arr) {
   const a = arr.slice();
@@ -192,7 +241,7 @@ function shuffled(arr) {
 }
 
 function createPlayer() {
-  const sess = get(savedSession) || {};
+  const sess = readSession() || {};
   const restoredQueue = Array.isArray(sess.queue) ? sess.queue : [];
   const { subscribe, update, set } = writable({
     queue: restoredQueue,
@@ -219,22 +268,25 @@ function createPlayer() {
     _orig: Array.isArray(sess._orig) ? sess._orig : null,
   });
 
-  // Persist the session: immediately when the track/queue changes, throttled
-  // (~2s) for mere position updates so we don't hammer localStorage 4×/s.
-  let saveTimer = null;
+  // Persist the state in two tiers. The FULL session (queue and all) is only
+  // written when something real happens: track/queue change, play/pause — one
+  // write per user action. Mere position progress during playback refreshes
+  // only the tiny POS_KEY tick (throttled to ~2s, ~60 bytes), so continuous
+  // playback never re-serializes the whole queue. Play/pause counts as a full
+  // save on purpose: a pause in the background is often the LAST code that
+  // runs before Android kills the tab (hidden+silent pages get their timers
+  // frozen), so the exact position can't wait for any timer.
+  let posTimer = null;
   let lastStructKey = "";
   let latest = null;
-  function snapshot(s) {
+  function snapshot(s, cap = SESSION_CAP) {
     // Cap the persisted queue with a window AROUND the playing track — a plain
     // head slice restored the wrong track whenever the index was past the cap.
     let queue = s.queue;
     let index = s.index;
-    if (queue.length > SESSION_CAP) {
-      const start = Math.min(
-        Math.max(0, index - (SESSION_CAP >> 1)),
-        queue.length - SESSION_CAP
-      );
-      queue = queue.slice(start, start + SESSION_CAP);
+    if (queue.length > cap) {
+      const start = Math.min(Math.max(0, index - (cap >> 1)), queue.length - cap);
+      queue = queue.slice(start, start + cap);
       index = index - start; // still -1 when nothing was playing (start is 0)
     }
     return {
@@ -244,21 +296,44 @@ function createPlayer() {
       context: s.context,
       shuffle: s.shuffle,
       repeat: s.repeat,
-      _orig: s._orig ? s._orig.slice(0, SESSION_CAP) : null,
+      _orig: s._orig ? s._orig.slice(0, cap) : null,
+      at: Date.now(),
     };
+  }
+  function save(s) {
+    // Quota blown by a huge queue: retry with a tight window around the
+    // playing track so at least the position and nearby tracks survive.
+    if (!writeJSON(SESSION_KEY, snapshot(s)))
+      writeJSON(SESSION_KEY, snapshot(s, SESSION_CAP_MIN));
+  }
+  function savePos(s) {
+    writeJSON(POS_KEY, {
+      i: s.index,
+      id: s.queue[s.index]?.deezer_id ?? null,
+      t: s.currentTime,
+      at: Date.now(),
+    });
+  }
+  // Write the freshest full state NOW — called when the page is hidden/frozen/
+  // closed, the moments after which timers can't be trusted.
+  function flushSession() {
+    if (!latest) return;
+    clearTimeout(posTimer);
+    posTimer = null;
+    save(latest);
   }
   subscribe((s) => {
     latest = s;
-    const key = `${s.index}|${s.queue[s.index]?.deezer_id ?? ""}|${s.queue.length}`;
+    const key = `${s.index}|${s.queue[s.index]?.deezer_id ?? ""}|${s.queue.length}|${s.playing}`;
     if (key !== lastStructKey) {
       lastStructKey = key;
-      clearTimeout(saveTimer);
-      saveTimer = null;
-      savedSession.set(snapshot(s));
-    } else if (!saveTimer) {
-      saveTimer = setTimeout(() => {
-        saveTimer = null;
-        savedSession.set(snapshot(latest));
+      clearTimeout(posTimer);
+      posTimer = null;
+      save(s);
+    } else if (!posTimer) {
+      posTimer = setTimeout(() => {
+        posTimer = null;
+        savePos(latest);
       }, 2000);
     }
   });
@@ -475,12 +550,27 @@ function createPlayer() {
         return { ...s, repeat };
       });
     },
+
+    flushSession,
   };
 
   return player;
 }
 
 export const player = createPlayer();
+
+// Flush the session at every "last reliable moment" of the page lifecycle:
+// backgrounding (Android may kill the tab without any further event), the
+// page-freeze that precedes it, and an outright close/navigation. This is
+// what makes the position/queue survive the OS reclaiming a paused player.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") player.flushSession();
+  });
+  window.addEventListener("pagehide", () => player.flushSession());
+  // Page Lifecycle API (Chrome): fired right before a hidden tab is frozen.
+  document.addEventListener("freeze", () => player.flushSession());
+}
 
 export const current = derived(player, ($p) =>
   $p.index >= 0 && $p.index < $p.queue.length ? $p.queue[$p.index] : null
