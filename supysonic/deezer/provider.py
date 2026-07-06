@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import time
 import weakref
 from pathlib import Path
 
@@ -28,6 +29,7 @@ except ImportError:  # pycryptodomex
     from Cryptodome.Cipher import Blowfish
 
 from deezerpy import Deezer
+from deezerpy.errors import DeezerError as DeezerPyError
 from deezerpy._throttle import limiter
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,9 @@ class DeezerProvider:
             weakref.WeakValueDictionary()
         )
         self._track_locks_guard = threading.Lock()
+        # Last time a resolve failure forced a re-login (see resolve): rate-
+        # limited so a genuinely unavailable track can't spam login calls.
+        self._last_relogin = 0.0
         # (checksum, tracks) cache for the favorites list — see
         # get_my_favorite_tracks. The expensive part is fetching full metadata
         # for every favorite; Deezer hands back a cheap checksum of the set, so
@@ -355,13 +360,42 @@ class DeezerProvider:
 
     # -- resolve a playable, possibly-degraded stream URL ----------------
 
+    # Minimum delay between two failure-driven re-logins. Within the window a
+    # failing resolve is a genuine "track unavailable", not a stale session.
+    _RELOGIN_INTERVAL = 60.0
+
     def resolve(self, sng_id, quality: str | None = None):
         """Return ``(url, fmt, gw_info, used_id)`` for a playable source.
+
+        The Deezer media license token (minted at login) silently expires after
+        a while; when it does, ``get_track_url`` fails for EVERY quality and
+        every not-yet-archived track becomes unplayable until the process
+        restarts — while archived ones keep working. So a resolve that fails
+        outright re-logs in once (rate-limited) and retries with fresh tokens.
+        """
+        quality = quality or self.default_quality
+        try:
+            return self._resolve_once(sng_id, quality)
+        except (DeezerError, DeezerPyError) as exc:
+            if time.monotonic() - self._last_relogin < self._RELOGIN_INTERVAL:
+                raise  # the session is fresh — the track really is unavailable
+            self._last_relogin = time.monotonic()
+            logger.info(
+                "Resolve failed for %s (%s) — re-logging into Deezer and retrying",
+                sng_id, exc,
+            )
+            try:
+                self.relogin()
+            except Exception:
+                raise exc  # ARL dead / network down: surface the original error
+            return self._resolve_once(sng_id, quality)
+
+    def _resolve_once(self, sng_id, quality: str):
+        """One resolve attempt against the current session (see ``resolve``).
 
         Falls back to the gateway-provided alternative (``FALLBACK.SNG_ID``)
         when the requested track has no playable source.
         """
-        quality = quality or self.default_quality
         info = self.get_track_info(sng_id)
         url, fmt = self._url_from_info(info, quality)
         if url:

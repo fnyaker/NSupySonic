@@ -356,6 +356,55 @@ class DeezerTestCase(TestBase):
         reloaded = Track[ids.track_uuid("7")]
         self.assertTrue(reloaded.path.endswith(".mp3"))
 
+    # -- resolve: expired-session recovery --------------------------------
+
+    class _FakeDz:
+        """A dz whose media URL calls work only when `alive` (expired license
+        tokens make get_track_url fail for every quality until a re-login)."""
+
+        def __init__(self, alive):
+            self.alive = alive
+            self.gw = self
+            self.current_user = {"can_stream_lossless": True}
+
+        def get_track(self, sng_id):
+            return raw_track(sng_id)
+
+        def get_track_url(self, token, fmt):
+            return "http://x/media" if self.alive else None
+
+    def test_resolve_relogins_on_expired_session(self):
+        relogins = []
+        self.provider._dz = self._FakeDz(alive=False)
+
+        def fake_relogin():
+            relogins.append(1)
+            self.provider._dz = self._FakeDz(alive=True)
+            return self.provider._dz
+
+        self.provider.relogin = fake_relogin
+
+        url, fmt, info, used_id = self.provider.resolve("7")
+        self.assertEqual(url, "http://x/media")
+        self.assertEqual(fmt, "FLAC")
+        self.assertEqual(relogins, [1])
+
+    def test_resolve_no_relogin_when_session_is_fresh(self):
+        # A resolve failing right after a re-login is a genuinely unavailable
+        # track: raise instead of hammering the login endpoint.
+        import time
+
+        from supysonic.deezer.provider import DeezerError
+
+        relogins = []
+        self.provider._dz = self._FakeDz(alive=False)
+        self.provider._last_relogin = time.monotonic()
+        self.provider.relogin = lambda: relogins.append(1)
+
+        with self.assertRaises(DeezerError):
+            self.provider.resolve("7")
+        self.assertEqual(relogins, [])
+
     # -- push: playlist reconcile (Subsonic -> Deezer) -------------------
 
     def test_push_reconcile_playlist(self):

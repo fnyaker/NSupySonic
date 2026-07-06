@@ -78,32 +78,45 @@
   let bgN = 0;
   let bgTimer;
   let bgLoader = null;
+  let bgRetryTimer = null;
   $: setBg(resolveCover($offlineCovers, $current?.album?.cover) || "");
-  function setBg(url) {
+  function setBg(url, attempt = 0) {
     if (!url) return; // no art: keep the previous backdrop rather than blanking
     const top = bgLayers[bgLayers.length - 1];
-    if (top && top.src === url) return;
-    if (bgLoader && bgLoader.__url === url) return; // already preloading it
+    if (top && (top.url || top.src) === url) return;
+    if (bgLoader && bgLoader.__url === url && !attempt) return; // already preloading it
     if (bgLoader) {
       bgLoader.onload = bgLoader.onerror = null;
       bgLoader.src = "";
     }
+    clearTimeout(bgRetryTimer);
+    // Retries re-fetch under a cache-busted URL so the browser doesn't just
+    // replay the failed attempt from its cache.
+    const fetchSrc =
+      attempt && !url.startsWith("blob:")
+        ? url + (url.includes("?") ? "&" : "?") + "r=" + attempt
+        : url;
     const im = new Image();
     im.__url = url;
     bgLoader = im;
     im.onload = () => {
       if (bgLoader !== im) return; // a newer cover superseded this one
       bgLoader = null;
-      pushBgLayer(url);
+      pushBgLayer(fetchSrc, url);
     };
     im.onerror = () => {
-      if (bgLoader === im) bgLoader = null; // keep the previous backdrop
+      if (bgLoader !== im) return;
+      bgLoader = null;
+      // One delayed retry (the image CDN fails transiently); after that the
+      // previous backdrop simply stays up.
+      if (attempt < 1)
+        bgRetryTimer = setTimeout(() => setBg(url, attempt + 1), 1500);
     };
-    im.src = url;
+    im.src = fetchSrc;
   }
-  function pushBgLayer(url) {
+  function pushBgLayer(src, url) {
     const id = ++bgN;
-    bgLayers = [...bgLayers, { id, src: url }];
+    bgLayers = [...bgLayers, { id, src, url }];
     clearTimeout(bgTimer);
     bgTimer = setTimeout(() => (bgLayers = bgLayers.filter((l) => l.id === id)), 420);
   }

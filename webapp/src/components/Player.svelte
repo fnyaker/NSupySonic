@@ -22,7 +22,7 @@
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
-  import { duration as fmtDuration, resolveCover } from "../lib/format.js";
+  import { duration as fmtDuration, resolveCover, coverKey } from "../lib/format.js";
   import { registerSource, resumeAudio } from "../lib/visualizer.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
@@ -939,18 +939,65 @@
     performSeek(+e.target.value);
   }
 
+  // The OS fetches the notification artwork itself, ONCE, with no retry — and
+  // the Deezer image CDN is flaky enough that this regularly left the system
+  // notification artless. So the art is fetched HERE (retried, through the
+  // server-side cached /api/cover proxy, with the page's session cookie) and
+  // handed to the media session as a local blob: URL that always displays.
+  let artSeq = 0; // invalidates an in-flight artwork fetch on track change
+  let artCache = { key: null, url: null }; // current track's fetched artwork
+
+  async function notificationArt(track) {
+    const cover = track.album?.cover;
+    const offline = resolveCover(get(offlineCovers), cover);
+    if (offline && offline !== cover) return offline; // already a local blob
+    const key = coverKey(cover) || "id:" + track.deezer_id;
+    if (artCache.key === key && artCache.url) return artCache.url;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(api.coverUrl(track.deezer_id), {
+          credentials: "include",
+        });
+        if (!res.ok) throw new Error(String(res.status));
+        const url = URL.createObjectURL(await res.blob());
+        if (artCache.url && artCache.url.startsWith("blob:")) {
+          try {
+            URL.revokeObjectURL(artCache.url);
+          } catch {
+            /* ignore */
+          }
+        }
+        artCache = { key, url };
+        return url;
+      } catch {
+        await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+      }
+    }
+    return cover || null; // last resort: let the OS try the CDN URL itself
+  }
+
   function updateMediaSession(track) {
     if (!("mediaSession" in navigator) || !track) return;
+    const seq = ++artSeq;
+    const setMeta = (art) => {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.title,
+          artist: track.artist?.name,
+          album: track.album?.title,
+          artwork: art ? [{ src: art, sizes: "500x500" }] : [],
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+    // Title/artist must show instantly; the artwork upgrade follows as soon as
+    // the reliable (blob) copy is in hand.
+    setMeta(resolveCover(get(offlineCovers), track.album?.cover));
+    notificationArt(track).then((art) => {
+      if (art && seq === artSeq) setMeta(art);
+    });
     try {
-      // Resolve through the offline cover cache so the OS notification art
-      // shows in airplane mode too (it used to rely on the HTTP cache alone).
-      const art = resolveCover(get(offlineCovers), track.album?.cover);
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: track.title,
-        artist: track.artist?.name,
-        album: track.album?.title,
-        artwork: art ? [{ src: art, sizes: "500x500", type: "image/jpeg" }] : [],
-      });
       navigator.mediaSession.setActionHandler("play", () => player.play());
       navigator.mediaSession.setActionHandler("pause", () => player.pause());
       navigator.mediaSession.setActionHandler("nexttrack", () => player.next());
