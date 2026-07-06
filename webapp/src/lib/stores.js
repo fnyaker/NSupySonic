@@ -182,28 +182,53 @@ const savedRepeat = persisted("player.repeat", "off"); // off | all | one
 // writeSession (not the `persisted` helper) so a quota failure can retry with
 // a tighter queue window instead of silently saving nothing.
 const SESSION_KEY = "player.session";
+// The playhead position lives in its OWN tiny key ({index, id, time}, ~60
+// bytes). During plain playback only this key is refreshed — re-serializing
+// the whole queue (potentially hundreds of KB) 30×/min just to move the
+// position was a pointless CPU/storage cost. The full session is only written
+// on real actions: track/queue changes and play/pause.
+const POS_KEY = "player.pos";
 // Persisted-queue caps: keep as much of the queue as the quota allows (~1000
 // tracks is well under localStorage limits), fall back to a tight window
 // around the playing track if the write still fails.
 const SESSION_CAP = 1000;
 const SESSION_CAP_MIN = 100;
 
-function readSession() {
+function readJSON(key) {
   try {
-    const raw = localStorage.getItem(SESSION_KEY);
+    const raw = localStorage.getItem(key);
     return raw !== null ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-function writeSession(snap) {
+function writeJSON(key, value) {
   try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify(snap));
+    localStorage.setItem(key, JSON.stringify(value));
   } catch {
     return false;
   }
   return true;
+}
+
+function readSession() {
+  const sess = readJSON(SESSION_KEY);
+  if (!sess) return null;
+  // Overlay the position tick when it's FRESHER than the full snapshot (both
+  // carry a write timestamp) and belongs to the same track the session says
+  // is playing — during playback the tick is the up-to-date one, right after
+  // a pause/seek the full snapshot is.
+  const pos = readJSON(POS_KEY);
+  if (
+    pos &&
+    pos.i === sess.index &&
+    sess.queue?.[sess.index]?.deezer_id === pos.id &&
+    typeof pos.t === "number" &&
+    (pos.at || 0) >= (sess.at || 0)
+  )
+    sess.currentTime = pos.t;
+  return sess;
 }
 
 function shuffled(arr) {
@@ -243,12 +268,15 @@ function createPlayer() {
     _orig: Array.isArray(sess._orig) ? sess._orig : null,
   });
 
-  // Persist the session: immediately when the track/queue/play-state changes,
-  // throttled (~2s) for mere position updates so we don't hammer localStorage
-  // 4×/s. Play/pause counts as a structural change on purpose: a pause in the
-  // background is often the LAST code that runs before Android kills the tab
-  // (hidden+silent pages get their timers frozen), so it can't wait 2s.
-  let saveTimer = null;
+  // Persist the state in two tiers. The FULL session (queue and all) is only
+  // written when something real happens: track/queue change, play/pause — one
+  // write per user action. Mere position progress during playback refreshes
+  // only the tiny POS_KEY tick (throttled to ~2s, ~60 bytes), so continuous
+  // playback never re-serializes the whole queue. Play/pause counts as a full
+  // save on purpose: a pause in the background is often the LAST code that
+  // runs before Android kills the tab (hidden+silent pages get their timers
+  // frozen), so the exact position can't wait for any timer.
+  let posTimer = null;
   let lastStructKey = "";
   let latest = null;
   function snapshot(s, cap = SESSION_CAP) {
@@ -269,19 +297,29 @@ function createPlayer() {
       shuffle: s.shuffle,
       repeat: s.repeat,
       _orig: s._orig ? s._orig.slice(0, cap) : null,
+      at: Date.now(),
     };
   }
   function save(s) {
     // Quota blown by a huge queue: retry with a tight window around the
     // playing track so at least the position and nearby tracks survive.
-    if (!writeSession(snapshot(s))) writeSession(snapshot(s, SESSION_CAP_MIN));
+    if (!writeJSON(SESSION_KEY, snapshot(s)))
+      writeJSON(SESSION_KEY, snapshot(s, SESSION_CAP_MIN));
   }
-  // Write the freshest state NOW — called on pause and when the page is
-  // hidden/frozen/closed, the moments after which timers can't be trusted.
+  function savePos(s) {
+    writeJSON(POS_KEY, {
+      i: s.index,
+      id: s.queue[s.index]?.deezer_id ?? null,
+      t: s.currentTime,
+      at: Date.now(),
+    });
+  }
+  // Write the freshest full state NOW — called when the page is hidden/frozen/
+  // closed, the moments after which timers can't be trusted.
   function flushSession() {
     if (!latest) return;
-    clearTimeout(saveTimer);
-    saveTimer = null;
+    clearTimeout(posTimer);
+    posTimer = null;
     save(latest);
   }
   subscribe((s) => {
@@ -289,13 +327,13 @@ function createPlayer() {
     const key = `${s.index}|${s.queue[s.index]?.deezer_id ?? ""}|${s.queue.length}|${s.playing}`;
     if (key !== lastStructKey) {
       lastStructKey = key;
-      clearTimeout(saveTimer);
-      saveTimer = null;
+      clearTimeout(posTimer);
+      posTimer = null;
       save(s);
-    } else if (!saveTimer) {
-      saveTimer = setTimeout(() => {
-        saveTimer = null;
-        save(latest);
+    } else if (!posTimer) {
+      posTimer = setTimeout(() => {
+        posTimer = null;
+        savePos(latest);
       }, 2000);
     }
   });
