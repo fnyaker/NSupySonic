@@ -1,17 +1,20 @@
 <script>
   import { onMount } from "svelte";
-  import { player, favTracks, toasts, isAdmin, syncing, downloads } from "../lib/stores.js";
-  import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
+  import { player, toasts, isAdmin, syncing, downloads } from "../lib/stores.js";
+  import { userPlaylists, runDeezerSync } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
   import { api } from "../lib/api.js";
   import Card from "../components/Card.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
+  import PagedTrackBrowser, { invalidatePaged } from "../components/PagedTrackBrowser.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
 
   let tab = "favorites";
-  // favTracks is a shared cache: instant on revisit, refreshed in background.
-  $: favorites = $favTracks;
+  // Favorites load progressively, block by block (see PagedTrackBrowser).
+  let favPager = null;
+  let favTotal = null;
+  const loadFavPage = (offset, limit) => api.myFavorites({ offset, limit });
   let playlists = null;
   let plQuery = "";
   $: shownPlaylists = filterPlaylists(playlists, plQuery);
@@ -28,7 +31,6 @@
   let uploading = false;
 
   onMount(() => {
-    loadMyFavorites();
     if ($isAdmin) userPlaylists().then((p) => (playlists = p));
     loadLocal();
   });
@@ -71,16 +73,17 @@
     }
   }
 
-  function playFavorites() {
-    if (favorites?.length) player.playQueue(favorites, 0, { kind: "favorites" });
-  }
   function playLocal() {
     if (local?.length) player.playQueue(local, 0, { kind: "local" });
   }
 
   // Manual "refresh from Deezer" (shared action), then refresh this page's list.
   async function syncDeezer() {
-    if (await runDeezerSync()) playlists = await userPlaylists(true);
+    if (await runDeezerSync()) {
+      playlists = await userPlaylists(true);
+      invalidatePaged("favorites"); // favorites may have changed
+      favPager?.refresh();
+    }
   }
 </script>
 
@@ -116,17 +119,25 @@
 </div>
 
 {#if tab === "favorites"}
-  {#if favorites === null}
-    <Skeleton kind="list" />
-  {:else if !favorites.length}
+  <!-- Kept mounted (not swapped for the empty state) so the pager instance and
+       its loaded blocks survive; the empty hint just overlays when total is 0. -->
+  {#if favTotal === 0}
     <p class="muted hint">Aucun titre favori. Survolez un titre et cliquez sur le cœur pour l'ajouter.</p>
   {:else}
-    <div class="row fav-head">
-      <button class="pill" on:click={playFavorites}><Icon name="play" size={18} /> Tout lire</button>
-      <span class="muted">{favorites.length} titres</span>
+    <div class="row fav-head" class:hidden={favTotal === null}>
+      <button class="pill" on:click={() => favPager?.playAll()}><Icon name="play" size={18} /> Tout lire</button>
+      <span class="muted">{favTotal ?? "…"} titres</span>
     </div>
-    <TrackBrowser tracks={favorites} context={{ kind: "favorites" }} />
   {/if}
+  <div class:hidden={favTotal === 0}>
+    <PagedTrackBrowser
+      bind:this={favPager}
+      load={loadFavPage}
+      context={{ kind: "favorites" }}
+      cacheKey="favorites"
+      oncount={(t) => (favTotal = t)}
+    />
+  </div>
 {:else if tab === "playlists"}
   {#if playlists === null}
     <Skeleton kind="shelf" />
@@ -230,6 +241,9 @@
   .fav-head {
     margin-bottom: 14px;
     gap: 16px;
+  }
+  .hidden {
+    display: none;
   }
   .pl-search {
     display: flex;
