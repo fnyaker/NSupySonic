@@ -197,19 +197,23 @@ export async function startTrackRadio(track) {
   }
 }
 
-export async function addTrackToPlaylist(playlistId, trackId, playlistTitle) {
-  try {
-    await api.addToPlaylist(playlistId, [String(trackId)]);
-    // The sidebar/menu cache shows track counts — refresh on the next read.
-    invalidatePlaylists();
-    // Remember it for the one-tap "Ajouter à « X »" shortcut.
-    lastPlaylist.set({ id: String(playlistId), title: playlistTitle });
-    toasts.push(`Ajouté à « ${playlistTitle} »`);
-    return true;
-  } catch {
-    toasts.push("Échec de l'ajout à la playlist", "error");
-    return false;
-  }
+// Optimistic: the toast and the "last playlist" shortcut update INSTANTLY —
+// the server call (which may include a Deezer round-trip) runs in the
+// background, and only a failure surfaces afterwards.
+export function addTrackToPlaylist(playlistId, trackId, playlistTitle) {
+  lastPlaylist.set({ id: String(playlistId), title: playlistTitle });
+  toasts.push(`Ajouté à « ${playlistTitle} »`);
+  return api
+    .addToPlaylist(playlistId, [String(trackId)])
+    .then(() => {
+      // The sidebar/menu cache shows track counts — refresh on the next read.
+      invalidatePlaylists();
+      return true;
+    })
+    .catch(() => {
+      toasts.push(`Échec de l'ajout à « ${playlistTitle} »`, "error");
+      return false;
+    });
 }
 
 // -- offline downloads (device-local; available to every user) --------------

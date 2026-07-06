@@ -39,7 +39,7 @@
   let loadSeq = 0;
   async function load(plId) {
     const mine = ++loadSeq;
-    flushOrder(); // save any pending reorder of the playlist we're leaving
+    queueOrder(); // save any pending reorder of the playlist we're leaving
     loading = true;
     data = null;
     editing = false;
@@ -102,12 +102,36 @@
     }
   }
 
-  // Reorders are saved debounced: the UI updates instantly, and a burst of
-  // moves (several drags, repeated up/down taps) collapses into ONE request
-  // instead of hammering the server with a full-order PUT per move. Flushed
-  // when leaving the page so nothing is lost.
+  // -- edits: instant UI, serialized background saves -----------------------
+  // Every mutation updates the page IMMEDIATELY; the matching API call is
+  // pushed onto a FIFO chain, so at most one request is in flight and the
+  // server applies operations in exactly the order the user made them (an
+  // index-based remove racing a reorder would corrupt the playlist). Reorders
+  // are coalesced: a burst of drags / up-down taps collapses into ONE PUT of
+  // the latest order. The user never waits — worst case a save fails and the
+  // list silently resyncs from the server.
+  let chain = Promise.resolve();
+  function enqueue(op) {
+    chain = chain.then(op, op);
+  }
+
+  // Resync from the server after a failed save (source of truth) — without
+  // resetting the edit-mode/scroll state the way a full load() would.
+  async function resync(plId) {
+    try {
+      const r = await api.playlist(plId);
+      if (r?.playlist && plId === id) {
+        data = r;
+        fav = !!r.playlist.is_favorite;
+      }
+    } catch {
+      /* offline: the optimistic state stays; next load will settle it */
+    }
+  }
+
   let orderTimer = null;
   let pendingOrder = null;
+  let orderQueued = false;
   function reorder(newTracks) {
     data.tracks = newTracks;
     data = data;
@@ -115,44 +139,59 @@
     // playlist swaps `id` before the debounce fires.
     pendingOrder = { plId: id, order: newTracks.map((t) => String(t.deezer_id)) };
     clearTimeout(orderTimer);
-    orderTimer = setTimeout(flushOrder, 500);
+    orderTimer = setTimeout(queueOrder, 400);
   }
-  async function flushOrder() {
+  function queueOrder() {
     clearTimeout(orderTimer);
     orderTimer = null;
-    if (!pendingOrder) return;
-    const { plId, order } = pendingOrder;
-    pendingOrder = null;
-    try {
-      await api.reorderPlaylist(plId, order);
-    } catch {
-      toasts.push("Échec du réordonnancement", "error");
-    }
+    if (!pendingOrder || orderQueued) return; // the queued op sends the latest
+    orderQueued = true;
+    enqueue(async () => {
+      orderQueued = false;
+      if (!pendingOrder) return;
+      const { plId, order } = pendingOrder;
+      pendingOrder = null;
+      try {
+        await api.reorderPlaylist(plId, order);
+      } catch {
+        toasts.push("Échec du réordonnancement", "error");
+        await resync(plId);
+      }
+    });
   }
-  onDestroy(flushOrder);
+  onDestroy(queueOrder);
 
-  async function removeAt(index) {
-    // The server resolves indexes against ITS current order — make sure any
-    // pending (debounced) reorder is applied first so they match.
-    await flushOrder();
-    const removed = data.tracks[index];
+  function removeAt(index) {
+    const plId = id;
     data.tracks = data.tracks.filter((_, i) => i !== index);
     data = data;
-    try {
-      await api.removePlaylistIndexes(id, [index]);
-      invalidatePlaylists(); // sidebar/menu track counts
-    } catch {
-      // rollback
-      data.tracks = [...data.tracks.slice(0, index), removed, ...data.tracks.slice(index)];
-      data = data;
-      toasts.push("Échec de la suppression", "error");
-    }
+    // Any pending reorder is queued FIRST: the server resolves the remove
+    // index against its own order, which must match what the user saw.
+    queueOrder();
+    enqueue(async () => {
+      try {
+        await api.removePlaylistIndexes(plId, [index]);
+        invalidatePlaylists(); // sidebar/menu track counts
+      } catch {
+        toasts.push("Échec de la suppression", "error");
+        await resync(plId);
+      }
+    });
   }
 
   function onAdded(track) {
+    const plId = id;
     data.tracks = [...data.tracks, track];
     data = data;
-    invalidatePlaylists();
+    enqueue(async () => {
+      try {
+        await api.addToPlaylist(plId, [String(track.deezer_id)]);
+        invalidatePlaylists();
+      } catch {
+        toasts.push(`Échec de l'ajout de « ${track.title} »`, "error");
+        await resync(plId);
+      }
+    });
   }
 
   async function deletePlaylist() {
@@ -233,7 +272,6 @@
 
   {#if showAdd}
     <AddTracksSheet
-      playlistId={id}
       {existingIds}
       onadd={onAdded}
       onclose={() => (showAdd = false)}

@@ -19,7 +19,11 @@
   export let onreorder = null; // (newTracks) => void
   export let onremove = null; // (index) => void
 
+  // Row-shift animation duration. FLIP measures EVERY row's position on each
+  // drag update / move — O(N) layout reads per event — so it's disabled past
+  // ~120 rows: big playlists reorder instantly instead of animating sluggishly.
   const FLIP = 160;
+  $: flipMs = rows.length > 120 ? 0 : FLIP;
 
   // Wrap each track with a stable id for keyed iteration + dnd. The id sticks
   // to the track OBJECT (WeakMap), so a reorder/remove keeps every surviving
@@ -83,7 +87,7 @@
 <div
   class="list"
   class:editing
-  use:dragHandleZone={{ items: rows, flipDurationMs: FLIP, dropTargetStyle: {} }}
+  use:dragHandleZone={{ items: rows, flipDurationMs: flipMs, dropTargetStyle: {} }}
   on:consider={handleConsider}
   on:finalize={handleFinalize}
 >
@@ -91,7 +95,7 @@
     {@const track = row.track}
     {@const isCurrent = $currentId === track.deezer_id}
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="row" class:active={isCurrent} animate:flip={{ duration: FLIP }} on:contextmenu={(e) => menu(e, track)}>
+    <div class="row" class:active={isCurrent} animate:flip={{ duration: flipMs }} on:contextmenu={(e) => menu(e, track)}>
       <span class="grip" use:dragHandle aria-label="Déplacer le titre" title="Glisser pour réordonner">
         <Icon name="grip" size={editing ? 22 : 18} />
       </span>
