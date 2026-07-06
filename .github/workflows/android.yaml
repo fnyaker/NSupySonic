@@ -1,0 +1,91 @@
+name: Android
+
+# Builds the native Android app (android/) into a downloadable APK, in
+# parallel with the Docker image workflow. The APK is uploaded as a run
+# artifact on every build, and attached to the GitHub release on v* tags.
+#
+# Signing: without secrets, an ephemeral keystore is generated per run —
+# installing a newer build then requires uninstalling the previous one
+# (signature mismatch). For a stable signature, set the repo secrets
+# ANDROID_KEYSTORE_BASE64 (base64 of a .jks), ANDROID_KEYSTORE_PASSWORD,
+# ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD.
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+    paths:
+      - android/**
+      - .github/workflows/android.yaml
+  pull_request:
+    paths:
+      - android/**
+      - .github/workflows/android.yaml
+  workflow_dispatch:
+
+jobs:
+  apk:
+    name: Build APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the APK to releases on tags
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Prepare signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KS="$GITHUB_WORKSPACE/android/release.jks"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$KS"
+          else
+            keytool -genkeypair -keystore "$KS" -alias nsupysonic \
+              -storepass nsupysonic -keypass nsupysonic \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=NSupySonic"
+          fi
+          {
+            echo "ANDROID_KEYSTORE_FILE=$KS"
+            echo "ANDROID_KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD:-nsupysonic}"
+            echo "ANDROID_KEY_ALIAS=${KEY_ALIAS:-nsupysonic}"
+            echo "ANDROID_KEY_PASSWORD=${KEY_PASSWORD:-nsupysonic}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+          VERSION_NAME: ${{ github.ref_type == 'tag' && github.ref_name || format('1.0.{0}', github.run_number) }}
+        run: gradle -p android assembleRelease
+
+      - name: Collect APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk nsupysonic.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsupysonic-apk
+          path: nsupysonic.apk
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nsupysonic.apk

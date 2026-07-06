@@ -82,6 +82,20 @@ tracks of the current album/playlist are pre-fetched in the background.
 This means the same data powers your Subsonic client and the web player — there
 is no separate "Deezer mode", it's just your library.
 
+## Android app
+
+A native Kotlin app (`android/`) wraps the web player in a fullscreen WebView
+and adds what a mobile browser can't provide: a **foreground media service +
+MediaSession**, so playback survives long pauses in the background and gets
+real lockscreen / notification / Bluetooth controls. On first launch you enter
+your server URL, an optional port, and whether to verify the SSL certificate
+(untick for self-signed setups).
+
+The APK is built by CI (`android.yaml` workflow) alongside the Docker image:
+grab the `nsupysonic-apk` artifact from any run, or the APK attached to
+releases on `v*` tags. See [android/README.md](android/README.md) for details
+(including stable-signature setup via repo secrets).
+
 ## Quick start (Docker)
 
 **Requirements:** Docker + Docker Compose, a Deezer account (HiFi/Premium for

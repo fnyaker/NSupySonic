@@ -47,8 +47,21 @@ supysonic-cli deezer sync                            # import playlists/favorite
 docker compose up --build                            # web player at :5722/app, Subsonic at :5722/rest
 ```
 
-Note: the upstream `tests/` are unittest-based; there is no pytest config. CI runs two
-workflows — `tests.yaml` (unittest across py3.10–3.14) and `docker.yaml` (image build).
+Note: the upstream `tests/` are unittest-based; there is no pytest config. CI runs three
+workflows — `tests.yaml` (unittest across py3.10–3.14), `docker.yaml` (image build) and
+`android.yaml` (native app APK, uploaded as a run artifact / attached to `v*` releases).
+
+## Android app
+
+`android/` is a native Kotlin app: a fullscreen WebView hosts the SPA (`<server>/app/`,
+configured at first launch: URL + optional port + SSL-verify toggle for self-signed certs)
+while `PlayerService` (foreground service + MediaSessionCompat) keeps the process alive in
+the background and owns the media notification / lockscreen / Bluetooth controls. Audio
+stays in the WebView — the native side is only a remote control + keep-alive. The bridge is
+`webapp/src/lib/native.js`: it mirrors the `player` store to `window.NSNative.publish()` and
+receives transport commands via `window.__nsNativeCmd()`; it is a no-op in a regular browser.
+Build: `gradle -p android assembleRelease` (JDK 17, SDK 34 — CI does this; no wrapper is
+committed).
 
 ## Architecture
 
