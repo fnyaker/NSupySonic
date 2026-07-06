@@ -1,7 +1,7 @@
 <script>
   import { push } from "svelte-spa-router";
   import { player, currentId, playing, favorites, openMenu, downloads } from "../lib/stores.js";
-  import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
+  import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
@@ -23,13 +23,10 @@
     else player.playTrack(track);
   }
 
-  async function menu(e) {
-    // preventDefault must run synchronously, before the await, to suppress the
-    // native context menu.
+  function menu(e) {
     e.preventDefault();
     e.stopPropagation();
     const coords = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
-    await userPlaylists(); // ensure the "add to playlist" submenu is populated
     openMenu(coords, buildTrackMenu(track, push));
   }
 </script>

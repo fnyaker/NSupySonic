@@ -1,7 +1,8 @@
 <script>
+  import { onDestroy } from "svelte";
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
-  import { player, isAdmin, toasts } from "../lib/stores.js";
+  import { player, isAdmin, toasts, lastPlaylist } from "../lib/stores.js";
   import { toggleEntityFavorite, invalidatePlaylists, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
@@ -38,6 +39,7 @@
   let loadSeq = 0;
   async function load(plId) {
     const mine = ++loadSeq;
+    flushOrder(); // save any pending reorder of the playlist we're leaving
     loading = true;
     data = null;
     editing = false;
@@ -100,22 +102,45 @@
     }
   }
 
-  async function reorder(newTracks) {
+  // Reorders are saved debounced: the UI updates instantly, and a burst of
+  // moves (several drags, repeated up/down taps) collapses into ONE request
+  // instead of hammering the server with a full-order PUT per move. Flushed
+  // when leaving the page so nothing is lost.
+  let orderTimer = null;
+  let pendingOrder = null;
+  function reorder(newTracks) {
     data.tracks = newTracks;
     data = data;
+    // Capture the playlist id with the order: a quick navigation to another
+    // playlist swaps `id` before the debounce fires.
+    pendingOrder = { plId: id, order: newTracks.map((t) => String(t.deezer_id)) };
+    clearTimeout(orderTimer);
+    orderTimer = setTimeout(flushOrder, 500);
+  }
+  async function flushOrder() {
+    clearTimeout(orderTimer);
+    orderTimer = null;
+    if (!pendingOrder) return;
+    const { plId, order } = pendingOrder;
+    pendingOrder = null;
     try {
-      await api.reorderPlaylist(id, newTracks.map((t) => String(t.deezer_id)));
+      await api.reorderPlaylist(plId, order);
     } catch {
       toasts.push("Échec du réordonnancement", "error");
     }
   }
+  onDestroy(flushOrder);
 
   async function removeAt(index) {
+    // The server resolves indexes against ITS current order — make sure any
+    // pending (debounced) reorder is applied first so they match.
+    await flushOrder();
     const removed = data.tracks[index];
     data.tracks = data.tracks.filter((_, i) => i !== index);
     data = data;
     try {
       await api.removePlaylistIndexes(id, [index]);
+      invalidatePlaylists(); // sidebar/menu track counts
     } catch {
       // rollback
       data.tracks = [...data.tracks.slice(0, index), removed, ...data.tracks.slice(index)];
@@ -135,6 +160,8 @@
     try {
       await api.deletePlaylist(id);
       invalidatePlaylists();
+      // Drop the "add to last playlist" shortcut if it pointed here.
+      if ($lastPlaylist?.id === id) lastPlaylist.set(null);
       toasts.push("Playlist supprimée");
       push("/library");
     } catch {
@@ -301,8 +328,12 @@
   .icon-btn.danger:hover {
     color: var(--accent-2);
   }
+  /* The dedicated edit mode (drag handles + up/down + remove) is available on
+     every screen size — it used to be mobile-only, which made reordering
+     nearly undiscoverable there and unavailable as a "big handles" mode here. */
   .edit-toggle {
-    display: none;
+    display: inline-flex;
+    align-items: center;
     margin-left: auto;
     padding: 8px 16px;
     border-radius: 999px;
@@ -318,11 +349,6 @@
   @media (max-width: 640px) {
     .art {
       width: 150px;
-    }
-    /* The dedicated edit mode is the primary mobile editing affordance. */
-    .edit-toggle {
-      display: inline-flex;
-      align-items: center;
     }
   }
 </style>

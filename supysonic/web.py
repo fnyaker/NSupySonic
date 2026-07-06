@@ -117,6 +117,16 @@ def create_application(config=None):
         bool(app.config["WEBAPP"].get("session_cookie_secure", False)),
     )
 
+    # Bound request body size (the /api/upload endpoint accepts audio files from
+    # any logged-in user — unbounded, one request could fill the disk). Flask
+    # rejects oversized bodies with 413.
+    try:
+        upload_max = int(app.config["WEBAPP"].get("upload_max_size") or 0)
+    except (TypeError, ValueError):
+        upload_max = 0
+    if upload_max > 0:
+        app.config["MAX_CONTENT_LENGTH"] = upload_max * 1024**2
+
     # Baseline security response headers for the admin UI and the bundled SPA.
     # CSP: scripts are served from this origin (admin assets are local, the
     # Svelte build emits external bundles), Deezer cover art / audio come over

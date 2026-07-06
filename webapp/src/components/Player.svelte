@@ -21,7 +21,7 @@
   import { online } from "../lib/net.js";
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
-  import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
+  import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, resolveCover, coverKey } from "../lib/format.js";
   import { registerSource, resumeAudio } from "../lib/visualizer.js";
   import Cover from "./Cover.svelte";
@@ -924,12 +924,11 @@
     }
   }
 
-  async function trackMenu(e) {
+  function trackMenu(e) {
     e.preventDefault();
     e.stopPropagation();
     if (!$current) return;
     const coords = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
-    await userPlaylists();
     openMenu(coords, buildTrackMenu($current, push));
   }
 

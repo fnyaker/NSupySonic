@@ -942,6 +942,33 @@ class WebUITestCase(unittest.TestCase):
         data = self.client.get(f"/api/playlist/{pid}").get_json()
         self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["3", "1", "2"])
 
+    def test_reorder_playlist_keeps_duplicates(self):
+        # A playlist may hold the same track twice; a reorder must keep BOTH
+        # occurrences (they used to be collapsed into one).
+        self._login()
+        pid = self._create_playlist("PL")["id"]
+        self.client.post(
+            f"/api/playlist/{pid}/tracks", json={"tracks": ["1", "2", "1"]}
+        )
+        rv = self.client.put(
+            f"/api/playlist/{pid}/order", json={"tracks": ["1", "1", "2"]}
+        )
+        self.assertEqual(rv.status_code, 200)
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1", "1", "2"])
+
+    def test_reorder_playlist_keeps_omitted_tracks(self):
+        # Tracks the client forgot to list survive, appended at the end.
+        self._login()
+        pid = self._create_playlist("PL")["id"]
+        self.client.post(
+            f"/api/playlist/{pid}/tracks", json={"tracks": ["1", "2", "3"]}
+        )
+        rv = self.client.put(f"/api/playlist/{pid}/order", json={"tracks": ["2"]})
+        self.assertEqual(rv.status_code, 200)
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["2", "1", "3"])
+
     def test_rename_playlist(self):
         self._login()
         pid = self._create_playlist("Old")["id"]

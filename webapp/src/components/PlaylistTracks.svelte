@@ -3,7 +3,7 @@
   import { dragHandleZone, dragHandle } from "svelte-dnd-action";
   import { push } from "svelte-spa-router";
   import { player, currentId, playing, openMenu, downloads } from "../lib/stores.js";
-  import { buildTrackMenu, userPlaylists } from "../lib/actions.js";
+  import { buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
@@ -21,13 +21,28 @@
 
   const FLIP = 160;
 
-  // Wrap each track with a stable id for keyed iteration + dnd. Rebuilt only
-  // when the parent's track array changes (load / add / remove), never mid-drag.
+  // Wrap each track with a stable id for keyed iteration + dnd. The id sticks
+  // to the track OBJECT (WeakMap), so a reorder/remove keeps every surviving
+  // row's id — Svelte's keyed {#each} then MOVES the DOM nodes instead of
+  // destroying and recreating the whole list (which reloaded every cover and
+  // froze the page on big playlists).
   let seq = 0;
+  const rowIds = new WeakMap();
+  function rowId(t) {
+    let id = rowIds.get(t);
+    if (id === undefined) {
+      id = ++seq;
+      rowIds.set(t, id);
+    }
+    return id;
+  }
   let rows = [];
   $: syncRows(tracks);
   function syncRows(list) {
-    rows = list.map((t) => ({ id: ++seq, track: t }));
+    // The parent echoes our own order back after a drag (data.tracks = ...):
+    // same objects in the same order means the DOM is already right — skip.
+    if (rows.length === list.length && rows.every((r, i) => r.track === list[i])) return;
+    rows = list.map((t) => ({ id: rowId(t), track: t }));
   }
 
   function handleConsider(e) {
@@ -36,6 +51,18 @@
   function handleFinalize(e) {
     rows = e.detail.items;
     onreorder?.(rows.map((r) => r.track));
+  }
+
+  // Tap-to-move fallback for edit mode: precise single-step moves that don't
+  // require a drag gesture (essential on touch screens).
+  function move(i, delta) {
+    const j = i + delta;
+    if (j < 0 || j >= rows.length) return;
+    const next = rows.slice();
+    const [r] = next.splice(i, 1);
+    next.splice(j, 0, r);
+    rows = next;
+    onreorder?.(next.map((x) => x.track));
   }
 
   function playAt(i) {
@@ -49,7 +76,6 @@
     e.preventDefault();
     e.stopPropagation();
     const coords = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
-    await userPlaylists();
     openMenu(coords, buildTrackMenu(track, push));
   }
 </script>
@@ -70,14 +96,25 @@
         <Icon name="grip" size={editing ? 22 : 18} />
       </span>
 
-      <button class="play" on:click={() => playAt(i)} aria-label="Lire">
-        {#if isCurrent && $playing}
-          <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
-        {:else}
-          <span class="num">{i + 1}</span>
-          <span class="ic"><Icon name="play" size={14} /></span>
-        {/if}
-      </button>
+      {#if editing}
+        <span class="updown">
+          <button on:click={() => move(i, -1)} disabled={i === 0} aria-label="Monter le titre" title="Monter">
+            <Icon name="chevronUp" size={20} />
+          </button>
+          <button on:click={() => move(i, 1)} disabled={i === rows.length - 1} aria-label="Descendre le titre" title="Descendre">
+            <Icon name="chevronDown" size={20} />
+          </button>
+        </span>
+      {:else}
+        <button class="play" on:click={() => playAt(i)} aria-label="Lire">
+          {#if isCurrent && $playing}
+            <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
+          {:else}
+            <span class="num">{i + 1}</span>
+            <span class="ic"><Icon name="play" size={14} /></span>
+          {/if}
+        </button>
+      {/if}
 
       <div class="titles">
         <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} /></div>
@@ -167,8 +204,29 @@
   .row:hover .play .ic {
     display: block;
   }
-  .list.editing .play {
-    display: none;
+  /* Up/down tap-to-move buttons (edit mode) — the drag handle's precise,
+     gesture-free sibling. */
+  .updown {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .updown button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 26px;
+    color: var(--text-dim);
+    border-radius: 6px;
+  }
+  .updown button:hover:not(:disabled) {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+  .updown button:disabled {
+    opacity: 0.3;
   }
   .titles {
     display: flex;
@@ -315,9 +373,13 @@
       margin-left: -4px;
     }
     .list.editing .row {
-      grid-template-columns: 44px 1fr 44px;
+      grid-template-columns: 44px 40px 1fr 44px;
       padding: 12px 6px;
       align-items: center;
+    }
+    .list.editing .updown button {
+      width: 40px;
+      height: 32px;
     }
     .list.editing .more {
       display: none;

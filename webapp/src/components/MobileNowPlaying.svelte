@@ -17,7 +17,7 @@
     openMenu,
     offlineCovers,
   } from "../lib/stores.js";
-  import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
+  import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
@@ -28,12 +28,11 @@
 
   let showQueue = false;
 
-  async function trackMenu(e) {
+  function trackMenu(e) {
     e.preventDefault();
     e.stopPropagation();
     if (!$current) return;
     const coords = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
-    await userPlaylists();
     openMenu(coords, buildTrackMenu($current, go));
   }
 

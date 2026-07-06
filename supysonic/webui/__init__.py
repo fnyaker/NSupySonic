@@ -1686,23 +1686,29 @@ def reorder_playlist(playlist_id):
     for t in current:
         by_uid.setdefault(_track_uid(t), t)
         by_uid.setdefault(str(t.id), t)
+    # A playlist may hold the same track several times; honour each occurrence
+    # instead of collapsing them (the old set-based dedup silently DELETED
+    # duplicates on every reorder).
+    from collections import Counter
+
+    avail = Counter(t.id for t in current)
     with db.atomic():
         PlaylistTrack.delete().where(PlaylistTrack.playlist == pl).execute()
         idx = 0
-        placed = set()
+        used = Counter()
         for uid in order:
             t = by_uid.get(uid)
-            if t is None or t.id in placed:
+            if t is None or used[t.id] >= avail[t.id]:
                 continue
             PlaylistTrack.create(playlist=pl, track=t.id, index=idx)
             idx += 1
-            placed.add(t.id)
+            used[t.id] += 1
         # Safety: keep any track the client omitted, appended at the end.
         for t in current:
-            if t.id not in placed:
+            if used[t.id] < avail[t.id]:
                 PlaylistTrack.create(playlist=pl, track=t.id, index=idx)
                 idx += 1
-                placed.add(t.id)
+                used[t.id] += 1
     _mirror_playlist(provider, pl)
     return jsonify({"ok": True})
 
