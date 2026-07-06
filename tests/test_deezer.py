@@ -356,6 +356,53 @@ class DeezerTestCase(TestBase):
         reloaded = Track[ids.track_uuid("7")]
         self.assertTrue(reloaded.path.endswith(".mp3"))
 
+    def test_ensure_archived_writes_cover_sidecar(self):
+        # The album art is archived on disk (cover.jpg next to the audio) and
+        # then served locally with no Deezer call — like the sound itself.
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        track = library.upsert_track(raw_track(8, "Art"), root, "FLAC")
+        info = raw_track(8, "Art")
+
+        self.provider.resolve = lambda sng_id, quality=None: (
+            "http://x/stream", "MP3_320", info, sng_id
+        )
+
+        def fake_download(url, track_id, dest):
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as fh:
+                fh.write(b"\x00" * 4096)
+
+        fetches = []
+        self.provider.download_to = fake_download
+        self.provider.fetch_cover = lambda md5, size=1000: (
+            fetches.append(md5) or b"JPEGDATA"
+        )
+
+        archive.ensure_archived(self.provider, track)
+
+        # cover.jpg written in the album folder and the Folder marked for it.
+        folder = Track[ids.track_uuid("8")].folder
+        cover_path = os.path.join(folder.path, "cover.jpg")
+        self.assertTrue(os.path.isfile(cover_path))
+        self.assertEqual(folder.cover_art, "cover.jpg")
+        with open(cover_path, "rb") as fh:
+            self.assertEqual(fh.read(), b"JPEGDATA")
+
+        # Now the album cover resolves from disk without touching Deezer.
+        fetches.clear()
+
+        class FakeCache:
+            def set(self, k, v):  # would only be hit on a Deezer fallback
+                raise AssertionError("should serve the local sidecar")
+
+        got = archive.deezer_cover_path(
+            self.provider, FakeCache(), str(track.album_id)
+        )
+        self.assertEqual(got, cover_path)
+        self.assertEqual(fetches, [])  # no Deezer fetch
+
     # -- resolve: expired-session recovery --------------------------------
 
     class _FakeDz:

@@ -25,6 +25,10 @@ from .provider import EXT_FOR_FORMAT, NOMINAL_BITRATE
 DEEZER_ROOT_NAME = "Deezer"
 PODCAST_DIR_NAME = "Podcasts"
 
+# Album art is archived next to the audio as a plain sidecar so it is served
+# straight from disk (like the FLAC) and survives Deezer pulling the source.
+COVER_FILENAME = "cover.jpg"
+
 _ILLEGAL = re.compile(r'[/\\:*?"<>|]')
 
 
@@ -70,6 +74,51 @@ def get_album_folder(root: Folder, artist_name: str, album_name: str, cache=None
     if cache is not None:
         cache.folders[path] = folder
     return folder
+
+
+def save_album_cover(folder: Folder, data: bytes) -> str | None:
+    """Persist album art as a ``cover.jpg`` sidecar in the album folder.
+
+    Mirrors how the audio is archived: the image lands on disk next to the
+    tracks and the ``Folder.cover_art`` marker is set, so every cover endpoint
+    (Subsonic ``getCoverArt`` and the web ``/api/cover``) serves it locally with
+    no Deezer call — it keeps showing even once Deezer drops the source.
+
+    Idempotent (writes the file at most once); returns the cover path or None.
+    """
+    if not data or folder is None:
+        return None
+    path = os.path.join(folder.path, COVER_FILENAME)
+    try:
+        os.makedirs(folder.path, exist_ok=True)
+        if not os.path.isfile(path):
+            tmp = f"{path}.part"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+    except OSError:
+        return None
+    if folder.cover_art != COVER_FILENAME:
+        folder.cover_art = COVER_FILENAME
+        folder.save()
+    return path
+
+
+def album_cover_file(album) -> str | None:
+    """On-disk ``cover.jpg`` path for an archived album, or None if not present.
+
+    Looks the album's tracks up for a folder carrying a cover marker (set by
+    ``save_album_cover``) and returns the file only if it really exists.
+    """
+    track = (
+        album.tracks.join(Folder, on=Track.folder)
+        .where(Folder.cover_art.is_null(False))
+        .first()
+    )
+    if track is None:
+        return None
+    path = os.path.join(track.folder.path, track.folder.cover_art)
+    return path if os.path.isfile(path) else None
 
 
 def normalize_track(t: dict) -> dict:
