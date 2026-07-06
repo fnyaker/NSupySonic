@@ -405,31 +405,6 @@ function createPlayer() {
       }));
     },
 
-    // Replace the queue with a fuller list WITHOUT interrupting playback —
-    // used by progressively-loaded lists: play the tapped track from the first
-    // block instantly, then, once every block has loaded, extend the queue to
-    // the whole list. The currently-playing track is located in the new list
-    // (by identity, then id) and kept as the index; seq is NOT bumped, so the
-    // audio element keeps playing the same source uninterrupted.
-    fillQueue(tracks, context = null) {
-      const list = clean(tracks);
-      if (!list.length) return;
-      update((s) => {
-        const cur = s.index >= 0 ? s.queue[s.index] : null;
-        let index = 0;
-        if (cur) {
-          index = list.indexOf(cur);
-          if (index < 0) index = list.findIndex((t) => t.deezer_id === cur.deezer_id);
-          if (index < 0) {
-            // The playing track isn't in the fuller list (rare): keep it at the
-            // front so playback is never cut.
-            return { ...s, queue: [cur, ...list], index: 0, context: context || s.context, _orig: null };
-          }
-        }
-        return { ...s, queue: list, index, context: context || s.context, _orig: null };
-      });
-    },
-
     addToQueue(tracks) {
       const extra = clean(tracks);
       if (!extra.length) return;

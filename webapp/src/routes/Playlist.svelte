@@ -6,8 +6,8 @@
   import { toggleEntityFavorite, invalidatePlaylists, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
+  import TrackBrowser from "../components/TrackBrowser.svelte";
   import TrackList from "../components/TrackList.svelte";
-  import PagedTrackBrowser from "../components/PagedTrackBrowser.svelte";
   import PlaylistTracks from "../components/PlaylistTracks.svelte";
   import AddTracksSheet from "../components/AddTracksSheet.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
@@ -16,16 +16,12 @@
 
   export let params = {};
 
-  const PAGE = 100; // progressive-loading block size
-
   let id = null;
-  let data = null; // { playlist, tracks, total }
+  let data = null;
   let fav = false;
   let loading = true;
-  let fullLoading = false; // editable playlist: fetching the remaining blocks
-  let roPager = null; // read-only PagedTrackBrowser instance
 
-  let editing = false; // mobile "Modifier" mode (drag handles + remove always on)
+  let editing = false; // dedicated edit mode (drag handles + up/down + remove)
   let editingMeta = false; // header rename/description inputs open
   let showAdd = false; // AddTracksSheet open
   let draftTitle = "";
@@ -33,7 +29,7 @@
 
   // View sort/search for editable playlists (like the favorites browser). A
   // non-default sort or a search shows a read-only, sorted projection; the
-  // reorderable manual view is "Ordre d'origine" with no search.
+  // reorderable edit mode is only offered in the natural "Ordre d'origine".
   let plSort = "default";
   let plQuery = "";
   let plDir = 1;
@@ -78,11 +74,9 @@
   }
 
   $: editable = !!data?.playlist?.editable && $isAdmin;
-  $: allLoaded = !!data && data.tracks.length >= (data.total ?? data.tracks.length);
-  // Leaving the manual order (a sort/search) can't coexist with drag-edit mode.
-  $: if ((!manualView || fullLoading) && editing) editing = false;
+  // A sort/search can't coexist with the drag-reorder edit mode.
+  $: if (!manualView && editing) editing = false;
   $: existingIds = new Set((data?.tracks || []).map((t) => String(t.deezer_id)));
-  const roLoad = (offset, limit) => api.playlist(id, { offset, limit });
 
   // Sequence guard: a delayed earlier response must not overwrite the page
   // after a quick navigation to another playlist.
@@ -95,65 +89,36 @@
     editing = false;
     editingMeta = false;
     showAdd = false;
-    fullLoading = false;
     plSort = "default";
     plQuery = "";
     plDir = 1;
     try {
-      // First block only: fast first paint. It also tells us total + editability.
-      const r = await api.playlist(plId, { offset: 0, limit: PAGE });
-      if (mine !== loadSeq) return;
-      data = r;
-      fav = !!r.playlist?.is_favorite;
-      loading = false;
-      // Editable playlists need EVERY track for index-correct reorder/remove:
-      // load the remaining blocks in the background, then swap in the full list.
-      if (r.playlist?.editable && $isAdmin && (r.total ?? 0) > (r.tracks?.length ?? 0)) {
-        fullLoading = true;
-        try {
-          const full = await api.playlist(plId); // no limit -> all tracks
-          if (mine === loadSeq) data = { ...data, tracks: full.tracks };
-        } finally {
-          if (mine === loadSeq) fullLoading = false;
-        }
+      const r = await api.playlist(plId);
+      if (mine === loadSeq) {
+        data = r;
+        fav = !!r.playlist?.is_favorite;
       }
     } catch {
-      if (mine === loadSeq) {
-        data = null;
-        loading = false;
-      }
+      if (mine === loadSeq) data = null;
     }
+    if (mine === loadSeq) loading = false;
   }
 
-  const ctx = () => ({ kind: "playlist", id });
   function playAll() {
-    if (editable) {
-      if (data?.tracks?.length) player.playQueue(data.tracks, 0, ctx());
-    } else roPager?.playAll();
-  }
-  function shufflePlay() {
-    if (editable) {
-      if (data?.tracks?.length) player.shufflePlay(data.tracks, ctx());
-    } else roPager?.shufflePlay();
+    if (data?.tracks?.length) player.playQueue(data.tracks, 0, { kind: "playlist", id });
   }
   let dlBusy = false;
   async function downloadAll() {
-    if (dlBusy) return;
+    if (dlBusy || !data?.tracks?.length) return;
     dlBusy = true;
     try {
-      let tracks = data?.tracks || [];
-      // Read-only playlist not fully loaded yet: fetch every track to download.
-      if (!editable && !allLoaded) {
-        try {
-          tracks = (await api.playlist(id)).tracks || tracks;
-        } catch {
-          /* fall back to what's loaded */
-        }
-      }
-      if (tracks.length) await downloadTracks(tracks);
+      await downloadTracks(data.tracks);
     } finally {
       dlBusy = false;
     }
+  }
+  function shufflePlay() {
+    if (data?.tracks?.length) player.shufflePlay(data.tracks, { kind: "playlist", id });
   }
 
   async function toggleFav() {
@@ -290,10 +255,7 @@
     }
   }
 
-  // Duration of the loaded tracks; only meaningful (shown) once every block is
-  // in, since a partial list would under-report it.
-  $: durLoaded = (data?.tracks || []).reduce((s, t) => s + (t.duration || 0), 0);
-  $: countLabel = data ? (data.total ?? data.tracks.length) : 0;
+  $: total = (data?.tracks || []).reduce((s, t) => s + (t.duration || 0), 0);
 </script>
 
 {#if loading}
@@ -318,7 +280,7 @@
           <h1>{data.playlist.title}</h1>
           {#if data.playlist.description}<p class="desc muted">{data.playlist.description}</p>{/if}
           <span class="muted">
-            {data.playlist.owner ? data.playlist.owner + " · " : ""}{countLabel} titres{allLoaded ? " · " + fmtDuration(durLoaded) : ""}
+            {data.playlist.owner ? data.playlist.owner + " · " : ""}{data.tracks.length} titres · {fmtDuration(total)}
           </span>
         {/if}
       </div>
@@ -333,13 +295,11 @@
         <button class="icon-btn" on:click={() => (showAdd = true)} aria-label="Ajouter des titres" title="Ajouter des titres"><Icon name="plus" size={24} /></button>
         <button class="icon-btn" on:click={openMeta} aria-label="Renommer" title="Renommer / description"><Icon name="edit" size={20} /></button>
         <button class="icon-btn danger" on:click={deletePlaylist} aria-label="Supprimer la playlist" title="Supprimer la playlist"><Icon name="trash" size={20} /></button>
-        <!-- Dedicated edit mode (drag + up/down + remove). Disabled until the
-             whole playlist is loaded, so index-based reorder/remove is exact. -->
         <button
           class="edit-toggle"
           class:on={editing}
-          disabled={fullLoading || !manualView}
-          title={!manualView ? "Repassez en « Ordre d'origine » pour réorganiser" : (fullLoading ? "Chargement de la playlist…" : "")}
+          disabled={!manualView}
+          title={!manualView ? "Repassez en « Ordre d'origine » pour réorganiser" : ""}
           on:click={() => (editing = !editing)}
         >
           {editing ? "Terminé" : "Modifier"}
@@ -350,9 +310,7 @@
     </div>
 
     {#if editable}
-      <!-- Sort/search toolbar (like the favorites browser). A non-default sort
-           or a search switches to a read-only, sorted projection; reordering is
-           only offered in the natural "Ordre d'origine". -->
+      <!-- Sort/search toolbar (like the favorites browser). -->
       <div class="toolbar">
         <div class="searchbox">
           <Icon name="search" size={16} />
@@ -366,10 +324,9 @@
           <Icon name="sort" size={17} />
         </button>
       </div>
-      {#if fullLoading}
-        <p class="muted loadhint"><Icon name="refresh" size={14} /> Chargement de la playlist complète…</p>
-      {/if}
-      {#if manualView}
+      {#if editing}
+        <!-- Reorderable edit mode (drag + up/down + remove). Only in the manual
+             order; the toggle is disabled otherwise. -->
         <PlaylistTracks
           tracks={data.tracks}
           context={{ kind: "playlist", id }}
@@ -377,24 +334,14 @@
           onreorder={reorder}
           onremove={removeAt}
         />
+      {:else if plQuery.trim() && !sortedTracks.length}
+        <p class="muted empty-hint">Aucun titre ne correspond à « {plQuery} ».</p>
       {:else}
-        {#if plQuery.trim() && !sortedTracks.length}
-          <p class="muted loadhint">Aucun titre ne correspond à « {plQuery} ».</p>
-        {:else}
-          <TrackList tracks={sortedTracks} context={{ kind: "playlist", id }} numbered={true} />
-        {/if}
+        <!-- View mode: the virtualized list — smooth scrolling on huge playlists. -->
+        <TrackList tracks={sortedTracks} context={{ kind: "playlist", id }} numbered={true} />
       {/if}
     {:else}
-      <!-- Keyed on id so navigating between two read-only playlists remounts
-           the pager with the new playlist's seed block. -->
-      {#key id}
-        <PagedTrackBrowser
-          bind:this={roPager}
-          load={roLoad}
-          seed={{ tracks: data.tracks, total: data.total }}
-          context={{ kind: "playlist", id }}
-        />
-      {/key}
+      <TrackBrowser tracks={data.tracks} context={{ kind: "playlist", id }} />
     {/if}
   </div>
 
@@ -466,12 +413,8 @@
   .tb.rev {
     color: var(--accent);
   }
-  .loadhint {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 4px 0 12px;
-    font-size: 0.85rem;
+  .empty-hint {
+    margin-top: 18px;
   }
   .art {
     width: 200px;

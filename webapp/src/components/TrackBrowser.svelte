@@ -10,26 +10,11 @@
   export let showAlbum = true;
   export let showCover = true;
   export let downloadable = true;
-  // Progressive loading (set by PagedTrackBrowser). `hasMore` = more blocks to
-  // fetch; `onNearEnd` fetches the next block; `onPlayed` fires on play so the
-  // parent can extend the queue; `onNeedAll` is called when the user sorts or
-  // searches — those need the WHOLE list, so the parent loads every block first.
-  export let hasMore = false;
-  export let onNearEnd = null;
-  export let onPlayed = null;
-  export let onNeedAll = null;
 
   let query = "";
   let sort = "default";
   let dir = 1; // 1 = ascending, -1 = descending
   let dlBusy = false;
-
-  // Sorting / searching only makes sense over the full list — pull every block
-  // the moment the user engages either (idempotent on the parent side).
-  $: if (onNeedAll && (sort !== "default" || query.trim())) onNeedAll();
-  // Only drive block-loading from scroll while showing the natural, unfiltered
-  // order; once sorted/searched the parent has (or is) loading everything.
-  $: browsing = sort === "default" && !query.trim();
 
   const SORTS = [
     { key: "default", label: "Ordre d'origine" },
@@ -108,16 +93,7 @@
 {#if query.trim() && !shown.length}
   <p class="muted empty">Aucun titre ne correspond à « {query} ».</p>
 {:else}
-  <TrackList
-    tracks={shown}
-    {context}
-    {numbered}
-    {showAlbum}
-    {showCover}
-    hasMore={browsing && hasMore}
-    {onNearEnd}
-    {onPlayed}
-  />
+  <TrackList tracks={shown} {context} {numbered} {showAlbum} {showCover} />
 {/if}
 
 <style>
