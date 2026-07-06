@@ -1,4 +1,5 @@
 <script>
+  import { onMount, tick } from "svelte";
   import { player } from "../lib/stores.js";
   import TrackRow from "./TrackRow.svelte";
 
@@ -7,73 +8,131 @@
   export let showAlbum = true;
   export let showCover = true;
   export let context = null;
-  // Progressive loading hooks (used by PagedTrackBrowser). `hasMore` keeps the
-  // sentinel alive when more DATA can be fetched beyond what's loaded;
-  // `onNearEnd` asks the parent to fetch the next block when the render window
-  // reaches the end of the loaded data; `onPlayed` fires when a row starts
-  // playback (so the parent can load the rest and extend the queue).
-  export let hasMore = false;
-  export let onNearEnd = null;
-  export let onPlayed = null;
 
-  const STEP = 60;
-  let limit = STEP;
+  // Windowed rendering (virtual list): only the rows actually on screen (plus a
+  // small buffer) are mounted, no matter how long the playlist is. The list
+  // reserves its full height with a spacer, and visible rows are absolutely
+  // positioned, so scrolling a 5000-track favorites list keeps ~20 rows in the
+  // DOM instead of thousands — the difference between smooth and janky.
+  const BUFFER = 8; // extra rows above/below the viewport (smooth fast scroll)
+  const FALLBACK_H = 52; // row height until measured
 
-  // Reset the window whenever the list itself changes. Referencing `.length`
-  // (not the array identity) so appending a loaded block doesn't reset the
-  // window back to the top — it just reveals what the user scrolled to.
-  let lastLen = 0;
-  $: if (tracks.length < lastLen) limit = STEP; // shrunk/replaced -> reset
-  $: lastLen = tracks.length;
+  let listEl;
+  let scroller = null; // nearest scrolling ancestor (the app's <main>)
+  let rowH = FALLBACK_H;
+  let start = 0;
+  let end = 0;
 
-  $: visible = tracks.slice(0, limit);
+  $: total = tracks.length;
+  $: topPad = start * rowH;
+  $: visible = tracks.slice(start, end);
+
+  function findScroller(node) {
+    let el = node.parentElement;
+    while (el) {
+      const oy = getComputedStyle(el).overflowY;
+      if (oy === "auto" || oy === "scroll") return el;
+      el = el.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  function recompute() {
+    if (!listEl || !scroller) return;
+    const lr = listEl.getBoundingClientRect();
+    const sr = scroller.getBoundingClientRect();
+    // Where the viewport sits relative to the list's own top.
+    const above = sr.top - lr.top; // list content scrolled above the viewport
+    const viewH = sr.height;
+    let s = Math.floor(above / rowH) - BUFFER;
+    let e = Math.ceil((above + viewH) / rowH) + BUFFER;
+    s = Math.max(0, Math.min(s, total));
+    e = Math.max(0, Math.min(e, total));
+    if (s !== start || e !== end) {
+      start = s;
+      end = e;
+    }
+  }
+
+  let ticking = false;
+  function onScroll() {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      ticking = false;
+      recompute();
+    });
+  }
+
+  // Measure the real (natural) row height once rows exist — rows flow normally
+  // inside the translated window, so an accurate uniform height keeps their
+  // absolute offsets pixel-perfect. Covers theme/font/zoom differences.
+  async function measure() {
+    await tick();
+    const row = listEl?.querySelector(".vrow");
+    if (row) {
+      const h = row.getBoundingClientRect().height;
+      if (h && Math.abs(h - rowH) > 0.5) {
+        rowH = h;
+        await tick();
+      }
+    }
+    recompute();
+  }
+
+  onMount(() => {
+    scroller = findScroller(listEl);
+    end = Math.min(total, Math.ceil((scroller?.clientHeight || 800) / rowH) + BUFFER);
+    scroller?.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll, { passive: true });
+    measure();
+    return () => {
+      scroller?.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
+  });
+
+  // Re-window whenever the list contents change (new playlist, sort, filter, or
+  // an in-place edit like un-starring a row). We DON'T jump to the top — the
+  // window is recomputed from the current scroll position, so removing a row
+  // mid-list keeps you where you were.
+  let lastRef = null;
+  $: if (tracks !== lastRef) {
+    lastRef = tracks;
+    if (scroller) measure();
+  }
 
   function playFrom(i) {
     player.playQueue(tracks, i, context);
-    onPlayed?.();
-  }
-
-  // IntersectionObserver-based "load more" so huge lists (favorites) stay snappy.
-  // Two-stage: first grow the render window over already-loaded rows; once the
-  // window reaches the end of loaded data, ask the parent for the next block.
-  function lazyload(node) {
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (!entries[0].isIntersecting) return;
-        if (limit < tracks.length) limit = Math.min(limit + STEP, tracks.length);
-        else if (hasMore) onNearEnd?.();
-      },
-      { rootMargin: "600px 0px" }
-    );
-    io.observe(node);
-    return { destroy: () => io.disconnect() };
   }
 </script>
 
-<div class="list">
-  {#each visible as track, i (track.deezer_id + ":" + i)}
-    <TrackRow
-      {track}
-      index={numbered ? i + 1 : null}
-      {showAlbum}
-      {showCover}
-      onplay={() => playFrom(i)}
-    />
-  {/each}
-  {#if limit < tracks.length || hasMore}
-    <div class="sentinel" use:lazyload>Chargement…</div>
-  {/if}
+<div class="list" bind:this={listEl} style="height:{total * rowH}px">
+  <div class="win" style="transform:translateY({topPad}px)">
+    {#each visible as track, i (track.deezer_id + ":" + (start + i))}
+      <div class="vrow">
+        <TrackRow
+          {track}
+          index={numbered ? start + i + 1 : null}
+          {showAlbum}
+          {showCover}
+          onplay={() => playFrom(start + i)}
+        />
+      </div>
+    {/each}
+  </div>
 </div>
 
 <style>
   .list {
-    display: flex;
-    flex-direction: column;
+    position: relative;
+    width: 100%;
   }
-  .sentinel {
-    padding: 16px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 0.85rem;
+  .win {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    will-change: transform;
   }
 </style>

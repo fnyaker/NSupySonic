@@ -10,7 +10,7 @@
 import logging
 import mimetypes
 
-from flask import Flask
+from flask import Flask, request
 from logging.handlers import TimedRotatingFileHandler
 from os import makedirs, path
 
@@ -150,6 +150,40 @@ def create_application(config=None):
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Content-Security-Policy", csp)
+        return response
+
+    # gzip the JSON API responses (playlists/favorites track lists are large and
+    # highly repetitive — this cuts the bytes on the wire ~5-10x, so big lists
+    # load much faster). Streamed audio/cover responses (direct_passthrough) and
+    # small/already-encoded ones are left untouched.
+    import gzip as _gzip
+
+    @app.after_request
+    def compress_response(response):
+        try:
+            if (
+                response.direct_passthrough
+                or response.status_code < 200
+                or response.status_code >= 300
+                or response.headers.get("Content-Encoding")
+            ):
+                return response
+            accept = request.headers.get("Accept-Encoding", "")
+            if "gzip" not in accept.lower():
+                return response
+            ctype = (response.content_type or "").split(";", 1)[0].strip()
+            if not (ctype == "application/json" or ctype.startswith("text/")):
+                return response
+            data = response.get_data()
+            if len(data) < 1024:  # not worth the CPU / header overhead
+                return response
+            packed = _gzip.compress(data, compresslevel=6)
+            response.set_data(packed)
+            response.headers["Content-Encoding"] = "gzip"
+            response.headers["Content-Length"] = str(len(packed))
+            response.headers.add("Vary", "Accept-Encoding")
+        except Exception:  # compression must never break a response
+            logger.debug("response compression skipped", exc_info=True)
         return response
 
     # Honour X-Forwarded-* from a trusted reverse proxy so request.remote_addr

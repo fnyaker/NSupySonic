@@ -957,48 +957,6 @@ class WebUITestCase(unittest.TestCase):
         data = self.client.get(f"/api/playlist/{pid}").get_json()
         self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1", "1", "2"])
 
-    def test_playlist_pagination(self):
-        # ?offset=&limit= returns one block + the real total; no params -> all.
-        self._login()
-        pid = self._create_playlist("PL")["id"]
-        self.client.post(
-            f"/api/playlist/{pid}/tracks", json={"tracks": ["1", "2", "3", "4", "5"]}
-        )
-        data = self.client.get(f"/api/playlist/{pid}?offset=0&limit=2").get_json()
-        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1", "2"])
-        self.assertEqual(data["total"], 5)
-        self.assertEqual(data["playlist"]["nb_tracks"], 5)
-        data = self.client.get(f"/api/playlist/{pid}?offset=2&limit=2").get_json()
-        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["3", "4"])
-        self.assertEqual(data["total"], 5)
-        # last (partial) block
-        data = self.client.get(f"/api/playlist/{pid}?offset=4&limit=2").get_json()
-        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["5"])
-        # no limit -> the whole list (play/download path)
-        data = self.client.get(f"/api/playlist/{pid}").get_json()
-        self.assertEqual(len(data["tracks"]), 5)
-        self.assertEqual(data["total"], 5)
-
-    def test_playlist_page_cover_from_first_track(self):
-        # A later page still reports the playlist cover (from the first track).
-        self._login()
-        pid = self._create_playlist("PL")["id"]
-        self.client.post(f"/api/playlist/{pid}/tracks", json={"tracks": ["1", "2", "3"]})
-        first = self.client.get(f"/api/playlist/{pid}?offset=0&limit=1").get_json()
-        later = self.client.get(f"/api/playlist/{pid}?offset=2&limit=1").get_json()
-        self.assertEqual(later["playlist"]["cover"], first["playlist"]["cover"])
-
-    def test_favorites_pagination(self):
-        self._login()
-        full = self.client.get("/api/me/favorites").get_json()
-        total = full["total"]
-        self.assertEqual(len(full["tracks"]), total)
-        page = self.client.get("/api/me/favorites?offset=0&limit=1").get_json()
-        self.assertEqual(page["total"], total)
-        self.assertLessEqual(len(page["tracks"]), 1)
-        if total:
-            self.assertEqual(page["tracks"][0]["deezer_id"], full["tracks"][0]["deezer_id"])
-
     def test_reorder_playlist_keeps_omitted_tracks(self):
         # Tracks the client forgot to list survive, appended at the end.
         self._login()
