@@ -22,12 +22,24 @@
   let hiUrl = null; // decoded hi-res upgrade (only when src is a hi-res URL)
   let hiLoader = null; // in-flight preloader, cancelled on src change
   let stallTimer = null;
+  // Transient CDN failures: retry the base art a couple of times (delayed,
+  // cache-busted) before giving up on it — the Deezer image CDN drops requests
+  // often enough that a single failed fetch used to blank covers for good.
+  let retries = 0;
+  let retryTimer = null;
 
   // Downloaded/cached cover blob for this art (any resolution) — the offline
   // fallback when the network URL fails or stalls.
   $: blob = src ? $offlineCovers[coverKey(src)] : null;
   // What actually renders: offline blob (fallback) > decoded hi-res > base art.
-  $: shown = usingBlob && blob ? blob : hiUrl || baseCover(src);
+  // `retries` is passed explicitly so Svelte re-runs this when a retry fires.
+  $: shown = usingBlob && blob ? blob : hiUrl || bust(baseCover(src), retries);
+  // A cache-busted variant of a failed URL, so the retry is a real re-fetch
+  // instead of the browser replaying its cached failure. No-op on blob: URLs.
+  function bust(u, n) {
+    if (!n || !u || u.startsWith("blob:")) return u;
+    return u + (u.includes("?") ? "&" : "?") + "r=" + n;
+  }
   // A few-KB downscaled version of the same cover, shown blurred underneath
   // until the full-size art finishes loading (null for a local blob / non-Deezer).
   $: low = loResCover(shown);
@@ -40,6 +52,9 @@
     failed = false;
     usingBlob = false;
     hiUrl = null;
+    retries = 0;
+    clearTimeout(retryTimer);
+    retryTimer = null;
     cancelHi();
     clearTimeout(stallTimer);
     stallTimer = null;
@@ -85,6 +100,7 @@
   onDestroy(() => {
     cancelHi();
     clearTimeout(stallTimer);
+    clearTimeout(retryTimer);
   });
 
   // …but if the new image is already cached, mark it loaded before the browser
@@ -94,11 +110,17 @@
   });
 
   // The image failed to load: step through the fallback chain — drop a failed
-  // hi-res back to the base, then the downloaded blob (offline), and only then
-  // the placeholder — never leave a broken image.
+  // hi-res back to the base, retry the base a couple of times (transient CDN
+  // failure), then the downloaded blob (offline), and only then the
+  // placeholder — never leave a broken image.
   function onError() {
     if (hiUrl) {
       hiUrl = null;
+    } else if (!usingBlob && retries < 2 && navigator.onLine !== false) {
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => {
+        retries += 1; // bumps `shown` to a cache-busted URL -> new attempt
+      }, 500 * (retries + 1));
     } else if (!usingBlob && blob) {
       usingBlob = true;
       loaded = false;

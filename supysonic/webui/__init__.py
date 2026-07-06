@@ -1929,10 +1929,12 @@ def local_cover(track_id):
 @webapi.route("/cover/<cid>")
 @login_required
 def cover(cid):
-    """Archived cover art for ANY track — a Deezer numeric id or a local UUID —
-    served same-origin from the file's embedded image. Lets the web player cache
-    a downloaded track's cover for offline playback without hitting the Deezer
-    CDN (and without CORS). 404 until the track is archived (has a file)."""
+    """Cover art for ANY track — a Deezer numeric id or a local UUID — served
+    same-origin. An archived track serves its embedded image; a not-yet-archived
+    one proxies the art from Deezer (cached on disk). This gives the web player
+    a reliable same-origin URL for the OS media-notification artwork and the
+    offline cover cache, instead of depending on the client reaching the Deezer
+    image CDN (flaky enough to regularly leave the notification artless)."""
     from ..deezer import archive
 
     if _valid_id(cid):
@@ -1942,9 +1944,34 @@ def cover(cid):
             track = Track[uuid.UUID(str(cid))]
         except (ValueError, Track.DoesNotExist):
             track = None
-    if track is None or not os.path.isfile(track.path):
+    if track is not None and os.path.isfile(track.path):
+        return _serve_embedded_cover(track)
+
+    provider = _provider()
+    if provider is None:
         return jsonify({"error": "not found"}), 404
-    return _serve_embedded_cover(track)
+    cache = current_app.cache
+    try:
+        if not _valid_id(cid):
+            # UUID without an archived Track: album/artist/playlist/podcast art.
+            path = archive.deezer_cover_path(provider, cache, cid)
+            if path:
+                return send_file(path, mimetype="image/jpeg", conditional=True)
+            return jsonify({"error": "not found"}), 404
+        key = f"deezer-cover-{cid}"
+        if cache.has(key):
+            return send_file(cache.get(key), mimetype="image/jpeg", conditional=True)
+        if track is not None and track.album is not None and track.album.cover_md5:
+            md5 = track.album.cover_md5
+        else:
+            md5 = provider.get_track_info(cid).get("ALB_PICTURE")
+        data = provider.fetch_cover(md5) if md5 else None
+        if not data:
+            return jsonify({"error": "not found"}), 404
+        return send_file(cache.set(key, data), mimetype="image/jpeg", conditional=True)
+    except Exception:
+        logger.debug("Cover fallback failed for %s", cid, exc_info=True)
+        return jsonify({"error": "not found"}), 404
 
 
 @webapi.route("/stream/<deezer_id>")

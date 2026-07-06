@@ -690,8 +690,33 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(rv.status_code, 200)
         self.assertEqual(rv.get_data(), b"JPEGDATA")
 
+    def test_cover_cdn_fallback_when_not_archived(self):
+        # A track that isn't archived yet: /api/cover proxies the art from
+        # Deezer (cached on disk) instead of 404ing, so the player always has
+        # a same-origin artwork URL for the OS media notification.
+        self._login()
+        fetches = []
+
+        def fake_fetch_cover(md5, size=1000):
+            fetches.append(md5)
+            return b"CDNJPEG"
+
+        self.app.deezer.fetch_cover = fake_fetch_cover
+        rv = self.client.get("/api/cover/1")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_data(), b"CDNJPEG")
+        self.assertEqual(fetches, ["md5c"])  # ALB_PICTURE from the track info
+
+        # Second hit is served from the cache — no new CDN fetch.
+        rv = self.client.get("/api/cover/1")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_data(), b"CDNJPEG")
+        self.assertEqual(fetches, ["md5c"])
+
     def test_cover_unknown_id_404(self):
         self._login()
+        # The CDN fallback finds no art for it either.
+        self.app.deezer.fetch_cover = lambda md5, size=1000: None
         self.assertEqual(self.client.get("/api/cover/999999").status_code, 404)
 
     def test_stream_local_track_by_uuid(self):
