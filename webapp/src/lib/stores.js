@@ -118,6 +118,22 @@ function createToasts() {
 }
 export const toasts = createToasts();
 
+// -- playlists (quick-add UX) -------------------------------------------------
+
+// Last playlist a track was added to ({id, title} | null), persisted — powers
+// the one-tap "Ajouter à « X »" entry in the track menu.
+export const lastPlaylist = persisted("playlist.lastUsed", null);
+
+// Playlist picker sheet: pick (or search, or create) a playlist for a track.
+// { track } | null — mounted once in App.svelte, opened from anywhere.
+export const playlistPicker = writable(null);
+export function openPlaylistPicker(track) {
+  playlistPicker.set({ track });
+}
+export function closePlaylistPicker() {
+  playlistPicker.set(null);
+}
+
 // -- context menu -----------------------------------------------------------
 // { x, y, items: [{label, icon, action, danger, sub:[...]}, "divider"] } | null
 

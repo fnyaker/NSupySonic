@@ -187,7 +187,14 @@ export const api = {
       credentials: "include",
       body: fd,
     });
-    if (!res.ok) throw { status: res.status, message: "upload failed" };
+    if (!res.ok)
+      throw {
+        status: res.status,
+        message:
+          res.status === 413
+            ? "Fichiers trop volumineux (limite du serveur)"
+            : "upload failed",
+      };
     return res.json();
   },
 

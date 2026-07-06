@@ -16,7 +16,7 @@
     openMenu,
     offlineCovers,
   } from "../lib/stores.js";
-  import { toggleFavorite, buildTrackMenu, userPlaylists } from "../lib/actions.js";
+  import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
 
   // Blurred backdrop, as a stack of crossfading layers. Each new cover is
@@ -82,12 +82,11 @@
 
   let tab = "queue";
 
-  async function trackMenu(e) {
+  function trackMenu(e) {
     e.preventDefault();
     e.stopPropagation();
     if (!$current) return;
     const coords = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
-    await userPlaylists();
     openMenu(coords, buildTrackMenu($current, go));
   }
 

@@ -13,6 +13,14 @@
   // favTracks is a shared cache: instant on revisit, refreshed in background.
   $: favorites = $favTracks;
   let playlists = null;
+  let plQuery = "";
+  $: shownPlaylists = filterPlaylists(playlists, plQuery);
+  function filterPlaylists(list, term) {
+    if (!list) return null;
+    const t = term.trim().toLowerCase();
+    if (!t) return list;
+    return list.filter((p) => (p.title || "").toLowerCase().includes(t));
+  }
   let local = null;
   let offline = null;
 
@@ -56,8 +64,8 @@
         toasts.push(`${r.skipped.length} ignoré(s) (format non géré)`, "error");
       await loadLocal();
       tab = "local";
-    } catch {
-      toasts.push("Échec de l'import", "error");
+    } catch (e) {
+      toasts.push(e?.status === 413 ? e.message : "Échec de l'import", "error");
     } finally {
       uploading = false;
     }
@@ -125,9 +133,17 @@
   {:else if !playlists.length}
     <p class="muted hint">Aucune playlist.</p>
   {:else}
-    <div class="grid">
-      {#each playlists as p (p.id)}<Card item={p} kind="playlist" />{/each}
+    <div class="pl-search">
+      <Icon name="search" size={16} />
+      <input placeholder="Rechercher dans mes playlists…" bind:value={plQuery} />
     </div>
+    {#if !shownPlaylists.length}
+      <p class="muted hint">Aucune playlist ne correspond à « {plQuery} ».</p>
+    {:else}
+      <div class="grid">
+        {#each shownPlaylists as p (p.id)}<Card item={p} kind="playlist" />{/each}
+      </div>
+    {/if}
   {/if}
 {:else if tab === "downloaded"}
   {#if offline === null}
@@ -214,6 +230,29 @@
   .fav-head {
     margin-bottom: 14px;
     gap: 16px;
+  }
+  .pl-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-card);
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    max-width: 380px;
+    color: var(--text-dim);
+  }
+  .pl-search:focus-within {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .pl-search input {
+    border: none;
+    background: none;
+    outline: none;
+    color: var(--text);
+    width: 100%;
   }
   .hint {
     margin-top: 24px;

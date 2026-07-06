@@ -50,6 +50,11 @@ log_rotate = yes
 ; Default: off
 ;session_cookie_secure = off
 
+; Maximum accepted request body size in MB. Mainly bounds the web UI's
+; "import files" upload; oversized requests are rejected with 413.
+; 0 disables the limit. Default: 1024
+;upload_max_size = 1024
+
 ; Number of trusted reverse proxies in front of the server. 0 = the app is
 ; reached directly. When > 0, that many X-Forwarded-For / -Proto hops are
 ; trusted (ProxyFix), so request IP (rate limiting, logs) and HTTPS detection

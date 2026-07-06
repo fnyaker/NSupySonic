@@ -39,6 +39,10 @@ class DefaultConfig:
         "mount_api": True,
         "mount_spa": True,
         "session_cookie_secure": False,
+        # Maximum accepted request body size in MB (mainly bounds /api/upload —
+        # without it any logged-in user could fill the disk with one request).
+        # 0 disables the limit.
+        "upload_max_size": 1024,
         # Number of trusted reverse proxies in front of the app. 0 = none (the
         # app is reached directly); when > 0, X-Forwarded-* headers from that
         # many hops are trusted (ProxyFix). NEVER set this unless a proxy you

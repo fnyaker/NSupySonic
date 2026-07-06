@@ -15,6 +15,7 @@
   import NowPlaying from "./components/NowPlaying.svelte";
   import Toasts from "./components/Toasts.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
+  import PlaylistPicker from "./components/PlaylistPicker.svelte";
   import NetworkIndicator from "./components/NetworkIndicator.svelte";
   import Login from "./routes/Login.svelte";
   import Home from "./routes/Home.svelte";
@@ -174,6 +175,7 @@
 
 <Toasts />
 <ContextMenu />
+<PlaylistPicker />
 <NetworkIndicator />
 
 <style>

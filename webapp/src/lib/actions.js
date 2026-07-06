@@ -11,6 +11,8 @@ import {
   isAdmin,
   syncing,
   downloadQuality,
+  lastPlaylist,
+  openPlaylistPicker,
 } from "./stores.js";
 import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
 
@@ -200,9 +202,13 @@ export async function addTrackToPlaylist(playlistId, trackId, playlistTitle) {
     await api.addToPlaylist(playlistId, [String(trackId)]);
     // The sidebar/menu cache shows track counts — refresh on the next read.
     invalidatePlaylists();
+    // Remember it for the one-tap "Ajouter à « X »" shortcut.
+    lastPlaylist.set({ id: String(playlistId), title: playlistTitle });
     toasts.push(`Ajouté à « ${playlistTitle} »`);
+    return true;
   } catch {
     toasts.push("Échec de l'ajout à la playlist", "error");
+    return false;
   }
 }
 
@@ -335,15 +341,23 @@ export function buildTrackMenu(track, nav) {
     { label: "Ajouter à la file", icon: "queue", action: () => player.addToQueue([track]) },
   ];
   // Adding to a playlist edits the owner's Deezer playlists — admin-only.
+  // `track.deezer_id` is the universal track id — a numeric Deezer id, or the
+  // row UUID for local files — so this works for local tracks too.
   if (admin) {
-    // `track.deezer_id` is the universal track id — a numeric Deezer id, or the
-    // row UUID for local files — so this works for local tracks too.
-    const playlistSub = (playlistCache || []).map((p) => ({
-      label: p.title,
+    const last = get(lastPlaylist);
+    if (last && last.id)
+      items.push({
+        label: `Ajouter à « ${last.title} »`,
+        icon: "plus",
+        action: () => addTrackToPlaylist(last.id, track.deezer_id, last.title),
+      });
+    // Opens the searchable playlist picker (scrolling a giant submenu to find
+    // the right playlist was the old, painful way).
+    items.push({
+      label: "Ajouter à une playlist…",
       icon: "music",
-      action: () => addTrackToPlaylist(p.id, track.deezer_id, p.title),
-    }));
-    items.push({ label: "Ajouter à une playlist", icon: "plus", sub: playlistSub });
+      action: () => openPlaylistPicker(track),
+    });
   }
   // Offline download — device-local, so available to everyone. A plain
   // "Télécharger" at the default quality, plus a submenu to pick another.
