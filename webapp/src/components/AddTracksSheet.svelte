@@ -7,11 +7,11 @@
 
   // Modal (desktop) / bottom-sheet (mobile) to add tracks to a playlist. Search
   // covers both Deezer and the local library (the /search endpoint merges them),
-  // so a single box adds either kind. Adds are optimistic via `onadd`.
-  export let playlistId;
+  // so a single box adds either kind. Adds are fully optimistic: the ✓ shows
+  // instantly and the parent page performs (and sequences) the actual API call.
   export let existingIds = new Set();
   export let onclose = null;
-  export let onadd = null; // (track) => void
+  export let onadd = null; // (track) => void — owns the API call
 
   let q = "";
   let results = [];
@@ -41,17 +41,12 @@
     }
   }
 
-  async function add(track) {
+  function add(track) {
     const id = String(track.deezer_id);
     if (added.has(id)) return;
-    try {
-      await api.addToPlaylist(playlistId, [id]);
-      added = new Set(added).add(id);
-      onadd?.(track);
-      toasts.push("Ajouté à la playlist");
-    } catch {
-      toasts.push("Échec de l'ajout", "error");
-    }
+    added = new Set(added).add(id);
+    onadd?.(track);
+    toasts.push("Ajouté à la playlist");
   }
 
   function isIn(track) {

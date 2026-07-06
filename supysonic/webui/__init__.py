@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os.path
 import threading
+import time
 import uuid
 from functools import wraps
 
@@ -514,6 +515,22 @@ def _resolve_db_playlist(pid):
     return None
 
 
+def _db_playlist_track_rows(pl):
+    """The playlist's Track rows in order, with Album+Artist eager-loaded —
+    ``pl.get_tracks()`` lazy-loads both per track (2 extra queries per row,
+    thousands on a big playlist)."""
+    return (
+        Track.select(Track, Album, Artist)
+        .join(Album)
+        .switch(Track)
+        .join(Artist)
+        .switch(Track)
+        .join(PlaylistTrack, on=(PlaylistTrack.track == Track.id))
+        .where(PlaylistTrack.playlist == pl)
+        .order_by(PlaylistTrack.index)
+    )
+
+
 def _db_playlist_cover(tracks: list) -> str | None:
     """Pick the first available album cover as the playlist's cover (Playlist
     rows don't store a Deezer picture md5)."""
@@ -567,7 +584,7 @@ def _resolve_tracks(provider, raw_ids) -> list:
     return out
 
 
-def _mirror_playlist(provider, pl):
+def _mirror_now(provider, pl):
     """Push the playlist's Deezer-track subset back to the Deezer account
     (fail-soft: a Deezer error must never break the local edit)."""
     from ..deezer import push
@@ -576,6 +593,86 @@ def _mirror_playlist(provider, pl):
         push.reconcile_playlist(provider, pl)
     except Exception:
         logger.warning("playlist mirror failed for %s", pl.id, exc_info=True)
+
+
+# The Deezer mirror is asynchronous and coalesced: playlist edits must respond
+# at local-DB speed, never waiting on Deezer round-trips (which took seconds and
+# made every add/remove/reorder feel laggy). Each edit stamps its playlist id
+# here; a single worker thread reconciles a playlist once things settle
+# (_MIRROR_DELAY), so a burst of rapid edits becomes ONE reconcile with the
+# final state — reconcile_playlist is state-based, intermediate states are
+# irrelevant. The worker exits when idle and is restarted on demand.
+_MIRROR_DELAY = 1.5
+_mirror_lock = threading.Lock()
+_mirror_pending: dict = {}  # playlist uuid -> monotonic timestamp of last edit
+_mirror_thread: threading.Thread | None = None
+
+
+def _mirror_playlist(provider, pl):
+    if current_app.testing:  # keep tests deterministic: reconcile inline
+        _mirror_now(provider, pl)
+        return
+    app = current_app._get_current_object()
+    global _mirror_thread
+    with _mirror_lock:
+        _mirror_pending[pl.id] = time.monotonic()
+        if _mirror_thread is None or not _mirror_thread.is_alive():
+            _mirror_thread = threading.Thread(
+                target=_mirror_worker, args=(app,), name="playlist-mirror", daemon=True
+            )
+            _mirror_thread.start()
+
+
+def _mirror_worker(app):
+    from ..db import close_connection, open_connection
+
+    global _mirror_thread
+    while True:
+        time.sleep(0.3)
+        due = []
+        with _mirror_lock:
+            now_m = time.monotonic()
+            for pid, ts in list(_mirror_pending.items()):
+                if now_m - ts >= _MIRROR_DELAY:
+                    due.append(pid)
+                    del _mirror_pending[pid]
+            if not due and not _mirror_pending:
+                _mirror_thread = None  # idle: exit; next edit restarts us
+                return
+        provider = getattr(app, "deezer", None)
+        if provider is None:
+            continue
+        for pid in due:
+            try:
+                open_connection(reuse=True)
+                try:
+                    pl = Playlist[pid]
+                except Playlist.DoesNotExist:
+                    continue  # deleted meanwhile
+                _mirror_now(provider, pl)
+            except Exception:
+                logger.warning("playlist mirror worker failed for %s", pid, exc_info=True)
+            finally:
+                try:
+                    close_connection()
+                except Exception:
+                    pass
+
+
+def _push_async(label, fn, *args):
+    """Run a single fail-soft Deezer push off the request thread (inline in
+    tests). For calls that need no DB access — pass plain values, not rows."""
+
+    def run():
+        try:
+            fn(*args)
+        except Exception:
+            logger.warning("Deezer %s failed", label, exc_info=True)
+
+    if current_app.testing:
+        run()
+        return
+    threading.Thread(target=run, name=f"deezer-{label}", daemon=True).start()
 
 
 # -- auth -------------------------------------------------------------------
@@ -904,7 +1001,7 @@ def playlist(playlist_id):
     # recommendation/editorial playlist is read straight from Deezer (read-only).
     pl = _resolve_db_playlist(playlist_id)
     if pl is not None:
-        tracks = [_db_track(t) for t in pl.get_tracks()]
+        tracks = [_db_track(t) for t in _db_playlist_track_rows(pl)]
         return jsonify(
             {
                 "playlist": {
@@ -1153,14 +1250,18 @@ def my_playlists():
         .order_by(Playlist.created.desc())
     )
     for pl in query:
-        tracks = pl.get_tracks()
+        # Count + first-track cover only — loading every track of every
+        # playlist just for this made the list (refetched after each playlist
+        # edit) scale with the whole library.
+        nb = PlaylistTrack.select().where(PlaylistTrack.playlist == pl).count()
+        first = _db_playlist_track_rows(pl).limit(1).first()
         out.append(
             {
                 "id": str(pl.id),
                 "deezer_id": pl.deezer_id,
                 "title": pl.name,
-                "cover": _db_playlist_cover([_db_track(t) for t in tracks[:1]]),
-                "nb_tracks": len(tracks),
+                "cover": _db_playlist_cover([_db_track(first)]) if first else None,
+                "nb_tracks": nb,
                 "editable": True,
             }
         )
@@ -1594,10 +1695,11 @@ def edit_playlist(playlist_id):
         pl.comment = data.get("description") or None
     pl.save()
     if pl.deezer_id:
-        try:
-            provider.edit_playlist(pl.deezer_id, title=pl.name, description=pl.comment)
-        except Exception:
-            logger.warning("Deezer edit_playlist failed for %s", pl.id, exc_info=True)
+        # Deezer rename happens in the background — the local edit already
+        # succeeded and must not wait on (or fail with) the network.
+        _push_async(
+            "edit_playlist", provider.edit_playlist, pl.deezer_id, pl.name, pl.comment
+        )
     return jsonify({"ok": True})
 
 
@@ -1616,10 +1718,9 @@ def delete_playlist(playlist_id):
     if dz:
         from ..deezer import push
 
-        try:  # local delete already done; a Deezer outage must not 500 it
-            push.delete_playlist(provider, dz)
-        except Exception:
-            logger.warning("Deezer delete_playlist failed for %s", dz, exc_info=True)
+        # Local delete already done; the Deezer-side delete is fail-soft and
+        # runs in the background (never blocks or 500s the response).
+        _push_async("delete_playlist", push.delete_playlist, provider, dz)
     return jsonify({"ok": True})
 
 
@@ -1692,23 +1793,26 @@ def reorder_playlist(playlist_id):
     from collections import Counter
 
     avail = Counter(t.id for t in current)
+    rows = []
+    used = Counter()
+    for uid in order:
+        t = by_uid.get(uid)
+        if t is None or used[t.id] >= avail[t.id]:
+            continue
+        rows.append((pl.id, t.id, len(rows)))
+        used[t.id] += 1
+    # Safety: keep any track the client omitted, appended at the end.
+    for t in current:
+        if used[t.id] < avail[t.id]:
+            rows.append((pl.id, t.id, len(rows)))
+            used[t.id] += 1
+    fields = (PlaylistTrack.playlist, PlaylistTrack.track, PlaylistTrack.index)
     with db.atomic():
         PlaylistTrack.delete().where(PlaylistTrack.playlist == pl).execute()
-        idx = 0
-        used = Counter()
-        for uid in order:
-            t = by_uid.get(uid)
-            if t is None or used[t.id] >= avail[t.id]:
-                continue
-            PlaylistTrack.create(playlist=pl, track=t.id, index=idx)
-            idx += 1
-            used[t.id] += 1
-        # Safety: keep any track the client omitted, appended at the end.
-        for t in current:
-            if used[t.id] < avail[t.id]:
-                PlaylistTrack.create(playlist=pl, track=t.id, index=idx)
-                idx += 1
-                used[t.id] += 1
+        # Bulk insert in chunks: one statement instead of one INSERT per track
+        # (a 500-track reorder was 500 round-trips on Postgres/MySQL).
+        for i in range(0, len(rows), 300):
+            PlaylistTrack.insert_many(rows[i : i + 300], fields=fields).execute()
     _mirror_playlist(provider, pl)
     return jsonify({"ok": True})
 

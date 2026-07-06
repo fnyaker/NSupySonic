@@ -39,12 +39,12 @@
     return out;
   }
 
-  async function pick(p) {
-    if (busy || !track) return;
-    busy = true;
-    const ok = await addTrackToPlaylist(p.id, track.deezer_id, p.title);
-    busy = false;
-    if (ok) closePlaylistPicker();
+  function pick(p) {
+    if (!track) return;
+    // Optimistic: close instantly, the add runs in the background (a failure
+    // shows its own toast from addTrackToPlaylist).
+    addTrackToPlaylist(p.id, track.deezer_id, p.title);
+    closePlaylistPicker();
   }
 
   async function createAndAdd() {
