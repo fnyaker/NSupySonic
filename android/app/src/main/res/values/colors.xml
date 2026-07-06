@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors the webapp palette (webapp/src/app.css). -->
+    <color name="bg">#0F0D13</color>
+    <color name="bg_elev">#1B1822</color>
+    <color name="accent">#A238FF</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="text">#F2EFF7</color>
+    <color name="text_dim">#9A93A8</color>
+    <color name="ic_launcher_background">#0F0D13</color>
+</resources>

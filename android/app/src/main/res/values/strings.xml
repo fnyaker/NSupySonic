@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NSupySonic</string>
+
+    <string name="channel_playback">Lecture</string>
+    <string name="action_play">Lecture</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_prev">Précédent</string>
+    <string name="action_next">Suivant</string>
+
+    <string name="setup_title">Connexion au serveur</string>
+    <string name="setup_subtitle">Renseigne l\'adresse de ton instance NSupySonic.</string>
+    <string name="setup_host_hint">Adresse du serveur</string>
+    <string name="setup_host_helper">ex. musique.mondomaine.fr ou http://192.168.1.10</string>
+    <string name="setup_port_hint">Port (optionnel)</string>
+    <string name="setup_ssl_check">Vérifier le certificat SSL</string>
+    <string name="setup_ssl_helper">Décoche pour un certificat auto-signé.</string>
+    <string name="setup_connect">Se connecter</string>
+    <string name="setup_checking">Vérification…</string>
+    <string name="setup_host_required">Adresse requise</string>
+    <string name="setup_unreachable_title">Serveur injoignable</string>
+    <string name="setup_unreachable">Impossible de joindre %1$s. Vérifie l\'adresse, le port et le réseau.</string>
+    <string name="setup_retry">Réessayer</string>
+    <string name="setup_continue_anyway">Continuer quand même</string>
+    <string name="setup_battery">Désactiver l\'optimisation batterie</string>
+    <string name="setup_battery_helper">Recommandé : évite qu\'Android tue le lecteur après une longue pause.</string>
+    <string name="setup_battery_already">L\'optimisation batterie est déjà désactivée pour cette application.</string>
+
+    <string name="error_title">Connexion impossible</string>
+    <string name="error_unreachable">Impossible de charger %1$s</string>
+    <string name="error_ssl">Certificat SSL invalide. Décoche « Vérifier le certificat SSL » dans les paramètres si ton serveur utilise un certificat auto-signé.</string>
+    <string name="error_retry">Réessayer</string>
+    <string name="error_settings">Paramètres du serveur</string>
+
+    <string name="shortcut_server">Serveur</string>
+    <string name="shortcut_server_long">Paramètres du serveur</string>
+</resources>

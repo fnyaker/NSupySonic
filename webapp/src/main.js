@@ -1,6 +1,11 @@
 import "./app.css";
 import { mount } from "svelte";
 import App from "./App.svelte";
+import { initNativeBridge } from "./lib/native.js";
+
+// Inside the Android app (android/): mirror the player to the native
+// MediaSession + foreground service. A no-op in a regular browser.
+initNativeBridge();
 
 // Svelte 5 mounting API. The old `new App({ target })` form doesn't establish a
 // root effect context, which leaves library deriveds/effects (e.g. svelte-spa-
