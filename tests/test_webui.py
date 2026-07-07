@@ -458,6 +458,32 @@ class WebUITestCase(unittest.TestCase):
         self.assertTrue(data["tracks"])
         self.assertEqual(data["tracks"][1]["title"], "Mix")
 
+    def test_flow_deezer_error_no_500(self):
+        # A Deezer outage on Flow must degrade to an empty list, not a 500 —
+        # the player polls this for autoplay continuation.
+        self._login()
+        prov = self.app.deezer
+        orig = prov.get_flow
+        prov.get_flow = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            rv = self.client.get("/api/flow")
+        finally:
+            prov.get_flow = orig
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_json()["tracks"], [])
+
+    def test_track_radio_deezer_error_no_500(self):
+        self._login()
+        prov = self.app.deezer
+        orig = prov.get_track_mix
+        prov.get_track_mix = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            rv = self.client.get("/api/radio/track/3135556")
+        finally:
+            prov.get_track_mix = orig
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_json()["tracks"], [])
+
     def test_recommendations(self):
         self._login()
         data = self.client.get("/api/recommendations").get_json()
@@ -538,6 +564,29 @@ class WebUITestCase(unittest.TestCase):
         self._login()
         data = self.client.get("/api/me/favorite-ids").get_json()
         self.assertEqual(set(data["ids"]), {"1", "2"})
+
+    def test_favorite_ids_merges_unpushed_db_star(self):
+        # A star recorded in the DB but NOT in the live favorites list (push
+        # disabled / failed) must still show up, so its heart isn't empty.
+        self._login()
+        self.client.post("/api/favorite", json={"deezer_id": "3", "on": True})
+        ids = set(self.client.get("/api/me/favorite-ids").get_json()["ids"])
+        self.assertIn("3", ids)  # DB Deezer star merged in
+        self.assertLessEqual({"1", "2"}, ids)  # live favorites still present
+
+    def test_favorite_respects_push_to_deezer_off(self):
+        # With push_to_deezer off the admin's star stays local (never mirrored),
+        # yet is still recorded so the heart state is correct.
+        self._login()
+        self.app.config["DEEZER"]["push_to_deezer"] = False
+        try:
+            rv = self.client.post("/api/favorite", json={"deezer_id": "3", "on": True})
+        finally:
+            self.app.config["DEEZER"]["push_to_deezer"] = True
+        self.assertEqual(rv.status_code, 200)
+        self.assertNotIn("3", self.app.deezer.dz.gw.fav_added)  # not mirrored
+        ids = set(self.client.get("/api/me/favorite-ids").get_json()["ids"])
+        self.assertIn("3", ids)  # but still a local star
 
     # -- local (non-Deezer) tracks --------------------------------------------
 
@@ -934,6 +983,23 @@ class WebUITestCase(unittest.TestCase):
         self.client.delete(f"/api/playlist/{pid}/tracks", json={"indexes": [1]})
         data = self.client.get(f"/api/playlist/{pid}").get_json()
         self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1", "3"])
+
+    def test_remove_playlist_bad_indexes_400(self):
+        # A non-numeric index must 400, not 500 (int() ValueError).
+        self._login()
+        pid = self._create_playlist("PL")["id"]
+        self.client.post(f"/api/playlist/{pid}/tracks", json={"tracks": ["1"]})
+        rv = self.client.delete(f"/api/playlist/{pid}/tracks", json={"indexes": ["x"]})
+        self.assertEqual(rv.status_code, 400)
+
+    def test_edit_playlist_non_string_title_ignored(self):
+        # A non-string title must be ignored, not 500 (.strip() AttributeError).
+        self._login()
+        pid = self._create_playlist("Keep")["id"]
+        rv = self.client.patch(f"/api/playlist/{pid}", json={"title": 123})
+        self.assertEqual(rv.status_code, 200)
+        data = self.client.get(f"/api/playlist/{pid}").get_json()
+        self.assertEqual(data["playlist"]["title"], "Keep")  # unchanged
 
     def test_playlist_mixes_local_and_deezer(self):
         self._login()
