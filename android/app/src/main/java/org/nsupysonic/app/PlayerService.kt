@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.wifi.WifiManager
@@ -20,6 +21,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.ServiceCompat
 import androidx.media.session.MediaButtonReceiver
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -33,7 +35,7 @@ import java.util.concurrent.Executors
  * logic keeps working); this service is the part Android actually requires to
  * keep that audio alive: a foreground service with a MediaSession, which
  * yields the media notification, lockscreen controls, Bluetooth buttons — and
- * a process the OS won't kill after a long pause.
+ * a process the OS won't freeze/kill after a long pause in the background.
  */
 class PlayerService : Service() {
 
@@ -46,8 +48,6 @@ class PlayerService : Service() {
         val cover: String,
         val position: Double, // seconds
         val duration: Double, // seconds
-        val hasPrev: Boolean,
-        val hasNext: Boolean,
     ) {
         companion object {
             fun fromJson(json: String): State? = try {
@@ -61,8 +61,6 @@ class PlayerService : Service() {
                     cover = o.optString("cover"),
                     position = o.optDouble("position", 0.0),
                     duration = o.optDouble("duration", 0.0),
-                    hasPrev = o.optBoolean("hasPrev"),
-                    hasNext = o.optBoolean("hasNext"),
                 )
             } catch (_: Exception) {
                 null
@@ -87,7 +85,7 @@ class PlayerService : Service() {
     private lateinit var session: MediaSessionCompat
     private var state: State? = null
     private var foregrounded = false
-    private var notifKey = "" // last (title|playing|art) actually rendered
+    private var notifKey = "" // last (title|artist|playing|art) actually rendered
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -117,6 +115,12 @@ class PlayerService : Service() {
             override fun onSeekTo(pos: Long) = send("seek", pos / 1000.0)
             override fun onStop() = send("pause")
         })
+        session.setSessionActivity(
+            PendingIntent.getActivity(
+                this, 0, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        )
         session.isActive = true
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -136,13 +140,28 @@ class PlayerService : Service() {
             notifKey = ""
             return START_NOT_STICKY
         }
-        // startForegroundService contract: show a notification right away.
-        if (!foregrounded) {
-            startForeground(NOTIFICATION_ID, buildNotification())
-            foregrounded = true
-        }
+        // startForegroundService contract: go foreground right away.
+        goForeground()
         // A restart without the WebView would be a zombie — don't be sticky.
         return START_NOT_STICKY
+    }
+
+    /**
+     * targetSdk 34: the service type must be explicit at startForeground time
+     * (and match the manifest's foregroundServiceType) — via ServiceCompat.
+     */
+    private fun goForeground() {
+        if (foregrounded) return
+        try {
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID, buildNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+            foregrounded = true
+        } catch (_: Exception) {
+            // Background FGS-start restriction: the session stays usable, the
+            // next update from a foregrounded app will promote us again.
+        }
     }
 
     private fun send(cmd: String, value: Double? = null) {
@@ -174,8 +193,8 @@ class PlayerService : Service() {
                         PlaybackStateCompat.ACTION_PLAY_PAUSE or
                         PlaybackStateCompat.ACTION_SEEK_TO or
                         PlaybackStateCompat.ACTION_STOP or
-                        (if (s.hasNext) PlaybackStateCompat.ACTION_SKIP_TO_NEXT else 0L) or
-                        (if (s.hasPrev) PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS else 0L)
+                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
                 )
                 .setState(
                     if (s.playing) PlaybackStateCompat.STATE_PLAYING
@@ -191,10 +210,9 @@ class PlayerService : Service() {
 
         // Re-render the notification only on real changes — the position bar
         // reads live from the session, not from the notification itself.
-        val key = "${s.title}|${s.artist}|${s.playing}|${s.hasPrev}|${s.hasNext}|${artBitmap != null}"
+        val key = "${s.title}|${s.artist}|${s.playing}|${artBitmap != null}"
         if (!foregrounded) {
-            startForeground(NOTIFICATION_ID, buildNotification())
-            foregrounded = true
+            goForeground()
             notifKey = key
         } else if (key != notifKey) {
             notifKey = key
