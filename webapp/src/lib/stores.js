@@ -383,11 +383,14 @@ function createPlayer() {
     update,
 
     playQueue(tracks, start = 0, context = null) {
-      let queue = clean(tracks);
+      // Resolve the tapped track from the ORIGINAL list first: `start` is an
+      // index into what the user saw, but clean() drops unplayable entries and
+      // would shift the index, starting playback on the wrong track.
+      const src = tracks || [];
+      const wanted = src[Math.min(Math.max(start, 0), Math.max(0, src.length - 1))];
+      let queue = clean(src);
       if (!queue.length) return;
-      // Remember the tapped track, then drop anything unplayable (offline), and
-      // resume from the tapped track's new position (or the first available).
-      const startTrack = queue[Math.min(Math.max(start, 0), queue.length - 1)];
+      const startTrack = wanted && wanted.deezer_id ? wanted : queue[0];
       queue = filterQueue(queue);
       if (!queue.length) return;
       let index = queue.indexOf(startTrack);
@@ -492,6 +495,10 @@ function createPlayer() {
         if (i < 0 || i >= s.queue.length) return s;
         const queue = s.queue.slice();
         queue.splice(i, 1);
+        // Emptied the queue: stop, don't leave playing=true with index -1 (which
+        // kept the <audio> element playing a track no longer in the queue while
+        // the UI showed "nothing playing").
+        if (!queue.length) return { ...s, queue, index: -1, playing: false };
         let index = s.index;
         if (i < s.index) index--;
         else if (i === s.index) index = Math.min(index, queue.length - 1);
@@ -616,7 +623,3 @@ export const current = derived(player, ($p) =>
 // so long lists (e.g. thousands of favorites) don't re-render 4×/second.
 export const currentId = derived(current, ($c) => ($c ? $c.deezer_id : null));
 export const playing = derived(player, ($p) => $p.playing);
-
-export const upNext = derived(player, ($p) =>
-  $p.index >= 0 ? $p.queue.slice($p.index + 1) : []
-);

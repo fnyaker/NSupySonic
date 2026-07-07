@@ -70,7 +70,13 @@
     audio = els[0]; // assignment kicks the reactive load/transport blocks
     startWatchdog();
     document.addEventListener("visibilitychange", onVisibility);
+    // Last reliable moment before the tab is discarded: report the current
+    // track's play time (reportListen uses keepalive, so it survives unload).
+    window.addEventListener("pagehide", onPageHide);
   });
+  function onPageHide() {
+    flushListen(null);
+  }
   onDestroy(() => {
     stopWatchdog();
     cancelRecovery();
@@ -81,6 +87,7 @@
     clearTimeout(prefetchTimer);
     clearTimeout(archiveTimer);
     document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("pagehide", onPageHide);
     releaseWakeLock();
     setBlobUrl(null); // revoke any live object URL
     for (const el of els) {
@@ -432,6 +439,30 @@
   $: if (audio && $current) {
     if ($current.deezer_id !== curId) loadTrack($current);
     else if ($player.seq !== curSeq) restartCurrent();
+  }
+  // The queue emptied (last track removed): stop and release the element so it
+  // doesn't keep playing a track that's no longer current while the UI shows
+  // "nothing playing".
+  $: if (audio && !$current && curId !== null) teardownAudio();
+
+  function teardownAudio() {
+    cancelRecovery();
+    cancelSwitch();
+    cancelSeekChase();
+    cancelPendingSeek();
+    try {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    } catch {
+      /* ignore */
+    }
+    setBlobUrl(null);
+    curId = null;
+    curIsBlob = false;
+    buffered.set(0);
+    player.setProgress(0, 0);
+    setPlaybackStatus("idle");
   }
   // A quality change for the SAME track is handed off gaplessly instead of
   // reloading the element in place.
@@ -872,6 +903,10 @@
     if (e && e.target !== audio) return; // ignore the idle/preloading element
     if (loadingTrack) return; // a track change is mid-flight — position is stale
     if (chasing) return; // chasing a seek — hold the bar at the target
+    // If the visualizer wired the element through a Web Audio context that the
+    // OS later suspended (backgrounded tab), the element "plays" but is silent —
+    // resumeAudio() is a no-op unless the context is actually suspended.
+    resumeAudio();
     // Healthy progress: clear the recovery budget so a later, unrelated stall
     // gets its full retry allowance again.
     if (recoverAttempts && audio.currentTime > lastPos) recoverAttempts = 0;

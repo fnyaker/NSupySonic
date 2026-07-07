@@ -57,8 +57,14 @@
 
   async function downloadAll() {
     if (dlBusy) return;
-    const ids = tracks.map((t) => t.deezer_id).filter(Boolean);
-    if (!ids.length) return;
+    // Server-side pre-archive is for Deezer tracks (numeric ids). Local/uploaded
+    // files (UUID ids) are already on the server's disk, so filter them out —
+    // sending them made the server queue nothing and report "0 titres".
+    const ids = tracks.map((t) => t.deezer_id).filter((x) => /^\d+$/.test(String(x)));
+    if (!ids.length) {
+      toasts.push("Rien à archiver (fichiers déjà locaux)");
+      return;
+    }
     dlBusy = true;
     try {
       const r = await api.download(ids);
