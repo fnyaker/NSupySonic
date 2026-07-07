@@ -26,6 +26,8 @@
     <string name="setup_battery_helper">Recommandé : évite qu\'Android tue le lecteur après une longue pause.</string>
     <string name="setup_battery_already">L\'optimisation batterie est déjà désactivée pour cette application.</string>
 
+    <string name="notifications_hint">Autorise les notifications pour afficher les contrôles de lecture (paramètres Android > Applications > NSupySonic).</string>
+
     <string name="error_title">Connexion impossible</string>
     <string name="error_unreachable">Impossible de charger %1$s</string>
     <string name="error_ssl">Certificat SSL invalide. Décoche « Vérifier le certificat SSL » dans les paramètres si ton serveur utilise un certificat auto-signé.</string>

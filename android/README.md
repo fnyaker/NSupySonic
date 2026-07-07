@@ -8,8 +8,11 @@ dans une WebView plein écran et lui donne ce qui manque au navigateur :
   (tout le comportement du lecteur web — cache, offline, reprise — reste
   identique), le natif tient la session, les wakelocks et la notification.
 - **Notification média / écran de verrouillage / Bluetooth** : lecture, pause,
-  précédent, suivant, seek — reliés au lecteur web via le pont
-  `window.NSNative` (`webapp/src/lib/native.js`).
+  précédent, suivant, seek. Le pont est `app/src/main/assets/nsshim.js`,
+  injecté au chargement de la page : il remplace `navigator.mediaSession`
+  (que le lecteur web alimente déjà — métadonnées, état, position, handlers)
+  et relaie tout vers le service natif. Aucun code côté webapp : l'app
+  fonctionne avec n'importe quelle version du SPA déployée sur le serveur.
 - **Écran de configuration au premier lancement** : adresse du serveur, port
   optionnel, case « Vérifier le certificat SSL » (à décocher pour un certificat
   auto-signé), et raccourci pour désactiver l'optimisation batterie.

@@ -58,10 +58,12 @@ configured at first launch: URL + optional port + SSL-verify toggle for self-sig
 while `PlayerService` (foreground service + MediaSessionCompat) keeps the process alive in
 the background and owns the media notification / lockscreen / Bluetooth controls. Audio
 stays in the WebView — the native side is only a remote control + keep-alive. The bridge is
-`webapp/src/lib/native.js`: it mirrors the `player` store to `window.NSNative.publish()` and
-receives transport commands via `window.__nsNativeCmd()`; it is a no-op in a regular browser.
-Build: `gradle -p android assembleRelease` (JDK 17, SDK 34 — CI does this; no wrapper is
-committed).
+`android/app/src/main/assets/nsshim.js`, injected at document start: it REPLACES
+`navigator.mediaSession` and forwards the metadata/playbackState/positionState/action-handlers
+that `Player.svelte` already maintains to `window.NSNative.publish()`, and routes transport
+commands back via `window.__nsNativeCmd()`. No webapp-side code is involved, so the app works
+against any deployed SPA version. Build: `gradle -p android assembleRelease` (JDK 17, SDK 34 —
+CI does this; no wrapper is committed).
 
 ## Architecture
 
