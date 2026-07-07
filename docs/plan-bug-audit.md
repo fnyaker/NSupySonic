@@ -1,13 +1,172 @@
 # Plan — audit de bugs : app Android + web UI
 
 > **Statut : audit terminé, corrections à faire.**
-> Relecture complète de `webapp/src` (SPA Svelte), `webapp/public/sw.js` (PWA),
-> `supysonic/webui/` (backend `/api` + SPA serving) et `android/` (app native +
-> `nsshim.js`). Chaque entrée donne le symptôme, la cause (fichier:ligne) et le
-> correctif proposé. Priorités : **P1** = cassant / fort impact utilisateur,
-> **P2** = bug fonctionnel réel, **P3** = robustesse / cas limite / UX mineure.
-> Règle du repo : tout correctif côté `/api` ou proxy s'accompagne d'un test
-> (`tests/test_webui.py`) ; côté SPA/Android, vérification manuelle décrite.
+> Deux passes : (1) relecture complète de `webapp/src` (SPA Svelte),
+> `webapp/public/sw.js` (PWA), `supysonic/webui/` (backend `/api` + SPA serving)
+> et `android/` (app native + `nsshim.js`) ; (2) **tests dynamiques en
+> conditions réelles** — serveur lancé, SPA buildée, pistes locales uploadées,
+> Chromium piloté par Playwright avec simulation de flux `/api/stream` lents,
+> gelés ou en erreur (harnais : `docs/repro/e2e_transport_repro.py`). La passe
+> dynamique a reproduit les symptômes « impossible de mettre en pause » et
+> « la lecture ne démarre pas » — voir la section **P0**.
+> Priorités : **P0** = reproduit, casse la lecture ; **P1** = cassant / fort
+> impact utilisateur ; **P2** = bug fonctionnel réel ; **P3** = robustesse /
+> cas limite / UX mineure. Règle du repo : tout correctif côté `/api` ou proxy
+> s'accompagne d'un test (`tests/test_webui.py`) ; côté SPA/Android,
+> vérification manuelle décrite (le harnais e2e sert de non-régression).
+
+---
+
+## P0 — lecture & transport : bugs REPRODUITS (pause morte, lecture qui ne démarre pas)
+
+Contexte commun : dans `Player.svelte`, le bloc réactif « transport » qui
+répercute play/pause du store vers l'élément `<audio>` est **désactivé** dès
+que `switching` ou `recovering` est vrai :
+
+```js
+// Player.svelte:740
+$: if (audio && curId && !switching && !recovering) { ... play/pause ... }
+```
+
+Ces deux états peuvent durer de 8 secondes à **l'infini**. Pendant ce temps,
+tous les appuis play/pause de l'utilisateur ne touchent que le store : l'icône
+change, l'audio n'obéit pas. Les quatre bugs ci-dessous en découlent. Baseline
+vérifiée saine (T1 du harnais) : sur un flux normal, play → pause → reprise
+fonctionnent ; le problème est le *state machine gating*, pas le chemin de base.
+
+### 0.1 `recoverPlayback` se bloque pour toujours → transport mort, silence avec icône « lecture »
+
+- **Repro (T2 du harnais)** : lecture en cours → piste suivante dont le
+  `/api/stream` **pend** (archive à froid, transcode gelé, proxy qui
+  bufferise, connexion moribonde). À ~6 s le watchdog appelle
+  `recoverPlayback()` : `recovering = true`, la source est rechargée (le
+  rechargement remet l'élément `paused`), et `recovering` n'est remis à faux
+  **que** par le `loadedmetadata` ou l'`error` de CE chargement
+  (`Player.svelte:211-241`). Une réponse qui n'arrive jamais ne déclenche ni
+  l'un ni l'autre → `recovering` reste vrai indéfiniment.
+- **Observé** : silence total, icône encore sur « lecture » (store
+  `playing=true`, élément `paused=true` — le transport re-jouerait mais il est
+  gaté par `recovering`). Les appuis pause/play suivants ne changent QUE
+  l'icône. Même une fois le réseau rétabli, la piste reste morte ; **il faut
+  passer à une autre piste** pour déverrouiller (et c'est le handler périmé du
+  recovery qui, en s'exécutant sur le chargement de la piste suivante, remet
+  `recovering` à faux — voir 0.4).
+- **C'est exactement** « la lecture ne démarre pas » + « impossible de mettre
+  en pause » sans aucune explication à l'écran.
+- **Correctifs** :
+  1. `cancelRecovery()` explicite (retire les listeners, `recovering = false`)
+     appelé par `loadTrack`, par `failCurrentTrack` et par **toute action
+     transport utilisateur** ;
+  2. deadline sur la récupération (comme le switch : ~10 s puis abandon →
+     retente/parque/passe) ;
+  3. la **pause doit toujours gagner** : appliquer `audio.pause()` même si
+     `switching`/`recovering`/`chasing` (ne gater que la direction « play ») ;
+  4. dans `onMeta` du recovery : ne seek/play que si la piste n'a pas changé
+     (capturer `curId`) **et** si `get(player).playing` — aujourd'hui
+     `audio.play()` y est inconditionnel (`Player.svelte:225`) : la musique
+     redémarre toute seule après une pause utilisateur.
+
+### 0.2 Pause ignorée pendant un changement de qualité (jusqu'à 8 s d'audio « incontrôlable »)
+
+- **Repro (T4)** : lecture en cours → choisir une autre qualité → le préchargement
+  du nouveau débit pend (transcode Opus à froid : le serveur **bloque la
+  réponse** pendant tout l'archivage FLAC, `webui/__init__.py:2158-2163` — cas
+  réel fréquent). Appuyer sur pause pendant le switch : l'icône passe à pause,
+  **l'audio continue** (mesuré : `t=1.92 → 3.97` après l'appui) ; la pause ne
+  s'applique qu'au timeout de 8 s du switch (`failTimer`, `Player.svelte:703`).
+- **Cause** : transport gaté par `!switching` (`Player.svelte:740`) ;
+  `wasPlaying` est figé au début du switch (`:629`), donc même le swap réussi
+  relance la lecture un tick avant que le transport ne la re-pause.
+- **Correctifs** : pause immédiate sur l'élément actif même pendant un switch ;
+  une pause utilisateur **annule** le switch en cours (ou le laisse finir en
+  arrière-plan sans `play()`) ; recalculer `wasPlaying` au moment du swap.
+
+### 0.3 Watchdog à 6 s + 4 essais : le premier play d'une piste non archivée est condamné
+
+- **Repro (T3)** : `/api/stream` en 5xx → boucle de récupération (backoff
+  0,8/1,6/2,4/3,2 s) puis « Titre indisponible, passage au suivant » à ~9 s,
+  **en cascade sur toute la file** (chaque piste suivante rejoue le même
+  scénario). Pendant ces 9 s : silence, icône « lecture », aucun indicateur —
+  le toast (2,6 s) est l'unique feedback et arrive trop tard.
+- **Cas réel** : le chemin Opus d'une piste à froid bloque la réponse le temps
+  de télécharger tout le FLAC (`ensure_archived`) ; le chemin FLAC live peut
+  mettre > 6 s à produire son premier octet audio (Deezer lent). Or le watchdog
+  déclare la lecture « bloquée » après 6 s de `currentTime` figé
+  (`Player.svelte:160`) : il recharge la source — **ce qui avorte la requête
+  d'archivage en cours** — puis re-tente, et après 4 tentatives **saute la
+  piste** (`failCurrentTrack`). Une simple lenteur devient « Titre
+  indisponible ».
+- **Correctifs** :
+  1. période de grâce au premier chargement : tant que l'élément n'a jamais eu
+     de données (`readyState < 2` / aucun progrès passé), laisser 30-45 s avant
+     de « récupérer » (et s'appuyer sur les événements `waiting`/`stalled`
+     plutôt que sur `currentTime` figé) ;
+  2. côté serveur, ne pas bloquer la réponse Opus-à-froid : démarrer le
+     transcode en flux dès les premiers octets du FLAC (ou répondre d'abord,
+     archiver pendant) ;
+  3. budget de retries plus généreux quand le serveur répond (un 502 transitoire
+     de reverse-proxy ne doit pas consommer le même budget qu'un flux corrompu) ;
+  4. exposer l'état au client (header `X-NS-Status: archiving|transcoding|cache`)
+     pour nourrir les indicateurs (voir la feature ci-dessous).
+
+### 0.4 Le store repasse en « lecture » contre la volonté de l'utilisateur (toggle inversé)
+
+- **Repro (T2b)** : après le wedge 0.1 et le retour du réseau, la séquence
+  utilisateur play → pause se termine avec **l'élément en lecture et l'icône
+  « lecture »** : des événements `play`/`playing` émis par des handlers périmés
+  (recovery/chase/switch) passent par `onElPlay` (`Player.svelte:261-271`) qui
+  force `player.play()` dans le store. La pause de l'utilisateur « ne tient
+  pas », et comme le bouton est un *toggle*, l'appui suivant fait l'inverse de
+  l'attendu.
+- **Correctifs** : marquer les `play()` programmatiques (flag interne) pour ne
+  refléter dans le store que les play *réels* (OS/notification) ; annuler tout
+  handler périmé quand la piste ou l'intention change (même famille que 0.1-1) ;
+  après une pause utilisateur explicite, ignorer les `play` élément pendant un
+  court verrou (~500 ms) sauf action utilisateur.
+
+### Feature demandée — indicateurs d'état de lecture (discrets mais explicites)
+
+Objectif : quand « ça ne lit pas alors qu'on veut que ça lise », l'UI doit dire
+**ce qui se passe**. Aujourd'hui l'icône pause + silence est un mensonge (T2/T3),
+et l'equalizer animé des TrackRow tourne même quand rien ne sort.
+
+1. **Nouveau store** `playbackStatus` (`stores.js`) :
+   `{ state: "idle"|"loading"|"buffering"|"archiving"|"waiting-network"|"recovering"|"error", since }`,
+   alimenté uniquement par `Player.svelte` :
+   `loadTrack` → `loading` ; événements élément `waiting`/`stalled` →
+   `buffering` ; `netWaiting` → `waiting-network` ; `recovering`/retries →
+   `recovering` ; réponse portant `X-NS-Status: archiving` (0.3-4) →
+   `archiving` ; `failCurrentTrack` → `error` ; `playing`/`timeupdate` sain →
+   `idle`.
+2. **Bouton play/pause** (mini-player + plein écran) : fin anneau/spinner
+   autour du bouton quand `state ∈ {loading, buffering, archiving, recovering}`
+   — discret, mais lève l'ambiguïté « icône pause + silence ».
+3. **Ligne de statut** sous le titre (mini-player) et dans les vues plein
+   écran : texte `text-dim` ~0.72rem, libellés explicites :
+   « Chargement… », « Mise en mémoire tampon… », « Premier téléchargement du
+   titre (archivage)… », « Connexion perdue — reprise automatique… »,
+   « Nouvel essai (2/4)… », « Titre indisponible ». Rien d'affiché en état
+   `idle` (zéro bruit visuel en lecture normale).
+4. **TrackRow / PlaylistTracks** : l'equalizer ne s'anime que quand ça joue
+   *réellement* (`playing && state === "idle"`) ; pendant
+   loading/buffering/archiving → mini-spinner à la place.
+5. **Seek bar** : état indéterminé (pulse léger) tant que rien n'est bufferisé
+   (`buffered === 0` et state ≠ idle).
+6. **Serveur** : ajouter `X-NS-Status` sur `/api/stream` (3 valeurs :
+   `file` (archivé/servi du disque), `transcode` (génération en cours),
+   `archiving` (premier téléchargement Deezer)) — quelques lignes dans
+   `webui/__init__.py:stream()` + `_stream_episode()` ; test dans
+   `tests/test_webui.py`.
+
+### Harnais de reproduction
+
+`docs/repro/e2e_transport_repro.py` (Playwright + Chromium) : monte la SPA
+buildée sur un serveur local avec 3 WAV uploadés, instrumente les éléments
+`<audio>` créés par le player, puis rejoue T1 (baseline), T2 (stream qui pend →
+wedge), T3 (5xx → cascade de skips), T4 (switch de qualité gelé → pause
+ignorée). À relancer après chaque correctif P0 ; les assertions attendues
+s'inversent alors (pause toujours effective < 500 ms, aucun skip sur lenteur
+< 30 s, statut affiché).
 
 ---
 
@@ -318,6 +477,14 @@
 
 ## Ordre de bataille proposé
 
+0. **Lot 0 (P0 — transport, en premier)** : 0.1 → 0.4 dans `Player.svelte`
+   (la règle transversale : *une action transport utilisateur gagne toujours* ;
+   annulation propre des handlers recovery/switch/chase ; grâce au premier
+   chargement) + la feature indicateurs (`playbackStatus` + UI + header
+   `X-NS-Status`). Validation : relancer le harnais
+   `docs/repro/e2e_transport_repro.py` — T2/T3/T4 doivent montrer une pause
+   effective < 500 ms dans tous les états, pas de skip sur simple lenteur, et
+   un statut visible.
 1. **Lot 1 (P1, rapide)** : 1.1 (CSS), 1.2 (sw.js + bump cache), 1.3 (logout
    Settings), 1.4 (onNewIntent). Petites diffs, gros impact.
 2. **Lot 2 (P2 web)** : 2.1, 2.4, 2.5, 3.4, 3.5 (pur front) puis 2.2 et 2.3
@@ -329,4 +496,5 @@
 
 Chaque lot = un commit (ou une PR) indépendant, testable isolément :
 `python -m unittest tests.test_webui` pour le backend, `npm run build` +
-vérification manuelle mobile/desktop pour la SPA, build Gradle pour l'app.
+vérification manuelle mobile/desktop pour la SPA, build Gradle pour l'app, et
+le harnais e2e pour tout ce qui touche au transport.
