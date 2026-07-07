@@ -107,6 +107,14 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
     except Exception as exc:  # tagging must never break playback
         logger.warning("Tagging failed for %s: %s", track.path, exc)
 
+    if cover:
+        # Archive the art on disk too (a cover.jpg sidecar) so it is served
+        # locally, exactly like the audio, even if Deezer later drops the album.
+        try:
+            library.save_album_cover(track.folder, cover)
+        except Exception as exc:
+            logger.warning("Saving cover sidecar failed for %s: %s", track.path, exc)
+
     track.bitrate = _bitrate_for(track.path, fmt, track.duration)
     track.has_art = bool(cover)
     track.last_modification = int(time.time())
@@ -297,6 +305,11 @@ def deezer_cover_path(provider, cache, eid: str):
     data = None
     try:
         alb = Album[key]
+        # Prefer the archived cover.jpg sidecar (served straight from disk, no
+        # Deezer call) and only fall back to fetching from Deezer if absent.
+        local = library.album_cover_file(alb)
+        if local:
+            return local
         data = provider.fetch_cover(alb.cover_md5) if alb.cover_md5 else None
     except Album.DoesNotExist:
         try:
