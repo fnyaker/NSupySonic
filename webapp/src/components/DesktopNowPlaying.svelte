@@ -18,6 +18,7 @@
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
+  import { playbackLabel, playbackBusy } from "../lib/playback.js";
 
   // Blurred backdrop, as a stack of crossfading layers. Each new cover is
   // PRELOADED first and only stacked once decoded, ON TOP of the previous layer
@@ -203,7 +204,7 @@
       <div class="info">
         <div class="txt">
           <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
-          <button class="a" on:click={() => $current.artist && go("/artist/" + $current.artist.deezer_id)}>{$current.artist?.name}</button>
+          <button class="a" class:status={$playbackLabel} on:click={() => !$playbackLabel && $current.artist && go("/artist/" + $current.artist.deezer_id)}>{$playbackLabel || $current.artist?.name}</button>
         </div>
         <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
           <Icon name={fav ? "heartFilled" : "heart"} size={24} />
@@ -219,7 +220,7 @@
       <div class="controls">
         <button class="sm" class:on={$player.shuffle} on:click={() => player.toggleShuffle()} aria-label="Aléatoire"><Icon name="shuffle" size={22} /></button>
         <button on:click={() => player.prev()} aria-label="Précédent"><Icon name="prev" size={30} /></button>
-        <button class="pp" on:click={() => player.toggle()} aria-label="Lecture/Pause"><Icon name={$playing ? "pause" : "play"} size={28} /></button>
+        <button class="pp" class:busy={$playbackBusy} on:click={() => player.toggle()} aria-label="Lecture/Pause"><Icon name={$playing ? "pause" : "play"} size={28} /></button>
         <button on:click={() => player.next()} aria-label="Suivant"><Icon name="next" size={30} /></button>
         <button class="sm" class:on={$player.repeat !== "off"} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
       </div>
@@ -492,9 +493,27 @@
     color: #111;
     display: grid;
     place-items: center;
+    position: relative;
   }
   .controls .pp:hover {
     transform: scale(1.05);
+  }
+  .controls .pp.busy::after {
+    content: "";
+    position: absolute;
+    inset: -5px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: var(--accent);
+    animation: pp-spin 0.8s linear infinite;
+  }
+  @keyframes pp-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .a.status {
+    color: var(--accent) !important;
   }
 
   .viz {

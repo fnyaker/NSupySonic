@@ -5,6 +5,7 @@
   import { player, currentId, playing, openMenu, downloads } from "../lib/stores.js";
   import { buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
+  import { playbackIdle } from "../lib/playback.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
 
@@ -111,8 +112,10 @@
         </span>
       {:else}
         <button class="play" on:click={() => playAt(i)} aria-label="Lire">
-          {#if isCurrent && $playing}
+          {#if isCurrent && $playing && $playbackIdle}
             <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
+          {:else if isCurrent && $playing}
+            <span class="rowspin" aria-hidden="true"></span>
           {:else}
             <span class="num">{i + 1}</span>
             <span class="ic"><Icon name="play" size={14} /></span>
@@ -314,6 +317,19 @@
   }
   .empty {
     margin-top: 18px;
+  }
+  .rowspin {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--bg-hover);
+    border-top-color: var(--accent);
+    animation: rowspin 0.8s linear infinite;
+  }
+  @keyframes rowspin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   /* equalizer animation on the playing row */
   .eq {

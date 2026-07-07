@@ -16,9 +16,11 @@
     toasts,
     prefetchEnabled,
     offlineCovers,
+    setPlaybackStatus,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
+  import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
@@ -59,6 +61,7 @@
     el.addEventListener("pause", onElPause);
     el.addEventListener("error", onElError);
     el.addEventListener("stalled", onElStall);
+    el.addEventListener("waiting", onElWaiting);
     el.addEventListener("progress", onProgress);
     return el;
   }
@@ -67,15 +70,24 @@
     audio = els[0]; // assignment kicks the reactive load/transport blocks
     startWatchdog();
     document.addEventListener("visibilitychange", onVisibility);
+    // Last reliable moment before the tab is discarded: report the current
+    // track's play time (reportListen uses keepalive, so it survives unload).
+    window.addEventListener("pagehide", onPageHide);
   });
+  function onPageHide() {
+    flushListen(null);
+  }
   onDestroy(() => {
     stopWatchdog();
+    cancelRecovery();
+    cancelSwitch();
     cancelPauseMirror();
     cancelPendingSeek();
     cancelSeekChase();
     clearTimeout(prefetchTimer);
     clearTimeout(archiveTimer);
     document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("pagehide", onPageHide);
     releaseWakeLock();
     setBlobUrl(null); // revoke any live object URL
     for (const el of els) {
@@ -140,9 +152,20 @@
   let lastAdvance = 0;
   let recovering = false;
   let recoverAttempts = 0;
+  let recoverDeadline = null; // hard timeout so a recovery can't wedge forever
+  // Has the current track ever produced audio progress? A track that never has
+  // (first play of a cold Deezer track being archived/transcoded server-side)
+  // gets a long grace window before we treat a frozen playhead as a stall —
+  // reloading too early aborts the in-flight archive and turns slowness into a
+  // skip. Reset on every (re)load / restart.
+  let hadProgress = false;
   // True while playback is interrupted purely because the network is down: we
   // hold the track + position and resume on reconnect instead of skipping.
   let netWaiting = false;
+  const RECOVER_MAX = 4;
+  const STALL_MS = 6000; // a track that HAS played but froze → real stall
+  const COLD_START_MS = 30000; // a track that never started → let the server work
+  const RECOVER_DEADLINE_MS = 12000; // give up on a single recovery attempt
 
   function startWatchdog() {
     stopWatchdog();
@@ -154,10 +177,19 @@
       if (audio.currentTime !== lastPos) {
         lastPos = audio.currentTime;
         lastAdvance = Date.now();
+        if (audio.currentTime > 0.25) {
+          hadProgress = true;
+          setPlaybackStatus("idle");
+        }
         return;
       }
-      // currentTime frozen while we believe we're playing → stuck on a bug.
-      if (Date.now() - lastAdvance > 6000) recoverPlayback();
+      // currentTime frozen while we believe we're playing.
+      const frozen = Date.now() - lastAdvance;
+      const limit = hadProgress ? STALL_MS : COLD_START_MS;
+      // Say WHAT is happening while we wait, so the silence isn't unexplained.
+      if (frozen > 1500 && !netWaiting)
+        setPlaybackStatus(hadProgress ? "buffering" : "archiving");
+      if (frozen > limit) recoverPlayback();
     }, 2000);
   }
   function stopWatchdog() {
@@ -177,10 +209,37 @@
   function onElStall(e) {
     if (e && e.target !== audio) return;
     // Give buffering a moment; the watchdog handles a sustained freeze.
+    if (get(player).playing && !recovering && !switching)
+      setPlaybackStatus(hadProgress ? "buffering" : "archiving");
+  }
+  // The element ran out of buffered data and is waiting for more — surface it
+  // right away (faster than the watchdog) so silence isn't unexplained.
+  function onElWaiting(e) {
+    if (e && e.target !== audio) return;
+    if (loadingTrack || recovering || switching) return;
+    if (get(player).playing && !netWaiting)
+      setPlaybackStatus(hadProgress ? "buffering" : "archiving");
+  }
+
+  // Tear down any in-flight recovery so a late loadedmetadata/error can't fire
+  // after the track changed OR after the user paused — that stale handler used
+  // to re-`play()` a paused track and leave `recovering` stuck (the "pause does
+  // nothing / silence with the play icon on" wedge). Safe to call any time.
+  let recoverCleanup = null;
+  function cancelRecovery() {
+    clearTimeout(recoverDeadline);
+    recoverDeadline = null;
+    if (recoverCleanup) {
+      recoverCleanup();
+      recoverCleanup = null;
+    }
+    recovering = false;
   }
 
   // Reload the current track in place and resume where it died. Capped so a
-  // permanently broken stream can't spin in a reload loop.
+  // permanently broken stream can't spin in a reload loop, and bounded by a hard
+  // deadline so a HUNG reload (upstream that never answers) can't wedge the
+  // transport — the whole point: the user's pause must always take effect.
   function recoverPlayback() {
     const cur = get(current);
     if (!cur || !audio || switching || recovering || loadingTrack) return;
@@ -190,55 +249,75 @@
     // place (reloading the object URL) instead of parking or hitting the net.
     if (!curIsBlob && (!navigator.onLine || !get(online))) {
       netWaiting = true;
+      setPlaybackStatus("waiting-network");
       return;
     }
-    if (recoverAttempts >= 4) {
+    if (recoverAttempts >= RECOVER_MAX) {
       failCurrentTrack(); // permanently broken stream — move on
       return;
     }
     recovering = true;
     recoverAttempts++;
+    setPlaybackStatus("recovering", { attempt: recoverAttempts, max: RECOVER_MAX });
+    const recoverId = curId; // the track this attempt belongs to
+    const el = audio;
     const pos =
-      audio.currentTime > 0.5
-        ? audio.currentTime
+      el.currentTime > 0.5
+        ? el.currentTime
         : lastKnownTime || get(player).currentTime || 0;
     // The element may still carry preload=none from a paused restore — with it,
     // load() defers fetching and loadedmetadata below would never fire.
-    audio.preload = "auto";
-    audio.src =
+    el.preload = "auto";
+    el.src =
       curIsBlob && curBlobUrl ? curBlobUrl : api.streamUrl(cur.deezer_id, curQ);
-    audio.load();
+    el.load();
     const cleanup = () => {
-      audio.removeEventListener("loadedmetadata", onMeta);
-      audio.removeEventListener("error", onErr);
+      clearTimeout(recoverDeadline);
+      recoverDeadline = null;
+      el.removeEventListener("loadedmetadata", onMeta);
+      el.removeEventListener("error", onErr);
+      recoverCleanup = null;
+      recovering = false;
     };
+    recoverCleanup = cleanup;
     const onMeta = () => {
-      cleanup();
+      // The track changed or the element was swapped meanwhile: don't touch it.
+      if (recoverId !== curId || el !== audio) {
+        cleanup();
+        return;
+      }
       try {
         // Only seek when the reloaded source actually allows it: forcing it on
         // a still-generating (rangeless) stream made the browser restart the
         // fetch and bounce playback to 0.
-        if (pos > 0 && seekableAt(audio, pos)) audio.currentTime = pos;
+        if (pos > 0 && seekableAt(el, pos)) el.currentTime = pos;
       } catch {
         /* not seekable yet */
       }
-      audio.play().catch(() => {});
-      recovering = false;
+      // Only resume if the user still WANTS playback — a recovery must never
+      // override a pause the user made while we were reloading.
+      if (get(player).playing) el.play().catch(() => {});
+      cleanup();
       lastAdvance = Date.now();
+      setPlaybackStatus("idle");
     };
-    // The reload itself failed (e.g. server 502): loadedmetadata never fires, so
-    // release `recovering` and schedule the next attempt with backoff. Once the
-    // budget is spent the next call skips the track (or parks it if offline).
+    // The reload itself failed (e.g. server 502) OR the deadline fired (a hung
+    // upstream): schedule the next attempt with backoff. Once the budget is
+    // spent the next call skips the track (or parks it if offline).
     const onErr = () => {
       cleanup();
-      recovering = false;
       const delay = Math.min(800 * recoverAttempts, 4000);
       setTimeout(() => {
-        if (get(player).playing) recoverPlayback();
+        if (get(player).playing && recoverId === curId) recoverPlayback();
       }, delay);
     };
-    audio.addEventListener("loadedmetadata", onMeta);
-    audio.addEventListener("error", onErr);
+    el.addEventListener("loadedmetadata", onMeta);
+    el.addEventListener("error", onErr);
+    recoverDeadline = setTimeout(() => {
+      recoverDeadline = null;
+      if (recoverId === curId && el === audio) onErr();
+      else cleanup();
+    }, RECOVER_DEADLINE_MS);
   }
 
   // A buffer underrun makes some browsers fire a transient `pause` (immediately
@@ -267,7 +346,12 @@
     // resume play near the start but knew a later position, restore it. The
     // guard (knew > 2s, now ~0) keeps legit fresh starts at the beginning.
     if (lastKnownTime > 2 && audio.currentTime < 0.5) safeSeek(lastKnownTime);
-    if (!get(player).playing) player.play();
+    // Reflect a NATIVE resume (OS/lock-screen play) back into the store — but
+    // NOT while we're mid-recovery/switch/chase, where the play() is ours or a
+    // stale handler's: promoting it there would resurrect a playback the user
+    // just paused (the "pause won't stick / play button inverted" bug).
+    if (!get(player).playing && !recovering && !switching && !chasing)
+      player.play();
   }
   function onElPause(e) {
     if (e.target !== audio) return;
@@ -356,6 +440,30 @@
     if ($current.deezer_id !== curId) loadTrack($current);
     else if ($player.seq !== curSeq) restartCurrent();
   }
+  // The queue emptied (last track removed): stop and release the element so it
+  // doesn't keep playing a track that's no longer current while the UI shows
+  // "nothing playing".
+  $: if (audio && !$current && curId !== null) teardownAudio();
+
+  function teardownAudio() {
+    cancelRecovery();
+    cancelSwitch();
+    cancelSeekChase();
+    cancelPendingSeek();
+    try {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    } catch {
+      /* ignore */
+    }
+    setBlobUrl(null);
+    curId = null;
+    curIsBlob = false;
+    buffered.set(0);
+    player.setProgress(0, 0);
+    setPlaybackStatus("idle");
+  }
   // A quality change for the SAME track is handed off gaplessly instead of
   // reloading the element in place.
   $: if (
@@ -415,10 +523,13 @@
     curSeq = get(player).seq;
     lastKnownTime = resumeAt;
     recoverAttempts = 0; // fresh track, fresh recovery budget
+    hadProgress = false; // this track hasn't produced audio yet (cold-start grace)
+    cancelRecovery(); // a recovery for the OUTGOING track must not touch this one
     cancelPauseMirror(); // drop a deferred pause from the outgoing track
     cancelPendingSeek(); // a stale seek must never land on this new track
     cancelSeekChase(); // ditto for a chase targeting the outgoing track
     buffered.set(0); // new source -> nothing loaded yet
+    setPlaybackStatus(get(player).playing ? "loading" : "idle");
     // Reset the seek bar NOW — before the (possibly async) source resolve — so a
     // skip never leaves the outgoing track's position/duration on screen, and
     // gate onTime so a late timeupdate from the old source can't write it back.
@@ -463,6 +574,8 @@
   function restartCurrent() {
     curSeq = get(player).seq;
     lastKnownTime = 0;
+    hadProgress = false;
+    cancelRecovery();
     cancelPendingSeek(); // a pending resume-seek would undo the restart
     cancelSeekChase(); // so would a chase still aiming at an old target
     try {
@@ -489,8 +602,9 @@
   // A track we couldn't play at all (no playable source / archiving failed /
   // repeated decode errors). Skip to the next one instead of freezing.
   function failCurrentTrack() {
-    recovering = false;
-    switching = false;
+    cancelRecovery();
+    cancelSwitch();
+    setPlaybackStatus("error");
     const s = get(player);
     toasts.push("Titre indisponible, passage au suivant", "error");
     if (s.index < s.queue.length - 1) player.next();
@@ -612,6 +726,18 @@
   // Gapless quality switch: buffer the new bitrate on the idle element at the
   // current position, then swap playback over once it can play through. Keeps
   // the position to the element's full precision so there's no audible jump.
+  // Abort an in-flight quality switch and keep the CURRENT element as-is, so a
+  // user pause during a (possibly hung) preload takes effect immediately on the
+  // still-playing element instead of waiting out the 8s deadline.
+  let switchCleanup = null;
+  function cancelSwitch() {
+    if (switchCleanup) {
+      switchCleanup();
+      switchCleanup = null;
+    }
+    switching = false;
+  }
+
   function switchQuality(newQ) {
     const cur = get(current);
     const incoming = els.find((e) => e !== audio);
@@ -626,7 +752,6 @@
     cancelSeekChase(); // the swap changes elements — a chase would misfire
     switching = true;
     const pos = audio.currentTime;
-    const wasPlaying = !audio.paused && get(player).playing;
     incoming.volume = audio.volume;
     incoming.muted = audio.muted;
     incoming.preload = "auto"; // may carry preload=none from a paused restore
@@ -644,14 +769,15 @@
     };
     const cleanup = () => {
       clearTimeout(failTimer);
+      switchCleanup = null;
       incoming.removeEventListener("loadedmetadata", onMeta);
       incoming.removeEventListener("canplay", swap);
       incoming.removeEventListener("error", abort);
     };
-    // The preload failed (404/network) or stalled past the deadline: DON'T hand
-    // playback to a dead element (that used to kill the audio outright) — keep
-    // playing at the old bitrate and apply the new quality on the next load.
-    const abort = () => {
+    // Tear down the incoming preload without swapping, keeping the current
+    // element playing. Used both by a user pause mid-switch (cancelSwitch) and
+    // as the base of `abort`.
+    switchCleanup = () => {
       if (done) return;
       done = true;
       cleanup();
@@ -662,8 +788,16 @@
       } catch {
         /* ignore */
       }
-      curQ = newQ; // next load uses it; avoids an instant retry loop
+      curQ = newQ; // adopt for the next load; avoids an instant retry loop
       switching = false;
+    };
+    // The preload failed (404/network) or stalled past the deadline: DON'T hand
+    // playback to a dead element (that used to kill the audio outright) — keep
+    // playing at the old bitrate and apply the new quality on the next load.
+    const abort = () => {
+      if (done) return;
+      const teardown = switchCleanup;
+      teardown && teardown();
       toasts.push("Qualité appliquée au prochain titre", "info");
     };
     const swap = () => {
@@ -685,7 +819,9 @@
       curQ = newQ;
       registerSource(incoming);
       resumeAudio();
-      if (wasPlaying) incoming.play().catch(() => {});
+      // Recompute intent at SWAP time — a pause made during the preload must not
+      // be undone by a stale `wasPlaying` captured when the switch started.
+      if (get(player).playing) incoming.play().catch(() => {});
       old.pause();
       try {
         old.removeAttribute("src");
@@ -737,17 +873,25 @@
   // is paused while the store may still read playing=true for a tick, and an
   // unconditional play() gets cut off again → a rapid play/pause loop. Guarding
   // on audio.paused makes each direction idempotent and breaks the oscillation.
-  $: if (audio && curId && !switching && !recovering) {
-    if ($player.playing && audio.paused) {
-      // While chasing a seek the element is deliberately paused (post-reload
-      // buffering toward the target) — the chase resumes it when it lands.
-      if (!chasing) {
-        // Playback starts: restore eager buffering if the paused-restore load
-        // deferred it (play() fetches regardless, but rebuffers stay eager too).
-        if (audio.preload !== "auto") audio.preload = "auto";
-        audio.play().catch(() => {});
-      }
-    } else if (!$player.playing && !audio.paused) audio.pause();
+  $: if (audio && curId) {
+    if (!$player.playing) {
+      // A pause ALWAYS wins, in EVERY state. First tear down any in-flight
+      // recovery / quality-switch / seek-chase — otherwise their late handlers
+      // would re-`play()` the element a moment later and the pause "does
+      // nothing" (silence with the play icon on, or the button feels inverted).
+      // Then pause the element. Guard on audio.paused so we don't fight the OS.
+      if (recovering) cancelRecovery();
+      if (switching) cancelSwitch();
+      if (chasing) cancelSeekChase();
+      if (!audio.paused) audio.pause();
+      setPlaybackStatus("idle"); // paused = not trying to play = no indicator
+    } else if (!switching && !recovering && !chasing && audio.paused) {
+      // Playback starts: restore eager buffering if the paused-restore load
+      // deferred it (play() fetches regardless, but rebuffers stay eager too).
+      // Mid-transition states own their own play(), so don't double-drive here.
+      if (audio.preload !== "auto") audio.preload = "auto";
+      audio.play().catch(() => {});
+    }
   }
   $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
 
@@ -759,6 +903,10 @@
     if (e && e.target !== audio) return; // ignore the idle/preloading element
     if (loadingTrack) return; // a track change is mid-flight — position is stale
     if (chasing) return; // chasing a seek — hold the bar at the target
+    // If the visualizer wired the element through a Web Audio context that the
+    // OS later suspended (backgrounded tab), the element "plays" but is silent —
+    // resumeAudio() is a no-op unless the context is actually suspended.
+    resumeAudio();
     // Healthy progress: clear the recovery budget so a later, unrelated stall
     // gets its full retry allowance again.
     if (recoverAttempts && audio.currentTime > lastPos) recoverAttempts = 0;
@@ -769,7 +917,11 @@
       audio.duration && isFinite(audio.duration)
         ? audio.duration
         : $current?.duration || 0;
-    if (audio.currentTime > 0.25) lastKnownTime = audio.currentTime;
+    if (audio.currentTime > 0.25) {
+      lastKnownTime = audio.currentTime;
+      hadProgress = true;
+      if (!audio.paused) setPlaybackStatus("idle"); // real audio is flowing
+    }
     if (netWaiting) netWaiting = false; // progress resumed on its own
     player.setProgress(audio.currentTime, d);
     updateBuffered();
@@ -1052,7 +1204,10 @@
       <Cover src={$current.album?.cover} alt={$current.title} size={56} />
       <span class="info">
         <span class="t">{$current.title}</span>
-        <span class="a muted">{$current.artist?.name}</span>
+        <!-- While the player is working toward playback, the subtitle line says
+             WHAT is happening (Chargement…, Nouvel essai…) instead of the artist,
+             so silence under a "playing" icon is never unexplained. -->
+        <span class="a muted" class:status={$playbackLabel}>{$playbackLabel || $current.artist?.name}</span>
       </span>
     {:else}
       <span class="muted ph">Rien en lecture</span>
@@ -1070,7 +1225,7 @@
   <div class="controls">
     <button class="sm shuf" class:on={$player.shuffle} on:click={() => player.toggleShuffle()} aria-label="Aléatoire"><Icon name="shuffle" size={18} /></button>
     <button class="prev" on:click={() => player.prev()} aria-label="Précédent"><Icon name="prev" size={20} /></button>
-    <button class="pp" on:click={() => player.toggle()} aria-label="Lecture/Pause">
+    <button class="pp" class:busy={$playbackBusy} on:click={() => player.toggle()} aria-label="Lecture/Pause">
       <Icon name={$player.playing ? "pause" : "play"} size={18} />
     </button>
     <button class="next" on:click={() => player.next()} aria-label="Suivant"><Icon name="next" size={20} /></button>
@@ -1229,9 +1384,29 @@
     color: var(--bg) !important;
     display: grid;
     place-items: center;
+    position: relative;
   }
   .pp:hover {
     transform: scale(1.06);
+  }
+  /* Discreet spinner ring around the play/pause button while the player is
+     working toward playback (loading / buffering / archiving / retrying). */
+  .pp.busy::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: var(--accent);
+    animation: pp-spin 0.8s linear infinite;
+  }
+  @keyframes pp-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .a.status {
+    color: var(--accent);
   }
   .seek {
     grid-area: seek;
@@ -1399,8 +1574,8 @@
     }
     /* Keep only the fullscreen toggle from the extras cluster — the quality
        menu, volume, etc. don't fit a narrow bar, but the fullscreen button
-       must stay reachable. */
-    .extra > :not(.fs) {
+       (class "max") must stay reachable. */
+    .extra > :not(.max) {
       display: none;
     }
     .extra {

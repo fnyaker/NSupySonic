@@ -31,7 +31,10 @@
     data = null;
     try {
       const r = await api.album(albumId);
-      if (mine === loadSeq) data = r;
+      if (mine === loadSeq) {
+        data = r;
+        fav = !!r.album?.is_favorite; // correct heart state on open
+      }
     } catch {
       if (mine === loadSeq) data = null;
     }
@@ -77,7 +80,7 @@
         <span class="kind">Album</span>
         <h1>{data.album.title}</h1>
         <div class="sub">
-          <button class="artist" on:click={() => push("/artist/" + data.album.artist.deezer_id)}>
+          <button class="artist" on:click={() => data.album.artist && push("/artist/" + data.album.artist.deezer_id)}>
             {data.album.artist?.name}
           </button>
           <span class="muted">

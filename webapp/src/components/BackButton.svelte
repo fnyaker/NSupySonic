@@ -15,7 +15,7 @@
   // Only on detail pages (the ones you reach by tapping into something and from
   // which there's no nav entry to get back). Top-level routes (home / search /
   // library) stay clean — they're one tap away in the nav.
-  const DETAIL = ["/album/", "/artist/", "/playlist/", "/mix/"];
+  const DETAIL = ["/album/", "/artist/", "/playlist/", "/mix/", "/podcast/"];
   $: show = DETAIL.some((p) => $location.startsWith(p));
 </script>
 

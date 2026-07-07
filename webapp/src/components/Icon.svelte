@@ -2,9 +2,6 @@
   // Clean Lucide-style line icons (no emoji). fill/stroke handled per-icon.
   export let name;
   export let size = 20;
-
-  const FILLED = new Set(["play", "pause", "prev", "next", "more", "moreVertical", "heartFilled"]);
-  $: filled = FILLED.has(name);
 </script>
 
 <svg

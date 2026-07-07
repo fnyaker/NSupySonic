@@ -88,6 +88,10 @@ def _album(a):
         "artist": {"deezer_id": str(a.get("ART_ID")), "name": a.get("ART_NAME", "")},
         "nb_tracks": a.get("NUMBER_TRACK"),
         "year": (str(a.get("PHYSICAL_RELEASE_DATE") or a.get("DIGITAL_RELEASE_DATE") or "")[:4]) or None,
+        # The gw album page reports whether the account already favorited it, so
+        # the detail page can show the correct heart state (and avoid a "re-add"
+        # that reads as a fresh favorite). Absent on older responses → False.
+        "is_favorite": bool(a.get("FAVORITE_STATUS")),
     }
 
 
@@ -1107,7 +1111,13 @@ def flow():
     provider, err = _need_provider()
     if err:
         return err
-    res = provider.get_flow()
+    try:
+        res = provider.get_flow()
+    except Exception:
+        # A Deezer outage must not 500 the endless-radio endpoint (the player
+        # polls it for autoplay continuation) — degrade to "no more tracks".
+        logger.warning("Flow fetch failed", exc_info=True)
+        return jsonify({"tracks": []})
     return jsonify({"tracks": _tracks((res or {}).get("data", []))})
 
 
@@ -1192,7 +1202,14 @@ def track_radio(track_id):
     provider, err = _need_provider()
     if err:
         return err
-    res = provider.get_track_mix(track_id)
+    if not _valid_id(track_id):
+        return jsonify({"tracks": []})
+    try:
+        res = provider.get_track_mix(track_id)
+    except Exception:
+        # Seeds autoplay after a track ends — a Deezer hiccup shouldn't 500 it.
+        logger.warning("Track radio failed for %s", track_id, exc_info=True)
+        return jsonify({"tracks": []})
     return jsonify({"tracks": _tracks((res or {}).get("data", []))})
 
 
@@ -1276,21 +1293,21 @@ def my_favorite_ids():
     if not _is_admin():
         ids = [str(t.deezer_id) if t.deezer_id else str(t.id) for t in _user_starred()]
         return jsonify({"ids": ids})
-    ids = [str(t.id) for t in _local_starred()]  # local stars (UUIDs)
+    # Always seed from the DB stars (local UUIDs + the admin's Deezer stars),
+    # THEN union the live Deezer favorites. Reading only the live list dropped a
+    # star whose push was disabled (push_to_deezer off) or failed, leaving its
+    # heart empty; the union keeps every star the user actually made. A set
+    # de-dupes the overlap between the DB mirror and the live list.
+    ids = {str(t.id) for t in _local_starred()}
+    ids |= {str(t.deezer_id) for t in _deezer_starred() if t.deezer_id}
     provider = _provider()
-    live_ok = False
     if provider is not None:
         try:
             raw = provider.dz.gw.get_user_favorite_ids(limit=100000)
-            ids += [str(x.get("SNG_ID")) for x in (raw.get("data") or []) if x.get("SNG_ID")]
-            live_ok = True
+            ids |= {str(x.get("SNG_ID")) for x in (raw.get("data") or []) if x.get("SNG_ID")}
         except Exception:
             pass
-    if not live_ok:
-        # Deezer unreachable: use the Deezer stars already mirrored in the DB so
-        # heart state stays correct offline.
-        ids += [str(t.deezer_id) for t in _deezer_starred() if t.deezer_id]
-    return jsonify({"ids": ids})
+    return jsonify({"ids": list(ids)})
 
 
 @webapi.route("/me/local")
@@ -1325,12 +1342,20 @@ def my_favorites():
             tracks = [_local_track(t) for t in _local_starred()]
             # ``get_my_favorite_tracks`` returns public-API-shaped dicts, so reuse
             # ``_track_api``.
+            have = set()
             for t in provider.get_my_favorite_tracks():
                 tr = _track_api(t)
                 if not tr:
                     continue
                 tr["added"] = int(t.get("time_add") or t.get("DATE_ADD") or 0)
                 tracks.append(tr)
+                have.add(tr["deezer_id"])
+            # Include the admin's DB Deezer stars that AREN'T in the live list —
+            # e.g. starred with push_to_deezer off, or whose push failed. Without
+            # this they vanished from the library while still showing a full heart.
+            for t in _deezer_starred():
+                if str(t.deezer_id) not in have:
+                    tracks.append(_db_track(t))
             return jsonify({"tracks": tracks})
         except Exception:
             logger.warning("Deezer favorites fetch failed; serving from DB", exc_info=True)
@@ -1579,8 +1604,11 @@ def favorite():
         except Exception:
             logger.warning("favorite: metadata fetch failed for %s", deezer_id, exc_info=True)
             return jsonify({"error": "track unavailable"}), 502
-    # Guests keep favorites private/local — never mirror them to the Deezer account.
-    if _is_admin() and provider is not None:
+    # Guests keep favorites private/local — never mirror them to the Deezer
+    # account. The admin's stars mirror to Deezer only when push_to_deezer is on;
+    # either way the local star is recorded, so it survives a disabled/failed push.
+    push = current_app.config["DEEZER"].get("push_to_deezer", True)
+    if _is_admin() and provider is not None and push:
         try:
             if on:
                 provider.dz.gw.add_song_to_favorites(deezer_id)
@@ -1689,7 +1717,8 @@ def edit_playlist(playlist_id):
         return jsonify({"error": "not found"}), 404
     data = request.get_json(silent=True) or {}
     title = data.get("title")
-    if title is not None and title.strip():
+    # Tolerate a non-string title (e.g. a number) instead of 500-ing on .strip().
+    if isinstance(title, str) and title.strip():
         pl.name = title.strip()
     if "description" in data:
         pl.comment = data.get("description") or None
@@ -1761,7 +1790,10 @@ def remove_playlist_tracks(playlist_id):
             i for i, t in enumerate(pl.get_tracks())
             if _track_uid(t) in wanted or str(t.id) in wanted
         ]
-    indexes = [int(i) for i in indexes]
+    try:
+        indexes = [int(i) for i in indexes]
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid indexes"}), 400
     if not indexes:
         return jsonify({"error": "no tracks"}), 400
     pl.remove_at_indexes(indexes)
@@ -1859,15 +1891,19 @@ def trigger_sync():
     if not current_app.config["DEEZER"].get("sync_user"):
         return jsonify({"error": "no sync user configured"}), 503
 
+    from ..deezer import scheduler
+
     global _sync_thread
     with _sync_lock:
-        if _sync_thread is not None and _sync_thread.is_alive():
+        # Already running (our own manual thread, OR the scheduled sync): don't
+        # start a second one — _run_sync shares scheduler._sync_lock, so a
+        # duplicate would just no-op, but reporting it cleanly avoids the spinner
+        # thinking a fresh run started.
+        if (_sync_thread is not None and _sync_thread.is_alive()) or scheduler.is_syncing():
             return jsonify({"ok": True, "running": True})
-        from ..deezer.scheduler import _run_sync
-
         app = current_app._get_current_object()
         _sync_thread = threading.Thread(
-            target=_run_sync, args=(app,), name="deezer-sync-manual", daemon=True
+            target=scheduler._run_sync, args=(app,), name="deezer-sync-manual", daemon=True
         )
         _sync_thread.start()
     return jsonify({"ok": True, "running": True})
@@ -1877,7 +1913,9 @@ def trigger_sync():
 @login_required
 @admin_required
 def sync_status():
-    running = _sync_thread is not None and _sync_thread.is_alive()
+    from ..deezer import scheduler
+
+    running = (_sync_thread is not None and _sync_thread.is_alive()) or scheduler.is_syncing()
     return jsonify({"running": running})
 
 

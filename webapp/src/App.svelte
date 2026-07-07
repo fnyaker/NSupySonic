@@ -126,7 +126,8 @@
 
   function onKey(e) {
     const tag = (e.target.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+    if (tag === "input" || tag === "textarea" || tag === "select" || e.target.isContentEditable)
+      return;
     if (!$user) return;
     switch (e.key) {
       case " ":

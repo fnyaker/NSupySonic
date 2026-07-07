@@ -8,8 +8,15 @@
  * so they always go straight to the network — never cached.
  */
 
-const CACHE = "nsupysonic-shell-v3";
+const CACHE = "nsupysonic-shell-v4";
 const SCOPE_PATH = "/app/";
+
+// Only ever cache a genuine success. Caching a 404/5xx (a transient 502 on a
+// hashed asset, a 503 "not built" notice served as the shell) would pin that
+// error forever under cache-first and brick the app until storage is cleared.
+function ok(res) {
+  return res && res.ok && res.status === 200;
+}
 
 // Precache the shell + its hashed JS/CSS so an airplane-mode launch actually
 // boots. The asset filenames are content-hashed (unknown ahead of time), so we
@@ -71,8 +78,10 @@ self.addEventListener("fetch", (event) => {
         (hit) =>
           hit ||
           fetch(request).then((res) => {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(request, copy));
+            if (ok(res)) {
+              const copy = res.clone();
+              caches.open(CACHE).then((c) => c.put(request, copy));
+            }
             return res;
           })
       )
@@ -86,8 +95,10 @@ self.addEventListener("fetch", (event) => {
   // the fetch finish in the background (still refreshing the cache for next time).
   if (request.mode === "navigate" || url.pathname === SCOPE_PATH) {
     const networked = fetch(request).then((res) => {
-      const copy = res.clone();
-      caches.open(CACHE).then((c) => c.put("/app/", copy));
+      if (ok(res)) {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put("/app/", copy));
+      }
       return res;
     });
     networked.catch(() => {}); // don't surface as unhandled when we serve cache
@@ -106,8 +117,10 @@ self.addEventListener("fetch", (event) => {
       (hit) =>
         hit ||
         fetch(request).then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(request, copy));
+          if (ok(res)) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(request, copy));
+          }
           return res;
         })
     )

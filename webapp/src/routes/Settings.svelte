@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { push } from "svelte-spa-router";
   import {
+    user,
     downloadQuality,
     downloads,
     downloadsSize,
@@ -11,6 +12,7 @@
     offlineOnlyDownloaded,
     toasts,
   } from "../lib/stores.js";
+  import { api } from "../lib/api.js";
   import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
   import { clearPlayCache, enforce } from "../lib/playcache.js";
   import { bytes as fmtBytes, duration as fmtDuration } from "../lib/format.js";
@@ -64,11 +66,33 @@
     await clearAll();
     toasts.push("Téléchargements supprimés");
   }
+
+  // The sidebar (desktop) is the usual logout entry point, but it's hidden on
+  // phones — so Settings carries the only mobile-reachable Déconnexion.
+  async function logout() {
+    try {
+      await api.logout();
+    } catch {
+      /* ignore — clear the local session regardless */
+    }
+    user.set(null);
+  }
 </script>
 
 <div class="head">
   <h1>Réglages</h1>
 </div>
+
+<section class="card">
+  <h2>Compte</h2>
+  <div class="acct">
+    <div class="acct-info">
+      <span class="acct-name">{$user?.name}</span>
+      <span class="muted acct-sub">{$user?.admin ? "Administrateur" : "Utilisateur"}</span>
+    </div>
+    <button class="logout" on:click={logout}><Icon name="user" size={16} /> Déconnexion</button>
+  </div>
+</section>
 
 <section class="card">
   <h2>Qualité de téléchargement par défaut</h2>
@@ -165,6 +189,38 @@
 <style>
   .head h1 {
     margin-bottom: 18px;
+  }
+  .acct {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .acct-info {
+    display: flex;
+    flex-direction: column;
+  }
+  .acct-name {
+    font-weight: 700;
+  }
+  .acct-sub {
+    font-size: 0.82rem;
+  }
+  .logout {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 15px;
+    border-radius: 999px;
+    background: var(--bg);
+    border: 1px solid var(--bg-hover);
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .logout:hover {
+    border-color: var(--accent-2);
+    color: var(--accent-2);
   }
   .card {
     background: var(--bg-card);

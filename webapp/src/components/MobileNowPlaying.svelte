@@ -19,6 +19,7 @@
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
+  import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import { followScroll } from "../lib/scroll.js";
@@ -311,18 +312,28 @@
   // a button press or auto-advance slides the new cover in.
   let lastId = null;
   let prevIdx = -1;
-  $: if ($current && scroller) recenter($current.deezer_id);
-  async function recenter(id) {
-    if (id === lastId) return;
+  // Re-run on a change to the current track OR its index. Toggling shuffle
+  // reorders the queue and moves the current track to index 0 WITHOUT changing
+  // its id — keying on the id alone (the old code) left the carousel aligned to
+  // the OLD slot, and the stale scroll position then made onSettled fire a bogus
+  // swipe-advance (the "enabling shuffle skips to the next song" bug). Handling
+  // the reindex re-centres instead.
+  $: if (scroller && idx >= 0 && $current) recenter($current.deezer_id, idx);
+  async function recenter(id, index) {
+    const idChanged = id !== lastId;
+    const idxChanged = index !== prevIdx;
+    if (!idChanged && !idxChanged) return;
     const first = lastId === null;
+    const dir = index >= prevIdx ? 1 : -1;
     lastId = id;
-    const dir = idx >= prevIdx ? 1 : -1;
-    prevIdx = idx;
+    prevIdx = index;
     const wasSwipe = swipeAdvance;
     swipeAdvance = false;
     await tick();
-    if (first || wasSwipe) centerCurrent(); // open / swipe -> no extra motion
-    else slideToCurrent(dir); // button / auto-advance -> slide in
+    // Open, a finger swipe, or a same-track reindex (shuffle/reorder) -> just
+    // snap to centre. A real track change (button / auto-advance) slides in.
+    if (first || wasSwipe || !idChanged) centerCurrent();
+    else slideToCurrent(dir);
   }
   onDestroy(() => {
     clearTimeout(settleTimer);
@@ -376,7 +387,7 @@
     <div class="info">
       <div class="txt">
         <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
-        <button class="a" on:click={() => $current.artist && go("/artist/" + $current.artist.deezer_id)}>{$current.artist?.name}</button>
+        <button class="a" class:status={$playbackLabel} on:click={() => !$playbackLabel && $current.artist && go("/artist/" + $current.artist.deezer_id)}>{$playbackLabel || $current.artist?.name}</button>
       </div>
       <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
         <Icon name={fav ? "heartFilled" : "heart"} size={24} />
@@ -392,7 +403,7 @@
     <div class="controls">
       <button class="sm" class:on={$player.shuffle} on:click={() => player.toggleShuffle()} aria-label="Aléatoire"><Icon name="shuffle" size={22} /></button>
       <button on:click={() => player.prev()} aria-label="Précédent"><Icon name="prev" size={30} /></button>
-      <button class="pp" on:click={() => player.toggle()} aria-label="Lecture/Pause"><Icon name={$playing ? "pause" : "play"} size={28} /></button>
+      <button class="pp" class:busy={$playbackBusy} on:click={() => player.toggle()} aria-label="Lecture/Pause"><Icon name={$playing ? "pause" : "play"} size={28} /></button>
       <button on:click={() => player.next()} aria-label="Suivant"><Icon name="next" size={30} /></button>
       <button class="sm" class:on={$player.repeat !== "off"} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
     </div>
@@ -639,6 +650,24 @@
     color: #111;
     display: grid;
     place-items: center;
+    position: relative;
+  }
+  .controls .pp.busy::after {
+    content: "";
+    position: absolute;
+    inset: -5px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: var(--accent);
+    animation: pp-spin 0.8s linear infinite;
+  }
+  @keyframes pp-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .a.status {
+    color: var(--accent) !important;
   }
 
   .viz {

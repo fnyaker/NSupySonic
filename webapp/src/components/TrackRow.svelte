@@ -3,6 +3,7 @@
   import { player, currentId, playing, favorites, openMenu, downloads } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
+  import { playbackIdle } from "../lib/playback.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
 
@@ -39,8 +40,12 @@
   on:contextmenu={menu}
 >
   <button class="play" on:click={play} aria-label="Lire">
-    {#if isPlaying}
+    {#if isPlaying && $playbackIdle}
       <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
+    {:else if isPlaying}
+      <!-- current row but audio isn't flowing yet (loading/buffering): a spinner
+           tells the truth instead of an equalizer dancing over silence. -->
+      <span class="rowspin" aria-hidden="true"></span>
     {:else}
       {#if index !== null}<span class="num">{index}</span>{/if}
       <span class="ic"><Icon name="play" size={15} /></span>
@@ -181,6 +186,20 @@
     text-align: right;
     font-variant-numeric: tabular-nums;
     font-size: 0.85rem;
+  }
+  /* small spinner shown on the current row while audio isn't flowing yet */
+  .rowspin {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--bg-hover);
+    border-top-color: var(--accent);
+    animation: rowspin 0.8s linear infinite;
+  }
+  @keyframes rowspin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   /* equalizer animation on the playing row */
   .eq {

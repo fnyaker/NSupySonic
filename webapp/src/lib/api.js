@@ -60,8 +60,10 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
   try {
     res = await fetch(BASE + path, {
       credentials: "include",
-      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
       ...opts,
+      // Spread opts FIRST so its own `headers` (if any) can't clobber the merged
+      // header object — then merge, letting a caller override individual headers.
+      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
     });
   } catch (e) {
     // Network-level failure: offline, DNS, reset, CORS-less abort.

@@ -18,7 +18,12 @@
 
   // Deep link support (/search/:q from the sidebar) — initialise once.
   $: if (params.q !== undefined) {
-    const decoded = decodeURIComponent(params.q);
+    let decoded = params.q;
+    try {
+      decoded = decodeURIComponent(params.q); // a malformed %xx would throw
+    } catch {
+      /* keep the raw value */
+    }
     if (decoded !== q) {
       q = decoded;
       run(q.trim());

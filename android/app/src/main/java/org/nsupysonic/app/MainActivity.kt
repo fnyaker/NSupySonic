@@ -99,7 +99,12 @@ class MainActivity : AppCompatActivity() {
             databaseEnabled = true
             // Auto-advance to the next track must not require a tap.
             mediaPlaybackRequiresUserGesture = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            // Only relax mixed content for the self-signed / http home-server case
+            // (SSL verification turned off). With verification ON, keep the safer
+            // compatibility mode instead of blanket-allowing http on an https page.
+            mixedContentMode =
+                if (prefs.verifySsl) WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                else WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             userAgentString = "$userAgentString NSupySonicApp/1.0"
         }
         webView.addJavascriptInterface(Bridge(), "NSNative")
@@ -139,8 +144,13 @@ class MainActivity : AppCompatActivity() {
                 view: WebView?, request: WebResourceRequest?
             ): Boolean {
                 val url = request?.url ?: return false
-                // Keep the app's own origin inside; hand anything else to the system.
-                if (url.toString().startsWith(prefs.baseUrl())) return false
+                // Keep the app's own origin inside; hand anything else to the
+                // system. Compare scheme/host/port (a bare startsWith let
+                // "https://host.evil.com" or "https://host:57223" masquerade as
+                // the configured "https://host[:5722]").
+                val base = android.net.Uri.parse(prefs.baseUrl())
+                if (url.scheme == base.scheme && url.host == base.host && url.port == base.port)
+                    return false
                 return try {
                     startActivity(Intent(Intent.ACTION_VIEW, url))
                     true
@@ -172,6 +182,23 @@ class MainActivity : AppCompatActivity() {
         })
 
         webView.loadUrl(prefs.appUrl())
+    }
+
+    // Reopening the settings relaunches us (singleTask) via onNewIntent rather
+    // than onCreate, so the WebView keeps showing the OLD server until the app
+    // is killed. Reload here when the configured origin no longer matches what's
+    // loaded, so a host/port/SSL change takes effect immediately.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!prefs.configured) return
+        if (::webView.isInitialized &&
+            webView.url?.startsWith(prefs.baseUrl()) != true
+        ) {
+            mainFrameFailed = false
+            errorView.visibility = View.GONE
+            webView.loadUrl(prefs.appUrl())
+        }
     }
 
     // NOTE: webView.onPause() is deliberately NOT called from onPause() — that
@@ -218,7 +245,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleState(state: PlayerService.State) {
-        if (!state.active) return
+        if (!state.active) {
+            // Playback wound down (queue emptied / logged out): let the service
+            // clear its media notification instead of leaving a stale one up.
+            if (serviceStarted) service?.update(state)
+            pendingState = state
+            return
+        }
         // Promote to a foreground service on the FIRST actual playback — not on
         // mere app open with a restored (paused) session, which would flash a
         // pointless notification.
@@ -227,8 +260,16 @@ class MainActivity : AppCompatActivity() {
                 pendingState = state
                 return
             }
+            try {
+                ContextCompat.startForegroundService(this, Intent(this, PlayerService::class.java))
+            } catch (_: Exception) {
+                // Background FGS-start can be blocked (Android 12+) if we slipped
+                // to the background between the play tap and this call — retry on
+                // the next state once we're foregrounded again.
+                pendingState = state
+                return
+            }
             serviceStarted = true
-            ContextCompat.startForegroundService(this, Intent(this, PlayerService::class.java))
         }
         pendingState = state
         service?.update(state)

@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 
 _BOOT_DELAY = 20  # let the web server come up before the first sync
 
+# At most one sync at a time, whether triggered by the scheduler or the manual
+# /api/sync endpoint — two DeezerImporter.sync() runs in parallel duplicate work
+# and race on the same DB rows. The web layer reads this to report status and to
+# avoid launching a redundant manual run.
+_sync_lock = threading.Lock()
+
+
+def is_syncing() -> bool:
+    return _sync_lock.locked()
+
 
 def _seconds_until(hour: int, minute: int) -> float:
     now = datetime.now()
@@ -78,6 +88,11 @@ def _run_sync(app):
     from ..db import close_connection, open_connection
     from .importer import DeezerImporter
 
+    # Skip if a sync (scheduled or manual) is already in flight — never run two.
+    if not _sync_lock.acquire(blocking=False):
+        logger.info("Deezer sync already running; skipping this trigger")
+        return
+
     cfg = app.config["DEEZER"]
     try:
         open_connection(reuse=True)
@@ -102,6 +117,7 @@ def _run_sync(app):
             close_connection()
         except Exception:
             pass
+        _sync_lock.release()
 
 
 def _loop(app, schedule, on_start):

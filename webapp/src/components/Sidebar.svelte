@@ -51,7 +51,9 @@
     }
   }
 
-  $: active = (path) => ($location === path ? "active" : "");
+  // Prefix match (except root) so e.g. /search/<query> keeps "Rechercher" lit.
+  $: active = (path) =>
+    $location === path || (path !== "/" && $location.startsWith(path)) ? "active" : "";
 </script>
 
 <nav class="sidebar">

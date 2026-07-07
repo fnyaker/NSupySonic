@@ -46,6 +46,25 @@ export const seekTo = writable(null);
 // re-buffer (a brief pause), so showing it makes that behaviour legible.
 export const buffered = writable(0);
 
+// What the player is actually DOING when it isn't cleanly playing — so the UI
+// can say why "it isn't playing even though I pressed play" instead of showing
+// a lying pause icon over silence. Driven solely by Player.svelte.
+//   idle            — playing normally (or nothing loaded): show nothing
+//   loading         — a new track's source is being attached
+//   buffering       — the element ran out of data mid-play (waiting/stalled)
+//   archiving       — server is fetching/transcoding this track for the 1st time
+//   waiting-network — offline; holding the track, will resume on reconnect
+//   recovering      — a stall/error is being retried (carries attempt/max)
+//   error           — the track could not be played at all
+export const playbackStatus = writable({ state: "idle", since: 0, attempt: 0, max: 0 });
+export function setPlaybackStatus(state, extra = {}) {
+  playbackStatus.update((s) =>
+    s.state === state && s.attempt === (extra.attempt || 0)
+      ? s
+      : { state, since: Date.now(), attempt: extra.attempt || 0, max: extra.max || 0 }
+  );
+}
+
 // Web-player streaming quality (FLAC | MP3_320 | MP3_128).
 export const quality = persisted("player.quality", "FLAC");
 
@@ -364,11 +383,14 @@ function createPlayer() {
     update,
 
     playQueue(tracks, start = 0, context = null) {
-      let queue = clean(tracks);
+      // Resolve the tapped track from the ORIGINAL list first: `start` is an
+      // index into what the user saw, but clean() drops unplayable entries and
+      // would shift the index, starting playback on the wrong track.
+      const src = tracks || [];
+      const wanted = src[Math.min(Math.max(start, 0), Math.max(0, src.length - 1))];
+      let queue = clean(src);
       if (!queue.length) return;
-      // Remember the tapped track, then drop anything unplayable (offline), and
-      // resume from the tapped track's new position (or the first available).
-      const startTrack = queue[Math.min(Math.max(start, 0), queue.length - 1)];
+      const startTrack = wanted && wanted.deezer_id ? wanted : queue[0];
       queue = filterQueue(queue);
       if (!queue.length) return;
       let index = queue.indexOf(startTrack);
@@ -473,6 +495,10 @@ function createPlayer() {
         if (i < 0 || i >= s.queue.length) return s;
         const queue = s.queue.slice();
         queue.splice(i, 1);
+        // Emptied the queue: stop, don't leave playing=true with index -1 (which
+        // kept the <audio> element playing a track no longer in the queue while
+        // the UI showed "nothing playing").
+        if (!queue.length) return { ...s, queue, index: -1, playing: false };
         let index = s.index;
         if (i < s.index) index--;
         else if (i === s.index) index = Math.min(index, queue.length - 1);
@@ -597,7 +623,3 @@ export const current = derived(player, ($p) =>
 // so long lists (e.g. thousands of favorites) don't re-render 4×/second.
 export const currentId = derived(current, ($c) => ($c ? $c.deezer_id : null));
 export const playing = derived(player, ($p) => $p.playing);
-
-export const upNext = derived(player, ($p) =>
-  $p.index >= 0 ? $p.queue.slice($p.index + 1) : []
-);

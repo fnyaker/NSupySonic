@@ -1,7 +1,11 @@
 export function duration(sec) {
   sec = Math.floor(sec || 0);
-  const m = Math.floor(sec / 60);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
+  // Podcast episodes and long albums run past an hour — show h:mm:ss then,
+  // otherwise m:ss (never a bare "92:15").
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return m + ":" + String(s).padStart(2, "0");
 }
 

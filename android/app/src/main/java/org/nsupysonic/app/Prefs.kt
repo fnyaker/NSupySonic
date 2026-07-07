@@ -24,16 +24,32 @@ class Prefs(context: Context) {
 
     /**
      * Normalized origin: scheme defaults to https, the optional port field is
-     * appended only when the host doesn't already carry one.
+     * inserted into the AUTHORITY (host) only when the host doesn't already
+     * carry one — never after a path (the old code produced ".../musique:5722"
+     * for a reverse-proxied sub-path host).
      */
-    fun baseUrl(): String {
-        var h = host.trim().trimEnd('/')
-        if (!h.contains("://")) h = "https://$h"
-        val p = port.trim()
-        if (p.isNotEmpty() && !h.substringAfter("://").contains(":")) h = "$h:$p"
-        return h
-    }
+    fun baseUrl(): String = buildBaseUrl(host, port)
 
     /** The SPA entry point served by supysonic/webui/spa.py. */
-    fun appUrl(): String = baseUrl() + "/app/"
+    fun appUrl(): String = appUrlFor(host, port)
+
+    companion object {
+        fun buildBaseUrl(host: String, port: String): String {
+            var raw = host.trim().trimEnd('/')
+            if (raw.isEmpty()) return ""
+            if (!raw.contains("://")) raw = "https://$raw"
+            val schemeEnd = raw.indexOf("://") + 3
+            val scheme = raw.substring(0, schemeEnd)        // "https://"
+            val rest = raw.substring(schemeEnd)             // "host[:port][/path]"
+            val slash = rest.indexOf('/')
+            val authority = if (slash >= 0) rest.substring(0, slash) else rest
+            val path = if (slash >= 0) rest.substring(slash) else ""
+            val p = port.trim()
+            val auth =
+                if (p.isNotEmpty() && !authority.contains(":")) "$authority:$p" else authority
+            return "$scheme$auth$path"
+        }
+
+        fun appUrlFor(host: String, port: String): String = buildBaseUrl(host, port) + "/app/"
+    }
 }
