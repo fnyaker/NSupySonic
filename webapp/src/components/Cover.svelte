@@ -103,11 +103,36 @@
     clearTimeout(retryTimer);
   });
 
-  // …but if the new image is already cached, mark it loaded before the browser
-  // paints, so swapping to an already-seen cover doesn't flash (no re-fade).
+  // …but if the new image is already cached, mark it loaded before it paints,
+  // so swapping to an already-seen cover doesn't flash (no re-fade). Checked a
+  // microtask later AND against currentSrc: right after a src change,
+  // `complete`/`naturalWidth` still describe the PREVIOUS image (the spec only
+  // updates the image data at the next stable state), so the old check marked
+  // the outgoing cover as loaded — leaving the previous track's art displayed,
+  // indefinitely when the new fetch stalled.
   afterUpdate(() => {
-    if (!loaded && img && img.complete && img.naturalWidth > 0) loaded = true;
+    if (loaded || !img) return;
+    const want = shown;
+    queueMicrotask(() => {
+      if (
+        !loaded &&
+        img &&
+        shown === want &&
+        img.complete &&
+        img.naturalWidth > 0 &&
+        sameSrc(img.currentSrc, want)
+      )
+        loaded = true;
+    });
   });
+  function sameSrc(cur, want) {
+    if (!cur || !want) return false;
+    try {
+      return cur === new URL(want, window.location.href).href;
+    } catch {
+      return cur === want;
+    }
+  }
 
   // The image failed to load: step through the fallback chain — drop a failed
   // hi-res back to the base, retry the base a couple of times (transient CDN
