@@ -1,6 +1,37 @@
 # Plan — audit de bugs : app Android + web UI
 
-> **Statut : audit terminé, corrections à faire.**
+> **Statut : IMPLÉMENTÉ.** Tous les lots (0 → 5) sont livrés sur la branche
+> `claude/app-web-bug-audit-opqvci`, un commit par lot :
+> - **Lot 0 (P0)** — bugs de transport reproduits (pause morte / lecture qui ne
+>   démarre pas) + indicateurs d'état de lecture. Vérifié end-to-end
+>   (`docs/repro/e2e_transport_repro.py`) : pause effective < 500 ms dans tous
+>   les états, plus de wedge, indicateur visible.
+> - **Lot 1 (P1)** — bouton plein écran mobile, cache SW des erreurs, logout
+>   mobile, rechargement Android au changement de serveur. (1.1/1.3 vérifiés
+>   navigateur.)
+> - **Lot 2 (P2 web)** — filtre hors-ligne, durées h:mm:ss, cache playlists,
+>   cœur album/artiste, menu épisode podcast (+ 3.4, 3.5). Test backend ajouté.
+> - **Lot 3 (P2 api)** — flow/radio 500, concurrence de sync, favoris admin
+>   (push_to_deezer + fusion lecture), durcissement entrées (+ 3.15). 6 tests.
+> - **Lot 4 (P2/P3 app)** — parsing URL, persistance setup, crash FGS, notif
+>   zombie, origine WebView, mixed-content (2.9–2.11, 3.17–3.20). Non compilé
+>   ici (pas de SDK) ; revu à la main.
+> - **Lot 5 (P3 web)** — teardown file, alignement d'index, AudioContext,
+>   télémétrie pagehide, et divers (3.1–3.3, 3.6–3.8, 3.10–3.13). 3.9 laissé
+>   de côté (nécessite un état favori par carte, non disponible).
+>
+> Tests : 143 tests offline verts (le seul « échec » local, `test_spa_served`,
+> est l'artefact du `dist/` buildé sur place — vert en CI où `dist/` est absent).
+> Suivi restant noté : header serveur `X-NS-Status` + transcode Opus-à-froid non
+> bloquant (0.3, approfondissement serveur — l'indicateur côté client couvre
+> déjà le besoin), et 3.9.
+>
+> _Le reste de ce document est le rapport d'audit d'origine, conservé comme
+> référence des causes et des correctifs._
+
+---
+
+> **Statut initial : audit terminé, corrections à faire.**
 > Deux passes : (1) relecture complète de `webapp/src` (SPA Svelte),
 > `webapp/public/sw.js` (PWA), `supysonic/webui/` (backend `/api` + SPA serving)
 > et `android/` (app native + `nsshim.js`) ; (2) **tests dynamiques en
