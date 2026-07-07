@@ -312,18 +312,28 @@
   // a button press or auto-advance slides the new cover in.
   let lastId = null;
   let prevIdx = -1;
-  $: if ($current && scroller) recenter($current.deezer_id);
-  async function recenter(id) {
-    if (id === lastId) return;
+  // Re-run on a change to the current track OR its index. Toggling shuffle
+  // reorders the queue and moves the current track to index 0 WITHOUT changing
+  // its id — keying on the id alone (the old code) left the carousel aligned to
+  // the OLD slot, and the stale scroll position then made onSettled fire a bogus
+  // swipe-advance (the "enabling shuffle skips to the next song" bug). Handling
+  // the reindex re-centres instead.
+  $: if (scroller && idx >= 0 && $current) recenter($current.deezer_id, idx);
+  async function recenter(id, index) {
+    const idChanged = id !== lastId;
+    const idxChanged = index !== prevIdx;
+    if (!idChanged && !idxChanged) return;
     const first = lastId === null;
+    const dir = index >= prevIdx ? 1 : -1;
     lastId = id;
-    const dir = idx >= prevIdx ? 1 : -1;
-    prevIdx = idx;
+    prevIdx = index;
     const wasSwipe = swipeAdvance;
     swipeAdvance = false;
     await tick();
-    if (first || wasSwipe) centerCurrent(); // open / swipe -> no extra motion
-    else slideToCurrent(dir); // button / auto-advance -> slide in
+    // Open, a finger swipe, or a same-track reindex (shuffle/reorder) -> just
+    // snap to centre. A real track change (button / auto-advance) slides in.
+    if (first || wasSwipe || !idChanged) centerCurrent();
+    else slideToCurrent(dir);
   }
   onDestroy(() => {
     clearTimeout(settleTimer);
