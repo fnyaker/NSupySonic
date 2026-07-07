@@ -86,6 +86,7 @@ class PlayerService : Service() {
     private lateinit var session: MediaSessionCompat
     private var state: State? = null
     private var foregrounded = false
+    private var hasClient = false // the activity (WebView owner) is bound
     private var notifKey = "" // last (title|artist|playing|art) actually rendered
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -95,7 +96,15 @@ class PlayerService : Service() {
     private var artUrl: String? = null
     private var artBitmap: Bitmap? = null
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onBind(intent: Intent?): IBinder {
+        hasClient = true
+        return binder
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        hasClient = false
+        return false
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -141,6 +150,17 @@ class PlayerService : Service() {
             notifKey = ""
             return START_NOT_STICKY
         }
+        // Started by a stray media button (BT/headset) with no activity bound
+        // and no playback state — e.g. the process was gone. Satisfy the FGS
+        // contract (a startForegroundService MUST call startForeground) and then
+        // stop, instead of parking a dead notification with useless controls.
+        if (!hasClient && state == null) {
+            goForeground()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            foregrounded = false
+            stopSelf()
+            return START_NOT_STICKY
+        }
         // startForegroundService contract: go foreground right away.
         goForeground()
         // A restart without the WebView would be a zombie — don't be sticky.
@@ -172,7 +192,17 @@ class PlayerService : Service() {
     /** Called from MainActivity (main thread) with each bridge state. */
     fun update(s: State) {
         state = s
-        if (!s.active) return
+        if (!s.active) {
+            // Playback wound down (queue emptied / logged out): drop the
+            // notification and locks rather than leaving a stale card up.
+            releaseLocks()
+            if (foregrounded) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                foregrounded = false
+                notifKey = ""
+            }
+            return
+        }
 
         // Resolve the art FIRST: a track change clears the previous bitmap, so
         // the metadata/notification below never carry the old track's cover.

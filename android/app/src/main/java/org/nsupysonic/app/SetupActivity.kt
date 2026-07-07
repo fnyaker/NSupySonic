@@ -59,23 +59,27 @@ class SetupActivity : AppCompatActivity() {
                 hostField.error = getString(R.string.setup_host_required)
                 return@setOnClickListener
             }
-            prefs.host = host
-            prefs.port = portField.text.toString()
-            prefs.verifySsl = sslCheck.isChecked
+            val port = portField.text.toString().trim()
+            val verify = sslCheck.isChecked
 
             connectBtn.isEnabled = false
             connectBtn.setText(R.string.setup_checking)
             executor.execute {
-                val ok = probe(prefs.appUrl(), prefs.verifySsl)
+                // Probe with the ENTERED values without persisting them first —
+                // persisting before validation left a bad host saved if the user
+                // hit Retry then backed out. Only proceed() commits the settings.
+                val ok = probe(Prefs.appUrlFor(host, port), verify)
                 runOnUiThread {
                     connectBtn.isEnabled = true
                     connectBtn.setText(R.string.setup_connect)
-                    if (ok) proceed()
+                    if (ok) proceed(host, port, verify)
                     else MaterialAlertDialogBuilder(this)
                         .setTitle(R.string.setup_unreachable_title)
-                        .setMessage(getString(R.string.setup_unreachable, prefs.baseUrl()))
+                        .setMessage(getString(R.string.setup_unreachable, Prefs.buildBaseUrl(host, port)))
                         .setPositiveButton(R.string.setup_retry, null)
-                        .setNegativeButton(R.string.setup_continue_anyway) { _, _ -> proceed() }
+                        .setNegativeButton(R.string.setup_continue_anyway) { _, _ ->
+                            proceed(host, port, verify)
+                        }
                         .show()
                 }
             }
@@ -84,7 +88,10 @@ class SetupActivity : AppCompatActivity() {
         batteryBtn.setOnClickListener { requestIgnoreBatteryOptimizations() }
     }
 
-    private fun proceed() {
+    private fun proceed(host: String, port: String, verifySsl: Boolean) {
+        prefs.host = host
+        prefs.port = port
+        prefs.verifySsl = verifySsl
         prefs.configured = true
         startActivity(Intent(this, MainActivity::class.java))
         finish()
