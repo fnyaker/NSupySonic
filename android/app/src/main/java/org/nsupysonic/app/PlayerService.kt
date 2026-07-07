@@ -19,6 +19,7 @@ import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -173,6 +174,10 @@ class PlayerService : Service() {
         state = s
         if (!s.active) return
 
+        // Resolve the art FIRST: a track change clears the previous bitmap, so
+        // the metadata/notification below never carry the old track's cover.
+        fetchArtIfNeeded(s.cover)
+
         session.setMetadata(
             MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, s.title)
@@ -206,7 +211,6 @@ class PlayerService : Service() {
         )
 
         if (s.playing) acquireLocks() else releaseLocks()
-        fetchArtIfNeeded(s.cover)
 
         // Re-render the notification only on real changes — the position bar
         // reads live from the session, not from the notification itself.
@@ -292,24 +296,49 @@ class PlayerService : Service() {
     // -- album art ------------------------------------------------------------
 
     private fun fetchArtIfNeeded(url: String) {
-        if (url.isEmpty() || url == artUrl) return
+        if (url == artUrl) return
+        // New art (or none): drop the previous track's bitmap RIGHT AWAY — the
+        // old code kept it on an empty url, so the notification/lockscreen
+        // showed the previous track's cover after a track change.
         artUrl = url
         artBitmap = null
+        if (url.isEmpty()) return
         val verify = Prefs(this).verifySsl
+        // Same-origin /api/cover needs the WebView's session cookie.
+        val cookies = try {
+            CookieManager.getInstance().getCookie(url)
+        } catch (_: Exception) {
+            null
+        }
         artExecutor.execute {
-            val bmp = try {
-                val conn = URL(url).openConnection() as HttpURLConnection
-                Ssl.apply(conn, verify)
-                conn.connectTimeout = 8000
-                conn.readTimeout = 8000
-                conn.inputStream.use { BitmapFactory.decodeStream(it) }
-            } catch (_: Exception) {
-                null
+            var bmp: Bitmap? = null
+            for (attempt in 0 until 3) {
+                if (url != artUrl) return@execute // superseded by a newer track
+                bmp = try {
+                    val conn = URL(url).openConnection() as HttpURLConnection
+                    Ssl.apply(conn, verify)
+                    conn.connectTimeout = 8000
+                    conn.readTimeout = 8000
+                    conn.instanceFollowRedirects = true
+                    if (!cookies.isNullOrEmpty()) conn.setRequestProperty("Cookie", cookies)
+                    conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                } catch (_: Exception) {
+                    null
+                }
+                if (bmp != null) break
+                try {
+                    Thread.sleep(600L * (attempt + 1))
+                } catch (_: InterruptedException) {
+                    return@execute
+                }
             }
             if (bmp != null && url == artUrl) {
+                val art = bmp
                 Handler(Looper.getMainLooper()).post {
-                    artBitmap = bmp
-                    state?.let { update(it) } // re-render metadata + notification
+                    if (url == artUrl) {
+                        artBitmap = art
+                        state?.let { update(it) } // re-render metadata + notification
+                    }
                 }
             }
         }

@@ -22,7 +22,7 @@
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
-  import { duration as fmtDuration, resolveCover, coverKey } from "../lib/format.js";
+  import { duration as fmtDuration, resolveCover, coverKey, baseCover } from "../lib/format.js";
   import { registerSource, resumeAudio } from "../lib/visualizer.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
@@ -980,11 +980,27 @@
     const seq = ++artSeq;
     const setMeta = (art) => {
       try {
+        // Beyond the primary art (often a blob: the Android app's shim can't
+        // fetch), also list the same-origin /api/cover proxy (server-cached,
+        // reliable) and the plain CDN URL. Browsers use the first entry; the
+        // native shim picks the first non-blob one.
+        const artwork = [];
+        const add = (u) => {
+          if (u && !artwork.some((a) => a.src === u))
+            artwork.push({ src: u, sizes: "500x500" });
+        };
+        add(art);
+        try {
+          add(new URL(api.coverUrl(track.deezer_id), window.location.href).href);
+        } catch {
+          /* ignore */
+        }
+        add(baseCover(track.album?.cover));
         navigator.mediaSession.metadata = new MediaMetadata({
           title: track.title,
           artist: track.artist?.name,
           album: track.album?.title,
-          artwork: art ? [{ src: art, sizes: "500x500" }] : [],
+          artwork,
         });
       } catch {
         /* ignore */
