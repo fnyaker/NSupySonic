@@ -12,8 +12,12 @@ import { isDownloaded } from "./offline.js";
 import { isCached } from "./playcache.js";
 import { offlineOnlyDownloaded, setQueueFilter, toasts } from "./stores.js";
 
+// Offline = playable from THIS device: a permanent download or the play cache.
+// A "local" track lives on the SERVER's disk (an uploaded file) and still needs
+// the network to stream, so it must NOT count as offline-available — queuing it
+// in airplane mode only stalls playback.
 function available(t) {
-  return !!(t && (t.local || isDownloaded(t.deezer_id) || isCached(t.deezer_id)));
+  return !!(t && (isDownloaded(t.deezer_id) || isCached(t.deezer_id)));
 }
 
 export function initQueueFilter() {

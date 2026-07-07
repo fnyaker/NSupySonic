@@ -88,6 +88,10 @@ def _album(a):
         "artist": {"deezer_id": str(a.get("ART_ID")), "name": a.get("ART_NAME", "")},
         "nb_tracks": a.get("NUMBER_TRACK"),
         "year": (str(a.get("PHYSICAL_RELEASE_DATE") or a.get("DIGITAL_RELEASE_DATE") or "")[:4]) or None,
+        # The gw album page reports whether the account already favorited it, so
+        # the detail page can show the correct heart state (and avoid a "re-add"
+        # that reads as a fresh favorite). Absent on older responses → False.
+        "is_favorite": bool(a.get("FAVORITE_STATUS")),
     }
 
 

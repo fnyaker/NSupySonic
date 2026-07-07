@@ -33,7 +33,10 @@
     fav = false;
     try {
       const r = await api.artist(artistId);
-      if (mine === loadSeq) data = r;
+      if (mine === loadSeq) {
+        data = r;
+        fav = !!r.artist?.is_favorite; // correct when the source reports it
+      }
     } catch {
       if (mine === loadSeq) data = null;
     }

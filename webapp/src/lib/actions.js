@@ -67,10 +67,14 @@ export async function userPlaylists(force = false) {
   try {
     const r = await api.myPlaylists();
     playlistCache = r.playlists || [];
+    return playlistCache;
   } catch {
-    playlistCache = [];
+    // Don't memoize a failure: caching [] here left the sidebar / picker / the
+    // library tab permanently empty after a single failed load (offline boot,
+    // server not up yet) until an unrelated edit invalidated the cache. Return
+    // an empty list WITHOUT setting the cache, so the next call refetches.
+    return playlistCache || [];
   }
-  return playlistCache;
 }
 
 export function invalidatePlaylists() {
@@ -336,8 +340,37 @@ export function buildEntityMenu(kind, item, nav) {
   return items;
 }
 
+// A podcast episode is shaped like a track (so the queue/player play it), but
+// its id is a UUID and its "artist"/"album" are the channel — so the normal
+// track menu's favorite / radio / playlist / go-to-artist actions all hit
+// endpoints that reject a UUID (400) or 404. Give episodes their own minimal,
+// working menu instead.
+function buildEpisodeMenu(ep, nav) {
+  const dl = isDownloaded(ep.deezer_id);
+  const items = [
+    { label: "Lire ensuite", icon: "next", action: () => player.playNext([ep]) },
+    { label: "Ajouter à la file", icon: "queue", action: () => player.addToQueue([ep]) },
+    "divider",
+    dl
+      ? {
+          label: "Retirer le téléchargement",
+          icon: "downloaded",
+          action: () => undownloadTrack(ep),
+        }
+      : { label: "Télécharger", icon: "download", action: () => downloadTrackTo(ep) },
+  ];
+  if (ep.channel_id)
+    items.push("divider", {
+      label: "Ouvrir le podcast",
+      icon: "mic",
+      action: () => nav("/podcast/" + ep.channel_id),
+    });
+  return items;
+}
+
 // Build the context-menu item list for a track. `nav` is svelte-spa-router push.
 export function buildTrackMenu(track, nav) {
+  if (track.podcast) return buildEpisodeMenu(track, nav);
   const fav = get(favorites).has(String(track.deezer_id));
   const admin = get(isAdmin);
   const items = [

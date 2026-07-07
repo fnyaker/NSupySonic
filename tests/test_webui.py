@@ -486,6 +486,27 @@ class WebUITestCase(unittest.TestCase):
         data = self.client.get("/api/album/302127").get_json()
         self.assertEqual(data["album"]["title"], "Bar")
         self.assertEqual(len(data["tracks"]), 5)
+        # No favorite flag on the gw page -> not a favorite (never null/undefined).
+        self.assertFalse(data["album"]["is_favorite"])
+
+    def test_album_is_favorite(self):
+        # When the gw album page reports the account already favorited it, the
+        # detail response surfaces is_favorite so the UI shows the right heart.
+        self._login()
+        gw = self.app.deezer.dz.gw
+        orig = gw.get_album_page
+
+        def fav_page(alb_id):
+            page = orig(alb_id)
+            page["DATA"]["FAVORITE_STATUS"] = True
+            return page
+
+        gw.get_album_page = fav_page
+        try:
+            data = self.client.get("/api/album/302127").get_json()
+        finally:
+            gw.get_album_page = orig
+        self.assertTrue(data["album"]["is_favorite"])
 
     def test_discography(self):
         self._login()
