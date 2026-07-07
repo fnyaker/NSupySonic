@@ -70,6 +70,8 @@ SNAP = """
   })),
   // pause icon = <rect>s inside the main play/pause button; play icon = <polygon>
   uiShowsPause: !!document.querySelector(".player .pp svg rect"),
+  busyRing: !!document.querySelector(".player .pp.busy"),
+  statusText: (document.querySelector(".player .now .a.status") || {}).textContent || "",
   toasts: [...document.querySelectorAll(".toasts .toast")].map((t) => t.textContent.trim()),
   title: (document.querySelector(".player .now .t") || {}).textContent || "",
 })
@@ -141,7 +143,7 @@ def active(snap):
 def show(page, label):
     s = page.evaluate(SNAP)
     a = active(s)
-    print(f"  [{label}] ui_pause_icon={s['uiShowsPause']} title={s['title']!r} toasts={s['toasts']}")
+    print(f"  [{label}] ui_pause_icon={s['uiShowsPause']} busy_ring={s['busyRing']} status={s['statusText']!r} title={s['title']!r} toasts={s['toasts']}")
     for i, el in enumerate(s["audios"]):
         print(f"    audio[{i}] paused={el['paused']} t={el['t']} rs={el['readyState']} ns={el['networkState']} src=...{el['src']}")
         print(f"             ev={el['events']}")
@@ -199,10 +201,12 @@ def main():
         page.click(".player .next")
         page.wait_for_timeout(1500)
         show(page, "1.5s after next (loading, hung)")
-        print("  ... waiting 9s for the 6s watchdog to trigger recoverPlayback ...")
+        print("  ... waiting 9s (cold-start grace should now show a status, not skip) ...")
         page.wait_for_timeout(9000)
         s, a = show(page, "after watchdog window")
         t2_ui_lies = s["uiShowsPause"] and a and a["paused"]  # icon says playing, element silent
+        t2_status_shown = bool(s["busyRing"] or s["statusText"])
+        print(f"  -> indicator visible during the hang: ring={s['busyRing']} status={s['statusText']!r}")
         print("  -> user presses PAUSE now")
         page.click(".player .pp")
         page.wait_for_timeout(1500)
@@ -213,7 +217,7 @@ def main():
         t2_play_dead = a and a["paused"] and s["uiShowsPause"]  # store playing, element still parked
         page.click(".player .pp")
         page.wait_for_timeout(1500)
-        print(f"T2 RESULT: icon-playing-but-silent={t2_ui_lies}, play retries dead while recovering={t2_play_dead}")
+        print(f"T2 RESULT: icon-playing-but-silent={t2_ui_lies}, play retries dead while recovering={t2_play_dead}, indicator_shown={t2_status_shown}")
 
         page.unroute("**/api/stream/**")
         page.wait_for_timeout(2000)
@@ -222,8 +226,10 @@ def main():
         page.click(".player .pp")  # pause
         page.wait_for_timeout(1200)
         s, a = show(page, "network OK again, user did play then pause")
-        t2_state_flipped = a and (not a["paused"]) != (not s["uiShowsPause"]) or (a and not a["paused"])
-        print(f"T2b RESULT: pause didn't stick / state flapped after recovery={bool(t2_state_flipped)}")
+        # Consistent PAUSED state = element paused AND the play-triangle showing
+        # (uiShowsPause is the pause-bars icon, present only while playing).
+        t2_pause_stuck = bool(a and a["paused"] and not s["uiShowsPause"])
+        print(f"T2b RESULT: pause stuck after recovery (element paused + play icon)={t2_pause_stuck}")
 
         page.click(".player .next")
         page.wait_for_timeout(2500)
@@ -245,8 +251,9 @@ def main():
             if any("indisponible" in t for t in s["toasts"]):
                 saw_toast = round(time.time() - t0, 1)
                 break
+        s = page.evaluate(SNAP)
         show(page, f"after {round(time.time()-t0,1)}s of failing streams")
-        print(f"T3 RESULT: 'Titre indisponible' toast after {saw_toast}s (only feedback; no loading/status indicator exists)")
+        print(f"T3 RESULT: skip toast after {saw_toast}s; status indicator during the retries={s['statusText']!r} ring={s['busyRing']}")
         page.wait_for_timeout(12000)
         show(page, "cascade end")
         page.unroute("**/api/stream/**")

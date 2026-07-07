@@ -46,6 +46,25 @@ export const seekTo = writable(null);
 // re-buffer (a brief pause), so showing it makes that behaviour legible.
 export const buffered = writable(0);
 
+// What the player is actually DOING when it isn't cleanly playing — so the UI
+// can say why "it isn't playing even though I pressed play" instead of showing
+// a lying pause icon over silence. Driven solely by Player.svelte.
+//   idle            — playing normally (or nothing loaded): show nothing
+//   loading         — a new track's source is being attached
+//   buffering       — the element ran out of data mid-play (waiting/stalled)
+//   archiving       — server is fetching/transcoding this track for the 1st time
+//   waiting-network — offline; holding the track, will resume on reconnect
+//   recovering      — a stall/error is being retried (carries attempt/max)
+//   error           — the track could not be played at all
+export const playbackStatus = writable({ state: "idle", since: 0, attempt: 0, max: 0 });
+export function setPlaybackStatus(state, extra = {}) {
+  playbackStatus.update((s) =>
+    s.state === state && s.attempt === (extra.attempt || 0)
+      ? s
+      : { state, since: Date.now(), attempt: extra.attempt || 0, max: extra.max || 0 }
+  );
+}
+
 // Web-player streaming quality (FLAC | MP3_320 | MP3_128).
 export const quality = persisted("player.quality", "FLAC");
 
