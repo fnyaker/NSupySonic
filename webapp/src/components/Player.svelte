@@ -1539,8 +1539,8 @@
     }
     /* Keep only the fullscreen toggle from the extras cluster — the quality
        menu, volume, etc. don't fit a narrow bar, but the fullscreen button
-       must stay reachable. */
-    .extra > :not(.fs) {
+       (class "max") must stay reachable. */
+    .extra > :not(.max) {
       display: none;
     }
     .extra {

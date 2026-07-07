@@ -174,6 +174,23 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl(prefs.appUrl())
     }
 
+    // Reopening the settings relaunches us (singleTask) via onNewIntent rather
+    // than onCreate, so the WebView keeps showing the OLD server until the app
+    // is killed. Reload here when the configured origin no longer matches what's
+    // loaded, so a host/port/SSL change takes effect immediately.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!prefs.configured) return
+        if (::webView.isInitialized &&
+            webView.url?.startsWith(prefs.baseUrl()) != true
+        ) {
+            mainFrameFailed = false
+            errorView.visibility = View.GONE
+            webView.loadUrl(prefs.appUrl())
+        }
+    }
+
     // NOTE: webView.onPause() is deliberately NOT called from onPause() — that
     // is precisely what killed background playback in the browser. The
     // foreground service keeps the process alive; the WebView keeps decoding.
