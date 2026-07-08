@@ -19,6 +19,10 @@ cache_dir = /data/cache
 cache_size = 512
 ; Transcoded (lower-quality) outputs live here; raise it if you stream a lot.
 transcode_cache_size = 2048
+; Per-user upload quota in GB for non-admin accounts (admins are unlimited).
+; Only the initial default — an admin can change it live from the web UI, and
+; that value is stored in the DB and wins. 0 disables the quota.
+upload_quota_gb = 5
 log_level = INFO
 log_rotate = no
 
