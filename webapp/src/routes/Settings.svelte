@@ -41,6 +41,34 @@
     items = await listDownloads();
   }
   onMount(refresh);
+
+  // Admin-only: per-user upload quota (GB) applied to non-admin accounts.
+  let quotaGb = null;
+  let quotaSaving = false;
+  onMount(async () => {
+    if (!$user?.admin) return;
+    try {
+      quotaGb = (await api.getSettings()).upload_quota_gb;
+    } catch {
+      /* leave the card hidden if it can't load */
+    }
+  });
+  async function saveQuota() {
+    const v = Number(quotaGb);
+    if (!Number.isFinite(v) || v < 0) {
+      toasts.push("Valeur de quota invalide", "error");
+      return;
+    }
+    quotaSaving = true;
+    try {
+      quotaGb = (await api.setSettings({ upload_quota_gb: v })).upload_quota_gb;
+      toasts.push(v === 0 ? "Quota d'upload désactivé (illimité)" : `Quota d'upload réglé à ${quotaGb} Go`);
+    } catch {
+      toasts.push("Échec de l'enregistrement du quota", "error");
+    } finally {
+      quotaSaving = false;
+    }
+  }
   // Reload the list whenever the downloaded set changes (add / remove).
   $: $downloads, refresh();
 
@@ -93,6 +121,20 @@
     <button class="logout" on:click={logout}><Icon name="user" size={16} /> Déconnexion</button>
   </div>
 </section>
+
+{#if $user?.admin && quotaGb !== null}
+  <section class="card">
+    <h2>Quota d'upload (utilisateurs non-admin)</h2>
+    <p class="muted sub">Limite l'espace total que chaque utilisateur non-administrateur peut occuper avec ses fichiers importés. Les administrateurs ne sont pas limités. Mettez 0 pour désactiver la limite.</p>
+    <div class="quota-row">
+      <input class="quota-input" type="number" min="0" step="1" bind:value={quotaGb} />
+      <span class="muted">Go / utilisateur</span>
+      <button class="save" on:click={saveQuota} disabled={quotaSaving}>
+        {quotaSaving ? "Enregistrement…" : "Enregistrer"}
+      </button>
+    </div>
+  </section>
+{/if}
 
 <section class="card">
   <h2>Qualité de téléchargement par défaut</h2>
@@ -230,6 +272,34 @@
   }
   .card h2 {
     font-size: 1.05rem;
+  }
+  .quota-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .quota-input {
+    width: 90px;
+    padding: 9px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg);
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+  .save {
+    padding: 9px 16px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .save:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
   .sub {
     font-size: 0.85rem;

@@ -26,6 +26,7 @@ from peewee import fn
 from ..db import (
     Album,
     Artist,
+    Meta,
     Playlist,
     PlaylistTrack,
     PodcastChannel,
@@ -277,6 +278,68 @@ def _valid_id(value):
     """A Deezer numeric id (track/album/artist/playlist). Rejects junk early."""
     value = str(value or "")
     return value.lstrip("-").isdigit()
+
+
+# -- upload quota -----------------------------------------------------------
+# Non-admins may only upload up to a per-user byte quota; admins are unlimited.
+# The GB figure is admin-settable at runtime (stored in the Meta KV table, which
+# overrides the config default) and each user's files live in their own upload
+# subfolder, so usage is just the size of what's on disk — it self-corrects and
+# never drifts from a running counter.
+
+_QUOTA_META_KEY = "upload_quota_gb"
+
+
+def _quota_gb() -> float:
+    """The per-user upload quota in GB (0 = unlimited). DB value wins over config."""
+    row = Meta.get_or_none(Meta.key == _QUOTA_META_KEY)
+    if row is not None:
+        try:
+            return max(0.0, float(row.value))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return max(0.0, float(current_app.config["WEBAPP"].get("upload_quota_gb") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _set_quota_gb(value: float) -> None:
+    value = max(0.0, float(value))
+    # Store whole numbers without a trailing ".0" so the UI shows "5", not "5.0".
+    s = str(int(value)) if value == int(value) else repr(value)
+    row = Meta.get_or_none(Meta.key == _QUOTA_META_KEY)
+    if row is None:
+        Meta.create(key=_QUOTA_META_KEY, value=s)
+    else:
+        row.value = s
+        row.save()
+
+
+def _user_upload_dir(archive_dir: str, user) -> str:
+    """Where one user's uploaded files live — one folder per user, for accounting."""
+    return os.path.join(archive_dir, "Uploads", str(user.id))
+
+
+def _user_upload_usage(archive_dir: str, user) -> int:
+    """Total bytes this user has uploaded (sum of files under their upload dir)."""
+    total = 0
+    for dirpath, _dirs, files in os.walk(_user_upload_dir(archive_dir, user)):
+        for fn in files:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, fn))
+            except OSError:
+                pass
+    return total
+
+
+def _stream_size(stream) -> int:
+    """Byte length of an uploaded file, measured (not trusted from the client)."""
+    pos = stream.tell()
+    stream.seek(0, os.SEEK_END)
+    size = stream.tell()
+    stream.seek(pos)
+    return size
 
 
 # -- local (non-Deezer) tracks ----------------------------------------------
@@ -1924,7 +1987,10 @@ def sync_status():
 def upload():
     """Upload audio files (any format) into the archive. They're imported on the
     spot as local library tracks — searchable, playlistable, streamable — so it's
-    a one-click way to add your own music alongside Deezer."""
+    a one-click way to add your own music alongside Deezer.
+
+    Non-admin users are capped at a per-user byte quota (admins are unlimited):
+    files that would push them over the limit are skipped, not saved."""
     archive_dir = current_app.config["DEEZER"].get("archive_dir")
     if not archive_dir:
         return jsonify({"error": "archive directory not configured"}), 503
@@ -1936,17 +2002,36 @@ def upload():
 
     from ..deezer import library, local
 
+    user = request.webuser
+    # Resolve the quota once. 0 means unlimited (admins always, or a disabled
+    # cap); otherwise seed the running total from what the user already has on
+    # disk so this batch is checked against their real usage.
+    quota_bytes, used = 0, 0
+    if not _is_admin():
+        gb = _quota_gb()
+        if gb > 0:
+            quota_bytes = int(gb * 1024**3)
+            used = _user_upload_usage(archive_dir, user)
+
     root = library.get_root_folder(archive_dir)
-    dest_dir = os.path.join(archive_dir, "Uploads")
+    dest_dir = _user_upload_dir(archive_dir, user)
     os.makedirs(dest_dir, exist_ok=True)
 
     imported, skipped = [], []
+    quota_hit = False
     for f in files:
         name = secure_filename(f.filename or "")
         ext = os.path.splitext(name)[1][1:].lower()
         if not name or ext not in local.AUDIO_EXTS:
             skipped.append(f.filename)
             continue
+        # Refuse anything that would exceed the quota BEFORE writing it to disk.
+        if quota_bytes:
+            size = _stream_size(f.stream)
+            if used + size > quota_bytes:
+                quota_hit = True
+                skipped.append(f.filename)
+                continue
         base, e = os.path.splitext(os.path.join(dest_dir, name))
         dest, n = base + e, 0
         while os.path.exists(dest):
@@ -1959,6 +2044,10 @@ def upload():
             logger.warning("Upload import failed for %s", name, exc_info=True)
             track = None
         if track is not None:
+            try:
+                used += os.path.getsize(dest)
+            except OSError:
+                pass
             imported.append(_local_track(track))
         else:
             try:
@@ -1967,7 +2056,55 @@ def upload():
                 pass
             skipped.append(f.filename)
 
-    return jsonify({"imported": imported, "skipped": skipped, "count": len(imported)})
+    resp = {"imported": imported, "skipped": skipped, "count": len(imported)}
+    if quota_bytes:
+        resp["quota"] = quota_bytes
+        resp["used"] = used
+        resp["quota_exceeded"] = quota_hit
+    return jsonify(resp)
+
+
+@webapi.route("/upload/usage")
+@login_required
+def upload_usage():
+    """This user's upload usage and their cap (0 quota = unlimited)."""
+    archive_dir = current_app.config["DEEZER"].get("archive_dir")
+    admin = _is_admin()
+    gb = _quota_gb()
+    quota_bytes = int(gb * 1024**3) if (gb > 0 and not admin) else 0
+    used = _user_upload_usage(archive_dir, request.webuser) if archive_dir else 0
+    return jsonify(
+        {
+            "used": used,
+            "quota": quota_bytes,
+            "unlimited": admin or quota_bytes == 0,
+        }
+    )
+
+
+@webapi.route("/settings")
+@login_required
+@admin_required
+def get_settings():
+    """Admin-only server settings (currently just the upload quota)."""
+    return jsonify({"upload_quota_gb": _quota_gb()})
+
+
+@webapi.route("/settings", methods=["POST"])
+@login_required
+@admin_required
+def set_settings():
+    """Persist admin-editable server settings. Only ``upload_quota_gb`` for now."""
+    data = request.get_json(silent=True) or {}
+    if "upload_quota_gb" in data:
+        try:
+            v = float(data["upload_quota_gb"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid upload_quota_gb"}), 400
+        if v < 0:
+            return jsonify({"error": "invalid upload_quota_gb"}), 400
+        _set_quota_gb(v)
+    return jsonify({"ok": True, "upload_quota_gb": _quota_gb()})
 
 
 # Opus transcode bitrates (kbps) the web player may request: q=OPUS_320 etc.

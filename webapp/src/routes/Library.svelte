@@ -4,12 +4,24 @@
   import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
   import { api } from "../lib/api.js";
+  import { bytes as fmtBytes } from "../lib/format.js";
   import Card from "../components/Card.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
 
   let tab = "favorites";
+  // Upload usage/cap for the current user (guests get a per-user quota; admins
+  // are unlimited). Null until loaded.
+  let usage = null;
+  $: usagePct = usage && usage.quota ? Math.min(100, (usage.used / usage.quota) * 100) : 0;
+  async function loadUsage() {
+    try {
+      usage = await api.uploadUsage();
+    } catch {
+      usage = null;
+    }
+  }
   // favTracks is a shared cache: instant on revisit, refreshed in background.
   $: favorites = $favTracks;
   let playlists = null;
@@ -31,6 +43,7 @@
     loadMyFavorites();
     if ($isAdmin) userPlaylists().then((p) => (playlists = p));
     loadLocal();
+    loadUsage();
   });
 
   // Downloaded tracks come straight from IndexedDB, so this tab works offline.
@@ -59,10 +72,13 @@
     uploading = true;
     try {
       const r = await api.upload(files);
-      toasts.push(`${r.count} fichier(s) importé(s)`);
-      if (r.skipped && r.skipped.length)
+      if (r.count) toasts.push(`${r.count} fichier(s) importé(s)`);
+      if (r.quota_exceeded)
+        toasts.push("Quota d'upload atteint : certains fichiers ont été refusés.", "error");
+      else if (r.skipped && r.skipped.length)
         toasts.push(`${r.skipped.length} ignoré(s) (format non géré)`, "error");
       await loadLocal();
+      await loadUsage();
       tab = "local";
     } catch (e) {
       toasts.push(e?.status === 413 ? e.message : "Échec de l'import", "error");
@@ -105,6 +121,13 @@
     hidden
   />
 </div>
+
+{#if usage && !usage.unlimited && usage.quota}
+  <div class="quota">
+    <div class="quota-bar"><span style={`width:${usagePct}%`} class:warn={usagePct > 90}></span></div>
+    <span class="muted quota-txt">{fmtBytes(usage.used)} / {fmtBytes(usage.quota)} d'espace d'upload utilisé</span>
+  </div>
+{/if}
 
 <div class="tabs">
   <button class:active={tab === "favorites"} on:click={() => (tab = "favorites")}>Titres favoris</button>
@@ -210,6 +233,29 @@
   .upload:disabled {
     opacity: 0.6;
     cursor: default;
+  }
+  .quota {
+    margin-top: 12px;
+  }
+  .quota-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-hover);
+    overflow: hidden;
+  }
+  .quota-bar span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.25s ease;
+  }
+  .quota-bar span.warn {
+    background: var(--accent-2);
+  }
+  .quota-txt {
+    display: inline-block;
+    margin-top: 5px;
+    font-size: 0.8rem;
   }
   .tabs {
     display: flex;

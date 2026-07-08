@@ -43,6 +43,11 @@ class DefaultConfig:
         # without it any logged-in user could fill the disk with one request).
         # 0 disables the limit.
         "upload_max_size": 1024,
+        # Per-user upload quota in GB for NON-admin users (admins upload without
+        # limit). This is only the initial default: an admin can change it live
+        # from the web UI, and that runtime value (stored in the DB) wins. 0
+        # disables the per-user quota.
+        "upload_quota_gb": 5,
         # Number of trusted reverse proxies in front of the app. 0 = none (the
         # app is reached directly); when > 0, X-Forwarded-* headers from that
         # many hops are trusted (ProxyFix). NEVER set this unless a proxy you

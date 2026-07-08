@@ -199,6 +199,12 @@ export const api = {
       };
     return res.json();
   },
+  // Current user's upload usage + cap (bytes; quota 0 / unlimited => no limit).
+  uploadUsage: () => req("/upload/usage"),
+
+  // Admin-only server settings (upload quota, in GB).
+  getSettings: () => req("/settings"),
+  setSettings: (fields) => req("/settings", { method: "POST", body: body(fields) }),
 
   // telemetry — fire-and-forget; never let it break playback. A no-op server
   // side unless report_listens is enabled in the config. Skipped entirely while

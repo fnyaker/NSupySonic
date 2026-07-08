@@ -848,6 +848,115 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(j["count"], 0)
         self.assertEqual(j["skipped"], ["notes.txt"])
 
+    # -- upload quota (non-admin cap) ------------------------------------
+
+    def _login_guest(self):
+        UserManager.add("bob", "B0bpass", admin=False)
+        return self.client.post(
+            "/api/login", json={"username": "bob", "password": "B0bpass"}
+        )
+
+    def _upload_bytes(self, blobs):
+        """POST N files whose import always succeeds (patched tag reader)."""
+        from io import BytesIO
+
+        from supysonic.deezer import local
+
+        class FakeTag:
+            artist = "Up"
+            albumartist = None
+            album = "Al"
+            genre = None
+            title = "Song"
+            disc = 1
+            track = 1
+            year = None
+            length = 10.0
+            bitrate = 128000
+            images = []
+
+        orig = local._load_tag
+        local._load_tag = lambda p: FakeTag()
+        try:
+            data = {
+                "files": [(BytesIO(b), f"song{i}.mp3") for i, b in enumerate(blobs)]
+            }
+            return self.client.post(
+                "/api/upload", data=data, content_type="multipart/form-data"
+            )
+        finally:
+            local._load_tag = orig
+
+    def test_settings_quota_admin_only(self):
+        # A guest can neither read nor change the server settings.
+        self._login_guest()
+        self.assertEqual(self.client.get("/api/settings").status_code, 403)
+        self.assertEqual(
+            self.client.post("/api/settings", json={"upload_quota_gb": 1}).status_code,
+            403,
+        )
+        self.client.post("/api/logout")
+        # The admin can read the default and set a new value that round-trips.
+        self._login()
+        self.assertEqual(self.client.get("/api/settings").status_code, 200)
+        rv = self.client.post("/api/settings", json={"upload_quota_gb": 3})
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_json()["upload_quota_gb"], 3)
+        self.assertEqual(
+            self.client.get("/api/settings").get_json()["upload_quota_gb"], 3
+        )
+        # Garbage is rejected.
+        self.assertEqual(
+            self.client.post("/api/settings", json={"upload_quota_gb": -1}).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/settings", json={"upload_quota_gb": "nope"}
+            ).status_code,
+            400,
+        )
+
+    def test_upload_quota_blocks_guest(self):
+        # ~250 byte budget for non-admins.
+        self._login()
+        self.client.post(
+            "/api/settings", json={"upload_quota_gb": 250 / 1024**3}
+        )
+        self.client.post("/api/logout")
+
+        self._login_guest()
+        rv = self._upload_bytes([b"x" * 100, b"x" * 100, b"x" * 100])
+        self.assertEqual(rv.status_code, 200)
+        j = rv.get_json()
+        # Two fit under the cap, the third is refused (not saved).
+        self.assertEqual(j["count"], 2)
+        self.assertTrue(j["quota_exceeded"])
+        self.assertEqual(len(j["skipped"]), 1)
+        self.assertLessEqual(j["used"], j["quota"])
+
+        # Usage endpoint reflects the two accepted files for this guest.
+        usage = self.client.get("/api/upload/usage").get_json()
+        self.assertFalse(usage["unlimited"])
+        self.assertEqual(usage["used"], 200)
+        self.assertEqual(usage["quota"], j["quota"])
+
+        # A further upload that would exceed the remaining room is blocked too.
+        rv = self._upload_bytes([b"x" * 100])
+        self.assertEqual(rv.get_json()["count"], 0)
+        self.assertTrue(rv.get_json()["quota_exceeded"])
+
+    def test_upload_quota_admin_unlimited(self):
+        # Even with a tiny cap set, the admin uploads without limit.
+        self._login()
+        self.client.post("/api/settings", json={"upload_quota_gb": 250 / 1024**3})
+        rv = self._upload_bytes([b"x" * 100, b"x" * 100, b"x" * 100])
+        j = rv.get_json()
+        self.assertEqual(j["count"], 3)
+        self.assertNotIn("quota_exceeded", j)  # unlimited: no quota bookkeeping
+        usage = self.client.get("/api/upload/usage").get_json()
+        self.assertTrue(usage["unlimited"])
+
     def test_favorite_local_track_stars_locally(self):
         from supysonic.db import StarredTrack
 
