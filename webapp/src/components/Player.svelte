@@ -452,7 +452,12 @@
       const r = await api.trackGain(id);
       if (r && typeof r.gain === "number") {
         track.gain = r.gain; // cache on the queue object
-        if (get(current)?.deezer_id === track.deezer_id) setTrackGain(r.gain);
+        // Apply live only if this track is the one currently AUDIBLE — not while
+        // a track change is mid-load (loadingTrack), where the outgoing track is
+        // still playing and the incoming source hasn't been swapped in yet.
+        // loadTrack's own setTrackGain at the handover will pick up the value we
+        // just cached, so the gain still lands exactly when this track starts.
+        if (!loadingTrack && get(current)?.deezer_id === track.deezer_id) setTrackGain(r.gain);
       }
     } catch {
       /* leave it un-normalized */
@@ -581,11 +586,12 @@
     curQ = get(quality);
     curSeq = get(player).seq;
     lastKnownTime = resumeAt;
-    // Static per-track volume normalization: hand the graph this track's
-    // ReplayGain (dB) so it can set a fixed gain for the whole track. No-op
-    // unless the user enabled normalization. If the gain is unknown (older DB
-    // rows, or a browse dict without it), backfill it lazily from the server.
-    setTrackGain(track.gain);
+    // Per-track volume normalization is applied at the source HANDOVER below
+    // (right where the element's src is swapped), NOT here. Setting it now would
+    // re-gain the half-second of the OUTGOING track that keeps playing during the
+    // async resolveSource() — an audible volume "flash" whenever the next track
+    // normalizes louder. Only the lazy ReplayGain backfill starts here (no-op
+    // when the gain is already known, which is the common case).
     ensureGain(track);
     recoverAttempts = 0; // fresh track, fresh recovery budget
     hadProgress = false; // this track hasn't produced audio yet (cold-start grace)
@@ -622,6 +628,12 @@
     audio.src = src.url;
     audio.load();
     loadingTrack = false; // new source attached — accept its timeupdates again
+    // The outgoing audio is silenced the instant its src is reassigned above, so
+    // flip the normalization gain to THIS track's value now — synced to the
+    // audible handover. The new source is still buffering (silent) here, and the
+    // gain change is a short ramp, so the incoming track begins already at its
+    // target level with no flash on either side. No-op unless normalization is on.
+    setTrackGain(track.gain);
     if (src.blob) touch(track.deezer_id); // bump LRU recency
 
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
