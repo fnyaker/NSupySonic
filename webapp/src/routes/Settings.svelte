@@ -37,6 +37,16 @@
     { v: 4 * 1024 ** 3, label: "4 Go" },
   ];
 
+  // The page had grown into one long scroll, so it's split into tabs. Sound
+  // effects lead because they're what gets tweaked most often outside the
+  // player; quality/storage and account sit behind their own tabs.
+  const TABS = [
+    { id: "fx", label: "Effets sonores" },
+    { id: "quality", label: "Qualité sonore" },
+    { id: "account", label: "Compte" },
+  ];
+  let tab = "fx";
+
   let items = [];
   async function refresh() {
     items = await listDownloads();
@@ -112,33 +122,17 @@
   <h1>Réglages</h1>
 </div>
 
-<section class="card">
-  <h2>Compte</h2>
-  <div class="acct">
-    <div class="acct-info">
-      <span class="acct-name">{$user?.name}</span>
-      <span class="muted acct-sub">{$user?.admin ? "Administrateur" : "Utilisateur"}</span>
-    </div>
-    <button class="logout" on:click={logout}><Icon name="user" size={16} /> Déconnexion</button>
-  </div>
-</section>
+<div class="tabs" role="tablist" aria-label="Sections des réglages">
+  {#each TABS as t}
+    <button class="tab" class:sel={tab === t.id} role="tab" aria-selected={tab === t.id} on:click={() => (tab = t.id)}>{t.label}</button>
+  {/each}
+</div>
 
-{#if $user?.admin && quotaGb !== null}
-  <section class="card">
-    <h2>Quota d'upload (utilisateurs non-admin)</h2>
-    <p class="muted sub">Limite l'espace total que chaque utilisateur non-administrateur peut occuper avec ses fichiers importés. Les administrateurs ne sont pas limités. Mettez 0 pour désactiver la limite.</p>
-    <div class="quota-row">
-      <input class="quota-input" type="number" min="0" step="1" bind:value={quotaGb} />
-      <span class="muted">Go / utilisateur</span>
-      <button class="save" on:click={saveQuota} disabled={quotaSaving}>
-        {quotaSaving ? "Enregistrement…" : "Enregistrer"}
-      </button>
-    </div>
-  </section>
+{#if tab === "fx"}
+  <AudioEffects />
 {/if}
 
-<AudioEffects />
-
+{#if tab === "quality"}
 <section class="card">
   <h2>Qualité de téléchargement par défaut</h2>
   <p class="muted sub">Utilisée pour les nouveaux téléchargements (modifiable au cas par cas).</p>
@@ -230,10 +224,68 @@
     </div>
   {/if}
 </section>
+{/if}
+
+{#if tab === "account"}
+<section class="card">
+  <h2>Compte</h2>
+  <div class="acct">
+    <div class="acct-info">
+      <span class="acct-name">{$user?.name}</span>
+      <span class="muted acct-sub">{$user?.admin ? "Administrateur" : "Utilisateur"}</span>
+    </div>
+    <button class="logout" on:click={logout}><Icon name="user" size={16} /> Déconnexion</button>
+  </div>
+</section>
+
+{#if $user?.admin && quotaGb !== null}
+  <section class="card">
+    <h2>Quota d'upload (utilisateurs non-admin)</h2>
+    <p class="muted sub">Limite l'espace total que chaque utilisateur non-administrateur peut occuper avec ses fichiers importés. Les administrateurs ne sont pas limités. Mettez 0 pour désactiver la limite.</p>
+    <div class="quota-row">
+      <input class="quota-input" type="number" min="0" step="1" bind:value={quotaGb} />
+      <span class="muted">Go / utilisateur</span>
+      <button class="save" on:click={saveQuota} disabled={quotaSaving}>
+        {quotaSaving ? "Enregistrement…" : "Enregistrer"}
+      </button>
+    </div>
+  </section>
+{/if}
+{/if}
 
 <style>
   .head h1 {
     margin-bottom: 18px;
+  }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 18px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .tab {
+    flex: none;
+    padding: 9px 16px;
+    border-radius: 999px;
+    background: var(--bg-card);
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.9rem;
+    white-space: nowrap;
+  }
+  .tab:hover {
+    color: var(--text);
+  }
+  .tab.sel {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
   }
   .acct {
     display: flex;

@@ -113,4 +113,18 @@
   .menu button.sel {
     color: var(--accent);
   }
+
+  /* Roomier options on touch screens so the right quality is easy to hit in a
+     hurry — bigger rows and a wider panel, without changing the trigger size. */
+  @media (max-width: 640px) {
+    .menu {
+      min-width: 210px;
+      padding: 8px;
+    }
+    .menu button {
+      padding: 13px 14px;
+      font-size: 0.95rem;
+      border-radius: 9px;
+    }
+  }
 </style>
