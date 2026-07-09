@@ -39,6 +39,15 @@ run it through these questions. They are not optional polish; they are the bar.
    secrets (the ARL is a full-account credential).
 5. **Reliability & UX.** Fail soft where a feature is best-effort; keep the UI responsive and the
    result pretty. Test the change by actually exercising it, not just building.
+6. **Coherence with what the user actually wants.** Before shipping, picture the user in front of
+   it: what will they *do* with this? Does it truly answer their need, or just technically match
+   the words of the request? Will using it feel good — or are there irritating friction points
+   (controls too cramped, targets too small, a fader glued to its neighbour)? If so, fix them
+   *now*, not after they complain. Sweat the spacing, rhythm, alignment and feel.
+7. **Premium bar.** Every screen should look and feel like a team of senior engineers and
+   designers sweated it — top-of-the-top, not "good enough". No cramped or default-looking UI, no
+   emoji (glyphs go through `Icon.svelte`). When a layout feels off, it *is* off; keep iterating
+   until it reads as considered and effortless.
 
 ## Commands
 

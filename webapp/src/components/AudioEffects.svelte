@@ -377,28 +377,37 @@
     .eq {
       flex-direction: column;
       justify-content: flex-start;
-      gap: 4px;
+      gap: 6px;
       overflow-x: visible;
-      padding: 2px 0 0;
+      padding: 4px 0 2px;
     }
     .band {
       flex-direction: row;
       align-items: center;
-      gap: 12px;
+      gap: 14px;
       width: 100%;
       min-width: 0;
+      /* The 26px thumbs draw outside the thin track's box, so give each row a
+         generous height — otherwise adjacent thumbs sit on top of each other
+         and the whole thing reads as a cramped grid. This is the breathing
+         room that makes it feel considered rather than crammed. */
+      min-height: 44px;
     }
     .freq {
       order: -1;
       flex: none;
-      width: 38px;
+      width: 40px;
       text-align: left;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text);
     }
     .gain {
       flex: none;
-      width: 40px;
+      width: 44px;
       text-align: right;
       min-height: 0;
+      font-size: 0.78rem;
     }
     input.vert {
       writing-mode: horizontal-tb;
