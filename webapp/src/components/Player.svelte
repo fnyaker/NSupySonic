@@ -17,6 +17,7 @@
     prefetchEnabled,
     offlineCovers,
     setPlaybackStatus,
+    normalization,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
@@ -433,6 +434,31 @@
     listenMark = get(player).playing ? Date.now() : 0;
   }
 
+  // Backfill a track's ReplayGain when it's unknown, so normalization works on
+  // tracks whose metadata predates the gain field. Only when normalization is
+  // on and online; the result is cached on the queue object and server-side, so
+  // this fires at most once per track. Guarded by a session-level tried-set so
+  // a track with genuinely no gain isn't refetched on every replay.
+  // Turning normalization on mid-track: backfill the current track's gain too.
+  $: if ($normalization !== "off" && $current) ensureGain($current);
+  const gainTried = new Set();
+  async function ensureGain(track) {
+    if (get(normalization) === "off") return;
+    if (typeof track.gain === "number") return;
+    const id = String(track.deezer_id || "");
+    if (!/^\d+$/.test(id) || gainTried.has(id) || !get(online)) return;
+    gainTried.add(id);
+    try {
+      const r = await api.trackGain(id);
+      if (r && typeof r.gain === "number") {
+        track.gain = r.gain; // cache on the queue object
+        if (get(current)?.deezer_id === track.deezer_id) setTrackGain(r.gain);
+      }
+    } catch {
+      /* leave it un-normalized */
+    }
+  }
+
   // Podcast resume: remember the playhead of the current episode so it can be
   // picked up later. Throttled during playback (~5s), forced on pause/hide.
   let lastPodSave = 0;
@@ -557,8 +583,10 @@
     lastKnownTime = resumeAt;
     // Static per-track volume normalization: hand the graph this track's
     // ReplayGain (dB) so it can set a fixed gain for the whole track. No-op
-    // unless the user enabled normalization.
-    setTrackGain(typeof track.gain === "number" ? track.gain : null);
+    // unless the user enabled normalization. If the gain is unknown (older DB
+    // rows, or a browse dict without it), backfill it lazily from the server.
+    setTrackGain(track.gain);
+    ensureGain(track);
     recoverAttempts = 0; // fresh track, fresh recovery budget
     hadProgress = false; // this track hasn't produced audio yet (cold-start grace)
     cancelRecovery(); // a recovery for the OUTGOING track must not touch this one

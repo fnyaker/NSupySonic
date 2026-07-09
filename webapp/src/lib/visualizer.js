@@ -18,13 +18,20 @@ let analyser = null;
 
 // The DSP nodes, built once with the context. The chain is:
 //   sources → inputNode → normGain → eq[0..9] → bassNode
-//           → limiterNode → outputNode → (destination + analyser)
+//           → bassComp → limiterNode → outputNode → (destination + analyser)
 let inputNode = null;
 let outputNode = null;
 let normGain = null; // STATIC per-track normalization gain (set once on load)
 let eqFilters = [];
 let bassNode = null;
-let limiterNode = null; // brick-wall safety limiter (guards the bass lift)
+// Two-stage protection for the bass lift:
+//  1) bassComp — a gentle, soft-knee compressor whose amount tracks the boost.
+//     It does ~90% of the taming, smoothly and (near-)inaudibly, so the low end
+//     stays controlled instead of ballooning.
+//  2) limiterNode — a true brick-wall AFTER it, as a last-resort safety that
+//     only nips the rare peak the compressor let through, so nothing clips.
+let bassComp = null;
+let limiterNode = null;
 
 // createMediaElementSource may only run ONCE per element, so track which
 // elements are already wired. The player keeps two <audio> elements (for
@@ -39,6 +46,9 @@ let analyserWanted = false;
 
 // Fixed graphic-EQ centre frequencies (Hz), low→high. 10 bands.
 const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+// Per-band gain range (dB).
+const EQ_MIN_DB = -16;
+const EQ_MAX_DB = 16;
 
 // Current effect settings, mirrored from the stores (see the subscriptions at
 // the bottom of this file). Defaults are neutral / off.
@@ -104,17 +114,27 @@ function ensureGraph() {
     bassNode.frequency.value = 120;
     bassNode.gain.value = 0;
 
-    // Brick-wall limiter: high ratio, fast attack, threshold just below 0 dBFS.
-    // Left on whenever the graph is wired so the bass lift (or a positive
-    // normalization gain on an already-hot master) can never hard-clip
-    // ("le limiteur auto pour éviter de saturer"). It's transparent below the
-    // threshold, so it does NOT touch normal, already-normalized audio.
+    // Stage 1 — gentle, soft-knee compressor that carries most of the bass
+    // taming. Its params are set from the boost amount in applyEffects; neutral
+    // (ratio 1) when there's no boost, so it's inaudible on normal audio.
+    bassComp = ctx.createDynamicsCompressor();
+    bassComp.threshold.value = 0;
+    bassComp.knee.value = 30; // wide, soft knee → smooth, not pumping
+    bassComp.ratio.value = 1;
+    bassComp.attack.value = 0.012;
+    bassComp.release.value = 0.22;
+
+    // Stage 2 — true brick-wall safety limiter AFTER the compressor: threshold
+    // just below 0 dBFS, high ratio, fast attack. It only nips the rare peak the
+    // compressor let through, so it stays essentially inaudible while still
+    // guaranteeing nothing saturates. Transparent below threshold, so it never
+    // touches normal, already-normalized audio.
     limiterNode = ctx.createDynamicsCompressor();
-    limiterNode.threshold.value = -1;
+    limiterNode.threshold.value = -0.5;
     limiterNode.knee.value = 0;
     limiterNode.ratio.value = 20;
-    limiterNode.attack.value = 0.003;
-    limiterNode.release.value = 0.1;
+    limiterNode.attack.value = 0.002;
+    limiterNode.release.value = 0.06;
 
     analyser = ctx.createAnalyser();
     analyser.fftSize = 512; // 256 bins — finer resolution for the log-spaced bars
@@ -130,6 +150,8 @@ function ensureGraph() {
     }
     node.connect(bassNode);
     node = bassNode;
+    node.connect(bassComp);
+    node = bassComp;
     node.connect(limiterNode);
     node = limiterNode;
     node.connect(outputNode);
@@ -151,11 +173,24 @@ function applyEffects() {
   const t = ctx.currentTime;
   const bands = fx.eq ? fx.bands : new Array(10).fill(0);
   eqFilters.forEach((b, i) => {
-    const g = Math.max(-12, Math.min(12, +bands[i] || 0));
+    const g = Math.max(EQ_MIN_DB, Math.min(EQ_MAX_DB, +bands[i] || 0));
     b.gain.setTargetAtTime(g, t, 0.02);
   });
-  const bassDb = Math.max(0, Math.min(1, +fx.bass || 0)) * 12; // 0..+12 dB
+
+  const bass = Math.max(0, Math.min(1, +fx.bass || 0));
+  const bassDb = bass * 12; // low-shelf lift, 0..+12 dB
   bassNode.gain.setTargetAtTime(bassDb, t, 0.02);
+  // Stage-1 compressor scales with the boost: more lift → lower threshold and a
+  // higher ratio, so it does most of the taming. At bass 0 it's neutral
+  // (threshold 0, ratio 1) and inaudible.
+  if (bass > 0.001) {
+    bassComp.threshold.setTargetAtTime(-6 - bass * 14, t, 0.05); // 0→-6, 1→-20 dB
+    bassComp.ratio.setTargetAtTime(2 + bass * 4, t, 0.05); // 0→2, 1→6
+  } else {
+    bassComp.threshold.setTargetAtTime(0, t, 0.05);
+    bassComp.ratio.setTargetAtTime(1, t, 0.05);
+  }
+
   // Static normalization gain. A short ramp only smooths the step when the
   // LEVEL or the track changes — during a track the value is constant.
   normGain.gain.setTargetAtTime(normLinear(), t, 0.05);
@@ -164,7 +199,8 @@ function applyEffects() {
 // Called by the player on every track load with that track's ReplayGain (dB, or
 // null/undefined when unknown). Recomputes the static normalization gain.
 export function setTrackGain(db) {
-  trackGainDb = Number.isFinite(db) ? db : null;
+  const n = typeof db === "number" ? db : parseFloat(db);
+  trackGainDb = Number.isFinite(n) ? n : null;
   applyEffects();
 }
 
@@ -335,4 +371,4 @@ export function createVisualizer() {
 
 // Exposed for the settings UI: the fixed EQ centre frequencies, so the sliders
 // can label themselves without hard-coding the list twice.
-export { EQ_FREQS };
+export { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB };
