@@ -26,6 +26,7 @@ from mutagen.id3 import (
     TPOS,
     TRCK,
     TSRC,
+    TXXX,
 )
 from mutagen.id3 import error as ID3Error
 
@@ -50,7 +51,19 @@ def meta_from_gw(info: dict) -> dict:
         "date": date,
         "isrc": info.get("ISRC"),
         "md5_image": info.get("ALB_PICTURE", ""),
+        "gain": info.get("GAIN"),
     }
+
+
+def _replaygain_tag(raw) -> str | None:
+    """Format Deezer's ``GAIN`` (dB) as a standard ReplayGain tag value, e.g.
+    ``"-8.40 dB"``. Returns None when absent/unparseable."""
+    if raw in (None, ""):
+        return None
+    try:
+        return f"{float(raw):.2f} dB"
+    except (TypeError, ValueError):
+        return None
 
 
 def tag_file(path: Path, meta: dict, cover: bytes | None) -> None:
@@ -71,6 +84,9 @@ def tag_file(path: Path, meta: dict, cover: bytes | None) -> None:
             audio["date"] = meta["date"]
         if meta.get("isrc"):
             audio["isrc"] = meta["isrc"]
+        rg = _replaygain_tag(meta.get("gain"))
+        if rg:
+            audio["replaygain_track_gain"] = rg
         if cover:
             pic = Picture()
             pic.type = 3  # front cover
@@ -99,6 +115,9 @@ def tag_file(path: Path, meta: dict, cover: bytes | None) -> None:
         audio.add(TDRC(encoding=3, text=str(meta["date"])))
     if meta.get("isrc"):
         audio.add(TSRC(encoding=3, text=meta["isrc"]))
+    rg = _replaygain_tag(meta.get("gain"))
+    if rg:
+        audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=rg))
     if cover:
         audio.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover))
     audio.save(path)
