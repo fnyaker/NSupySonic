@@ -1043,6 +1043,57 @@ def artist(artist_id):
     return jsonify({"error": "not found"}), 404
 
 
+@webapi.route("/artist/<artist_id>/tracks")
+@login_required
+def artist_tracks(artist_id):
+    """All of an artist's tracks as a playlist-like list (the 'Titres' tab).
+
+    The public API's /artist/{id}/top endpoint is paged, so gather several pages
+    (deduping, since collaborations can repeat) up to a sane cap.
+    """
+    PAGE = 100
+    MAX = 300
+    provider = _provider()
+    if provider is not None:
+        dzapi = provider.dz.api
+        tracks = []
+        seen = set()
+        index = 0
+        while len(tracks) < MAX:
+            batch = _data(lambda i=index: dzapi.get_artist_top(artist_id, index=i, limit=PAGE))
+            if not batch:
+                break
+            for raw in batch:
+                t = _track_api(raw)
+                if t and t["deezer_id"] not in seen:
+                    seen.add(t["deezer_id"])
+                    tracks.append(t)
+            if len(batch) < PAGE:
+                break
+            index += PAGE
+        if tracks:
+            return jsonify({"tracks": tracks})
+    # Deezer disabled/unreachable: serve the artist's archived tracks from the DB.
+    ar = (
+        Artist.select().where(Artist.deezer_id == str(artist_id)).first()
+        if _valid_id(artist_id)
+        else None
+    )
+    if ar is not None:
+        rows = (
+            Track.select(Track, Album, Artist)
+            .join(Album)
+            .switch(Track)
+            .join(Artist)
+            .where(Track.artist == ar)
+            .order_by(Album.name, Track.disc, Track.number)
+        )
+        return jsonify({"tracks": [_db_track(t) for t in rows]})
+    if provider is None:
+        return jsonify({"error": "Deezer proxy disabled"}), 503
+    return jsonify({"error": "not found"}), 404
+
+
 def _db_album_by_id(album_id):
     """The DB Album for a Deezer numeric id, or None (no network)."""
     if not _valid_id(album_id):

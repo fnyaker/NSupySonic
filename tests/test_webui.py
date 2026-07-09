@@ -556,6 +556,12 @@ class WebUITestCase(unittest.TestCase):
         self.assertIn("album", data["discography"])
         self.assertEqual(data["discography"]["album"][0]["title"], "Bar")
 
+    def test_artist_tracks(self):
+        self._login()
+        data = self.client.get("/api/artist/9/tracks").get_json()
+        self.assertTrue(data["tracks"])
+        self.assertEqual(data["tracks"][0]["deezer_id"], "1")
+
     # -- my library -----------------------------------------------------
 
     def test_my_playlists(self):
