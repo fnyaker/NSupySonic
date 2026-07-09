@@ -365,4 +365,56 @@
     background: var(--accent);
     cursor: pointer;
   }
+
+  /* On phones a horizontal row of ten vertical faders forces horizontal
+     scrolling, and dragging to scroll grabs whichever fader is under the
+     finger. Rotate the whole EQ for touch: one horizontal fader per row,
+     stacked vertically. Page scroll (up/down) and fader drag (left/right)
+     are now on perpendicular axes, so they never fight — `touch-action:
+     pan-y` makes the browser hand vertical swipes to the page and horizontal
+     drags to the fader. */
+  @media (max-width: 640px) {
+    .eq {
+      flex-direction: column;
+      justify-content: flex-start;
+      gap: 4px;
+      overflow-x: visible;
+      padding: 2px 0 0;
+    }
+    .band {
+      flex-direction: row;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      min-width: 0;
+    }
+    .freq {
+      order: -1;
+      flex: none;
+      width: 38px;
+      text-align: left;
+    }
+    .gain {
+      flex: none;
+      width: 40px;
+      text-align: right;
+      min-height: 0;
+    }
+    input.vert {
+      writing-mode: horizontal-tb;
+      direction: ltr;
+      flex: 1;
+      width: auto;
+      height: 6px;
+      touch-action: pan-y;
+    }
+    input.vert::-webkit-slider-thumb {
+      width: 26px;
+      height: 26px;
+    }
+    input.vert::-moz-range-thumb {
+      width: 26px;
+      height: 26px;
+    }
+  }
 </style>
