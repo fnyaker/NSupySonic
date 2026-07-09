@@ -17,9 +17,33 @@
   let fav = false;
   let loading = true;
 
+  // Two views on the artist page: the card-based overview and a flat, full
+  // "Titres" list (all of the artist's tracks, loaded lazily on first open).
+  let tab = "overview";
+  let allTracks = null; // null = not loaded yet, [] = loaded/empty
+  let tracksLoading = false;
+
   $: if (params.id && params.id !== id) {
     id = params.id;
     load(id);
+  }
+
+  // Lazily fetch the full track list the first time the "Titres" tab is opened.
+  $: if (tab === "tracks" && allTracks === null && !tracksLoading) loadTracks(id);
+
+  async function loadTracks(artistId) {
+    tracksLoading = true;
+    try {
+      const r = await api.artistTracks(artistId);
+      if (artistId === id) allTracks = r.tracks || [];
+    } catch {
+      if (artistId === id) allTracks = [];
+    }
+    if (artistId === id) tracksLoading = false;
+  }
+
+  function playAllTracks() {
+    if (allTracks?.length) player.playQueue(allTracks, 0, { kind: "artist", id });
   }
 
   // Sequence guard: a delayed earlier response (network / offline retries)
@@ -31,6 +55,9 @@
     data = null;
     disco = null;
     fav = false;
+    tab = "overview";
+    allTracks = null;
+    tracksLoading = false;
     try {
       const r = await api.artist(artistId);
       if (mine === loadSeq) {
@@ -106,6 +133,24 @@
       <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Suivre"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
     </div>
 
+    <div class="tabs">
+      <button class:active={tab === "overview"} on:click={() => (tab = "overview")}>Aperçu</button>
+      <button class:active={tab === "tracks"} on:click={() => (tab = "tracks")}>Titres</button>
+    </div>
+
+    {#if tab === "tracks"}
+      {#if tracksLoading && allTracks === null}
+        <Skeleton kind="list" />
+      {:else if !allTracks?.length}
+        <p class="muted">Aucun titre trouvé pour cet artiste.</p>
+      {:else}
+        <div class="row tracks-head">
+          <button class="pill" on:click={playAllTracks}><Icon name="play" size={18} /> Tout lire</button>
+          <span class="muted">{allTracks.length} titres</span>
+        </div>
+        <TrackList tracks={allTracks} context={{ kind: "artist", id }} numbered />
+      {/if}
+    {:else}
     {#if latest.length}
       <h2>Dernières sorties</h2>
       <div class="shelf">{#each latest as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
@@ -140,6 +185,7 @@
       <h2>Biographie</h2>
       <p class="bio muted">{data.bio}</p>
     {/if}
+    {/if}
   </div>
 {/if}
 
@@ -167,6 +213,26 @@
   .actions {
     margin: 16px 0 18px;
     gap: 18px;
+  }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin: 4px 0 20px;
+  }
+  .tabs button {
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: var(--bg-card);
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .tabs button.active {
+    background: #fff;
+    color: #111;
+  }
+  .tracks-head {
+    margin-bottom: 14px;
+    gap: 16px;
   }
   .icon-btn {
     font-size: 1.4rem;

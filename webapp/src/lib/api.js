@@ -132,6 +132,7 @@ export const api = {
 
   // entities
   artist: (id) => req("/artist/" + id),
+  artistTracks: (id) => req("/artist/" + id + "/tracks"),
   discography: (id) => req("/artist/" + id + "/discography"),
   album: (id) => req("/album/" + id),
   playlist: (id) => req("/playlist/" + id),
