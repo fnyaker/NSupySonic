@@ -162,8 +162,8 @@ web UI and bundles it into the image, so there are no extra steps.
   browsing/scanning still works.
 - **Download ahead** — pre-archive a whole playlist or album in one click, without waiting for
   playback.
-- **SQLite or PostgreSQL** — starts on a zero-config SQLite file; flip one line to move to Postgres
-  and your data is migrated across automatically on the next boot.
+- **PostgreSQL out of the box** — `docker compose up` starts a bundled Postgres alongside the app;
+  any legacy SQLite data on the volume is migrated across automatically on the next boot.
 
 ## How it works
 
@@ -199,7 +199,7 @@ There are two ways to configure the server; pick one.
 | `DEEZER_QUALITY`           | `FLAC`     | Archive quality (`FLAC` recommended; needs HiFi).                |
 | `DEEZER_SYNC_AT`           | `04:00`    | Daily auto-sync time (HH:MM).                                    |
 | `DEEZER_REPORT_LISTENS`    | *(off)*    | Report plays back to Deezer so recommendations/Flow keep learning. Set `yes` to enable. |
-| `DATABASE_URI`             | *(sqlite)* | Empty = built-in SQLite on the volume. Set a Postgres URI to switch. |
+| `DATABASE_URI`             | *(bundled Postgres)* | Empty = the bundled `db` Postgres service. Set a URI to point at an external database. |
 
 Advanced knobs (web-server concurrency `GUNICORN_THREADS` / `GUNICORN_TIMEOUT`, reverse-proxy
 hardening `SUPYSONIC_PROXY_HOPS` / `SUPYSONIC_SESSION_COOKIE_SECURE`, and the bundled `POSTGRES_PASSWORD`)
@@ -226,12 +226,14 @@ The ARL is the session cookie that authenticates you with Deezer:
 > or share it. `.env`, `config/supysonic.conf` and `*.har` captures are gitignored and excluded
 > from the Docker build context for exactly this reason.
 
-### PostgreSQL (for production)
+### PostgreSQL
 
-SQLite is fine to start with. To move to Postgres: in `docker-compose.yml` uncomment the `db`
-service + the `depends_on` block, flip the `DATABASE_URI` line to the Postgres one, and set
-`POSTGRES_PASSWORD` in `.env` (single source of truth — the URI reuses it). On the next boot your
-existing SQLite data is migrated across automatically, one-shot and transparent.
+Postgres is the default: `docker compose up` starts a bundled `db` service alongside the app and the
+app connects to it out of the box. The only thing to set is `POSTGRES_PASSWORD` in `.env` (single
+source of truth — the `DATABASE_URI` reuses it). To use an external Postgres instead, remove the `db`
+service from `docker-compose.yml` and point `DATABASE_URI` at your server in `.env`. If a legacy
+SQLite database is still on the `/data` volume, its data is migrated across automatically on the next
+boot, one-shot and transparent.
 
 ## Streaming quality
 
