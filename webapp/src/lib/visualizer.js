@@ -54,16 +54,19 @@ const EQ_MAX_DB = 16;
 // the bottom of this file). Defaults are neutral / off.
 const fx = { eq: false, bands: new Array(10).fill(0), bass: 0, norm: "off" };
 
-// The current track's own loudness gain (dB, from Deezer's ReplayGain), set by
-// the player on every track load. null when unknown → that track isn't
-// normalized (we never invent a gain).
+// The current track's raw Deezer GAIN, set by the player on every track load.
+// IMPORTANT: Deezer's GAIN is the track's *loudness*, NOT the gain to apply.
+// The ReplayGain adjustment that normalizes it to Deezer's reference is
+// -(GAIN + 18.4) — the exact transform deemix uses for its ReplayGain tags.
+// null when unknown → that track isn't normalized (we never invent a gain).
 let trackGainDb = null;
+const RG_REFERENCE = 18.4; // Deezer's reference loudness offset (dB)
 
-// Volume normalization is STATIC: we take the track's ReplayGain and apply it
-// as a fixed gain for the whole track — no compression, nothing moving during
-// playback. The level only shifts the overall target loudness (like a
+// Volume normalization is STATIC: we take the track's ReplayGain adjustment and
+// apply it as a fixed gain for the whole track — no compression, nothing moving
+// during playback. The level shifts the overall target loudness (a
 // Quiet/Normal/Loud switch); "off" disables it entirely.
-const NORM_OFFSET = { off: 0, low: -5, medium: 0, high: 3 }; // dB
+const NORM_OFFSET = { off: 0, low: -2, medium: 2, high: 5 }; // dB
 const GAIN_MIN_DB = -24;
 const GAIN_MAX_DB = 12;
 
@@ -73,9 +76,10 @@ const dbToGain = (db) => Math.pow(10, db / 20);
 // (0 dB, no change) when normalization is off or the track's gain is unknown.
 function normLinear() {
   if (fx.norm === "off" || trackGainDb == null) return 1;
+  const replayGain = -(trackGainDb + RG_REFERENCE); // Deezer loudness → RG adjust
   const db = Math.max(
     GAIN_MIN_DB,
-    Math.min(GAIN_MAX_DB, trackGainDb + (NORM_OFFSET[fx.norm] || 0))
+    Math.min(GAIN_MAX_DB, replayGain + (NORM_OFFSET[fx.norm] || 0))
   );
   return dbToGain(db);
 }

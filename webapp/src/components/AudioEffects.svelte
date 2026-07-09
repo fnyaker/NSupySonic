@@ -2,16 +2,21 @@
   // Settings UI for the opt-in DSP chain (see lib/visualizer.js): volume
   // normalization, bass enhancement and a 10-band equalizer. Everything writes
   // to the persisted fx.* stores, which the audio graph subscribes to live.
-  import { eqEnabled, eqBands, bassBoost, normalization } from "../lib/stores.js";
+  import { player, eqEnabled, eqBands, bassBoost, normalization } from "../lib/stores.js";
   import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/visualizer.js";
   import Icon from "./Icon.svelte";
 
   const NORM_LEVELS = [
     { id: "off", label: "Désactivée", hint: "Volume d'origine" },
-    { id: "low", label: "Basse", hint: "Cible plus calme (−5 dB)" },
-    { id: "medium", label: "Normale", hint: "Cible de référence" },
-    { id: "high", label: "Élevée", hint: "Cible plus forte (+3 dB)" },
+    { id: "low", label: "Basse", hint: "Cible plus calme" },
+    { id: "medium", label: "Normale", hint: "Cible standard" },
+    { id: "high", label: "Élevée", hint: "Cible plus forte" },
   ];
+
+  // Master output volume — the same store the desktop player bar drives, exposed
+  // here so it's reachable on mobile (where the player bar is hidden) and so the
+  // user can pull the level down to offset the EQ / bass boost.
+  $: volPct = Math.round(($player.muted ? 0 : $player.volume) * 100);
 
   // A few useful curves (dB per band, low→high). "Plat" resets everything.
   const PRESETS = [
@@ -47,6 +52,25 @@
     défaut ; une fois activés, la lecture passe par le processeur audio (ce qui
     peut, sur certains mobiles, affecter la lecture en arrière-plan).
   </p>
+
+  <!-- Master volume ------------------------------------------------------- -->
+  <div class="block">
+    <div class="block-head">
+      <span class="block-title">Volume</span>
+      <span class="muted block-hint">
+        Volume de sortie général (identique à la barre du lecteur) — accessible
+        sur mobile, et pratique pour compenser l'égaliseur ou l'amplification
+        des basses.
+      </span>
+    </div>
+    <div class="slider-row">
+      <button class="vbtn" on:click={() => player.toggleMute()} aria-label="Muet" title="Muet">
+        <Icon name={$player.muted || $player.volume === 0 ? "mute" : "volume"} size={18} />
+      </button>
+      <input type="range" min="0" max="1" step="0.01" value={$player.muted ? 0 : $player.volume} on:input={(e) => player.setVolume(+e.target.value)} />
+      <span class="val">{volPct}%</span>
+    </div>
+  </div>
 
   <!-- Volume normalization ------------------------------------------------ -->
   <div class="block">
@@ -177,6 +201,15 @@
     display: flex;
     align-items: center;
     gap: 14px;
+  }
+  .vbtn {
+    flex: none;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+  }
+  .vbtn:hover {
+    color: var(--text);
   }
   .slider-row input[type="range"] {
     -webkit-appearance: none;
