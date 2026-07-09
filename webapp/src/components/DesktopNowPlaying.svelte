@@ -4,7 +4,6 @@
   import { onDestroy, tick } from "svelte";
   import { push } from "svelte-spa-router";
   import { fade } from "svelte/transition";
-  import { followScroll } from "../lib/scroll.js";
   import {
     player,
     current,
@@ -80,6 +79,7 @@
   import Lyrics from "./Lyrics.svelte";
   import Icon from "./Icon.svelte";
   import QualityMenu from "./QualityMenu.svelte";
+  import VirtualList from "./VirtualList.svelte";
 
   let tab = "queue";
 
@@ -96,15 +96,15 @@
 
   // Keep the playing track in view in the queue list (first quarter): jump
   // instantly when the queue tab (re)opens, then follow smoothly as it plays.
-  let queueBox;
+  let queueVL;
   let firstQueueFollow = true;
   $: followQueue(tab, idx, $immersiveOpen);
   async function followQueue() {
     if (tab !== "queue" || !$immersiveOpen || idx < 0) return;
     await tick();
-    const el = queueBox?.querySelector("li.now");
-    if (!el) return;
-    followScroll(queueBox, el, { ratio: 0.25, smooth: !firstQueueFollow });
+    // The queue is windowed, so the playing row may not be in the DOM — scroll
+    // by index instead of querying for it.
+    queueVL?.scrollToIndex(idx, { ratio: 0.25, smooth: !firstQueueFollow });
     firstQueueFollow = false;
   }
   $: if (tab !== "queue" || !$immersiveOpen) firstQueueFollow = true;
@@ -246,19 +246,19 @@
         <button class:active={tab === "queue"} on:click={() => (tab = "queue")}>File d'attente</button>
         <button class:active={tab === "lyrics"} on:click={() => (tab = "lyrics")}>Paroles</button>
       </div>
-      <div class="side-body" bind:this={queueBox}>
+      <div class="side-body">
         {#if tab === "queue"}
-          <ol class="queue">
-            {#each q as t, i (t.deezer_id + ":" + i)}
-              <li class:now={i === idx} class:past={i < idx}>
-                <button on:click={() => player.jump(i)}>
-                  <Cover src={t.album?.cover} alt="" size={42} />
-                  <span class="qm"><span class="qt">{t.title}</span><span class="qa">{t.artist?.name}</span></span>
-                  <span class="qd">{fmtDuration(t.duration)}</span>
+          <div class="queue">
+            <VirtualList items={q} bind:this={queueVL} let:item let:index>
+              <div class="qitem" class:now={index === idx} class:past={index < idx}>
+                <button on:click={() => player.jump(index)}>
+                  <Cover src={item.album?.cover} alt="" size={42} />
+                  <span class="qm"><span class="qt">{item.title}</span><span class="qa">{item.artist?.name}</span></span>
+                  <span class="qd">{fmtDuration(item.duration)}</span>
                 </button>
-              </li>
-            {/each}
-          </ol>
+              </div>
+            </VirtualList>
+          </div>
         {:else}
           <Lyrics />
         {/if}
@@ -587,11 +587,10 @@
     padding: 6px 10px 14px;
   }
   .queue {
-    list-style: none;
     margin: 0;
     padding: 0;
   }
-  .queue li button {
+  .qitem button {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -601,13 +600,13 @@
     text-align: left;
     color: #fff;
   }
-  .queue li button:hover {
+  .qitem button:hover {
     background: rgba(255, 255, 255, 0.08);
   }
-  .queue li.now .qt {
+  .qitem.now .qt {
     color: var(--accent);
   }
-  .queue li.past {
+  .qitem.past {
     opacity: 0.5;
   }
   .qm {

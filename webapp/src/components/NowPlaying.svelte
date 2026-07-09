@@ -12,6 +12,7 @@
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
   import Icon from "./Icon.svelte";
+  import VirtualList from "./VirtualList.svelte";
 
   let tab = "queue"; // queue | lyrics
 
@@ -55,23 +56,23 @@
 
     <div class="body">
       {#if tab === "queue"}
-        <ol class="queue">
-          {#each queue as t, i (t.deezer_id + ":" + i)}
-            <li class:now={i === idx} class:past={i < idx}>
-              <button class="qrow" on:click={() => player.jump(i)}>
-                <Cover src={t.album?.cover} alt={t.title} size={40} />
+        <div class="queue">
+          <VirtualList items={queue} let:item let:index>
+            <div class="qitem" class:now={index === idx} class:past={index < idx}>
+              <button class="qrow" on:click={() => player.jump(index)}>
+                <Cover src={item.album?.cover} alt={item.title} size={40} />
                 <span class="qmeta">
-                  <span class="qt">{t.title}</span>
-                  <span class="qa muted">{t.artist?.name}</span>
+                  <span class="qt">{item.title}</span>
+                  <span class="qa muted">{item.artist?.name}</span>
                 </span>
-                <span class="qd muted">{fmtDuration(t.duration)}</span>
+                <span class="qd muted">{fmtDuration(item.duration)}</span>
               </button>
-              {#if i > idx}
-                <button class="qx" on:click={() => player.removeAt(i)} aria-label="Retirer"><Icon name="close" size={15} /></button>
+              {#if index > idx}
+                <button class="qx" on:click={() => player.removeAt(index)} aria-label="Retirer"><Icon name="close" size={15} /></button>
               {/if}
-            </li>
-          {/each}
-        </ol>
+            </div>
+          </VirtualList>
+        </div>
       {:else}
         <Lyrics />
       {/if}
@@ -186,25 +187,21 @@
     padding: 10px 14px 18px;
   }
   .queue {
-    list-style: none;
     margin: 0;
     padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
   }
-  .queue li {
+  .qitem {
     display: flex;
     align-items: center;
     border-radius: 8px;
   }
-  .queue li:hover {
+  .qitem:hover {
     background: var(--bg-hover);
   }
-  .queue li.now .qt {
+  .qitem.now .qt {
     color: var(--accent);
   }
-  .queue li.past {
+  .qitem.past {
     opacity: 0.5;
   }
   .qrow {
@@ -244,7 +241,7 @@
     padding: 0 10px;
     opacity: 0;
   }
-  .queue li:hover .qx {
+  .qitem:hover .qx {
     opacity: 1;
   }
   .qx:hover {

@@ -22,10 +22,10 @@
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
-  import { followScroll } from "../lib/scroll.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import QualityMenu from "./QualityMenu.svelte";
+  import VirtualList from "./VirtualList.svelte";
 
   let showQueue = false;
 
@@ -134,15 +134,15 @@
 
   // Keep the playing track in view when the queue sheet is open (first quarter
   // on open, then follow as it advances).
-  let queueBox;
+  let queueVL;
   let firstQueueFollow = true;
   $: followQueue(showQueue, idx);
   async function followQueue() {
     if (!showQueue || idx < 0) return;
     await tick();
-    const el = queueBox?.querySelector("li.now");
-    if (!el) return;
-    followScroll(queueBox, el, { ratio: 0.25, smooth: !firstQueueFollow });
+    // The queue is windowed, so the playing row may not be in the DOM — scroll
+    // by index instead of querying for it.
+    queueVL?.scrollToIndex(idx, { ratio: 0.25, smooth: !firstQueueFollow });
     firstQueueFollow = false;
   }
   $: if (!showQueue) firstQueueFollow = true;
@@ -423,16 +423,16 @@
         <span>File d'attente</span>
         <button class="ic" on:click={() => (showQueue = false)} aria-label="Fermer"><Icon name="chevronDown" size={22} /></button>
       </div>
-      <ol class="queue" bind:this={queueBox}>
-        {#each q as t, i (t.deezer_id + ":" + i)}
-          <li class:now={i === idx} class:past={i < idx}>
-            <button on:click={() => { player.jump(i); showQueue = false; }}>
-              <Cover src={t.album?.cover} alt="" size={42} />
-              <span class="qm"><span class="qt">{t.title}</span><span class="qa">{t.artist?.name}</span></span>
+      <div class="queue">
+        <VirtualList items={q} bind:this={queueVL} let:item let:index>
+          <div class="qitem" class:now={index === idx} class:past={index < idx}>
+            <button on:click={() => { player.jump(index); showQueue = false; }}>
+              <Cover src={item.album?.cover} alt="" size={42} />
+              <span class="qm"><span class="qt">{item.title}</span><span class="qa">{item.artist?.name}</span></span>
             </button>
-          </li>
-        {/each}
-      </ol>
+          </div>
+        </VirtualList>
+      </div>
     </div>
   {/if}
 </div>
@@ -709,12 +709,13 @@
     color: #fff;
   }
   .queue {
-    list-style: none;
     margin: 0;
     padding: 0 10px 24px;
     overflow-y: auto;
+    flex: 1;
+    min-height: 0;
   }
-  .queue li button {
+  .qitem button {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -724,10 +725,10 @@
     text-align: left;
     color: #fff;
   }
-  .queue li.now .qt {
+  .qitem.now .qt {
     color: var(--accent);
   }
-  .queue li.past {
+  .qitem.past {
     opacity: 0.5;
   }
   .qm {
