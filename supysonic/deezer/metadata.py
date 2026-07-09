@@ -56,12 +56,17 @@ def meta_from_gw(info: dict) -> dict:
 
 
 def _replaygain_tag(raw) -> str | None:
-    """Format Deezer's ``GAIN`` (dB) as a standard ReplayGain tag value, e.g.
-    ``"-8.40 dB"``. Returns None when absent/unparseable."""
+    """Format a ``REPLAYGAIN_TRACK_GAIN`` value from Deezer's ``GAIN``.
+
+    Deezer's ``GAIN`` is the track's loudness, not the adjustment to apply, so
+    the actual ReplayGain adjustment is ``-(GAIN + 18.4)`` — the same transform
+    deemix uses. Returns e.g. ``"-10.00 dB"``, or None when absent/unparseable.
+    """
     if raw in (None, ""):
         return None
     try:
-        return f"{float(raw):.2f} dB"
+        # `+ 0.0` normalizes a -0.0 result to 0.0 ("0.00" not "-0.00").
+        return f"{-(float(raw) + 18.4) + 0.0:.2f} dB"
     except (TypeError, ValueError):
         return None
 

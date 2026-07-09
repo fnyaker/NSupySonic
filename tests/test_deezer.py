@@ -191,8 +191,10 @@ class DeezerTestCase(TestBase):
         info["GAIN"] = "-8.4"
         self.assertEqual(meta_from_gw(info)["gain"], "-8.4")
 
-        self.assertEqual(_replaygain_tag("-8.4"), "-8.40 dB")
-        self.assertEqual(_replaygain_tag(2), "2.00 dB")
+        # Deezer GAIN is the loudness; the ReplayGain adjustment is -(GAIN+18.4).
+        self.assertEqual(_replaygain_tag("-8.4"), "-10.00 dB")  # -(-8.4+18.4)
+        self.assertEqual(_replaygain_tag(-18.4), "0.00 dB")  # reference → no change
+        self.assertEqual(_replaygain_tag(-24), "5.60 dB")  # quiet track → boost
         self.assertIsNone(_replaygain_tag(None))
         self.assertIsNone(_replaygain_tag(""))
         self.assertIsNone(_replaygain_tag("nan-ish"))
