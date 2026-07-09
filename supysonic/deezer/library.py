@@ -121,6 +121,17 @@ def album_cover_file(album) -> str | None:
     return path if os.path.isfile(path) else None
 
 
+def _parse_gain(raw):
+    """Deezer's per-track ReplayGain (``GAIN``) arrives as a string in dB, e.g.
+    ``"-8.4"``. Return it as a float, or None when absent/unparseable."""
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_track(t: dict) -> dict:
     """Flatten a gateway track dict (song.getData / playlist / album list)."""
     title = t.get("SNG_TITLE", "")
@@ -130,6 +141,7 @@ def normalize_track(t: dict) -> dict:
     date = str(t.get("PHYSICAL_RELEASE_DATE") or t.get("DIGITAL_RELEASE_DATE") or "")
     year = int(date[:4]) if date[:4].isdigit() else None
     return {
+        "gain": _parse_gain(t.get("GAIN")),
         "sng_id": str(t.get("SNG_ID")),
         "title": title or "[unknown]",
         "artist": t.get("ART_NAME", "") or "[unknown]",
@@ -224,6 +236,8 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
         track.duration = f["duration"]
         track.year = f["year"]
         track.deezer_id = f["sng_id"]
+        if f["gain"] is not None:
+            track.gain = f["gain"]
         track.save()
         return track
     except Track.DoesNotExist:
@@ -242,6 +256,7 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
             album=album,
             artist=artist,
             bitrate=NOMINAL_BITRATE.get(default_quality, 320),
+            gain=f["gain"],
             path=path,
             last_modification=0,
             root_folder=root,

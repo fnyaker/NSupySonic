@@ -68,6 +68,22 @@ export function setPlaybackStatus(state, extra = {}) {
 // Web-player streaming quality (FLAC | MP3_320 | MP3_128).
 export const quality = persisted("player.quality", "FLAC");
 
+// -- audio effects (opt-in DSP chain) ---------------------------------------
+// All three default OFF: when nothing is engaged the player keeps a PURE audio
+// path (no Web Audio graph), which is what preserves reliable background
+// playback on mobile. Enabling any effect routes audio through the processor.
+//
+// Ten-band graphic EQ. Frequencies are fixed (see visualizer.js EQ_FREQS);
+// each entry is a gain in dB in [-12, +12], 0 = flat.
+export const eqEnabled = persisted("fx.eq.enabled", false);
+export const eqBands = persisted("fx.eq.bands", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+// Bass enhancement, 0..1 (a low-shelf lift). A brick-wall limiter always sits
+// at the end of the chain so a heavy lift can't clip/saturate the output.
+export const bassBoost = persisted("fx.bass", 0);
+// Volume normalization strength: "off" | "low" | "medium" | "high". A
+// dynamics compressor + make-up gain that evens out loud/quiet tracks.
+export const normalization = persisted("fx.normalize", "off");
+
 // -- offline / downloads ----------------------------------------------------
 
 // Default quality used when downloading a track to the device (overridable per

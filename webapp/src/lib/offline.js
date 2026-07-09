@@ -63,6 +63,8 @@ function slimTrack(t) {
     duration: t.duration || 0,
     explicit: !!t.explicit,
     local: !!t.local,
+    // Keep the ReplayGain so volume normalization still works offline.
+    gain: typeof t.gain === "number" ? t.gain : null,
     artist: t.artist ? { deezer_id: t.artist.deezer_id, name: t.artist.name } : null,
     album: t.album
       ? { deezer_id: t.album.deezer_id, title: t.album.title, cover: t.album.cover }

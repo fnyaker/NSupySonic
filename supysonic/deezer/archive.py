@@ -117,6 +117,13 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
 
     track.bitrate = _bitrate_for(track.path, fmt, track.duration)
     track.has_art = bool(cover)
+    # Archive the track's loudness gain alongside the audio: the resolve `info`
+    # is the authoritative song.getData response, so this fills in (or refreshes)
+    # the ReplayGain used for volume normalization even if the original import
+    # dict lacked it — persisted on the row exactly like bitrate/art.
+    gain = library._parse_gain(info.get("GAIN"))
+    if gain is not None:
+        track.gain = gain
     track.last_modification = int(time.time())
     track.save()
 

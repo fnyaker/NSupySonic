@@ -7,6 +7,7 @@ import os
 import os.path
 import tempfile
 import unittest
+from pathlib import Path
 
 from supysonic.db import Track, Album, Artist, Folder, Playlist, PlaylistTrack, StarredTrack, User
 from supysonic.deezer import ids
@@ -159,6 +160,42 @@ class DeezerTestCase(TestBase):
         self.assertEqual(t2.id, t.id)
         self.assertEqual(Track.select().where(Track.deezer_id == "1").count(), 1)
         self.assertEqual(t2.title, "Song (remastered)")
+
+    def test_upsert_track_stores_replaygain(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        # Deezer sends GAIN as a string in dB; it lands on the Track row as a
+        # float for the web player's static volume normalization.
+        raw = raw_track(1, "Loud")
+        raw["GAIN"] = "-8.4"
+        t = library.upsert_track(raw, root, "FLAC")
+        self.assertAlmostEqual(t.gain, -8.4)
+
+        # A later refresh without GAIN keeps the value we already learned.
+        t2 = library.upsert_track(raw_track(1, "Loud"), root, "FLAC")
+        self.assertAlmostEqual(t2.gain, -8.4)
+
+        # A track with no GAIN at all stays null (never normalized).
+        t3 = library.upsert_track(raw_track(2, "Unknown"), root, "FLAC")
+        self.assertIsNone(t3.gain)
+
+    def test_replaygain_tag_metadata(self):
+        # The gain is also carried into the archived file's tags (ReplayGain),
+        # so it travels with the FLAC/MP3 like the cover — readable by other
+        # players (e.g. Subsonic clients) offline. Here we verify the tag value
+        # the writer emits (the mutagen write itself is best-effort and guarded).
+        from supysonic.deezer.metadata import meta_from_gw, _replaygain_tag
+
+        info = raw_track(1, "Loud")
+        info["GAIN"] = "-8.4"
+        self.assertEqual(meta_from_gw(info)["gain"], "-8.4")
+
+        self.assertEqual(_replaygain_tag("-8.4"), "-8.40 dB")
+        self.assertEqual(_replaygain_tag(2), "2.00 dB")
+        self.assertIsNone(_replaygain_tag(None))
+        self.assertIsNone(_replaygain_tag(""))
+        self.assertIsNone(_replaygain_tag("nan-ish"))
 
     def test_find_local_track_is_network_free(self):
         # An imported track is found by its Deezer id with a pure DB lookup, so
@@ -333,6 +370,7 @@ class DeezerTestCase(TestBase):
         self.assertTrue(track.path.endswith(".flac"))
 
         info = raw_track(7, "Lazy")
+        info["GAIN"] = "-6.2"  # authoritative loudness from the resolve response
 
         # Pretend FLAC is unavailable: we only get MP3_320 back.
         def fake_resolve(sng_id, quality=None):
@@ -355,6 +393,8 @@ class DeezerTestCase(TestBase):
         self.assertGreater(track.bitrate, 0)
         reloaded = Track[ids.track_uuid("7")]
         self.assertTrue(reloaded.path.endswith(".mp3"))
+        # The loudness gain is archived on the row alongside bitrate/art.
+        self.assertAlmostEqual(reloaded.gain, -6.2)
 
     def test_ensure_archived_writes_cover_sidecar(self):
         # The album art is archived on disk (cover.jpg next to the audio) and

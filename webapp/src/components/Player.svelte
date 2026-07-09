@@ -25,7 +25,12 @@
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, resolveCover, coverKey, baseCover } from "../lib/format.js";
-  import { registerSource, resumeAudio } from "../lib/visualizer.js";
+  import { registerSource, resumeAudio, setTrackGain } from "../lib/visualizer.js";
+  import {
+    getEpisodeProgress,
+    saveEpisodeProgress,
+    clearEpisodeProgress,
+  } from "../lib/podcastProgress.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import ImmersivePlayer from "./ImmersivePlayer.svelte";
@@ -75,9 +80,11 @@
     window.addEventListener("pagehide", onPageHide);
   });
   function onPageHide() {
+    savePodcastProgress(true);
     flushListen(null);
   }
   onDestroy(() => {
+    savePodcastProgress(true);
     stopWatchdog();
     cancelRecovery();
     cancelSwitch();
@@ -398,6 +405,9 @@
   let listenAccum = 0; // ms played so far for the current track
   let listenMark = 0; // timestamp playback last resumed at (0 = paused)
   $: trackListenState($player.playing);
+  // Persist an episode's position the moment it's paused — a pause is often the
+  // last thing that runs before the tab is backgrounded and frozen.
+  $: if (!$player.playing) savePodcastProgress(true);
   function trackListenState(p) {
     if (p && !listenMark) listenMark = Date.now();
     else if (!p && listenMark) {
@@ -421,6 +431,20 @@
     listenId = nextId;
     listenAccum = 0;
     listenMark = get(player).playing ? Date.now() : 0;
+  }
+
+  // Podcast resume: remember the playhead of the current episode so it can be
+  // picked up later. Throttled during playback (~5s), forced on pause/hide.
+  let lastPodSave = 0;
+  function savePodcastProgress(force = false) {
+    const cur = get(current);
+    if (!cur || !cur.podcast || !audio) return;
+    const now = Date.now();
+    if (!force && now - lastPodSave < 5000) return;
+    lastPodSave = now;
+    const d =
+      audio.duration && isFinite(audio.duration) ? audio.duration : cur.duration || 0;
+    saveEpisodeProgress(cur.deezer_id, audio.currentTime, d);
   }
 
   // Seek requests from other views (e.g. the immersive player). Routed through
@@ -516,12 +540,25 @@
 
   async function loadTrack(track) {
     const firstLoad = curId === null;
-    // On the very first (session-restored) load, resume the saved position.
-    const resumeAt = firstLoad && $player.currentTime > 1 ? $player.currentTime : 0;
+    // Where to (re)start this track:
+    //  - a podcast episode always resumes from its own saved position, whenever
+    //    it's loaded (replaying it days later still picks up where you stopped);
+    //  - otherwise, only the very first (session-restored) load resumes.
+    let resumeAt = 0;
+    if (track.podcast) {
+      const p = getEpisodeProgress(track.deezer_id);
+      if (p && p.t > 1) resumeAt = p.t;
+    } else if (firstLoad && $player.currentTime > 1) {
+      resumeAt = $player.currentTime;
+    }
     curId = track.deezer_id;
     curQ = get(quality);
     curSeq = get(player).seq;
     lastKnownTime = resumeAt;
+    // Static per-track volume normalization: hand the graph this track's
+    // ReplayGain (dB) so it can set a fixed gain for the whole track. No-op
+    // unless the user enabled normalization.
+    setTrackGain(typeof track.gain === "number" ? track.gain : null);
     recoverAttempts = 0; // fresh track, fresh recovery budget
     hadProgress = false; // this track hasn't produced audio yet (cold-start grace)
     cancelRecovery(); // a recovery for the OUTGOING track must not touch this one
@@ -926,6 +963,7 @@
     player.setProgress(audio.currentTime, d);
     updateBuffered();
     updatePositionState(audio.currentTime, d);
+    savePodcastProgress(); // throttled; no-op for non-podcast tracks
   }
 
   // Publish how far we've buffered ahead of the playhead so the seek bars can
@@ -977,6 +1015,9 @@
     if (loadingTrack) return;
     const s = get(player);
     const cur = $current;
+    // Finished a podcast episode: drop its resume point so it doesn't offer to
+    // reopen at the very end next time. (repeat "one" restarts it, so keep it.)
+    if (cur && cur.podcast && s.repeat !== "one") clearEpisodeProgress(cur.deezer_id);
     if (s.repeat === "one") {
       audio.currentTime = 0;
       audio.play().catch(() => {});

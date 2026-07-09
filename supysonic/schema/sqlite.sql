@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS track (
     album_id CHAR(36) NOT NULL REFERENCES album,
     artist_id CHAR(36) NOT NULL REFERENCES artist,
     bitrate INTEGER NOT NULL,
+    gain REAL,
     path VARCHAR(4096) NOT NULL,
     path_hash BLOB NOT NULL,
     created DATETIME NOT NULL,
