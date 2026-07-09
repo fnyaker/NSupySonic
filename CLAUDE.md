@@ -17,6 +17,38 @@ This applies to both the web player and Subsonic clients. Deezer entities are ma
 ordinary supysonic DB rows under a dedicated `Deezer` root folder, so supysonic's normal
 browse/search/playlist/star endpoints work **unchanged** — only streaming is intercepted.
 
+## Engineering principles (definition of done)
+
+Before considering **any** change finished — in this session or any future Claude Code session —
+run it through these questions. They are not optional polish; they are the bar.
+
+1. **Does it break anything else?** Trace the logic you're touching end to end. What else reads
+   this state, subscribes to this store, or depends on this DOM shape? (E.g. windowing a list
+   breaks any code that `querySelector`s a row that may no longer be mounted — provide an
+   index-based path instead.) Prefer changes that keep the observable result identical.
+2. **Is it fast, optimized, fluid?** Think about the worst realistic input, not the happy path
+   (a 4000-track "play all favorites" queue, not a 12-track album). Avoid O(n) work on every
+   update and unbounded DOM/network fan-out. Long lists must be **windowed/virtualized**
+   (`components/VirtualList.svelte`, `components/TrackList.svelte`), never rendered whole.
+3. **Same result, faster tech?** If a different approach yields the *exact same* end result but
+   is materially faster/lighter, choose it — don't add an artificial throttle when the real fix
+   is to not do the work at all (render only what's visible).
+4. **Security.** Are the endpoints this touches properly protected (`@login_required`, numeric-id
+   validation, quota/ownership checks)? What happens on hostile or random input — does anything
+   leak, crash, or return data it shouldn't? Never trust client-supplied ids/paths. Never commit
+   secrets (the ARL is a full-account credential).
+5. **Reliability & UX.** Fail soft where a feature is best-effort; keep the UI responsive and the
+   result pretty. Test the change by actually exercising it, not just building.
+6. **Coherence with what the user actually wants.** Before shipping, picture the user in front of
+   it: what will they *do* with this? Does it truly answer their need, or just technically match
+   the words of the request? Will using it feel good — or are there irritating friction points
+   (controls too cramped, targets too small, a fader glued to its neighbour)? If so, fix them
+   *now*, not after they complain. Sweat the spacing, rhythm, alignment and feel.
+7. **Premium bar.** Every screen should look and feel like a team of senior engineers and
+   designers sweated it — top-of-the-top, not "good enough". No cramped or default-looking UI, no
+   emoji (glyphs go through `Icon.svelte`). When a layout feels off, it *is* off; keep iterating
+   until it reads as considered and effortless.
+
 ## Commands
 
 ```sh
