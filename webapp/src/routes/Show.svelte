@@ -2,6 +2,7 @@
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { player, currentId, playing, isAdmin, toasts } from "../lib/stores.js";
+  import { podcastProgress } from "../lib/podcastProgress.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
@@ -64,6 +65,16 @@
     }
   }
 
+  // Resume state for an episode: fraction played (0..1) and seconds remaining,
+  // derived from the saved podcast position. null when there's nothing to resume.
+  function resumeOf(ep) {
+    const p = $podcastProgress[ep.deezer_id];
+    if (!p || !p.t) return null;
+    const dur = p.d || ep.duration || 0;
+    if (!dur) return { pct: 0, left: 0 };
+    return { pct: Math.min(1, p.t / dur), left: Math.max(0, Math.round(dur - p.t)) };
+  }
+
   function fmtDate(ts) {
     if (!ts) return "";
     try {
@@ -114,6 +125,7 @@
       <ul class="episodes">
         {#each episodes as ep, i (ep.deezer_id)}
           {@const active = $currentId === ep.deezer_id}
+          {@const resume = resumeOf(ep)}
           <li class:active>
             <button class="pl" on:click={() => toggle(i, ep)} aria-label="Lire l'épisode">
               <Icon name={active && $playing ? "pause" : "play"} size={18} />
@@ -134,9 +146,16 @@
                 </button>
               {/if}
               <div class="foot muted">
-                {fmtDuration(ep.duration)}
+                {#if resume}
+                  <span class="resume">Reprendre · il reste {fmtDuration(resume.left)}</span>
+                {:else}
+                  {fmtDuration(ep.duration)}
+                {/if}
                 {#if ep.status === "completed"}· <Icon name="downloaded" size={14} />{/if}
               </div>
+              {#if resume}
+                <div class="ebar"><span style={`width:${resume.pct * 100}%`}></span></div>
+              {/if}
             </div>
           </li>
         {/each}
@@ -266,6 +285,23 @@
     align-items: center;
     gap: 6px;
     font-size: 0.82rem;
+  }
+  .resume {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .ebar {
+    margin-top: 8px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--bg-hover);
+    overflow: hidden;
+    max-width: 320px;
+  }
+  .ebar span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
   }
   @media (max-width: 640px) {
     .art {

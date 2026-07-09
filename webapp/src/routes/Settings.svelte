@@ -18,6 +18,7 @@
   import { bytes as fmtBytes, duration as fmtDuration } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
+  import AudioEffects from "../components/AudioEffects.svelte";
 
   const QUALITIES = [
     { id: "FLAC", label: "FLAC", hint: "Sans perte — lourd" },
@@ -135,6 +136,8 @@
     </div>
   </section>
 {/if}
+
+<AudioEffects />
 
 <section class="card">
   <h2>Qualité de téléchargement par défaut</h2>
