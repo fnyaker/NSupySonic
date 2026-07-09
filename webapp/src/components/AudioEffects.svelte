@@ -3,7 +3,7 @@
   // normalization, bass enhancement and a 10-band equalizer. Everything writes
   // to the persisted fx.* stores, which the audio graph subscribes to live.
   import { eqEnabled, eqBands, bassBoost, normalization } from "../lib/stores.js";
-  import { EQ_FREQS } from "../lib/visualizer.js";
+  import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/visualizer.js";
   import Icon from "./Icon.svelte";
 
   const NORM_LEVELS = [
@@ -28,7 +28,7 @@
 
   function setBand(i, v) {
     const next = $eqBands.slice();
-    next[i] = Math.max(-12, Math.min(12, +v || 0));
+    next[i] = Math.max(EQ_MIN_DB, Math.min(EQ_MAX_DB, +v || 0));
     eqBands.set(next);
   }
   function applyPreset(bands) {
@@ -84,7 +84,7 @@
     <button class="toggle" role="switch" aria-checked={$eqEnabled} on:click={() => eqEnabled.set(!$eqEnabled)}>
       <span class="tg-txt">
         <span class="tg-title">Égaliseur 10 bandes</span>
-        <span class="tg-hint muted">Ajustez chaque bande de fréquence (±12 dB).</span>
+        <span class="tg-hint muted">Ajustez chaque bande de fréquence (±16 dB).</span>
       </span>
       <span class="sw" class:on={$eqEnabled}><span class="knob"></span></span>
     </button>
@@ -102,8 +102,8 @@
           <input
             class="vert"
             type="range"
-            min="-12"
-            max="12"
+            min={EQ_MIN_DB}
+            max={EQ_MAX_DB}
             step="1"
             value={$eqBands[i]}
             disabled={!$eqEnabled}
@@ -288,29 +288,29 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     flex: 1;
-    min-width: 34px;
+    min-width: 42px;
   }
   .gain {
-    font-size: 0.7rem;
+    font-size: 0.74rem;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
     min-height: 1em;
   }
   .freq {
-    font-size: 0.68rem;
+    font-size: 0.72rem;
     color: var(--text-dim);
   }
   input.vert {
     writing-mode: vertical-lr;
     direction: rtl;
-    width: 8px;
-    height: 120px;
+    width: 10px;
+    height: 170px;
     -webkit-appearance: none;
     appearance: none;
     background: var(--bg-hover);
-    border-radius: 4px;
+    border-radius: 5px;
     cursor: pointer;
   }
   input.vert:disabled {
@@ -318,15 +318,15 @@
   }
   input.vert::-webkit-slider-thumb {
     -webkit-appearance: none;
-    width: 16px;
-    height: 16px;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
     background: var(--accent);
     cursor: pointer;
   }
   input.vert::-moz-range-thumb {
-    width: 16px;
-    height: 16px;
+    width: 20px;
+    height: 20px;
     border: none;
     border-radius: 50%;
     background: var(--accent);

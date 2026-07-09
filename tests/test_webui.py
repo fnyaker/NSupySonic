@@ -27,6 +27,7 @@ def raw_track(sid, title="T", art=("1", "Artist"), alb=("10", "Album"), pic="md5
         "TRACK_NUMBER": 1,
         "DISK_NUMBER": 1,
         "EXPLICIT_LYRICS": "0",
+        "GAIN": "-7.0",
     }
 
 
@@ -499,6 +500,21 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(len(data["lyrics"]["synced"]), 2)
         self.assertEqual(data["lyrics"]["synced"][1]["time"], 2500)
         self.assertIn("line one", data["lyrics"]["text"])
+
+    def test_track_gain(self):
+        # ReplayGain endpoint (volume normalization): a numeric Deezer id with no
+        # DB row falls back to a live fetch; a non-numeric/local id is null.
+        self._login()
+        data = self.client.get("/api/gain/5").get_json()
+        self.assertAlmostEqual(data["gain"], -7.0)
+        self.assertIsNone(self.client.get("/api/gain/not-a-number").get_json()["gain"])
+
+    def test_browse_tracks_carry_gain(self):
+        # The gain travels in the track objects the player queues, so normalization
+        # has it without an extra request.
+        self._login()
+        tracks = self.client.get("/api/album/302127").get_json()["tracks"]
+        self.assertTrue(all(t["gain"] == -7.0 for t in tracks))
 
     def test_playlist_page(self):
         self._login()

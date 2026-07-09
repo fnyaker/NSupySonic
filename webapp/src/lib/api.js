@@ -136,6 +136,8 @@ export const api = {
   album: (id) => req("/album/" + id),
   playlist: (id) => req("/playlist/" + id),
   lyrics: (id) => req("/lyrics/" + id),
+  // ReplayGain for volume normalization; backfilled + cached server-side.
+  trackGain: (id) => req("/gain/" + id),
 
   // radios
   trackRadio: (id) => req("/radio/track/" + id),

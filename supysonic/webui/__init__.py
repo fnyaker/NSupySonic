@@ -450,6 +450,7 @@ def _db_track(t: Track) -> dict:
         "title": t.title,
         "duration": t.duration or 0,
         "explicit": False,
+        "gain": t.gain,
         "artist": {"deezer_id": str(t.artist.deezer_id or ""), "name": t.artist.name},
         "album": {
             "deezer_id": str(t.album.deezer_id or ""),
@@ -1175,6 +1176,40 @@ def lyrics(track_id):
     except Exception:
         return jsonify({"lyrics": None})
     return jsonify({"lyrics": _lyrics(raw)})
+
+
+@webapi.route("/gain/<track_id>")
+@login_required
+def track_gain(track_id):
+    # ReplayGain for the web player's volume normalization. Browse responses
+    # already carry it when known; this fills the gap for tracks whose row
+    # predates the gain column (or was imported from a dict without GAIN) —
+    # fetched once from Deezer, then cached on the row so it's instant after.
+    if not track_id.isdigit():  # Deezer tracks only (locals have no ReplayGain)
+        return jsonify({"gain": None})
+
+    from ..deezer import ids
+
+    row = None
+    try:
+        row = Track[ids.track_uuid(track_id)]
+        if row.gain is not None:
+            return jsonify({"gain": row.gain})
+    except Track.DoesNotExist:
+        pass
+
+    provider = _provider()
+    if provider is None:
+        return jsonify({"gain": None})
+    try:
+        info = provider.get_track_info(track_id)
+        gain = _gain(info.get("GAIN"))
+    except Exception:
+        return jsonify({"gain": None})
+    if gain is not None and row is not None:
+        row.gain = gain
+        row.save()
+    return jsonify({"gain": gain})
 
 
 # -- radio / flow / recommendations -----------------------------------------
