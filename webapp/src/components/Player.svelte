@@ -25,7 +25,7 @@
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, resolveCover, coverKey, baseCover } from "../lib/format.js";
-  import { registerSource, resumeAudio } from "../lib/visualizer.js";
+  import { registerSource, resumeAudio, setTrackGain } from "../lib/visualizer.js";
   import {
     getEpisodeProgress,
     saveEpisodeProgress,
@@ -555,6 +555,10 @@
     curQ = get(quality);
     curSeq = get(player).seq;
     lastKnownTime = resumeAt;
+    // Static per-track volume normalization: hand the graph this track's
+    // ReplayGain (dB) so it can set a fixed gain for the whole track. No-op
+    // unless the user enabled normalization.
+    setTrackGain(typeof track.gain === "number" ? track.gain : null);
     recoverAttempts = 0; // fresh track, fresh recovery budget
     hadProgress = false; // this track hasn't produced audio yet (cold-start grace)
     cancelRecovery(); // a recovery for the OUTGOING track must not touch this one

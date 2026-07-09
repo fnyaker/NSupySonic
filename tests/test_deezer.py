@@ -160,6 +160,25 @@ class DeezerTestCase(TestBase):
         self.assertEqual(Track.select().where(Track.deezer_id == "1").count(), 1)
         self.assertEqual(t2.title, "Song (remastered)")
 
+    def test_upsert_track_stores_replaygain(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        # Deezer sends GAIN as a string in dB; it lands on the Track row as a
+        # float for the web player's static volume normalization.
+        raw = raw_track(1, "Loud")
+        raw["GAIN"] = "-8.4"
+        t = library.upsert_track(raw, root, "FLAC")
+        self.assertAlmostEqual(t.gain, -8.4)
+
+        # A later refresh without GAIN keeps the value we already learned.
+        t2 = library.upsert_track(raw_track(1, "Loud"), root, "FLAC")
+        self.assertAlmostEqual(t2.gain, -8.4)
+
+        # A track with no GAIN at all stays null (never normalized).
+        t3 = library.upsert_track(raw_track(2, "Unknown"), root, "FLAC")
+        self.assertIsNone(t3.gain)
+
     def test_find_local_track_is_network_free(self):
         # An imported track is found by its Deezer id with a pure DB lookup, so
         # streaming archived audio never needs Deezer (offline resilience).

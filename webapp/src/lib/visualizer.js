@@ -17,15 +17,14 @@ let ctx = null;
 let analyser = null;
 
 // The DSP nodes, built once with the context. The chain is:
-//   sources → inputNode → eq[0..9] → bassNode → compNode → makeupNode
+//   sources → inputNode → normGain → eq[0..9] → bassNode
 //           → limiterNode → outputNode → (destination + analyser)
 let inputNode = null;
 let outputNode = null;
+let normGain = null; // STATIC per-track normalization gain (set once on load)
 let eqFilters = [];
 let bassNode = null;
-let compNode = null; // normalization compressor
-let makeupNode = null; // post-compressor make-up gain
-let limiterNode = null; // brick-wall safety limiter (always on when wired)
+let limiterNode = null; // brick-wall safety limiter (guards the bass lift)
 
 // createMediaElementSource may only run ONCE per element, so track which
 // elements are already wired. The player keeps two <audio> elements (for
@@ -45,17 +44,31 @@ const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 // the bottom of this file). Defaults are neutral / off.
 const fx = { eq: false, bands: new Array(10).fill(0), bass: 0, norm: "off" };
 
-// Normalization presets: a compressor that pulls loud material down, plus a
-// make-up gain (dB) to bring the perceived level back up. The limiter after it
-// catches any peaks the make-up gain would otherwise clip.
-const NORM = {
-  off: { thr: 0, ratio: 1, makeup: 0 },
-  low: { thr: -18, ratio: 3, makeup: 3 },
-  medium: { thr: -24, ratio: 6, makeup: 6 },
-  high: { thr: -30, ratio: 12, makeup: 9 },
-};
+// The current track's own loudness gain (dB, from Deezer's ReplayGain), set by
+// the player on every track load. null when unknown → that track isn't
+// normalized (we never invent a gain).
+let trackGainDb = null;
+
+// Volume normalization is STATIC: we take the track's ReplayGain and apply it
+// as a fixed gain for the whole track — no compression, nothing moving during
+// playback. The level only shifts the overall target loudness (like a
+// Quiet/Normal/Loud switch); "off" disables it entirely.
+const NORM_OFFSET = { off: 0, low: -5, medium: 0, high: 3 }; // dB
+const GAIN_MIN_DB = -24;
+const GAIN_MAX_DB = 12;
 
 const dbToGain = (db) => Math.pow(10, db / 20);
+
+// The linear gain to apply for the current track at the current level. 1.0
+// (0 dB, no change) when normalization is off or the track's gain is unknown.
+function normLinear() {
+  if (fx.norm === "off" || trackGainDb == null) return 1;
+  const db = Math.max(
+    GAIN_MIN_DB,
+    Math.min(GAIN_MAX_DB, trackGainDb + (NORM_OFFSET[fx.norm] || 0))
+  );
+  return dbToGain(db);
+}
 
 function effectsOn() {
   return (
@@ -74,6 +87,8 @@ function ensureGraph() {
     ctx = new AC();
     inputNode = ctx.createGain();
     outputNode = ctx.createGain();
+    normGain = ctx.createGain();
+    normGain.gain.value = 1;
 
     eqFilters = EQ_FREQS.map((f) => {
       const b = ctx.createBiquadFilter();
@@ -89,19 +104,11 @@ function ensureGraph() {
     bassNode.frequency.value = 120;
     bassNode.gain.value = 0;
 
-    compNode = ctx.createDynamicsCompressor();
-    compNode.threshold.value = 0;
-    compNode.knee.value = 30;
-    compNode.ratio.value = 1;
-    compNode.attack.value = 0.01;
-    compNode.release.value = 0.25;
-
-    makeupNode = ctx.createGain();
-    makeupNode.gain.value = 1;
-
     // Brick-wall limiter: high ratio, fast attack, threshold just below 0 dBFS.
-    // Left on whenever the graph is wired so the bass lift / make-up gain can
-    // never push the output into hard clipping ("le limiteur auto").
+    // Left on whenever the graph is wired so the bass lift (or a positive
+    // normalization gain on an already-hot master) can never hard-clip
+    // ("le limiteur auto pour éviter de saturer"). It's transparent below the
+    // threshold, so it does NOT touch normal, already-normalized audio.
     limiterNode = ctx.createDynamicsCompressor();
     limiterNode.threshold.value = -1;
     limiterNode.knee.value = 0;
@@ -115,16 +122,14 @@ function ensureGraph() {
 
     // Wire the fixed chain (sources attach to inputNode in wireAudio).
     let node = inputNode;
+    node.connect(normGain);
+    node = normGain;
     for (const b of eqFilters) {
       node.connect(b);
       node = b;
     }
     node.connect(bassNode);
     node = bassNode;
-    node.connect(compNode);
-    node = compNode;
-    node.connect(makeupNode);
-    node = makeupNode;
     node.connect(limiterNode);
     node = limiterNode;
     node.connect(outputNode);
@@ -151,10 +156,16 @@ function applyEffects() {
   });
   const bassDb = Math.max(0, Math.min(1, +fx.bass || 0)) * 12; // 0..+12 dB
   bassNode.gain.setTargetAtTime(bassDb, t, 0.02);
-  const n = NORM[fx.norm] || NORM.off;
-  compNode.threshold.setTargetAtTime(n.thr, t, 0.05);
-  compNode.ratio.setTargetAtTime(n.ratio, t, 0.05);
-  makeupNode.gain.setTargetAtTime(dbToGain(n.makeup), t, 0.05);
+  // Static normalization gain. A short ramp only smooths the step when the
+  // LEVEL or the track changes — during a track the value is constant.
+  normGain.gain.setTargetAtTime(normLinear(), t, 0.05);
+}
+
+// Called by the player on every track load with that track's ReplayGain (dB, or
+// null/undefined when unknown). Recomputes the static normalization gain.
+export function setTrackGain(db) {
+  trackGainDb = Number.isFinite(db) ? db : null;
+  applyEffects();
 }
 
 // Called by the store subscriptions whenever an effect setting changes. Applies
@@ -223,7 +234,7 @@ bassBoost.subscribe((v) => {
   onFxChange();
 });
 normalization.subscribe((v) => {
-  fx.norm = NORM[v] ? v : "off";
+  fx.norm = v in NORM_OFFSET ? v : "off";
   onFxChange();
 });
 

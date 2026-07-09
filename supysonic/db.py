@@ -20,6 +20,7 @@ from peewee import (
     CharField,
     DateTimeField,
     FixedCharField,
+    FloatField,
     ForeignKeyField,
     IntegerField,
     UUIDField,
@@ -30,7 +31,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260703"
+SCHEMA_VERSION = "20260709"
 
 
 def now():
@@ -340,6 +341,10 @@ class Track(PathMixin, _Model):
     artist = ForeignKeyField(Artist, backref="tracks")
 
     bitrate = IntegerField()
+    # ReplayGain-style track loudness gain in dB (from Deezer's GAIN), used by
+    # the web player for static, per-track volume normalization. Null when
+    # unknown (e.g. locally uploaded files).
+    gain = FloatField(null=True)
 
     path = CharField(4096)  # unique
     _path_hash = BlobField(column_name="path_hash", unique=True)

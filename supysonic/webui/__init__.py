@@ -60,6 +60,17 @@ def _title(t):
     return f"{title} {version}".strip() if version and version not in title else title
 
 
+def _gain(raw):
+    """Per-track ReplayGain (dB) as a float for the web player's normalization,
+    or None. Deezer sends it as a string on the gateway, a number on the API."""
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _track(t):
     if not t or not t.get("SNG_ID"):
         return None
@@ -70,6 +81,7 @@ def _track(t):
         "duration": int(t.get("DURATION") or 0),
         "added": int(t.get("DATE_ADD") or 0),
         "explicit": expl == "1",
+        "gain": _gain(t.get("GAIN")),
         "artist": {"deezer_id": str(t.get("ART_ID")), "name": t.get("ART_NAME", "")},
         "album": {
             "deezer_id": str(t.get("ALB_ID")),
@@ -172,6 +184,7 @@ def _track_api(t):
         "title": t.get("title") or t.get("title_short") or "",
         "duration": int(t.get("duration") or 0),
         "explicit": bool(t.get("explicit_lyrics")),
+        "gain": _gain(t.get("gain")),
         "artist": {"deezer_id": str(art.get("id")), "name": art.get("name", "")},
         "album": {
             "deezer_id": str(alb.get("id")),
@@ -355,6 +368,7 @@ def _local_track(t: Track) -> dict:
         "title": t.title,
         "duration": t.duration or 0,
         "explicit": False,
+        "gain": t.gain,
         "artist": {"deezer_id": str(t.artist.id), "name": t.artist.name},
         "album": {
             "deezer_id": str(t.album.id),

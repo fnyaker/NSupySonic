@@ -7,10 +7,10 @@
   import Icon from "./Icon.svelte";
 
   const NORM_LEVELS = [
-    { id: "off", label: "Désactivée", hint: "Aucun traitement" },
-    { id: "low", label: "Faible", hint: "Léger" },
-    { id: "medium", label: "Moyenne", hint: "Équilibré" },
-    { id: "high", label: "Forte", hint: "Uniformise fort" },
+    { id: "off", label: "Désactivée", hint: "Volume d'origine" },
+    { id: "low", label: "Basse", hint: "Cible plus calme (−5 dB)" },
+    { id: "medium", label: "Normale", hint: "Cible de référence" },
+    { id: "high", label: "Élevée", hint: "Cible plus forte (+3 dB)" },
   ];
 
   // A few useful curves (dB per band, low→high). "Plat" resets everything.
@@ -52,7 +52,11 @@
   <div class="block">
     <div class="block-head">
       <span class="block-title">Normalisation du volume</span>
-      <span class="muted block-hint">Égalise les titres trop forts ou trop faibles.</span>
+      <span class="muted block-hint">
+        Gain fixe par titre (selon sa loudness ReplayGain analysée par Deezer)
+        pour que tous jouent au même niveau — sans compression ni ajustement
+        pendant la lecture.
+      </span>
     </div>
     <div class="seg">
       {#each NORM_LEVELS as n}
