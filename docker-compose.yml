@@ -22,16 +22,13 @@ services:
       # Report what you play back to Deezer so recommendations/Flow keep learning.
       # Off by default (opt-in). Set to "yes" to enable.
       DEEZER_REPORT_LISTENS: ${DEEZER_REPORT_LISTENS:-}
-      # Database. Empty (default) = built-in SQLite on the volume (fine to start
-      # with). To move to PostgreSQL (recommended for production):
-      #   1. uncomment the `db` service below + the `depends_on` block,
-      #   2. comment the SQLite line and uncomment the Postgres line below,
-      #   3. set POSTGRES_PASSWORD in .env (single source of truth — the URI
-      #      reuses it, so there's no password to keep in sync by hand).
-      # On first boot existing SQLite data is migrated across automatically
-      # (one-shot, transparent) — you only edit this file + .env.
-      DATABASE_URI: ${DATABASE_URI:-}
-      # DATABASE_URI: postgresql://supysonic:${POSTGRES_PASSWORD:-supysonic}@db:5432/supysonic
+      # Database: PostgreSQL, out of the box, served by the `db` service below.
+      # POSTGRES_PASSWORD (set it in .env) is the single source of truth — this
+      # URI reuses it, so there's nothing to keep in sync by hand. Override
+      # DATABASE_URI in .env only if you point at an external Postgres.
+      # If a legacy SQLite database is still on the /data volume, its data is
+      # migrated across automatically on first boot (one-shot, transparent).
+      DATABASE_URI: ${DATABASE_URI:-postgresql://supysonic:${POSTGRES_PASSWORD:-supysonic}@db:5432/supysonic}
       # Optional concurrency tuning for the web server (defaults: 1 worker /
       # 8 threads / 120s timeout). Raise threads for more simultaneous streams.
       # GUNICORN_THREADS: ${GUNICORN_THREADS:-}
@@ -44,7 +41,8 @@ services:
       # SUPYSONIC_PROXY_HOPS: ${SUPYSONIC_PROXY_HOPS:-}
       # SUPYSONIC_SESSION_COOKIE_SECURE: ${SUPYSONIC_SESSION_COOKIE_SECURE:-}
     volumes:
-      # Persistent state: sqlite db, caches and the Deezer FLAC archive.
+      # Persistent state: caches and the Deezer FLAC archive (the database
+      # lives in the `db` service's own volume).
       - supysonic-data:/data
       # Optional: an existing local music library (hybrid with Deezer).
       # - /path/to/your/music:/data/music:ro
@@ -52,34 +50,32 @@ services:
       # Copy config/supysonic.conf.example to config/supysonic.conf, edit it
       # (it's gitignored — it holds your ARL), then uncomment:
       # - ./config/supysonic.conf:/etc/supysonic:ro
-    # PostgreSQL: uncomment this block together with the `db` service and the
-    # DATABASE_URI line above to wait for the database before starting.
-    # depends_on:
-    #   db:
-    #     condition: service_healthy
+    # Wait for PostgreSQL to be ready before starting the app.
+    depends_on:
+      db:
+        condition: service_healthy
 
   # ---------------------------------------------------------------------------
-  # PostgreSQL (recommended for production). To enable: uncomment this whole
-  # service, set DATABASE_URI on the `supysonic` service above to
-  #   postgresql://supysonic:${POSTGRES_PASSWORD:-supysonic}@db:5432/supysonic
-  # and uncomment the `depends_on` block above. Existing SQLite data on the
-  # /data volume is migrated to Postgres automatically on the next boot.
+  # PostgreSQL — the default database, started alongside the app. The app's
+  # DATABASE_URI above reuses POSTGRES_PASSWORD (set it in .env), so the
+  # credentials live in ONE place. To use an external Postgres instead, remove
+  # this service and point DATABASE_URI at it in .env.
   # ---------------------------------------------------------------------------
-  # db:
-  #   image: postgres:16-alpine
-  #   container_name: supysonic-db
-  #   restart: unless-stopped
-  #   environment:
-  #     POSTGRES_DB: supysonic
-  #     POSTGRES_USER: supysonic
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supysonic}
-  #   volumes:
-  #     - supysonic-db:/var/lib/postgresql/data
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U supysonic -d supysonic"]
-  #     interval: 5s
-  #     timeout: 5s
-  #     retries: 10
+  db:
+    image: postgres:16-alpine
+    container_name: supysonic-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: supysonic
+      POSTGRES_USER: supysonic
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supysonic}
+    volumes:
+      - supysonic-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supysonic -d supysonic"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   # Optional background daemon: folder watcher + jukebox. Shares the same env,
   # config and /data volume. Uncomment to enable.
@@ -92,10 +88,14 @@ services:
   #   environment:
   #     DEEZER_ARL: ${DEEZER_ARL:-}
   #     DEEZER_SYNC_USER: ${SUPYSONIC_ADMIN_USER:-admin}
+  #     DATABASE_URI: ${DATABASE_URI:-postgresql://supysonic:${POSTGRES_PASSWORD:-supysonic}@db:5432/supysonic}
   #   volumes:
   #     - supysonic-data:/data
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
 
 volumes:
   supysonic-data:
-  # PostgreSQL data (used only when the `db` service above is enabled).
+  # PostgreSQL data.
   supysonic-db:

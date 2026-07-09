@@ -10,9 +10,9 @@
 ; All paths point inside the /data volume.
 
 [base]
-database_uri = sqlite:////data/db/supysonic.db
-; For heavier/multi-user use, prefer Postgres:
-;database_uri = postgres://supysonic:supysonic@db/supysonic
+; PostgreSQL by default (the compose `db` service). Match the password to
+; POSTGRES_PASSWORD in .env.
+database_uri = postgresql://supysonic:supysonic@db:5432/supysonic
 
 [webapp]
 cache_dir = /data/cache
