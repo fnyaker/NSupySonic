@@ -52,7 +52,8 @@
     }
     lastSent = now;
     var playing = playbackState === "playing";
-    // Interpolate from the last setPositionState (they arrive ~4x/s anyway).
+    // Interpolate from the last setPositionState snapshot — the page only sends
+    // one on discontinuities (load/seek/play/pause), per the MediaSession spec.
     var p = pos.position + (playing ? ((now - pos.at) / 1000) * (pos.rate || 1) : 0);
     if (pos.duration > 0) p = Math.min(p, pos.duration);
     try {
@@ -112,6 +113,21 @@
       return playbackState;
     },
     set: function (v) {
+      // Re-assigning the same state is a no-op: pages tend to mirror it on
+      // every progress tick, and force-publishing each mirror flooded the
+      // native bridge (JNI + MediaSession update several times per second).
+      if (v === playbackState) return;
+      // Position snapshots only arrive on discontinuities, so fold the
+      // interpolation into the snapshot at every play<->pause flip: freezes
+      // the playhead at the right spot on pause, and prevents the paused
+      // wall-time from being counted as playback on resume.
+      var now = Date.now();
+      var p =
+        pos.position +
+        (playbackState === "playing" ? ((now - pos.at) / 1000) * (pos.rate || 1) : 0);
+      if (pos.duration > 0) p = Math.min(p, pos.duration);
+      pos.position = Math.max(0, p);
+      pos.at = now;
       playbackState = v;
       if (v === "playing" || v === "paused") started = true;
       publish(true);

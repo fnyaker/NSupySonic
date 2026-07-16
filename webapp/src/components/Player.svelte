@@ -69,6 +69,13 @@
     el.addEventListener("stalled", onElStall);
     el.addEventListener("waiting", onElWaiting);
     el.addEventListener("progress", onProgress);
+    // Position discontinuities: the OS media session interpolates the playhead
+    // itself from the last snapshot, so setPositionState only needs to fire on
+    // jumps — not on every timeupdate (see onPosJump / updatePositionState).
+    el.addEventListener("loadedmetadata", onPosJump);
+    el.addEventListener("durationchange", onPosJump);
+    el.addEventListener("seeked", onPosJump);
+    el.addEventListener("ratechange", onPosJump);
     return el;
   }
   onMount(() => {
@@ -350,6 +357,7 @@
     cancelPauseMirror(); // resumed — the pause (if any) was just a rebuffer blip
     registerSource(audio); // wires Web Audio only if a visualizer view wants it
     resumeAudio();
+    pushPositionState(); // fresh snapshot: the OS interpolates from here
     // A long suspend (mobile lock) can silently rewind the element to 0. If we
     // resume play near the start but knew a later position, restore it. The
     // guard (knew > 2s, now ~0) keeps legit fresh starts at the beginning.
@@ -363,6 +371,9 @@
   }
   function onElPause(e) {
     if (e.target !== audio) return;
+    // Freeze the OS playhead at the exact pause position — with positionState
+    // only sent on jumps, skipping this would leave it stuck at the last one.
+    if (!loadingTrack && !chasing) pushPositionState();
     if (!get(player).playing) return; // already paused in the store (our own doing)
     if (audio.ended) return; // end-of-track is handled by onEnded, not here
     if (chasing) return; // our own programmatic pause while chasing a seek
@@ -973,8 +984,18 @@
   $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
 
   // Keep the OS media notification's transport state in sync (play/pause glyph).
-  $: if ("mediaSession" in navigator)
-    navigator.mediaSession.playbackState = $player.playing ? "playing" : "paused";
+  // Guarded on an actual change: this reactive block re-runs on EVERY store tick
+  // (4×/s progress updates), and on Android the WebView shim forwards each
+  // assignment over the JNI bridge to the native MediaSession — mirroring an
+  // unchanged value 4×/s was a constant Binder/CPU drain during playback.
+  let sessionPlaybackState = null;
+  $: if ("mediaSession" in navigator) {
+    const st = $player.playing ? "playing" : "paused";
+    if (st !== sessionPlaybackState) {
+      sessionPlaybackState = st;
+      navigator.mediaSession.playbackState = st;
+    }
+  }
 
   function onTime(e) {
     if (e && e.target !== audio) return; // ignore the idle/preloading element
@@ -1002,7 +1023,6 @@
     if (netWaiting) netWaiting = false; // progress resumed on its own
     player.setProgress(audio.currentTime, d);
     updateBuffered();
-    updatePositionState(audio.currentTime, d);
     savePodcastProgress(); // throttled; no-op for non-podcast tracks
   }
 
@@ -1032,7 +1052,28 @@
   }
 
   // Feed the OS media notification a duration/position so it can draw a seek
-  // bar. Throws if duration <= 0 or position > duration, so clamp + guard.
+  // bar. Per the MediaSession spec the OS advances the playhead itself from the
+  // last snapshot (position + rate), so this is only sent on DISCONTINUITIES —
+  // load/seek/rate/play/pause — never per timeupdate. The old per-timeupdate
+  // call was pure churn: 4×/s of main-thread + IPC work for a value the OS
+  // already interpolates (and on Android, 4×/s of JNI → MediaSession traffic).
+  function onPosJump(e) {
+    if (e && e.target !== audio) return; // ignore the idle/preloading element
+    // Mid track-change or mid seek-chase: the element's position is transient
+    // (the chase's reload passes through 0) — the landing seek/play pushes one.
+    if (loadingTrack || chasing) return;
+    pushPositionState();
+  }
+  function pushPositionState() {
+    if (!audio) return;
+    // Same live-transcode fallback as onTime: no Content-Length → no duration.
+    const d =
+      audio.duration && isFinite(audio.duration)
+        ? audio.duration
+        : get(current)?.duration || 0;
+    updatePositionState(audio.currentTime, d);
+  }
+  // Throws if duration <= 0 or position > duration, so clamp + guard.
   function updatePositionState(position, duration) {
     if (!("mediaSession" in navigator) || !("setPositionState" in navigator.mediaSession))
       return;

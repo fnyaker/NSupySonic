@@ -98,7 +98,12 @@ function ensureGraph() {
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return false;
   try {
-    ctx = new AC();
+    // latencyHint "playback": the context renders with larger internal buffers,
+    // which is what makes the graph glitch-proof under CPU load (scrolling, the
+    // visualizer canvas, GC). The default "interactive" hint uses the smallest
+    // buffers and audibly underruns (sub-100ms dropouts) on busy main threads —
+    // and for music playback the extra output latency is imperceptible.
+    ctx = new AC({ latencyHint: "playback" });
     inputNode = ctx.createGain();
     outputNode = ctx.createGain();
     normGain = ctx.createGain();
