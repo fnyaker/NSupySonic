@@ -88,6 +88,7 @@ class PlayerService : Service() {
     private var foregrounded = false
     private var hasClient = false // the activity (WebView owner) is bound
     private var notifKey = "" // last (title|artist|playing|art) actually rendered
+    private var metaKey = "" // last metadata actually pushed to the MediaSession
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -208,18 +209,25 @@ class PlayerService : Service() {
         // the metadata/notification below never carry the old track's cover.
         fetchArtIfNeeded(s.cover)
 
-        session.setMetadata(
-            MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, s.title)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, s.artist)
-                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, s.album)
-                .putLong(
-                    MediaMetadataCompat.METADATA_KEY_DURATION,
-                    if (s.duration > 0) (s.duration * 1000).toLong() else -1
-                )
-                .apply { artBitmap?.let { putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it) } }
-                .build()
-        )
+        // Only push metadata when it actually changed: setMetadata parcels the
+        // whole bundle — album-art bitmap included — across Binder on every
+        // call, which is far too heavy to repeat for mere position updates.
+        val mk = "${s.title}|${s.artist}|${s.album}|${s.duration}|${artBitmap != null}"
+        if (mk != metaKey) {
+            metaKey = mk
+            session.setMetadata(
+                MediaMetadataCompat.Builder()
+                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, s.title)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, s.artist)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, s.album)
+                    .putLong(
+                        MediaMetadataCompat.METADATA_KEY_DURATION,
+                        if (s.duration > 0) (s.duration * 1000).toLong() else -1
+                    )
+                    .apply { artBitmap?.let { putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it) } }
+                    .build()
+            )
+        }
         session.setPlaybackState(
             PlaybackStateCompat.Builder()
                 .setActions(
