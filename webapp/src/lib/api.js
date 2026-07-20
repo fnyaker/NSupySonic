@@ -152,6 +152,36 @@ export const api = {
     req("/podcasts", { method: "POST", body: body({ url }) }),
   unsubscribePodcast: (id) => req("/podcast/" + id, { method: "DELETE" }),
 
+  // podcasts — per-user progress & markers (server-side, follow you anywhere).
+  // Saves are fire-and-forget (keepalive survives a page unload) — losing one
+  // position tick must never surface as an error.
+  podcastProgress: () => req("/podcast/progress"),
+  savePodcastProgress: (episode_id, position, duration, finished = false) =>
+    req("/podcast/progress", {
+      method: "POST",
+      keepalive: true,
+      body: body({ episode_id, position, duration, finished }),
+    }),
+  showMarkers: (channelId) => req("/podcast/" + channelId + "/markers"),
+  episodeMarkers: (episodeId) => req("/podcast/episode/" + episodeId + "/markers"),
+  addMarker: (episodeId, position, label = null) =>
+    req("/podcast/episode/" + episodeId + "/markers", {
+      method: "POST",
+      body: body({ position, label }),
+    }),
+  deleteMarker: (markerId) => req("/podcast/marker/" + markerId, { method: "DELETE" }),
+
+  // sharing — waveform peaks + downloadable file/clip URLs (the server sets
+  // Content-Disposition, so navigating to them downloads with a nice name).
+  waveform: (id) => req("/share/waveform/" + id),
+  shareFileUrl: (id, fmt = null) =>
+    BASE + "/share/file/" + id + (fmt ? "?fmt=" + fmt : ""),
+  shareClipUrl: (id, start, end, fmt = "mp3") =>
+    BASE +
+    "/share/clip/" +
+    id +
+    `?start=${(+start).toFixed(3)}&end=${(+end).toFixed(3)}&fmt=${fmt}`,
+
   // library
   myPlaylists: () => req("/me/playlists"),
   myFavorites: () => req("/me/favorites"),

@@ -16,8 +16,10 @@
     buffered,
     openMenu,
     offlineCovers,
+    openShare,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
+  import { addMarkerAt } from "../lib/markers.js";
   import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
@@ -412,6 +414,16 @@
 
     <div class="footer">
       <button class="sm more" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={22} /></button>
+      {#if $current.podcast}
+        <button
+          class="sm"
+          on:click={() => addMarkerAt($current, $player.currentTime)}
+          aria-label="Marquer cette position"
+        >
+          <Icon name="bookmarkPlus" size={21} />
+        </button>
+      {/if}
+      <button class="sm" on:click={() => openShare($current)} aria-label="Partager"><Icon name="share" size={20} /></button>
       <span class="grow"></span>
       <QualityMenu />
     </div>

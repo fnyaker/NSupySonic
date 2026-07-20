@@ -31,7 +31,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260709"
+SCHEMA_VERSION = "20260720"
 
 
 def now():
@@ -774,6 +774,42 @@ class PodcastEpisode(_Model):
         return info
 
 
+class PodcastProgress(_Model):
+    """Per-user playback position of a podcast episode, so an episode resumes
+    where that user left it on ANY device. ``finished`` marks a fully-heard
+    episode (the position is kept for reference but no resume is offered)."""
+
+    user = ForeignKeyField(User, backref="+")
+    episode = ForeignKeyField(PodcastEpisode, backref="progresses")
+    position = IntegerField(default=0)  # seconds
+    duration = IntegerField(default=0)  # seconds, as known at save time
+    finished = BooleanField(default=False)
+    updated = DateTimeField(default=now)
+
+    class Meta:
+        primary_key = CompositeKey("user", "episode")
+
+
+class PodcastMarker(_Model):
+    """A user-placed bookmark inside a podcast episode (a position + label)."""
+
+    id = PrimaryKeyField()
+    user = ForeignKeyField(User, backref="+")
+    episode = ForeignKeyField(PodcastEpisode, backref="markers")
+    position = IntegerField()  # seconds
+    label = CharField(256, null=True)
+    created = DateTimeField(default=now)
+
+    def responsize(self):
+        return {
+            "id": str(self.id),
+            "episode_id": str(self.episode_id),
+            "position": self.position,
+            "label": self.label or "",
+            "created": self.created.isoformat(),
+        }
+
+
 def get_resource_text(respath):
     return importlib.resources.files(__package__).joinpath(respath).read_text("utf-8")
 
@@ -907,6 +943,8 @@ def _migration_order():
         RadioStation,
         PodcastChannel,
         PodcastEpisode,
+        PodcastProgress,
+        PodcastMarker,
     ]
 
 

@@ -31,6 +31,8 @@ from ..db import (
     PlaylistTrack,
     PodcastChannel,
     PodcastEpisode,
+    PodcastMarker,
+    PodcastProgress,
     StarredTrack,
     Track,
     User,
@@ -1685,6 +1687,180 @@ def unsubscribe_podcast(pid):
     return ("", 204)
 
 
+# -- podcast progress & markers ----------------------------------------------
+# Per-user, server-side: an episode resumes where THIS user left it on any
+# device, and manual markers (bookmarked positions) follow them everywhere.
+
+
+# How close to the end (seconds) counts as "finished listening".
+_EPISODE_DONE_TAIL = 15
+# Sanity cap on user-supplied positions/durations (seconds).
+_MAX_POSITION = 10**7
+# Cap markers per user per episode so a hostile client can't grow the table.
+_MAX_MARKERS = 100
+
+
+def _episode_by_id(eid):
+    try:
+        return PodcastEpisode[uuid.UUID(str(eid))]
+    except (ValueError, PodcastEpisode.DoesNotExist):
+        return None
+
+
+@webapi.route("/podcast/progress")
+@login_required
+def podcast_progress():
+    """All of this user's episode positions, keyed by episode UUID."""
+    out = {}
+    q = PodcastProgress.select().where(PodcastProgress.user == request.webuser)
+    for row in q:
+        out[str(row.episode_id)] = {
+            "position": row.position,
+            "duration": row.duration,
+            "finished": row.finished,
+            "updated": int(row.updated.timestamp()),
+        }
+    return jsonify({"progress": out})
+
+
+@webapi.route("/podcast/progress", methods=["POST"])
+@login_required
+def save_podcast_progress():
+    """Upsert this user's position in an episode (the player calls it
+    periodically while playing, and on pause/track change/page hide)."""
+    data = request.get_json(silent=True) or {}
+    episode = _episode_by_id(data.get("episode_id"))
+    if episode is None:
+        return jsonify({"error": "not found"}), 404
+    try:
+        position = int(float(data.get("position") or 0))
+        duration = int(float(data.get("duration") or 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid position"}), 400
+    if not (0 <= position <= _MAX_POSITION) or not (0 <= duration <= _MAX_POSITION):
+        return jsonify({"error": "invalid position"}), 400
+    duration = duration or episode.duration or 0
+    finished = bool(data.get("finished"))
+    # Reaching the last seconds counts as finished even if the client didn't
+    # say so — a completed episode must not offer to resume from the credits.
+    if duration and position >= max(0, duration - _EPISODE_DONE_TAIL):
+        finished = True
+
+    row, created = PodcastProgress.get_or_create(
+        user=request.webuser,
+        episode=episode,
+        defaults={"position": position, "duration": duration, "finished": finished},
+    )
+    if not created:
+        row.position = position
+        row.duration = duration
+        row.finished = finished
+        row.updated = now()
+        row.save()
+
+    # The admin owns the linked Deezer account: mirror their position into the
+    # legacy per-episode offset (Subsonic bookmarkPosition) and push it to
+    # Deezer fail-soft, so the official apps resume at the same spot too.
+    if _is_admin():
+        episode.play_offset = 0 if finished else position
+        episode.save(only=(PodcastEpisode.play_offset,))
+        provider = _provider()
+        if (
+            provider is not None
+            and episode.deezer_id
+            and current_app.config["DEEZER"].get("push_to_deezer", True)
+        ):
+            _push_async(
+                "episode_bookmark",
+                provider.set_episode_position,
+                episode.deezer_id,
+                position,
+                duration,
+                finished,
+            )
+    return jsonify({"ok": True, "finished": finished})
+
+
+def _marker_rows(where):
+    return (
+        PodcastMarker.select()
+        .where(PodcastMarker.user == request.webuser, where)
+        .order_by(PodcastMarker.position)
+    )
+
+
+@webapi.route("/podcast/<pid>/markers")
+@login_required
+def channel_markers(pid):
+    """This user's markers across a whole show, grouped by episode — one call
+    for the show page instead of one per episode."""
+    try:
+        channel = PodcastChannel[uuid.UUID(str(pid))]
+    except (ValueError, PodcastChannel.DoesNotExist):
+        return jsonify({"error": "not found"}), 404
+    episodes = PodcastEpisode.select(PodcastEpisode.id).where(
+        PodcastEpisode.channel == channel
+    )
+    out = {}
+    for m in _marker_rows(PodcastMarker.episode.in_(episodes)):
+        out.setdefault(str(m.episode_id), []).append(m.responsize())
+    return jsonify({"markers": out})
+
+
+@webapi.route("/podcast/episode/<eid>/markers")
+@login_required
+def episode_markers(eid):
+    episode = _episode_by_id(eid)
+    if episode is None:
+        return jsonify({"error": "not found"}), 404
+    rows = _marker_rows(PodcastMarker.episode == episode)
+    return jsonify({"markers": [m.responsize() for m in rows]})
+
+
+@webapi.route("/podcast/episode/<eid>/markers", methods=["POST"])
+@login_required
+def add_episode_marker(eid):
+    episode = _episode_by_id(eid)
+    if episode is None:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        position = int(float(data.get("position")))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid position"}), 400
+    if not (0 <= position <= _MAX_POSITION):
+        return jsonify({"error": "invalid position"}), 400
+    label = data.get("label")
+    label = str(label).strip()[:120] if label else None
+    count = (
+        PodcastMarker.select()
+        .where(
+            PodcastMarker.user == request.webuser, PodcastMarker.episode == episode
+        )
+        .count()
+    )
+    if count >= _MAX_MARKERS:
+        return jsonify({"error": "too many markers"}), 400
+    m = PodcastMarker.create(
+        user=request.webuser, episode=episode, position=position, label=label
+    )
+    return jsonify({"ok": True, "marker": m.responsize()})
+
+
+@webapi.route("/podcast/marker/<mid>", methods=["DELETE"])
+@login_required
+def delete_episode_marker(mid):
+    try:
+        m = PodcastMarker[uuid.UUID(str(mid))]
+    except (ValueError, PodcastMarker.DoesNotExist):
+        return jsonify({"error": "not found"}), 404
+    # Markers are personal: another user's marker doesn't exist for you.
+    if m.user_id != request.webuser.id:
+        return jsonify({"error": "not found"}), 404
+    m.delete_instance()
+    return ("", 204)
+
+
 # -- favorites & playback ---------------------------------------------------
 
 
@@ -2449,3 +2625,9 @@ def stream(deezer_id):
 
     # Lossless: serve the archived FLAC (range/seek via send_file).
     return send_file(track.path, mimetype=track.mimetype, conditional=True)
+
+
+# Share endpoints (waveform / file / clip) live in their own module; importing
+# it registers its routes on this blueprint. Must stay at the bottom: it
+# imports helpers defined above.
+from . import share  # noqa: E402,F401  isort:skip
