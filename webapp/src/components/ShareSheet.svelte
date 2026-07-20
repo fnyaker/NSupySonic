@@ -62,6 +62,10 @@
     zoom = 1;
     viewStart = 0;
     mode = "clip";
+    // Reset the format choice so a hidden option (e.g. MP3 for a podcast) can't
+    // linger from a previously-shared track with no radio button selected.
+    clipFmt = "mp3";
+    fullFmt = "orig";
     busy = false;
     stopPreview();
     // Sharing another track while the sheet is already open: the preview
@@ -655,7 +659,16 @@
   function fallbackName() {
     const artist = track.artist?.name || "";
     const base = (artist ? artist + " - " : "") + (track.title || "audio");
-    const ext = mode === "clip" ? clipFmt : fullFmt === "mp3" ? "mp3" : track.podcast ? "mp3" : "flac";
+    // "orig" = whatever the archive holds (mp3 for podcasts, else flac); a
+    // named format (mp3/m4a/flac) is its own extension.
+    const ext =
+      mode === "clip"
+        ? clipFmt
+        : fullFmt === "orig"
+          ? track.podcast
+            ? "mp3"
+            : "flac"
+          : fullFmt;
     return base.replace(/[\\/:*?"<>|]/g, "_") + "." + ext;
   }
 
@@ -814,6 +827,7 @@
           </div>
           <div class="fmt" role="radiogroup" aria-label="Format">
             <button role="radio" aria-checked={clipFmt === "mp3"} class:on={clipFmt === "mp3"} on:click={() => (clipFmt = "mp3")}>MP3 320</button>
+            <button role="radio" aria-checked={clipFmt === "m4a"} class:on={clipFmt === "m4a"} on:click={() => (clipFmt = "m4a")}>AAC</button>
             <button role="radio" aria-checked={clipFmt === "flac"} class:on={clipFmt === "flac"} on:click={() => (clipFmt = "flac")}>FLAC</button>
           </div>
         </div>
@@ -832,6 +846,7 @@
             {#if !track.podcast}
               <button role="radio" aria-checked={fullFmt === "mp3"} class:on={fullFmt === "mp3"} on:click={() => (fullFmt = "mp3")}>MP3 320</button>
             {/if}
+            <button role="radio" aria-checked={fullFmt === "m4a"} class:on={fullFmt === "m4a"} on:click={() => (fullFmt = "m4a")}>AAC</button>
           </div>
         </div>
       {/if}

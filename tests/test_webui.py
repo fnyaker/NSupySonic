@@ -1502,6 +1502,15 @@ class WebUITestCase(unittest.TestCase):
             self.assertEqual(rv.status_code, 200)
             self.assertEqual(rv.data, b"clipdata")
             self.assertEqual(len(calls), 1)
+
+            # AAC/m4a is offered too: distinct cache key, .m4a download name.
+            rv = self.client.get(
+                "/api/share/clip/" + str(t.id) + "?start=10&end=25&fmt=m4a"
+            )
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(rv.headers.get("Content-Type"), "audio/mp4")
+            self.assertIn(".m4a", rv.headers.get("Content-Disposition", ""))
+            self.assertEqual(len(calls), 2)  # a different format re-ran ffmpeg
         finally:
             share._ffmpeg_available = orig_avail
             share._clip_generator = orig_gen

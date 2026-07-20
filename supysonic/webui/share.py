@@ -43,9 +43,23 @@ _PEAKS_MAX = 4000
 CLIP_MAX_SECONDS = 600
 
 # fmt -> (ffmpeg codec args, extension, mimetype). MP3 320 is the "opens
-# anywhere" choice for messaging apps; FLAC is the exact archived audio.
+# anywhere" choice for messaging apps; AAC/m4a is the Apple-native equivalent;
+# FLAC is the exact archived audio.
+#
+# The m4a (MP4) muxer needs a seekable output to place its moov atom, but the
+# clip generator writes to a pipe — ``frag_keyframe+empty_moov`` produces a
+# fragmented MP4 that streams to a pipe instead of erroring. ``aac`` is
+# ffmpeg's always-available native encoder (no libfdk build needed).
 _FORMATS = {
     "mp3": (["-c:a", "libmp3lame", "-b:a", "320k", "-f", "mp3"], "mp3", "audio/mpeg"),
+    "m4a": (
+        [
+            "-c:a", "aac", "-b:a", "256k",
+            "-movflags", "+frag_keyframe+empty_moov", "-f", "mp4",
+        ],
+        "m4a",
+        "audio/mp4",
+    ),
     "flac": (["-c:a", "flac", "-f", "flac"], "flac", "audio/flac"),
 }
 
