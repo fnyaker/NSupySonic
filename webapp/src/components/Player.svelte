@@ -18,6 +18,7 @@
     offlineCovers,
     setPlaybackStatus,
     normalization,
+    openShare,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
@@ -30,7 +31,7 @@
   import {
     getEpisodeProgress,
     saveEpisodeProgress,
-    clearEpisodeProgress,
+    markEpisodeFinished,
   } from "../lib/podcastProgress.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
@@ -486,7 +487,9 @@
     lastPodSave = now;
     const d =
       audio.duration && isFinite(audio.duration) ? audio.duration : cur.duration || 0;
-    saveEpisodeProgress(cur.deezer_id, audio.currentTime, d);
+    // `force` also pushes straight to the server (pause / page-hide are often
+    // the last code to run before the tab is frozen).
+    saveEpisodeProgress(cur.deezer_id, audio.currentTime, d, force);
   }
 
   // Seek requests from other views (e.g. the immersive player). Routed through
@@ -589,7 +592,8 @@
     let resumeAt = 0;
     if (track.podcast) {
       const p = getEpisodeProgress(track.deezer_id);
-      if (p && p.t > 1) resumeAt = p.t;
+      // A finished episode restarts from the top instead of the credits.
+      if (p && !p.done && p.t > 1) resumeAt = p.t;
     } else if (firstLoad && $player.currentTime > 1) {
       resumeAt = $player.currentTime;
     }
@@ -1096,9 +1100,10 @@
     if (loadingTrack) return;
     const s = get(player);
     const cur = $current;
-    // Finished a podcast episode: drop its resume point so it doesn't offer to
-    // reopen at the very end next time. (repeat "one" restarts it, so keep it.)
-    if (cur && cur.podcast && s.repeat !== "one") clearEpisodeProgress(cur.deezer_id);
+    // Finished a podcast episode: flag it done (shows as "Terminé", no resume
+    // into the credits). (repeat "one" restarts it, so leave it alone.)
+    if (cur && cur.podcast && s.repeat !== "one")
+      markEpisodeFinished(cur.deezer_id, cur.duration || 0);
     if (s.repeat === "one") {
       audio.currentTime = 0;
       audio.play().catch(() => {});
@@ -1397,6 +1402,9 @@
         </ul>
       {/if}
     </div>
+    {#if $current}
+      <button class="sm" on:click={() => openShare($current)} title="Partager" aria-label="Partager"><Icon name="share" size={17} /></button>
+    {/if}
     <button class="sm" on:click={trackMenu} title="Plus d'options" aria-label="Plus d'options"><Icon name="moreVertical" size={18} /></button>
     <button class="sm max" on:click={() => immersiveOpen.set(true)} title="Plein écran" aria-label="Plein écran"><Icon name="maximize" size={17} /></button>
     <button class="sm" class:on={$nowPlayingOpen} on:click={() => nowPlayingOpen.update((v) => !v)} title="File / Paroles" aria-label="File d'attente"><Icon name="queue" size={18} /></button>

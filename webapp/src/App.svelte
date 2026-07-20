@@ -8,6 +8,7 @@
   import { initPlayCache } from "./lib/playcache.js";
   import { initQueueFilter } from "./lib/playfilter.js";
   import { loadFavorites } from "./lib/actions.js";
+  import { initPodcastProgress } from "./lib/podcastProgress.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
   import MobileNav from "./components/MobileNav.svelte";
@@ -16,6 +17,7 @@
   import Toasts from "./components/Toasts.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
   import PlaylistPicker from "./components/PlaylistPicker.svelte";
+  import ShareSheet from "./components/ShareSheet.svelte";
   import NetworkIndicator from "./components/NetworkIndicator.svelte";
   import Login from "./routes/Login.svelte";
   import Home from "./routes/Home.svelte";
@@ -108,8 +110,11 @@
     }
   }
 
-  // Reload favorites whenever a user logs in.
-  $: if ($user) loadFavorites();
+  // Reload favorites + pull the server-side podcast positions at login.
+  $: if ($user) {
+    loadFavorites();
+    initPodcastProgress();
+  }
 
   // Re-validate the session once connectivity returns after an offline boot.
   $: if (bootedOffline && $online) revalidate();
@@ -177,6 +182,7 @@
 <Toasts />
 <ContextMenu />
 <PlaylistPicker />
+<ShareSheet />
 <NetworkIndicator />
 
 <style>

@@ -14,8 +14,10 @@
     buffered,
     openMenu,
     offlineCovers,
+    openShare,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
+  import { addMarkerAt } from "../lib/markers.js";
   import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
 
@@ -235,6 +237,17 @@
           </div>
         </div>
         <div class="right">
+          {#if $current.podcast}
+            <button
+              class="sm"
+              on:click={() => addMarkerAt($current, $player.currentTime)}
+              title="Marquer cette position"
+              aria-label="Marquer cette position"
+            >
+              <Icon name="bookmarkPlus" size={20} />
+            </button>
+          {/if}
+          <button class="sm" on:click={() => openShare($current)} title="Partager" aria-label="Partager"><Icon name="share" size={19} /></button>
           <button class="sm" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={20} /></button>
           <QualityMenu />
         </div>

@@ -169,6 +169,18 @@ export function closePlaylistPicker() {
   playlistPicker.set(null);
 }
 
+// -- share sheet -------------------------------------------------------------
+// { track } | null — the full share UI (whole file or waveform-selected clip).
+// Mounted once in App.svelte, opened from anywhere (menus, players).
+
+export const shareSheet = writable(null);
+export function openShare(track) {
+  if (track && track.deezer_id) shareSheet.set({ track });
+}
+export function closeShare() {
+  shareSheet.set(null);
+}
+
 // -- context menu -----------------------------------------------------------
 // { x, y, items: [{label, icon, action, danger, sub:[...]}, "divider"] } | null
 

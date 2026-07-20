@@ -183,6 +183,35 @@
   {:else if name === "downloaded"}
     <circle cx="12" cy="12" r="10" />
     <polyline points="8 12 11 15 16 9" />
+  {:else if name === "share"}
+    <circle cx="18" cy="5" r="3" />
+    <circle cx="6" cy="12" r="3" />
+    <circle cx="18" cy="19" r="3" />
+    <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+    <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+  {:else if name === "bookmark"}
+    <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+  {:else if name === "bookmarkFilled"}
+    <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" fill="currentColor" stroke="none" />
+  {:else if name === "bookmarkPlus"}
+    <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+    <line x1="12" y1="7" x2="12" y2="13" />
+    <line x1="9" y1="10" x2="15" y2="10" />
+  {:else if name === "zoomIn"}
+    <circle cx="11" cy="11" r="8" />
+    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    <line x1="11" y1="8" x2="11" y2="14" />
+    <line x1="8" y1="11" x2="14" y2="11" />
+  {:else if name === "zoomOut"}
+    <circle cx="11" cy="11" r="8" />
+    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    <line x1="8" y1="11" x2="14" y2="11" />
+  {:else if name === "scissors"}
+    <circle cx="6" cy="6" r="3" />
+    <path d="M8.12 8.12 12 12" />
+    <path d="M20 4 8.12 15.88" />
+    <circle cx="6" cy="18" r="3" />
+    <path d="M14.8 14.8 20 20" />
   {:else if name === "mic"}
     <rect x="9" y="2" width="6" height="12" rx="3" />
     <path d="M5 10a7 7 0 0 0 14 0" />

@@ -130,7 +130,8 @@ Three Deezer code layers, from low to high:
      or every `sync_interval`, whenever a `sync_user` exists.
 
 3. **`supysonic/webui/`** — the custom `/api` blueprint (`__init__.py`, all routes `@login_required`,
-   numeric-id validation on stream/favorite) and `spa.py`, which serves the built Svelte SPA at
+   numeric-id validation on stream/favorite), `share.py` (waveform peaks + full-file/ffmpeg-clip
+   downloads for the SPA's share sheet, all cached) and `spa.py`, which serves the built Svelte SPA at
    **`/app/`** (hash-routed). Admin UI stays at `/`, Subsonic at `/rest`.
 
 **Streaming interception** lives in `supysonic/api/media.py` (`_ensure_deezer_archived`): first play
@@ -146,6 +147,10 @@ no Blowfish — `provider.download_episode_to` just follows redirects), archived
 (`getPodcasts`, `getNewestPodcasts`, `createPodcastChannel`, `refreshPodcasts`, `delete*`,
 `downloadPodcastEpisode`); `media.py` resolves a stream/download id to a Track **or** a `PodcastEpisode`.
 The local channel rows are the source of truth for subscriptions; `importer.sync_podcasts` refreshes them.
+Per-user playback state is server-side: `PodcastProgress` (auto-saved position, `finished` flag) and
+`PodcastMarker` (manual bookmarks) via `/api/podcast/progress` + marker CRUD; the SPA merges them with
+its localStorage copy newest-wins (`webapp/src/lib/podcastProgress.js`), and the admin's positions are
+mirrored to Deezer (`episode.bookmarkSet`) fail-soft.
 
 **Web app** (`webapp/`): Svelte 4 + Vite 5 SPA, hash routing (svelte-spa-router), consuming `/api`.
 Builds into `supysonic/webui/dist`. No emoji in the UI — all glyphs go through
@@ -154,7 +159,10 @@ playlists / albums / artists), not track shelves. Podcasts have their own pages
 (`routes/Podcasts.svelte` grid + subscribe, `routes/Show.svelte` episode list) consuming
 `/api/podcasts`, `/api/podcast/<id>` and streaming episodes through `/api/stream/<episode-uuid>`
 (an episode is shaped like a track whose `deezer_id` is its UUID, so the existing queue/player
-plays it unchanged).
+plays it unchanged). Sharing goes through `components/ShareSheet.svelte` (global modal, opened via
+`openShare(track)` from stores.js): whole file or an excerpt selected on a zoomable canvas waveform
+(peaks from `/api/share/waveform`), cut server-side by `/api/share/clip` and handed to the Web Share
+API (download fallback). Podcast markers live in `lib/markers.js`.
 
 ## Database / schema
 

@@ -49,6 +49,10 @@ class MockGW:
     def log_listen(self, sng_id, **kw):
         self.listens.append((str(sng_id), kw))
 
+    def set_episode_bookmark(self, episode_id, offset, duration, is_heard=False):
+        self.episode_bookmarks = getattr(self, "episode_bookmarks", [])
+        self.episode_bookmarks.append((str(episode_id), offset, duration, is_heard))
+
     def get_smart_tracklist(self, stl_id):
         return {
             "DATA": {"TITLE": "Nouveautés"},
@@ -1248,6 +1252,268 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(rv.status_code, 200)
         self.assertEqual(rv.get_json()["queued"], 2)  # "bad" rejected
         self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2"])
+
+    # -- podcast progress & markers --------------------------------------
+
+    def _make_episode(self, duration=1800, with_file=False, deezer_id="555"):
+        from supysonic.db import PodcastChannel, PodcastEpisode
+
+        alice = User.get(name="alice")
+        channel = PodcastChannel.create(
+            user=alice, url="https://feed.example/x", title="Mon Show", deezer_id="99"
+        )
+        path = None
+        if with_file:
+            d = os.path.join(self.archive, "Podcasts", "Mon Show")
+            os.makedirs(d, exist_ok=True)
+            path = os.path.join(d, "ep.mp3")
+            with open(path, "wb") as fh:
+                fh.write(b"episodeaudio")
+        episode = PodcastEpisode.create(
+            channel=channel,
+            title="Episode 1",
+            duration=duration,
+            deezer_id=deezer_id,
+            path=path,
+            status="completed" if with_file else "new",
+        )
+        return channel, episode
+
+    def test_podcast_progress_roundtrip(self):
+        from supysonic.db import PodcastEpisode
+
+        self._login()
+        _, ep = self._make_episode()
+        rv = self.client.post(
+            "/api/podcast/progress",
+            json={"episode_id": str(ep.id), "position": 300, "duration": 1800},
+        )
+        self.assertEqual(rv.status_code, 200)
+        self.assertFalse(rv.get_json()["finished"])
+
+        data = self.client.get("/api/podcast/progress").get_json()["progress"]
+        self.assertEqual(data[str(ep.id)]["position"], 300)
+        self.assertEqual(data[str(ep.id)]["duration"], 1800)
+        self.assertFalse(data[str(ep.id)]["finished"])
+        # Admin position mirrors into the legacy offset + the Deezer bookmark.
+        self.assertEqual(PodcastEpisode[ep.id].play_offset, 300)
+        gw = self.app.deezer.dz.gw
+        self.assertEqual(gw.episode_bookmarks, [("555", 300, 1800, False)])
+
+        # A later save overwrites (upsert, no duplicate rows).
+        self.client.post(
+            "/api/podcast/progress",
+            json={"episode_id": str(ep.id), "position": 400, "duration": 1800},
+        )
+        data = self.client.get("/api/podcast/progress").get_json()["progress"]
+        self.assertEqual(data[str(ep.id)]["position"], 400)
+
+    def test_podcast_progress_finish_near_end(self):
+        from supysonic.db import PodcastEpisode
+
+        self._login()
+        _, ep = self._make_episode(duration=1000)
+        rv = self.client.post(
+            "/api/podcast/progress",
+            json={"episode_id": str(ep.id), "position": 995, "duration": 1000},
+        )
+        self.assertTrue(rv.get_json()["finished"])
+        data = self.client.get("/api/podcast/progress").get_json()["progress"]
+        self.assertTrue(data[str(ep.id)]["finished"])
+        # A finished episode clears the legacy resume offset.
+        self.assertEqual(PodcastEpisode[ep.id].play_offset, 0)
+
+    def test_podcast_progress_invalid(self):
+        self._login()
+        rv = self.client.post(
+            "/api/podcast/progress", json={"episode_id": "junk", "position": 10}
+        )
+        self.assertEqual(rv.status_code, 404)
+        _, ep = self._make_episode()
+        rv = self.client.post(
+            "/api/podcast/progress",
+            json={"episode_id": str(ep.id), "position": "NaN"},
+        )
+        self.assertEqual(rv.status_code, 400)
+        rv = self.client.post(
+            "/api/podcast/progress",
+            json={"episode_id": str(ep.id), "position": -5},
+        )
+        self.assertEqual(rv.status_code, 400)
+
+    def test_podcast_markers_crud(self):
+        self._login()
+        channel, ep = self._make_episode()
+        rv = self.client.post(
+            "/api/podcast/episode/" + str(ep.id) + "/markers",
+            json={"position": 125, "label": "Passage intéressant"},
+        )
+        self.assertEqual(rv.status_code, 200)
+        marker = rv.get_json()["marker"]
+        self.assertEqual(marker["position"], 125)
+        self.assertEqual(marker["label"], "Passage intéressant")
+
+        # Unlabelled marker; list comes back ordered by position.
+        self.client.post(
+            "/api/podcast/episode/" + str(ep.id) + "/markers", json={"position": 42}
+        )
+        lst = self.client.get(
+            "/api/podcast/episode/" + str(ep.id) + "/markers"
+        ).get_json()["markers"]
+        self.assertEqual([m["position"] for m in lst], [42, 125])
+
+        # The whole-show endpoint groups them by episode.
+        grouped = self.client.get(
+            "/api/podcast/" + str(channel.id) + "/markers"
+        ).get_json()["markers"]
+        self.assertEqual(len(grouped[str(ep.id)]), 2)
+
+        rv = self.client.delete("/api/podcast/marker/" + marker["id"])
+        self.assertEqual(rv.status_code, 204)
+        lst = self.client.get(
+            "/api/podcast/episode/" + str(ep.id) + "/markers"
+        ).get_json()["markers"]
+        self.assertEqual([m["position"] for m in lst], [42])
+
+    def test_podcast_markers_are_private(self):
+        self._login()
+        _, ep = self._make_episode()
+        rv = self.client.post(
+            "/api/podcast/episode/" + str(ep.id) + "/markers", json={"position": 60}
+        )
+        mid = rv.get_json()["marker"]["id"]
+
+        UserManager.add("carol", "C4rol", admin=False)
+        self.client.post("/api/logout")
+        self.client.post("/api/login", json={"username": "carol", "password": "C4rol"})
+        # Another user sees no markers on the same episode…
+        lst = self.client.get(
+            "/api/podcast/episode/" + str(ep.id) + "/markers"
+        ).get_json()["markers"]
+        self.assertEqual(lst, [])
+        # …and cannot delete someone else's marker.
+        self.assertEqual(
+            self.client.delete("/api/podcast/marker/" + mid).status_code, 404
+        )
+
+    def test_podcast_marker_invalid(self):
+        self._login()
+        _, ep = self._make_episode()
+        rv = self.client.post(
+            "/api/podcast/episode/" + str(ep.id) + "/markers", json={"position": -1}
+        )
+        self.assertEqual(rv.status_code, 400)
+        rv = self.client.post(
+            "/api/podcast/episode/deadbeef/markers", json={"position": 3}
+        )
+        self.assertEqual(rv.status_code, 404)
+
+    # -- sharing ----------------------------------------------------------
+
+    def test_share_requires_login(self):
+        self.assertEqual(self.client.get("/api/share/file/1").status_code, 401)
+        self.assertEqual(self.client.get("/api/share/waveform/1").status_code, 401)
+
+    def test_share_file_local_track(self):
+        self._login()
+        t = self._make_local_track("Shared Song")
+        rv = self.client.get("/api/share/file/" + str(t.id))
+        self.assertEqual(rv.status_code, 200)
+        disp = rv.headers.get("Content-Disposition", "")
+        self.assertIn("attachment", disp)
+        self.assertIn("Local Band - Shared Song.mp3", disp)
+        self.assertEqual(rv.data, b"localaudio")
+
+    def test_share_file_unknown_404(self):
+        self._login()
+        rv = self.client.get("/api/share/file/00000000-0000-0000-0000-000000000000")
+        self.assertEqual(rv.status_code, 404)
+
+    def test_share_waveform(self):
+        from supysonic.webui import share
+
+        self._login()
+        t = self._make_local_track("Wave Song")
+        calls = []
+        orig_avail, orig_peaks = share._ffmpeg_available, share._audio_peaks
+
+        def fake_peaks(path, buckets):
+            calls.append((path, buckets))
+            return [0.5] * buckets
+
+        share._ffmpeg_available = lambda: True
+        share._audio_peaks = fake_peaks
+        try:
+            rv = self.client.get("/api/share/waveform/" + str(t.id))
+            self.assertEqual(rv.status_code, 200)
+            data = rv.get_json()
+            self.assertEqual(data["duration"], 180)
+            self.assertEqual(len(data["peaks"]), 400)  # 180s * 2 < min bucket floor
+            # Second call is served from the cache — no re-decode.
+            rv = self.client.get("/api/share/waveform/" + str(t.id))
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(len(calls), 1)
+        finally:
+            share._ffmpeg_available = orig_avail
+            share._audio_peaks = orig_peaks
+
+    def test_share_clip_validation(self):
+        self._login()
+        t = self._make_local_track("Clip Song")
+        base = "/api/share/clip/" + str(t.id)
+        self.assertEqual(self.client.get(base).status_code, 400)  # no range
+        self.assertEqual(self.client.get(base + "?start=20&end=10").status_code, 400)
+        self.assertEqual(self.client.get(base + "?start=-3&end=10").status_code, 400)
+        self.assertEqual(self.client.get(base + "?start=0&end=9000").status_code, 400)
+        self.assertEqual(
+            self.client.get(base + "?start=0&end=10&fmt=wav").status_code, 400
+        )
+        # Start past the end of the track.
+        self.assertEqual(self.client.get(base + "?start=500&end=520").status_code, 400)
+
+    def test_share_clip(self):
+        from supysonic.webui import share
+
+        self._login()
+        t = self._make_local_track("Clip Song")
+        calls = []
+        orig_avail, orig_gen = share._ffmpeg_available, share._clip_generator
+
+        def fake_gen(path, start, length, codec_args):
+            calls.append((start, length))
+            yield b"clipdata"
+
+        share._ffmpeg_available = lambda: True
+        share._clip_generator = fake_gen
+        try:
+            rv = self.client.get(
+                "/api/share/clip/" + str(t.id) + "?start=10&end=25&fmt=mp3"
+            )
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(rv.data, b"clipdata")
+            disp = rv.headers.get("Content-Disposition", "")
+            self.assertIn("attachment", disp)
+            self.assertIn("0m10s-0m25s", disp)
+            self.assertEqual(calls, [(10.0, 15.0)])
+            # Cached: the same selection doesn't re-run ffmpeg.
+            rv = self.client.get(
+                "/api/share/clip/" + str(t.id) + "?start=10&end=25&fmt=mp3"
+            )
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(rv.data, b"clipdata")
+            self.assertEqual(len(calls), 1)
+
+            # AAC/m4a is offered too: distinct cache key, .m4a download name.
+            rv = self.client.get(
+                "/api/share/clip/" + str(t.id) + "?start=10&end=25&fmt=m4a"
+            )
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(rv.headers.get("Content-Type"), "audio/mp4")
+            self.assertIn(".m4a", rv.headers.get("Content-Disposition", ""))
+            self.assertEqual(len(calls), 2)  # a different format re-ran ffmpeg
+        finally:
+            share._ffmpeg_available = orig_avail
+            share._clip_generator = orig_gen
 
     # -- SPA serving ----------------------------------------------------
 

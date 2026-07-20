@@ -13,8 +13,10 @@ import {
   downloadQuality,
   lastPlaylist,
   openPlaylistPicker,
+  openShare,
 } from "./stores.js";
 import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
+import { addMarkerAt } from "./markers.js";
 
 // Quality choices offered in the "download as…" submenu.
 export const DL_QUALITIES = [
@@ -350,6 +352,18 @@ function buildEpisodeMenu(ep, nav) {
   const items = [
     { label: "Lire ensuite", icon: "next", action: () => player.playNext([ep]) },
     { label: "Ajouter à la file", icon: "queue", action: () => player.addToQueue([ep]) },
+  ];
+  // Playing this very episode: offer a one-tap marker at the current position.
+  const s = get(player);
+  if (s.queue[s.index]?.deezer_id === ep.deezer_id) {
+    items.push({
+      label: "Marquer cette position",
+      icon: "bookmarkPlus",
+      action: () => addMarkerAt(ep, get(player).currentTime),
+    });
+  }
+  items.push(
+    { label: "Partager…", icon: "share", action: () => openShare(ep) },
     "divider",
     dl
       ? {
@@ -357,8 +371,8 @@ function buildEpisodeMenu(ep, nav) {
           icon: "downloaded",
           action: () => undownloadTrack(ep),
         }
-      : { label: "Télécharger", icon: "download", action: () => downloadTrackTo(ep) },
-  ];
+      : { label: "Télécharger", icon: "download", action: () => downloadTrackTo(ep) }
+  );
   if (ep.channel_id)
     items.push("divider", {
       label: "Ouvrir le podcast",
@@ -422,6 +436,7 @@ export function buildTrackMenu(track, nav) {
 
   items.push(
     "divider",
+    { label: "Partager…", icon: "share", action: () => openShare(track) },
     { label: "Lancer la radio", icon: "radio", action: () => startTrackRadio(track) },
     {
       label: fav ? "Retirer des favoris" : "Ajouter aux favoris",
