@@ -2,19 +2,24 @@ package org.nsupysonic.app
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.DownloadManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.IBinder
 import android.view.View
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
+import android.webkit.URLUtil
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -108,6 +113,16 @@ class MainActivity : AppCompatActivity() {
             userAgentString = "$userAgentString NSupySonicApp/1.0"
         }
         webView.addJavascriptInterface(Bridge(), "NSNative")
+
+        // A plain WebView silently drops any navigation whose response is
+        // Content-Disposition: attachment (the share sheet's "Télécharger"
+        // button, and its Web Share fallback on devices without navigator.share)
+        // — without this listener nothing visible happens at all. Hand the
+        // request off to the system DownloadManager instead, carrying the
+        // session cookie so the auth-protected /api/share/* URLs still work.
+        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            startDownload(url, userAgent, contentDisposition, mimeType)
+        }
 
         // Install the mediaSession-capturing shim before any page script runs.
         // The onPageStarted fallback below covers WebViews without the feature
@@ -234,6 +249,29 @@ class MainActivity : AppCompatActivity() {
         mainFrameFailed = true
         findViewById<TextView>(R.id.error_message).text = message
         errorView.visibility = View.VISIBLE
+    }
+
+    private fun startDownload(
+        url: String, userAgent: String?, contentDisposition: String?, mimeType: String?
+    ) {
+        val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+        try {
+            val cookie = CookieManager.getInstance().getCookie(url)
+            val request = DownloadManager.Request(Uri.parse(url)).apply {
+                if (!cookie.isNullOrEmpty()) addRequestHeader("Cookie", cookie)
+                if (!userAgent.isNullOrEmpty()) addRequestHeader("User-Agent", userAgent)
+                setMimeType(mimeType?.takeIf { it.isNotEmpty() } ?: "application/octet-stream")
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                setTitle(fileName)
+            }
+            (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+            Toast.makeText(this, getString(R.string.download_started, fileName), Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {
+            // A full Downloads dir, DownloadManager disabled by the user, etc.
+            // — surface it rather than silently doing nothing.
+            Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun runJsCommand(cmd: String, value: Double?) {
