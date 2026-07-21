@@ -640,14 +640,27 @@
 
   // -- share / download -------------------------------------------------------
 
+  // The Android app (MainActivity.kt) injects window.NSNative — a plain
+  // android.webkit.WebView typically has no file-sharing plumbing wired up for
+  // navigator.share (only text/url), so canShare({files}) there reports false
+  // and silently falls back to a download with no visible share sheet at all.
+  // Preferring the native bridge sidesteps that: it fetches the file itself
+  // and hands it to a real Android share Intent, which always works.
+  const nativeShare =
+    typeof window !== "undefined" && typeof window.NSNative?.shareFile === "function"
+      ? window.NSNative.shareFile.bind(window.NSNative)
+      : null;
+
   let canShareFiles = false;
-  try {
-    canShareFiles =
-      typeof navigator !== "undefined" &&
-      !!navigator.canShare &&
-      navigator.canShare({ files: [new File([""], "t.mp3", { type: "audio/mpeg" })] });
-  } catch {
-    canShareFiles = false;
+  if (!nativeShare) {
+    try {
+      canShareFiles =
+        typeof navigator !== "undefined" &&
+        !!navigator.canShare &&
+        navigator.canShare({ files: [new File([""], "t.mp3", { type: "audio/mpeg" })] });
+    } catch {
+      canShareFiles = false;
+    }
   }
 
   $: clipLen = Math.max(0, selEnd - selStart);
@@ -683,6 +696,17 @@
   }
 
   async function share() {
+    if (nativeShare) {
+      // Fire-and-forget: the native side fetches the file itself (with the
+      // session cookie) and hands it straight to Android's share Intent —
+      // there's no promise to await, and it shows its own toast on failure.
+      try {
+        nativeShare(new URL(shareUrl, window.location.href).href);
+      } catch {
+        toasts.push("Échec du partage", "error");
+      }
+      return;
+    }
     if (!canShareFiles) {
       download();
       return;

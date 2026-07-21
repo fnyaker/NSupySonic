@@ -32,8 +32,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
 
 /**
  * Full-screen WebView hosting the NSupySonic SPA (<server>/app/), bridged to
@@ -55,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private var serviceStarted = false
     private var pendingState: PlayerService.State? = null
     private var mainFrameFailed = false
+    private val shareExecutor = Executors.newSingleThreadExecutor()
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -274,6 +280,61 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Web Share API file support is spotty inside a plain android.webkit.WebView
+    // (unlike Chrome proper, it typically has no file-sharing plumbing wired up,
+    // only text/url) — so ShareSheet.svelte calls this bridge directly instead
+    // of navigator.share when it detects window.NSNative.shareFile. Fetching +
+    // handing off natively guarantees a real OS share sheet regardless of the
+    // hosting WebView's Web Share API completeness.
+    private fun startShare(rawUrl: String) {
+        val verify = prefs.verifySsl
+        val cookie = try {
+            CookieManager.getInstance().getCookie(rawUrl)
+        } catch (_: Exception) {
+            null
+        }
+        shareExecutor.execute {
+            try {
+                val conn = URL(rawUrl).openConnection() as HttpURLConnection
+                Ssl.apply(conn, verify)
+                conn.connectTimeout = 15000
+                conn.readTimeout = 60000
+                conn.instanceFollowRedirects = true
+                if (!cookie.isNullOrEmpty()) conn.setRequestProperty("Cookie", cookie)
+                if (conn.responseCode !in 200..299)
+                    throw java.io.IOException("HTTP ${conn.responseCode}")
+                val mimeType =
+                    conn.contentType?.substringBefore(";")?.trim().takeUnless { it.isNullOrEmpty() }
+                        ?: "application/octet-stream"
+                val fileName =
+                    URLUtil.guessFileName(rawUrl, conn.getHeaderField("Content-Disposition"), mimeType)
+
+                // One slot: a fresh share replaces whatever was queued before —
+                // nothing here needs to outlive the single chooser it feeds.
+                val dir = File(cacheDir, "shared").apply { mkdirs() }
+                dir.listFiles()?.forEach { it.delete() }
+                val outFile = File(dir, fileName)
+                conn.inputStream.use { input -> outFile.outputStream().use { input.copyTo(it) } }
+
+                val uri = FileProvider.getUriForFile(
+                    this@MainActivity, "$packageName.fileprovider", outFile
+                )
+                runOnUiThread {
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = mimeType
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(send, null))
+                }
+            } catch (_: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, R.string.share_failed, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     private fun runJsCommand(cmd: String, value: Double?) {
         if (!::webView.isInitialized) return
         val arg = value?.let { ", $it" } ?: ""
@@ -324,6 +385,14 @@ class MainActivity : AppCompatActivity() {
         fun openServerSettings() {
             runOnUiThread { openSettings() }
         }
+
+        // Detected by ShareSheet.svelte (window.NSNative.shareFile) in preference
+        // to navigator.share/canShare, which is unreliable for files in a plain
+        // WebView. `url` is the absolute /api/share/(file|clip)/... URL.
+        @JavascriptInterface
+        fun shareFile(url: String) {
+            startShare(url)
+        }
     }
 
     override fun onDestroy() {
@@ -336,6 +405,7 @@ class MainActivity : AppCompatActivity() {
             // The WebView (the actual audio) dies with us — take the service down.
             if (isFinishing) stopService(Intent(this, PlayerService::class.java))
         }
+        shareExecutor.shutdownNow()
         if (::webView.isInitialized) webView.destroy()
         super.onDestroy()
     }

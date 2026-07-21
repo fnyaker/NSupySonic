@@ -55,5 +55,19 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>
+
+        <!-- Lets the share sheet hand a downloaded audio file to the OS
+             Intent.ACTION_SEND chooser as a content:// Uri (required since
+             Android 7 — a bare file:// Uri to another app throws
+             FileUriExposedException). Scoped to the app's own cache dir. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
