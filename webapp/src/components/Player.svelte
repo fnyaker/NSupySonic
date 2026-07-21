@@ -453,6 +453,16 @@
   // a track with genuinely no gain isn't refetched on every replay.
   // Turning normalization on mid-track: backfill the current track's gain too.
   $: if ($normalization !== "off" && $current) ensureGain($current);
+  // Preload the UPCOMING track's ReplayGain so the handover value is exact the
+  // instant it starts. Without this, a track whose gain isn't yet known plays at
+  // raw source level for a beat (loadTrack snaps to unity), then the async
+  // backfill corrects it — an audible jump right after the transition. Fetching
+  // it ahead of time (cached on the queue object) means loadTrack snaps straight
+  // to the right level. ensureGain is a no-op once known and dedups per session.
+  $: if ($normalization !== "off" && $player.index >= 0) {
+    const nx = $player.queue[$player.index + 1];
+    if (nx) ensureGain(nx);
+  }
   const gainTried = new Set();
   async function ensureGain(track) {
     if (get(normalization) === "off") return;
@@ -469,7 +479,10 @@
         // still playing and the incoming source hasn't been swapped in yet.
         // loadTrack's own setTrackGain at the handover will pick up the value we
         // just cached, so the gain still lands exactly when this track starts.
-        if (!loadingTrack && get(current)?.deezer_id === track.deezer_id) setTrackGain(r.gain);
+        // This applies to the track that's ALREADY audible, so ramp (snap=false)
+        // — snapping it would click mid-playback.
+        if (!loadingTrack && get(current)?.deezer_id === track.deezer_id)
+          setTrackGain(r.gain, false);
       }
     } catch {
       /* leave it un-normalized */
@@ -645,9 +658,13 @@
     loadingTrack = false; // new source attached — accept its timeupdates again
     // The outgoing audio is silenced the instant its src is reassigned above, so
     // flip the normalization gain to THIS track's value now — synced to the
-    // audible handover. The new source is still buffering (silent) here, and the
-    // gain change is a short ramp, so the incoming track begins already at its
-    // target level with no flash on either side. No-op unless normalization is on.
+    // audible handover. The new source is still buffering (silent) here, so we
+    // SNAP the gain (setTrackGain's default): it's fully in place before the
+    // first audible sample, and — crucially — it can't carry the previous track's
+    // gain into the start of this one, even when this track plays instantly from
+    // the prefetch cache. track.gain is preloaded for upcoming tracks (see the
+    // reactive below), so the snapped value is already the correct one, with no
+    // unity-then-correct jump. No-op unless normalization is on.
     setTrackGain(track.gain);
     if (src.blob) touch(track.deezer_id); // bump LRU recency
 

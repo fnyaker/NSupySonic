@@ -64,9 +64,16 @@ const RG_REFERENCE = 18.4; // Deezer's reference loudness offset (dB)
 
 // Volume normalization is STATIC: we take the track's ReplayGain adjustment and
 // apply it as a fixed gain for the whole track — no compression, nothing moving
-// during playback. The level shifts the overall target loudness (a
-// Quiet/Normal/Loud switch); "off" disables it entirely.
-const NORM_OFFSET = { off: 0, low: -2, medium: 2, high: 5 }; // dB
+// during playback. The level shifts the overall target loudness; "off" disables
+// it entirely.
+//
+// The offsets are deliberately hot: the ReplayGain adjustment turns LOUD tracks
+// DOWN (their adjustment is negative) and quiet tracks up from an already-low
+// peak, so raising the target reference does NOT push peaks toward clipping —
+// and the brick-wall limiter at the end of the chain catches whatever transient
+// slips through. That lets us land noticeably louder without saturation:
+//   low ≈ -16 LUFS · medium ≈ -13 LUFS · high ≈ -10 LUFS (Spotify-loud).
+const NORM_OFFSET = { off: 0, low: 2, medium: 5, high: 8 }; // dB
 const GAIN_MIN_DB = -24;
 const GAIN_MAX_DB = 12;
 
@@ -200,17 +207,40 @@ function applyEffects() {
     bassComp.ratio.setTargetAtTime(1, t, 0.05);
   }
 
-  // Static normalization gain. A short ramp only smooths the step when the
-  // LEVEL or the track changes — during a track the value is constant.
-  normGain.gain.setTargetAtTime(normLinear(), t, 0.05);
+  // Static normalization gain. Ramp here: this path runs on a LEVEL change (or an
+  // EQ/bass tweak) that happens mid-track, where an instant jump would click. A
+  // track HANDOVER snaps instead — see setTrackGain / applyNorm.
+  applyNorm(false);
 }
 
-// Called by the player on every track load with that track's ReplayGain (dB, or
-// null/undefined when unknown). Recomputes the static normalization gain.
-export function setTrackGain(db) {
+// Push the normalization gain onto the live node. `snap` sets it instantly; a
+// ramp smooths it over ~0.2 s.
+//
+//  - HANDOVER (snap=true): the incoming source is still buffering — silent — so
+//    the value is in place before its first audible sample. This is the whole
+//    fix for the "normalization bleeds onto the seam" bug: a ramp would carry the
+//    PREVIOUS track's gain into the first ~200 ms of the new one (very audible
+//    when the next track plays instantly from the prefetch cache).
+//  - MID-TRACK (snap=false): a level change or a late gain backfill on the
+//    track that's already audible — ramp so it doesn't click.
+function applyNorm(snap) {
+  if (!ctx || !normGain) return;
+  const t = ctx.currentTime;
+  const g = normLinear();
+  normGain.gain.cancelScheduledValues(t);
+  if (snap) normGain.gain.setValueAtTime(g, t);
+  else normGain.gain.setTargetAtTime(g, t, 0.05);
+}
+
+// Called by the player with a track's ReplayGain (dB, or null/undefined when
+// unknown). `snap` defaults to true: the normal caller is a track HANDOVER,
+// where the value must land instantly on the still-silent incoming source. The
+// player passes snap=false only for a late gain backfill on the CURRENTLY
+// audible track, where a ramp avoids a click.
+export function setTrackGain(db, snap = true) {
   const n = typeof db === "number" ? db : parseFloat(db);
   trackGainDb = Number.isFinite(n) ? n : null;
-  applyEffects();
+  applyNorm(snap);
 }
 
 // Called by the store subscriptions whenever an effect setting changes. Applies
