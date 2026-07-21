@@ -27,6 +27,7 @@ from mutagen.id3 import (
     TRCK,
     TSRC,
     TXXX,
+    USLT,
 )
 from mutagen.id3 import error as ID3Error
 
@@ -126,3 +127,31 @@ def tag_file(path: Path, meta: dict, cover: bytes | None) -> None:
     if cover:
         audio.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover))
     audio.save(path)
+
+
+def embed_lyrics(path: Path, text: str) -> None:
+    """Embed plain (unsynced) lyrics into a FLAC/MP3 file's tags in place.
+
+    This is the portable half of lyrics archiving: the ``.lrc`` sidecar carries
+    the synced timing for our own player, while the embedded text lets ordinary
+    Subsonic clients (and any tag-reading player) surface the words straight
+    from the file, offline. Only the lyrics field is touched — every other tag
+    is preserved.
+    """
+    path = Path(path)
+    if not text or not path.is_file():
+        return
+    suffix = path.suffix.lower()
+    if suffix == ".flac":
+        audio = FLAC(path)
+        audio["lyrics"] = text
+        audio["unsyncedlyrics"] = text
+        audio.save()
+    elif suffix == ".mp3":
+        try:
+            audio = ID3(path)
+        except ID3Error:
+            audio = ID3()
+        audio.delall("USLT")
+        audio.add(USLT(encoding=3, lang="eng", desc="", text=text))
+        audio.save(path)

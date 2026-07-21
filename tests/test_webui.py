@@ -505,6 +505,28 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(data["lyrics"]["synced"][1]["time"], 2500)
         self.assertIn("line one", data["lyrics"]["text"])
 
+    def test_lyrics_archived_sidecar(self):
+        # An archived track with a .lrc sidecar is served from disk (source
+        # "archive"), not re-fetched live from Deezer.
+        from supysonic.deezer import library, lyrics as dz_lyrics
+
+        self._login()
+        with self.app.app_context():
+            root = library.get_root_folder(self.archive)
+            t = library.upsert_track(
+                {"SNG_ID": "555", "SNG_TITLE": "Song", "ART_ID": "1", "ART_NAME": "A",
+                 "ALB_ID": "10", "ALB_TITLE": "Alb", "ALB_PICTURE": "c", "DURATION": 100,
+                 "TRACK_NUMBER": 1, "DISK_NUMBER": 1}, root, "FLAC")
+            os.makedirs(os.path.dirname(t.path), exist_ok=True)
+            with open(t.path, "wb") as fh:
+                fh.write(b"\x00")
+            dz_lyrics.write_sidecar(
+                t, {"synced": [{"time": 7000, "text": "archived line"}], "text": "archived line"}
+            )
+        data = self.client.get("/api/lyrics/555").get_json()
+        self.assertEqual(data["lyrics"]["source"], "archive")
+        self.assertEqual(data["lyrics"]["synced"][0]["text"], "archived line")
+
     def test_track_gain(self):
         # ReplayGain endpoint (volume normalization): a numeric Deezer id with no
         # DB row falls back to a live fetch; a non-numeric/local id is null.
