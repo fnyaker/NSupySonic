@@ -22,6 +22,15 @@ let analyser = null;
 let inputNode = null;
 let outputNode = null;
 let normGain = null; // STATIC per-track normalization gain (set once on load)
+// The share-sheet preview joins the SAME processing chain (EQ, bass, limiter,
+// analyser) as the player, but through its OWN normalization gain: the previewed
+// track is usually NOT the one the player has loaded, so it needs its own
+// ReplayGain, independent of normGain. It feeds the head of the EQ chain in
+// parallel with normGain — the preview and the player never sound at the same
+// time (opening the preview pauses the player), so the two paths never sum.
+let previewNormGain = null;
+let previewSource = null; // MediaElementSource of the wired preview element
+let previewEl = null;
 let eqFilters = [];
 let bassNode = null;
 // Two-stage protection for the bass lift:
@@ -60,6 +69,9 @@ const fx = { eq: false, bands: new Array(10).fill(0), bass: 0, norm: "off" };
 // -(GAIN + 18.4) — the exact transform deemix uses for its ReplayGain tags.
 // null when unknown → that track isn't normalized (we never invent a gain).
 let trackGainDb = null;
+// The preview's track ReplayGain, same units/meaning as trackGainDb. null when
+// unknown → the preview isn't normalized (we never invent a gain).
+let previewGainDb = null;
 const RG_REFERENCE = 18.4; // Deezer's reference loudness offset (dB)
 
 // Volume normalization is STATIC: we take the track's ReplayGain adjustment and
@@ -79,16 +91,19 @@ const GAIN_MAX_DB = 12;
 
 const dbToGain = (db) => Math.pow(10, db / 20);
 
-// The linear gain to apply for the current track at the current level. 1.0
+// The linear gain to apply for a track's ReplayGain at the current level. 1.0
 // (0 dB, no change) when normalization is off or the track's gain is unknown.
-function normLinear() {
-  if (fx.norm === "off" || trackGainDb == null) return 1;
-  const replayGain = -(trackGainDb + RG_REFERENCE); // Deezer loudness → RG adjust
+function normLinearFor(gainDb) {
+  if (fx.norm === "off" || gainDb == null) return 1;
+  const replayGain = -(gainDb + RG_REFERENCE); // Deezer loudness → RG adjust
   const db = Math.max(
     GAIN_MIN_DB,
     Math.min(GAIN_MAX_DB, replayGain + (NORM_OFFSET[fx.norm] || 0))
   );
   return dbToGain(db);
+}
+function normLinear() {
+  return normLinearFor(trackGainDb);
 }
 
 function effectsOn() {
@@ -115,6 +130,8 @@ function ensureGraph() {
     outputNode = ctx.createGain();
     normGain = ctx.createGain();
     normGain.gain.value = 1;
+    previewNormGain = ctx.createGain();
+    previewNormGain.gain.value = 1;
 
     eqFilters = EQ_FREQS.map((f) => {
       const b = ctx.createBiquadFilter();
@@ -164,6 +181,10 @@ function ensureGraph() {
       node.connect(b);
       node = b;
     }
+    // The preview's own normalization gain joins the head of the EQ chain in
+    // parallel with normGain, so a preview shares EQ/bass/limiter/analyser but
+    // carries its own ReplayGain.
+    previewNormGain.connect(eqFilters[0]);
     node.connect(bassNode);
     node = bassNode;
     node.connect(bassComp);
@@ -211,6 +232,8 @@ function applyEffects() {
   // EQ/bass tweak) that happens mid-track, where an instant jump would click. A
   // track HANDOVER snaps instead — see setTrackGain / applyNorm.
   applyNorm(false);
+  // Keep the preview's normalization in step with a live level/effect change too.
+  applyPreviewNorm(false);
 }
 
 // Push the normalization gain onto the live node. `snap` sets it instantly; a
@@ -241,6 +264,72 @@ export function setTrackGain(db, snap = true) {
   const n = typeof db === "number" ? db : parseFloat(db);
   trackGainDb = Number.isFinite(n) ? n : null;
   applyNorm(snap);
+}
+
+// Push the preview's normalization gain onto its live node. `snap` sets it
+// instantly (before the preview's first audible sample, at a source handover);
+// a ramp smooths a mid-preview level change so it doesn't click.
+function applyPreviewNorm(snap) {
+  if (!ctx || !previewNormGain) return;
+  const t = ctx.currentTime;
+  const g = normLinearFor(previewGainDb);
+  previewNormGain.gain.cancelScheduledValues(t);
+  if (snap) previewNormGain.gain.setValueAtTime(g, t);
+  else previewNormGain.gain.setTargetAtTime(g, t, 0.05);
+}
+
+// Called by the share-sheet preview with the previewed track's ReplayGain (dB,
+// or null/undefined when unknown). Snaps by default: the value must be in place
+// before the preview element produces sound. Pass snap=false for a late gain
+// backfill on an already-audible preview, where a ramp avoids a click.
+export function setPreviewGain(db, snap = true) {
+  const n = typeof db === "number" ? db : parseFloat(db);
+  previewGainDb = Number.isFinite(n) ? n : null;
+  applyPreviewNorm(snap);
+}
+
+// Route the share-sheet preview element through the shared graph so it gets the
+// exact same pipeline as normal playback (normalization + EQ + bass + limiter).
+// Volume/mute stay on the element itself, mirroring the player. Unlike the
+// player's registerSource, this ALWAYS wires: the preview must follow the
+// pipeline even when the player is on its pure (effects-off) path, and it is a
+// short, deliberate foreground action, so forcing the AudioContext is fine. A
+// no-op if Web Audio is unavailable — the element then plays raw, still audible.
+export function wirePreview(el) {
+  if (!el) return;
+  if (previewEl === el) {
+    resumeAudio();
+    return;
+  }
+  if (!ensureGraph()) return;
+  releasePreview(); // drop any earlier preview element's source first
+  try {
+    previewSource = ctx.createMediaElementSource(el);
+    previewSource.connect(previewNormGain);
+    previewEl = el;
+  } catch {
+    previewSource = null;
+    previewEl = null;
+  }
+  // Land the previewed track's gain on the node NOW (the graph may have just
+  // been created, defaulting it to unity, or a setPreviewGain call may have
+  // no-oped earlier while ctx was null) — snapped, before the first sample.
+  applyPreviewNorm(true);
+  resumeAudio();
+}
+
+// Detach the current preview element from the graph (its source node can only be
+// created once, so it must be disconnected when the element is discarded).
+export function releasePreview() {
+  if (previewSource) {
+    try {
+      previewSource.disconnect();
+    } catch {
+      /* ignore */
+    }
+    previewSource = null;
+  }
+  previewEl = null;
 }
 
 // Called by the store subscriptions whenever an effect setting changes. Applies

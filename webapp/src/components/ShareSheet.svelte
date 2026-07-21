@@ -12,8 +12,10 @@
     player,
     current,
     toasts,
+    normalization,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
+  import { wirePreview, releasePreview, setPreviewGain } from "../lib/visualizer.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import { episodeMarkers, loadEpisodeMarkers } from "../lib/markers.js";
   import Cover from "./Cover.svelte";
@@ -69,8 +71,10 @@
     busy = false;
     stopPreview();
     // Sharing another track while the sheet is already open: the preview
-    // element still holds the previous track's source — drop it.
+    // element still holds the previous track's source — drop it (and detach it
+    // from the audio graph, since its source node can't be recreated).
     if (preview) {
+      releasePreview();
       try {
         preview.removeAttribute("src");
         preview.load();
@@ -80,6 +84,10 @@
       preview = null;
     }
     previewTime = 0;
+    // Seed the preview's normalization from this track's ReplayGain (backfilled
+    // if unknown) so the pre-listen matches the pipeline's per-track loudness.
+    setPreviewGain(typeof t.gain === "number" ? t.gain : null);
+    ensurePreviewGain(t);
     defaultSelection();
     if (t.podcast) loadEpisodeMarkers(id);
     try {
@@ -101,6 +109,7 @@
     initSeq++;
     stopPreview();
     if (preview) {
+      releasePreview();
       try {
         preview.removeAttribute("src");
         preview.load();
@@ -147,14 +156,47 @@
     if (preview) return preview;
     preview = new Audio();
     preview.preload = "auto";
+    // Same-origin stream (/api/stream), so the element isn't CORS-tainted and
+    // can be routed through the shared Web Audio graph — the pre-listen then gets
+    // the exact standard pipeline (per-track normalization, EQ, bass, safety
+    // limiter), while volume/mute stay on the element itself, like the player.
     preview.src = api.streamUrl(id);
+    preview.volume = get(player).muted ? 0 : get(player).volume;
     preview.addEventListener("timeupdate", onPreviewTime);
     preview.addEventListener("ended", stopPreview);
     preview.addEventListener("pause", () => {
       previewPlaying = false;
       requestDraw();
     });
+    wirePreview(preview);
     return preview;
+  }
+
+  // Follow the master volume / mute live, exactly as the player does on its own
+  // element — the preview is part of the same pipeline, so it obeys the same
+  // output level.
+  $: if (preview) preview.volume = $player.muted ? 0 : $player.volume;
+
+  // Backfill the previewed track's ReplayGain when unknown, so normalization
+  // works on tracks whose metadata predates the gain field. Only when
+  // normalization is on; dedup per session; caches on the track object.
+  const gainTried = new Set();
+  async function ensurePreviewGain(t) {
+    if (!t || get(normalization) === "off" || typeof t.gain === "number") return;
+    const gid = String(t.deezer_id || "");
+    if (!/^\d+$/.test(gid) || gainTried.has(gid)) return;
+    gainTried.add(gid);
+    try {
+      const r = await api.trackGain(gid);
+      if (r && typeof r.gain === "number") {
+        t.gain = r.gain; // cache on the track object
+        // Apply only if this is still the track the sheet is showing. Ramp
+        // (snap=false) — a preview may already be audible when this lands.
+        if (t.deezer_id === id) setPreviewGain(r.gain, false);
+      }
+    } catch {
+      /* leave the preview un-normalized */
+    }
   }
   function onPreviewTime() {
     if (!preview) return;
