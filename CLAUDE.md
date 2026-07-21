@@ -74,6 +74,7 @@ cd webapp && npm run dev                             # hot reload; proxies /api 
 supysonic-cli deezer login-test                      # check the ARL works
 supysonic-cli deezer import <deezer-url|track|album|playlist <id>>
 supysonic-cli deezer sync                            # import playlists/favorites/new releases
+supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics for archived tracks
 
 # Docker (full stack: builds SPA + python image, runs entrypoint that creates admin + auto-sync)
 docker compose up --build                            # web player at :5722/app, Subsonic at :5722/rest
@@ -125,6 +126,11 @@ Three Deezer code layers, from low to high:
    - `importer.py` — Deezer → Subsonic sync (writes straight to DB). `push.py` — Subsonic → Deezer
      mirror (star/unstar, playlist CRUD), hooked from `api/playlists.py` & `api/annotation.py`,
      guarded by `push_to_deezer`, fail-soft.
+   - `lyrics.py` — archive synced lyrics as a `.lrc` sidecar next to each archived audio file
+     (+ embedded plain text in the tags), sourced best-first from **Deezer's own** lyrics then the
+     public **LRCLIB** API (https://lrclib.net); synced wins over plain. `ensure_lyrics` is called on
+     archive and on first `/api/lyrics` view; `backfill_archived_lyrics` (CLI `deezer lyrics`)
+     backfills every already-archived track that lacks a sidecar.
    - `prefetch.py` — background preload of upcoming tracks + the `/api/download` pre-archive worker.
    - `scheduler.py` — auto-sync: full sync on startup (after ~20s) then daily at `sync_at` (04:00)
      or every `sync_interval`, whenever a `sync_user` exists.

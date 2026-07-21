@@ -144,25 +144,6 @@ def _playlist(p):
     }
 
 
-def _lyrics(raw):
-    """Normalize ``song.getLyrics`` output into plain + synced (LRC) lines."""
-    if not raw:
-        return None
-    synced = []
-    for line in raw.get("LYRICS_SYNC_JSON") or []:
-        ms = line.get("milliseconds")
-        text = line.get("line", "")
-        if ms is None:
-            continue
-        synced.append({"time": int(ms), "text": text})
-    return {
-        "text": raw.get("LYRICS_TEXT") or "",
-        "synced": synced,
-        "copyright": raw.get("LYRICS_COPYRIGHTS") or "",
-        "writers": raw.get("LYRICS_WRITERS") or "",
-    }
-
-
 # -- normalizers for the public REST API (api.deezer.com) -------------------
 # The public API is more stable than the private gateway for search/charts and
 # returns ready-to-use image URLs. Shapes differ (lowercase REST), so these map
@@ -1219,16 +1200,32 @@ def discography(artist_id):
 @webapi.route("/lyrics/<track_id>")
 @login_required
 def lyrics(track_id):
-    # Lyrics are a Deezer-only nicety (not stored locally): degrade to "no
-    # lyrics" when Deezer is disabled or unreachable rather than erroring.
+    from ..deezer import lyrics as deezer_lyrics
+    from ..deezer.archive import find_local_track
+
     provider = _provider()
+
+    # Archived track: serve (and, on first view, archive) its .lrc sidecar. This
+    # works even when Deezer is disabled/unreachable and upgrades to synced
+    # lyrics from the public LRCLIB API when Deezer itself had none.
+    track = find_local_track(track_id) if str(track_id).isdigit() else None
+    if track is not None and track.path and os.path.isfile(track.path):
+        try:
+            lyr = deezer_lyrics.ensure_lyrics(provider, track)
+        except Exception:
+            lyr = None
+        if lyr:
+            return jsonify({"lyrics": lyr})
+
+    # Cold (not-yet-archived) track: live Deezer lookup, nothing to archive to.
+    # Degrade to "no lyrics" when Deezer is disabled or unreachable.
     if provider is None:
         return jsonify({"lyrics": None})
     try:
         raw = provider.get_lyrics(track_id)
     except Exception:
         return jsonify({"lyrics": None})
-    return jsonify({"lyrics": _lyrics(raw)})
+    return jsonify({"lyrics": deezer_lyrics.normalize_gw_lyrics(raw)})
 
 
 @webapi.route("/gain/<track_id>")

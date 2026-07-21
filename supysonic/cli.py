@@ -502,6 +502,37 @@ def deezer_sync(config):
         click.echo(f"Recommendations: {out['recommendations']}")
 
 
+@deezer.command("lyrics")
+@click.option("--overwrite", is_flag=True, help="Re-fetch even tracks that already have a .lrc sidecar.")
+@click.option("--limit", type=int, default=None, help="Stop after N processed tracks.")
+@click.pass_obj
+def deezer_lyrics(config, overwrite, limit):
+    """Fetch and archive synced lyrics for every archived track that lacks them.
+
+    Writes a '.lrc' sidecar next to each archived audio file (sourced from Deezer
+    or the public LRCLIB API, synced when available) and embeds the plain text in
+    the file's tags. Tracks whose audio isn't archived yet are skipped.
+    """
+    from .deezer import get_provider
+    from .deezer.lyrics import backfill_archived_lyrics
+
+    # A provider is optional: LRCLIB works without Deezer, so local tracks (and
+    # any Deezer track already archived) can still get lyrics when the proxy is
+    # off — but with it we also get Deezer's own, richer synced lyrics.
+    provider = get_provider(config)
+    if provider is None:
+        click.echo("Deezer proxy disabled; using LRCLIB only.")
+
+    click.echo("Archiving lyrics for archived tracks...")
+    stats = backfill_archived_lyrics(
+        provider, overwrite=overwrite, limit=limit, progress=click.echo
+    )
+    click.echo(
+        "Done. synced={synced} plain={plain} none={missing} "
+        "(scanned {scanned}, {skipped} already had a sidecar).".format(**stats)
+    )
+
+
 @deezer.command("scan-local")
 @click.pass_obj
 def deezer_scan_local(config):

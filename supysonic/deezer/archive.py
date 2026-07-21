@@ -127,6 +127,18 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
     track.last_modification = int(time.time())
     track.save()
 
+    # Archive lyrics alongside the audio (a .lrc sidecar + embedded plain text).
+    # On the archive hot path we only consult Deezer (already logged in for the
+    # audio) — the public LRCLIB gap-fill happens lazily on first view / via the
+    # `deezer lyrics` backfill, so bulk archiving never fans out to a second
+    # service. Best-effort: a lyrics miss must never break the archive.
+    try:
+        from . import lyrics as lyrics_mod
+
+        lyrics_mod.ensure_lyrics(provider, track, allow_lrclib=False)
+    except Exception as exc:
+        logger.debug("Archiving lyrics failed for %s: %s", track.path, exc)
+
 
 def ensure_episode_archived(provider, episode: PodcastEpisode) -> None:
     """Fetch a podcast episode's MP3 into its archive path (idempotent).
