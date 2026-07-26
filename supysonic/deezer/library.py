@@ -30,6 +30,17 @@ PODCAST_DIR_NAME = "Podcasts"
 COVER_FILENAME = "cover.jpg"
 
 _ILLEGAL = re.compile(r'[/\\:*?"<>|]')
+# Control characters, NUL above all. These reach us from Deezer metadata and,
+# more realistically, from the ID3/Vorbis tags of files users upload — and every
+# filesystem call raises ValueError on an embedded null, so a single stray byte
+# in a tag turned a perfectly good file into an unexplained import failure.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# Filesystems cap a single path component at 255 **bytes**, not characters: a
+# 255-character CJK album title is ~765 bytes and makes os.makedirs fail with
+# ENAMETOOLONG, so an ordinary release simply refused to archive. The budget is
+# well under the limit to leave room for the "NN - " prefix and the extension
+# that track_archive_path appends.
+_MAX_COMPONENT_BYTES = 200
 
 
 class ImportCache:
@@ -45,9 +56,20 @@ class ImportCache:
         self.folders = {}  # path -> Folder
 
 
+def _truncate_bytes(name: str, limit: int) -> str:
+    """Cut `name` to at most `limit` UTF-8 bytes without splitting a character."""
+    raw = name.encode("utf-8")
+    if len(raw) <= limit:
+        return name
+    return raw[:limit].decode("utf-8", "ignore")
+
+
 def sanitize(name: str) -> str:
     """Make a string safe as a single path component."""
-    name = _ILLEGAL.sub("_", (name or "").strip(" ."))
+    name = _CONTROL.sub("", _ILLEGAL.sub("_", name or ""))
+    # Strip before AND after truncating: the cut can land on a space or a dot,
+    # and a component ending in either is silently rewritten by Windows.
+    name = _truncate_bytes(name.strip(" ."), _MAX_COMPONENT_BYTES).strip(" .")
     return name or "untitled"
 
 

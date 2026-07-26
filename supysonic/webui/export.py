@@ -125,18 +125,24 @@ def _transcode(path, args):
     ]
     # stderr to /dev/null: an unread, full stderr pipe would deadlock ffmpeg.
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    finished = False
     try:
         while True:
             data = proc.stdout.read(_CHUNK)
             if not data:
                 break
             yield data
+        finished = True
     except GeneratorExit:
         proc.kill()
         raise
     finally:
         proc.stdout.close()
-        if proc.wait() != 0:
+        rc = proc.wait()
+        # Only complain when we actually ran to completion. Raising here during
+        # a GeneratorExit (the client closed the download) would surface as a
+        # bogus "ffmpeg failed" on top of a perfectly normal disconnect.
+        if finished and rc != 0:
             raise RuntimeError("ffmpeg failed")
 
 
@@ -294,6 +300,7 @@ def export_zip(kind, ident):
             with zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
                 for i, tid, base in plan:
                     arc = f"{i:03d} - {base}.{ext}"
+                    wrote = False
                     try:
                         # _media_file archives the track on demand (the same
                         # path streaming takes) and hands back a real file. It
@@ -309,18 +316,26 @@ def export_zip(kind, ident):
                                         chunk = src.read(_CHUNK)
                                         if not chunk:
                                             break
+                                        wrote = True
                                         dst.write(chunk)
                                         if sink.pending() >= _CHUNK:
                                             yield sink.drain()
                             else:
                                 for chunk in _transcode(path, args):
+                                    wrote = True
                                     dst.write(chunk)
                                     if sink.pending() >= _CHUNK:
                                         yield sink.drain()
                         m3u.append(arc)
                     except Exception:
                         logger.warning("export: track %s failed", tid, exc_info=True)
-                        errors.append(f"{i:03d} - {base}")
+                        # An entry can't be withdrawn from a stream once bytes
+                        # are out, so say so: a truncated file that plays for
+                        # ten seconds and stops is worse than a named failure.
+                        errors.append(
+                            f"{i:03d} - {base}"
+                            + (" (fichier incomplet dans l'archive)" if wrote else "")
+                        )
                     yield sink.drain()
 
                 zf.writestr(_safe(title, kind) + ".m3u", "\n".join(m3u) + "\n")

@@ -882,6 +882,54 @@ class WebUITestCase(unittest.TestCase):
         locals_ = self.client.get("/api/me/local").get_json()["tracks"]
         self.assertTrue(any(t["title"] == "Uploaded Song" for t in locals_))
 
+    def test_upload_accepts_a_cyrillic_filename(self):
+        """End to end: a name with no Latin characters at all used to come back
+        from secure_filename as just "mp3", losing the extension, so the file was
+        rejected as an unsupported format — non-Latin libraries couldn't upload."""
+        import os
+        from io import BytesIO
+
+        from supysonic.deezer import local
+
+        self._login()
+
+        class FakeTag:
+            artist = "Артист"
+            albumartist = None
+            album = "Альбом"
+            genre = "Pop"
+            title = "Песня"
+            disc = 1
+            track = 1
+            year = None
+            length = 200.0
+            bitrate = 256000
+            images = []
+
+        orig = local._load_tag
+        local._load_tag = lambda p: FakeTag()
+        try:
+            rv = self.client.post(
+                "/api/upload",
+                data={"files": (BytesIO(b"audiobytes"), "Песня.mp3")},
+                content_type="multipart/form-data",
+            )
+        finally:
+            local._load_tag = orig
+        self.assertEqual(rv.status_code, 200)
+        j = rv.get_json()
+        self.assertEqual(j["skipped"], [])
+        self.assertEqual(j["count"], 1)
+        self.assertEqual(j["imported"][0]["title"], "Песня")
+        # the file really landed on disk, under the user's upload folder, with
+        # its own name intact
+        found = [
+            os.path.join(d, f)
+            for d, _s, fs in os.walk(os.path.join(self.archive, "Uploads"))
+            for f in fs
+        ]
+        self.assertEqual([os.path.basename(x) for x in found], ["Песня.mp3"])
+
     def test_upload_rejects_non_audio(self):
         from io import BytesIO
 
@@ -1544,6 +1592,75 @@ class WebUITestCase(unittest.TestCase):
         rv = self.client.get("/app/")
         self.assertEqual(rv.status_code, 503)
         self.assertIn(b"not built", rv.data)
+
+    # -- hardening -------------------------------------------------------
+
+    def test_upload_name_keeps_non_latin_scripts(self):
+        """secure_filename ASCII-folds, which erased a whole non-Latin name and
+        took the extension with it — the file was then rejected as an
+        unsupported format. Names must survive; paths must still be safe."""
+        from supysonic.webui import _safe_upload_name
+
+        self.assertEqual(_safe_upload_name("Песня.mp3"), ("Песня.mp3", "mp3"))
+        self.assertEqual(_safe_upload_name("曲.flac"), ("曲.flac", "flac"))
+        self.assertEqual(
+            _safe_upload_name("Chanson française.mp3"), ("Chanson française.mp3", "mp3")
+        )
+        # …while still being a single, safe path component
+        self.assertEqual(_safe_upload_name("../../etc/passwd.mp3"), ("passwd.mp3", "mp3"))
+        self.assertEqual(_safe_upload_name("..\\..\\x.mp3"), ("x.mp3", "mp3"))
+        self.assertEqual(_safe_upload_name(".hidden.flac"), ("hidden.flac", "flac"))
+        self.assertEqual(_safe_upload_name("a\x00b.mp3"), ("a_b.mp3", "mp3"))
+        self.assertEqual(_safe_upload_name("noext"), ("", ""))
+        name, _ = _safe_upload_name("a" * 400 + ".opus")
+        self.assertLessEqual(len(name.encode("utf-8")), 190)
+
+    def test_archive_path_sanitizer_is_filesystem_safe(self):
+        """Path components come from Deezer metadata and from uploaded files'
+        own tags, so they must survive a NUL and an over-long name."""
+        from supysonic.deezer.library import sanitize
+
+        self.assertEqual(sanitize("a\x00b"), "ab")  # NUL would raise on every fs call
+        self.assertEqual(sanitize(".."), "untitled")
+        self.assertEqual(sanitize("../../etc"), "_.._etc")
+        self.assertEqual(sanitize("a/b"), "a_b")
+        self.assertEqual(sanitize("nul."), "nul")  # Windows drops trailing dots
+        # 255 CJK characters is ~765 bytes: over every filesystem's limit.
+        long_cjk = sanitize("曲" * 300)
+        self.assertLessEqual(len(long_cjk.encode("utf-8")), 200)
+        self.assertTrue(long_cjk.startswith("曲"))
+        # and the cut never splits a multi-byte character
+        long_cjk.encode("utf-8").decode("utf-8")
+
+    def test_download_batch_is_capped_and_deduped(self):
+        from supysonic.webui import _DOWNLOAD_BATCH_MAX
+
+        self._login()
+        queued = []
+        self.app.deezer_prefetch.download_ids = lambda ids: queued.extend(ids) or len(ids)
+
+        # duplicates collapse
+        rv = self.client.post("/api/download", json={"ids": ["1", "1", "2"]})
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(queued, ["1", "2"])
+
+        # an oversized batch is capped rather than queueing a full FLAC download
+        # per entry (the queue behind this is unbounded)
+        queued.clear()
+        huge = [str(i) for i in range(_DOWNLOAD_BATCH_MAX + 500)]
+        rv = self.client.post("/api/download", json={"ids": huge})
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(len(queued), _DOWNLOAD_BATCH_MAX)
+
+        # junk is still rejected
+        queued.clear()
+        self.assertEqual(
+            self.client.post("/api/download", json={"ids": ["abc", "../x"]}).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post("/api/download", json={"ids": "not-a-list"}).status_code, 400
+        )
 
     # -- bulk ZIP export -------------------------------------------------
 
