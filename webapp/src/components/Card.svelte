@@ -3,6 +3,7 @@
   import { openMenu } from "../lib/stores.js";
   import { playEntity, buildEntityMenu } from "../lib/actions.js";
   import Cover from "./Cover.svelte";
+  import { isLocalId } from "../lib/format.js";
   import Icon from "./Icon.svelte";
 
   // item: {deezer_id, title|name, cover|picture}, kind: album|artist|playlist|mix
@@ -47,7 +48,7 @@
   title={title}
 >
   <div class="cv">
-    <Cover src={image} alt={title} round={kind === "artist"} />
+    <Cover src={image} alt={title} {kind} round={kind === "artist"} fallbackId={isLocalId(item.id) ? item.id : null} />
     <button class="play" on:click={play} aria-label="Lire"><Icon name="play" size={18} /></button>
   </div>
   <div class="meta">
@@ -66,8 +67,14 @@
     transition: background 0.12s ease;
     width: 100%;
     cursor: pointer;
+    /* Skip rendering off-screen cards, but with `auto` on the placeholder size:
+       the browser then REMEMBERS each card's last rendered height instead of
+       assuming a flat 220px. The fixed guess was wrong for every grid whose
+       columns are wider than a shelf card, so cards entering and leaving the
+       viewport kept resizing the page under the scrollbar. */
     content-visibility: auto;
-    contain-intrinsic-size: 220px;
+    contain-intrinsic-size: 232px; /* fallback: engines without the `auto` keyword */
+    contain-intrinsic-size: auto 232px;
   }
   .card:hover {
     background: var(--bg-hover);

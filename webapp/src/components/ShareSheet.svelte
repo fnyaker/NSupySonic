@@ -812,7 +812,7 @@
     <div class="sheet" role="dialog" aria-label="Partager" tabindex="-1" on:click|stopPropagation>
       <header>
         <div class="who">
-          <Cover src={track.album?.cover} alt={track.title} size={46} />
+          <Cover src={track.album?.cover} alt={track.title} size={46} kind="track" fallbackId={track.deezer_id} />
           <div class="txt">
             <span class="t">{track.title}</span>
             <span class="a muted">{track.artist?.name}</span>

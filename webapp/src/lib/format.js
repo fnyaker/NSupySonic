@@ -60,6 +60,23 @@ export function resolveCover(covers, url) {
   return (covers && covers[coverKey(url)]) || url;
 }
 
+// A safe CSS `url(…)` value for an inline style. An UNQUOTED url() is invalid
+// as soon as the URL contains a parenthesis, a space or a quote — and an empty
+// one (`url()`) drops the whole declaration — so backdrops silently vanished on
+// perfectly ordinary art. Quotes + escapes, and `none` when there's no image.
+export function cssUrl(u) {
+  if (!u) return "none";
+  return `url("${String(u).replace(/[\\"]/g, "\\$&").replace(/[\n\r]/g, "")}")`;
+}
+
+// True for a LOCAL entity id (a uuid) as opposed to a numeric Deezer id.
+// `/api/cover/<id>` resolves a uuid to whatever local row owns it (album,
+// artist, playlist, podcast, track) but treats a NUMERIC id as a *track* id —
+// so only a uuid is a safe cover fallback for a non-track entity.
+export function isLocalId(id) {
+  return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i.test(id);
+}
+
 // A tiny variant of a Deezer cover, used as an instant low-quality placeholder
 // while the full-size art loads (it downloads in a few KB). Returns null when
 // the URL has no Deezer dimensions to shrink (local / non-Deezer covers), so

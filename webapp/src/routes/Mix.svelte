@@ -53,7 +53,7 @@
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.playlist.cover}>
-      <div class="art"><Cover src={data.playlist.cover} alt={data.playlist.title} /></div>
+      <div class="art"><Cover src={data.playlist.cover} alt={data.playlist.title} kind="mix" eager /></div>
       <div class="meta">
         <span class="kind">Mix</span>
         <h1>{data.playlist.title}</h1>

@@ -16,18 +16,26 @@
   let timer;
   let seq = 0;
 
-  // Deep link support (/search/:q from the sidebar) — initialise once.
-  $: if (params.q !== undefined) {
-    let decoded = params.q;
+  // Deep link support (/search/:q from the sidebar).
+  //
+  // The gate is the last param we APPLIED — never the live input value. This
+  // block re-runs whenever anything it reads changes, and `q` is one of those:
+  // comparing against `q` meant every keystroke re-ran the block, found the
+  // typed text different from the URL term and reset the box back to it. The
+  // search field was effectively frozen on the deep-linked query.
+  let appliedParam = null;
+  $: applyParam(params.q);
+  function applyParam(raw) {
+    if (raw === undefined || raw === appliedParam) return;
+    appliedParam = raw;
+    let decoded = raw;
     try {
-      decoded = decodeURIComponent(params.q); // a malformed %xx would throw
+      decoded = decodeURIComponent(raw); // a malformed %xx would throw
     } catch {
       /* keep the raw value */
     }
-    if (decoded !== q) {
-      q = decoded;
-      run(q.trim());
-    }
+    q = decoded;
+    run(q.trim());
   }
 
   // Live search as you type, debounced. We deliberately do NOT change the route

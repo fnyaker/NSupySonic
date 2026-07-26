@@ -75,7 +75,7 @@
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.album.cover}>
-      <div class="art"><Cover src={data.album.cover} alt={data.album.title} /></div>
+      <div class="art"><Cover src={data.album.cover} alt={data.album.title} kind="album" eager /></div>
       <div class="meta">
         <span class="kind">Album</span>
         <h1>{data.album.title}</h1>

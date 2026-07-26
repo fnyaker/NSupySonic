@@ -4,7 +4,7 @@
   import { api } from "../lib/api.js";
   import { player, isAdmin, toasts, lastPlaylist } from "../lib/stores.js";
   import { toggleEntityFavorite, invalidatePlaylists, downloadTracks } from "../lib/actions.js";
-  import { duration as fmtDuration } from "../lib/format.js";
+  import { duration as fmtDuration, isLocalId } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -266,7 +266,7 @@
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.playlist.cover}>
-      <div class="art"><Cover src={data.playlist.cover} alt={data.playlist.title} /></div>
+      <div class="art"><Cover src={data.playlist.cover} alt={data.playlist.title} kind="playlist" fallbackId={isLocalId(id) ? id : null} eager /></div>
       <div class="meta">
         <span class="kind">Playlist</span>
         {#if editingMeta}

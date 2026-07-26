@@ -211,7 +211,7 @@
     <div class="list">
       {#each items as m (m.id)}
         <div class="row">
-          <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} /></div>
+          <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} kind="track" fallbackId={m.track?.deezer_id} /></div>
           <div class="meta">
             <div class="t">{m.track?.title}</div>
             <div class="a muted">{m.track?.artist?.name}</div>

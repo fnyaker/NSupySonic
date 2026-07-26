@@ -4,6 +4,7 @@
   import { api } from "../lib/api.js";
   import { toasts } from "../lib/stores.js";
   import Icon from "./Icon.svelte";
+  import Cover from "./Cover.svelte";
 
   export let onClose = () => {};
 
@@ -72,11 +73,10 @@
         {#each clusters as c (c.id)}
           <button class="cl" class:on={c.enabled} on:click={() => toggle(c)} title={c.title}>
             <div class="tile">
-              {#if c.cover}
-                <img src={c.cover} alt="" loading="lazy" />
-              {:else}
-                <div class="ph"><Icon name="music" size={26} /></div>
-              {/if}
+              <!-- Through Cover.svelte so a flaky CDN gets the same retry +
+                   placeholder treatment as everywhere else (a bare <img> just
+                   painted the browser's broken-image glyph). -->
+              <div class="cv"><Cover src={c.cover} alt="" kind="mix" /></div>
               <span class="check" aria-hidden="true"><Icon name="check" size={15} /></span>
               <span class="name">{c.title}</span>
             </div>
@@ -181,19 +181,9 @@
       box-shadow 0.15s ease,
       filter 0.15s ease;
   }
-  .tile img {
+  .tile .cv {
     position: absolute;
     inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-  .tile .ph {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    color: var(--text-dim);
   }
   .tile::after {
     content: "";

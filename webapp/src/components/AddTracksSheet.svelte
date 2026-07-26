@@ -24,20 +24,25 @@
     timer = setTimeout(search, 280);
   }
 
+  // Sequence guard: a slow earlier query must not overwrite a newer one's
+  // results (typing "dire straits" could land back on the "dir" results).
+  let seq = 0;
   async function search() {
     const term = q.trim();
+    const mine = ++seq;
     if (!term) {
       results = [];
+      loading = false;
       return;
     }
     loading = true;
     try {
       const r = await api.search(term);
-      results = r.tracks || [];
+      if (mine === seq) results = r.tracks || [];
     } catch {
-      results = [];
+      if (mine === seq) results = [];
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 
@@ -86,7 +91,7 @@
 
       {#each results as t (t.deezer_id)}
         <div class="res">
-          <div class="thumb"><Cover src={t.album?.cover} alt={t.title} size={42} /></div>
+          <div class="thumb"><Cover src={t.album?.cover} alt={t.title} size={42} kind="track" fallbackId={t.deezer_id} /></div>
           <div class="meta">
             <div class="t">
               {#if t.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}

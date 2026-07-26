@@ -119,7 +119,7 @@
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.artist.picture}>
-      <div class="art"><Cover src={data.artist.picture} alt={data.artist.name} round /></div>
+      <div class="art"><Cover src={data.artist.picture} alt={data.artist.name} kind="artist" round eager /></div>
       <div class="meta">
         <span class="kind">Artiste</span>
         <h1>{data.artist.name}</h1>

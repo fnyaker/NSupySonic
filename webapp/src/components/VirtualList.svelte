@@ -42,11 +42,21 @@
     }
     return document.scrollingElement || document.documentElement;
   }
+  // The document scroller is a special case: its bounding rect describes the
+  // WHOLE page, not the visible area, so measuring it like a normal element
+  // reported a viewport as tall as the document — and the window degenerated
+  // into "render every row", which is exactly what windowing exists to avoid.
+  function viewport(el) {
+    if (el === document.scrollingElement || el === document.documentElement || el === document.body)
+      return { top: 0, height: window.innerHeight };
+    const r = el.getBoundingClientRect();
+    return { top: r.top, height: r.height };
+  }
 
   function recompute() {
     if (!listEl || !scroller) return;
     const lr = listEl.getBoundingClientRect();
-    const sr = scroller.getBoundingClientRect();
+    const sr = viewport(scroller);
     const above = sr.top - lr.top; // list content scrolled above the viewport
     const viewH = sr.height;
     let s = Math.floor(above / rowH) - buffer;
@@ -92,7 +102,7 @@
     if (!listEl || !scroller || index < 0) return;
     await measure();
     const lr = listEl.getBoundingClientRect();
-    const sr = scroller.getBoundingClientRect();
+    const sr = viewport(scroller);
     const listTop = scroller.scrollTop + (lr.top - sr.top); // list top in scroll coords
     const target = listTop + index * rowH - scroller.clientHeight * ratio;
     scroller.scrollTo({ top: Math.max(0, target), behavior: smooth ? "smooth" : "auto" });
@@ -103,10 +113,20 @@
     end = Math.min(total, Math.ceil((scroller?.clientHeight || 800) / rowH) + buffer);
     scroller?.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll, { passive: true });
+    // The scroll container can change size without the WINDOW ever resizing —
+    // opening/closing the now-playing panel, a header collapsing. Watching only
+    // `resize` left the window stale (a short list of rows in a suddenly taller
+    // panel, blank space below) until the next scroll event nudged it.
+    let ro = null;
+    if (typeof ResizeObserver !== "undefined" && scroller) {
+      ro = new ResizeObserver(onScroll);
+      ro.observe(scroller);
+    }
     measure();
     return () => {
       scroller?.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
+      ro?.disconnect();
     };
   });
 

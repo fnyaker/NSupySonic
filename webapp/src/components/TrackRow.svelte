@@ -54,7 +54,7 @@
 
   <div class="titles">
     {#if showCover}
-      <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} /></div>
+      <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} kind="track" fallbackId={track.deezer_id} /></div>
     {/if}
     <div class="meta">
       <div class="t">

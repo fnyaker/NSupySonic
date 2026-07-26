@@ -125,7 +125,7 @@
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.cover}>
-      <div class="art"><Cover src={data.cover} alt={data.title} /></div>
+      <div class="art"><Cover src={data.cover} alt={data.title} kind="podcast" fallbackId={data.id} eager /></div>
       <div class="meta">
         <span class="kind">Podcast</span>
         <h1>{data.title}</h1>

@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { player, favTracks, toasts, isAdmin, syncing, downloads } from "../lib/stores.js";
   import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
@@ -47,11 +47,23 @@
   });
 
   // Downloaded tracks come straight from IndexedDB, so this tab works offline.
-  async function loadOffline() {
-    offline = (await listDownloads()).map((m) => m.track).filter(Boolean);
+  // Refreshed whenever the downloaded set changes (add / remove / evict), but
+  // COALESCED: downloading a 50-track album flips that store once per track,
+  // and every flip used to re-read the entire IndexedDB meta store. The
+  // sequence guard stops a slower earlier read from landing on a newer one.
+  let offlineSeq = 0;
+  let offlineTimer = null;
+  $: $downloads, scheduleOffline();
+  function scheduleOffline() {
+    clearTimeout(offlineTimer);
+    offlineTimer = setTimeout(loadOffline, 200);
   }
-  // Refresh whenever the downloaded set changes (add / remove / evict).
-  $: $downloads, loadOffline();
+  async function loadOffline() {
+    const mine = ++offlineSeq;
+    const list = (await listDownloads()).map((m) => m.track).filter(Boolean);
+    if (mine === offlineSeq) offline = list;
+  }
+  onDestroy(() => clearTimeout(offlineTimer));
 
   function playOffline() {
     if (offline?.length) player.playQueue(offline, 0, { kind: "downloads" });
