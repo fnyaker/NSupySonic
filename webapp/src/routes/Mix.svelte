@@ -27,10 +27,14 @@
     loading = true;
     data = null;
     try {
-      const r = await api.smartTracklist(mixId);
-      if (mine === loadSeq) data = r;
+      // Cached copy first, fresh one right after — no skeleton on a revisit.
+      await api.swr("/smarttracklist/" + mixId, (r) => {
+        if (mine !== loadSeq) return;
+        data = r;
+        loading = false;
+      });
     } catch {
-      if (mine === loadSeq) data = null;
+      if (mine === loadSeq && !data) data = null;
     }
     if (mine === loadSeq) loading = false;
   }

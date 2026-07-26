@@ -19,6 +19,7 @@
   import ContextMenu from "./components/ContextMenu.svelte";
   import PlaylistPicker from "./components/PlaylistPicker.svelte";
   import ShareSheet from "./components/ShareSheet.svelte";
+  import ExportSheet from "./components/ExportSheet.svelte";
   import NetworkIndicator from "./components/NetworkIndicator.svelte";
   import Login from "./routes/Login.svelte";
   import Home from "./routes/Home.svelte";
@@ -200,6 +201,7 @@
 <ContextMenu />
 <PlaylistPicker />
 <ShareSheet />
+<ExportSheet />
 <NetworkIndicator />
 
 <style>

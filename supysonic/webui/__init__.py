@@ -2628,3 +2628,4 @@ def stream(deezer_id):
 # it registers its routes on this blueprint. Must stay at the bottom: it
 # imports helpers defined above.
 from . import share  # noqa: E402,F401  isort:skip
+from . import export  # noqa: E402,F401  isort:skip

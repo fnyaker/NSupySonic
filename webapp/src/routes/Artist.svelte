@@ -59,13 +59,15 @@
     allTracks = null;
     tracksLoading = false;
     try {
-      const r = await api.artist(artistId);
-      if (mine === loadSeq) {
+      // Cached copy first, fresh one right after — no skeleton on a revisit.
+      await api.swr("/artist/" + artistId, (r) => {
+        if (mine !== loadSeq) return;
         data = r;
         fav = !!r.artist?.is_favorite; // correct when the source reports it
-      }
+        loading = false;
+      });
     } catch {
-      if (mine === loadSeq) data = null;
+      if (mine === loadSeq && !data) data = null;
     }
     if (mine === loadSeq) loading = false;
     api

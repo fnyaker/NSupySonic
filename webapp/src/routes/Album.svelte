@@ -1,7 +1,7 @@
 <script>
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
-  import { player, toasts, isAdmin } from "../lib/stores.js";
+  import { player, toasts, isAdmin, openExport } from "../lib/stores.js";
   import { toggleEntityFavorite, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
@@ -30,13 +30,16 @@
     loading = true;
     data = null;
     try {
-      const r = await api.album(albumId);
-      if (mine === loadSeq) {
+      // Stale-while-revalidate: an album you've opened before paints straight
+      // from disk instead of showing a skeleton for the length of a round-trip.
+      await api.swr("/album/" + albumId, (r) => {
+        if (mine !== loadSeq) return;
         data = r;
         fav = !!r.album?.is_favorite; // correct heart state on open
-      }
+        loading = false;
+      });
     } catch {
-      if (mine === loadSeq) data = null;
+      if (mine === loadSeq && !data) data = null;
     }
     if (mine === loadSeq) loading = false;
   }
@@ -97,6 +100,7 @@
         <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
       {/if}
       <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger l'album" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
+      <button class="icon-btn" on:click={() => openExport("album", id, data.album.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
     </div>
 
     <TrackList tracks={data.tracks} numbered showAlbum={false} showCover={false} context={{ kind: "album", id }} />

@@ -2,7 +2,19 @@
   // Settings UI for the opt-in DSP chain (see lib/visualizer.js): volume
   // normalization, bass enhancement and a 10-band equalizer. Everything writes
   // to the persisted fx.* stores, which the audio graph subscribes to live.
-  import { player, eqEnabled, eqBands, bassBoost, normalization } from "../lib/stores.js";
+  import { tick } from "svelte";
+  import {
+    player,
+    eqEnabled,
+    eqBands,
+    bassBoost,
+    normalization,
+    fxPresets,
+    saveFxPreset,
+    applyFxPreset,
+    deleteFxPreset,
+    toasts,
+  } from "../lib/stores.js";
   import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/visualizer.js";
   import Icon from "./Icon.svelte";
 
@@ -43,6 +55,64 @@
   $: activePreset = PRESETS.find((p) => p.bands.every((v, i) => v === $eqBands[i]))?.id;
 
   $: bassPct = Math.round($bassBoost * 100);
+
+  // -- the user's own presets ------------------------------------------------
+  // A saved preset captures the whole chain (EQ + bass + normalisation), so it
+  // restores a complete listening setup — "casque", "voiture", "nuit" — not just
+  // a curve. Naming happens in an inline field rather than window.prompt: the
+  // native dialog is blocked outright in some embedded webviews (including the
+  // Android app's), and it looks nothing like the rest of the app.
+  let naming = false;
+  let draftName = "";
+  let nameInput;
+
+  async function openNaming() {
+    naming = true;
+    draftName = "";
+    await tick();
+    nameInput?.focus();
+  }
+  function confirmSave() {
+    const saved = saveFxPreset(draftName);
+    if (!saved) {
+      nameInput?.focus();
+      return;
+    }
+    naming = false;
+    draftName = "";
+    toasts.push(`Préréglage « ${saved.name} » enregistré`);
+  }
+  function cancelSave() {
+    naming = false;
+    draftName = "";
+  }
+  function onNameKey(e) {
+    if (e.key === "Enter") confirmSave();
+    else if (e.key === "Escape") cancelSave();
+  }
+  function useCustom(p) {
+    applyFxPreset(p);
+    toasts.push(`Préréglage « ${p.name} » appliqué`);
+  }
+  function removeCustom(p) {
+    deleteFxPreset(p.id);
+    toasts.push(`Préréglage « ${p.name} » supprimé`);
+  }
+
+  // A custom preset is "active" when every part of the live chain matches it.
+  function matches(p, eq, bands, bass, norm) {
+    return (
+      !!p.eq === !!eq &&
+      p.norm === norm &&
+      Math.abs((+p.bass || 0) - bass) < 0.005 &&
+      Array.isArray(p.bands) &&
+      p.bands.length === bands.length &&
+      p.bands.every((v, i) => v === bands[i])
+    );
+  }
+  $: activeCustom = $fxPresets.find((p) =>
+    matches(p, $eqEnabled, $eqBands, $bassBoost, $normalization)
+  )?.id;
 </script>
 
 <section class="card">
@@ -138,6 +208,55 @@
         </div>
       {/each}
     </div>
+  </div>
+
+  <!-- The user's own presets ------------------------------------------------ -->
+  <div class="block">
+    <div class="block-head">
+      <span class="block-title">Mes préréglages</span>
+      <span class="muted block-hint">
+        Enregistrez le réglage complet — égaliseur, basses et normalisation — pour
+        le rappeler d'un geste (un pour le casque, un pour la voiture…).
+      </span>
+    </div>
+
+    {#if $fxPresets.length}
+      <div class="mine">
+        {#each $fxPresets as p (p.id)}
+          <div class="chip" class:sel={activeCustom === p.id}>
+            <button class="chip-main" on:click={() => useCustom(p)} title="Appliquer « {p.name} »">
+              {#if activeCustom === p.id}<Icon name="check" size={14} />{/if}
+              <span class="cname">{p.name}</span>
+            </button>
+            <button class="chip-x" on:click={() => removeCustom(p)} aria-label="Supprimer « {p.name} »" title="Supprimer">
+              <Icon name="close" size={13} />
+            </button>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <p class="muted none">Aucun préréglage enregistré pour l'instant.</p>
+    {/if}
+
+    {#if naming}
+      <div class="naming">
+        <input
+          bind:this={nameInput}
+          bind:value={draftName}
+          on:keydown={onNameKey}
+          placeholder="Nom du préréglage (ex. Casque)"
+          maxlength="40"
+        />
+        <button class="pill sm" on:click={confirmSave} disabled={!draftName.trim()}>
+          <Icon name="check" size={15} /> Enregistrer
+        </button>
+        <button class="ghost sm" on:click={cancelSave}>Annuler</button>
+      </div>
+    {:else}
+      <button class="save" on:click={openNaming}>
+        <Icon name="plus" size={16} /> Enregistrer le réglage actuel
+      </button>
+    {/if}
   </div>
 </section>
 
@@ -305,6 +424,106 @@
   .preset.sel {
     border-color: var(--accent);
     color: var(--accent);
+  }
+  .mine {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: stretch;
+    border-radius: 999px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg);
+    overflow: hidden;
+  }
+  .chip.sel {
+    border-color: var(--accent);
+  }
+  .chip-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 6px 8px 14px;
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.85rem;
+    max-width: 220px;
+  }
+  .chip.sel .chip-main {
+    color: var(--accent);
+  }
+  .chip-main:hover {
+    color: var(--text);
+  }
+  .cname {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .chip-x {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 11px 0 7px;
+    color: var(--text-dim);
+  }
+  .chip-x:hover {
+    color: var(--accent-2);
+  }
+  .none {
+    font-size: 0.82rem;
+    margin: 0 0 12px;
+  }
+  .save {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 15px;
+    border-radius: 999px;
+    border: 1px dashed var(--bg-hover);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .save:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .naming {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .naming input {
+    flex: 1;
+    min-width: 180px;
+    padding: 9px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--accent);
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
+    font-size: 0.9rem;
+  }
+  .pill.sm,
+  .ghost.sm {
+    font-size: 0.85rem;
+    padding: 8px 14px;
+    gap: 6px;
+  }
+  .pill.sm:disabled {
+    opacity: 0.5;
+    cursor: default;
+    transform: none;
+  }
+  .ghost.sm {
+    color: var(--text-dim);
+  }
+  .ghost.sm:hover {
+    color: var(--text);
   }
   .eq {
     display: flex;

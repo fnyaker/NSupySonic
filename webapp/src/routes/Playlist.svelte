@@ -2,7 +2,7 @@
   import { onDestroy } from "svelte";
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
-  import { player, isAdmin, toasts, lastPlaylist } from "../lib/stores.js";
+  import { player, isAdmin, toasts, lastPlaylist, openExport } from "../lib/stores.js";
   import { toggleEntityFavorite, invalidatePlaylists, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration, isLocalId } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
@@ -93,13 +93,16 @@
     plQuery = "";
     plDir = 1;
     try {
-      const r = await api.playlist(plId);
-      if (mine === loadSeq) {
+      // Cached copy first, fresh one right after — a big playlist you've opened
+      // before is on screen immediately instead of after a full round-trip.
+      await api.swr("/playlist/" + plId, (r) => {
+        if (mine !== loadSeq) return;
         data = r;
         fav = !!r.playlist?.is_favorite;
-      }
+        loading = false;
+      });
     } catch {
-      if (mine === loadSeq) data = null;
+      if (mine === loadSeq && !data) data = null;
     }
     if (mine === loadSeq) loading = false;
   }
@@ -290,6 +293,7 @@
       <button class="pill" on:click={playAll}><Icon name="play" size={18} /> Lire</button>
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
       <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger la playlist" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
+      <button class="icon-btn" on:click={() => openExport("playlist", id, data.playlist.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
 
       {#if editable}
         <button class="icon-btn" on:click={() => (showAdd = true)} aria-label="Ajouter des titres" title="Ajouter des titres"><Icon name="plus" size={24} /></button>

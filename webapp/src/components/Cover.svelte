@@ -232,15 +232,22 @@
         alt=""
         aria-hidden="true"
         decoding="async"
+        fetchpriority="low"
         on:error={() => (lowFailed = true)}
       />
     {/if}
+    <!-- Thumbnails are explicitly LOW priority. On a slow link twenty 500px
+         covers are the best part of a megabyte, and at the browser's default
+         "auto" they queue ahead of — and delay — the very API call that
+         produces the list they belong to. Low keeps them strictly in the
+         background: the list lands first and the art fills in behind it. The
+         above-the-fold art (`eager`) is the one thing that stays high. -->
     <img
       bind:this={img}
       src={shown}
       {alt}
       loading={eager ? "eager" : "lazy"}
-      fetchpriority={eager ? "high" : "auto"}
+      fetchpriority={eager ? "high" : "low"}
       decoding="async"
       class:loaded
       on:load={() => (loaded = true)}

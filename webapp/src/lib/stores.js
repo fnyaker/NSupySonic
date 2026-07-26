@@ -84,6 +84,51 @@ export const bassBoost = persisted("fx.bass", 0);
 // dynamics compressor + make-up gain that evens out loud/quiet tracks.
 export const normalization = persisted("fx.normalize", "off");
 
+// The user's own saved presets. A preset captures the WHOLE audio setup —
+// EQ on/off + the ten band gains, the bass lift and the normalization level —
+// not just the curve, because that's what "my setup for headphones" or "my
+// setup for the car" actually means.
+//   [{ id, name, eq: bool, bands: number[10], bass: number, norm: string }]
+export const fxPresets = persisted("fx.presets", []);
+
+export function saveFxPreset(name) {
+  const clean = String(name || "").trim().slice(0, 40);
+  if (!clean) return null;
+  const snapshot = {
+    id: "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    name: clean,
+    eq: get(eqEnabled),
+    bands: get(eqBands).slice(),
+    bass: get(bassBoost),
+    norm: get(normalization),
+  };
+  fxPresets.update((list) => {
+    // Saving under an existing name overwrites it rather than piling up
+    // near-duplicates — that's what the user means by re-saving.
+    const i = list.findIndex((p) => p.name.toLowerCase() === clean.toLowerCase());
+    if (i < 0) return [...list, snapshot];
+    const next = list.slice();
+    next[i] = { ...snapshot, id: list[i].id };
+    return next;
+  });
+  return snapshot;
+}
+
+export function applyFxPreset(preset) {
+  if (!preset) return;
+  if (Array.isArray(preset.bands) && preset.bands.length === 10)
+    eqBands.set(preset.bands.slice());
+  eqEnabled.set(!!preset.eq);
+  bassBoost.set(Math.max(0, Math.min(1, +preset.bass || 0)));
+  normalization.set(
+    ["off", "low", "medium", "high"].includes(preset.norm) ? preset.norm : "off"
+  );
+}
+
+export function deleteFxPreset(id) {
+  fxPresets.update((list) => list.filter((p) => p.id !== id));
+}
+
 // -- offline / downloads ----------------------------------------------------
 
 // Default quality used when downloading a track to the device (overridable per
@@ -179,6 +224,18 @@ export function openShare(track) {
 }
 export function closeShare() {
   shareSheet.set(null);
+}
+
+// -- export sheet ------------------------------------------------------------
+// { kind: "playlist" | "album" | "favorites", id, title } | null — pick a format
+// and download the whole thing as a ZIP. Mounted once in App.svelte.
+
+export const exportSheet = writable(null);
+export function openExport(kind, id, title = "") {
+  if (kind && id) exportSheet.set({ kind, id: String(id), title });
+}
+export function closeExport() {
+  exportSheet.set(null);
 }
 
 // -- context menu -----------------------------------------------------------
@@ -279,20 +336,36 @@ function readSession() {
   const sess = readJSON(SESSION_KEY);
   if (!sess) return null;
   // Overlay the position tick when it's FRESHER than the full snapshot (both
-  // carry a write timestamp) and belongs to the same track the session says
-  // is playing — during playback the tick is the up-to-date one, right after
-  // a pause/seek the full snapshot is.
+  // carry a write timestamp) — during playback the tick is the up-to-date one,
+  // right after a queue change the full snapshot is.
+  //
+  // The tick carries the INDEX as well as the time, and is trusted for both:
+  // that's what lets a plain track change skip rewriting the whole queue (see
+  // the subscriber below). We still verify the id at that index matches, so a
+  // tick pointing into a queue that has since been replaced is ignored.
   const pos = readJSON(POS_KEY);
   if (
     pos &&
-    pos.i === sess.index &&
-    sess.queue?.[sess.index]?.deezer_id === pos.id &&
+    Number.isInteger(pos.i) &&
     typeof pos.t === "number" &&
-    (pos.at || 0) >= (sess.at || 0)
-  )
+    (pos.at || 0) >= (sess.at || 0) &&
+    sess.queue?.[pos.i]?.deezer_id === pos.id
+  ) {
+    sess.index = pos.i;
     sess.currentTime = pos.t;
+  }
   return sess;
 }
+
+// Run `fn` when the main thread is next idle, so a big serialize+write never
+// lands in the same frame as a user interaction. Falls back to a short timer
+// where requestIdleCallback isn't available (Safari before 16.4).
+const runIdle =
+  typeof requestIdleCallback === "function"
+    ? (fn) => requestIdleCallback(fn, { timeout: 1000 })
+    : (fn) => setTimeout(fn, 1);
+const cancelIdle =
+  typeof cancelIdleCallback === "function" ? cancelIdleCallback : clearTimeout;
 
 function shuffled(arr) {
   const a = arr.slice();
@@ -340,21 +413,31 @@ function createPlayer() {
   // runs before Android kills the tab (hidden+silent pages get their timers
   // frozen), so the exact position can't wait for any timer.
   let posTimer = null;
-  let lastStructKey = "";
+  let saveIdle = null;
+  let lastQueue = null;
+  let lastPlaying = null;
+  let lastIndexKey = "";
   let latest = null;
+  // Offset of the persisted queue window inside the LIVE queue. A capped queue
+  // is stored as a window around the playing track, so its indices are shifted;
+  // the position tick has to record its index in the same coordinate space or
+  // the restore would land on the wrong track.
+  let savedOffset = 0;
   function snapshot(s, cap = SESSION_CAP) {
     // Cap the persisted queue with a window AROUND the playing track — a plain
     // head slice restored the wrong track whenever the index was past the cap.
     let queue = s.queue;
     let index = s.index;
+    let start = 0;
     if (queue.length > cap) {
-      const start = Math.min(Math.max(0, index - (cap >> 1)), queue.length - cap);
+      start = Math.min(Math.max(0, index - (cap >> 1)), queue.length - cap);
       queue = queue.slice(start, start + cap);
       index = index - start; // still -1 when nothing was playing (start is 0)
     }
     return {
       queue,
       index,
+      start,
       currentTime: s.currentTime,
       context: s.context,
       shuffle: s.shuffle,
@@ -366,15 +449,31 @@ function createPlayer() {
   function save(s) {
     // Quota blown by a huge queue: retry with a tight window around the
     // playing track so at least the position and nearby tracks survive.
-    if (!writeJSON(SESSION_KEY, snapshot(s)))
-      writeJSON(SESSION_KEY, snapshot(s, SESSION_CAP_MIN));
+    let snap = snapshot(s);
+    if (!writeJSON(SESSION_KEY, snap)) {
+      snap = snapshot(s, SESSION_CAP_MIN);
+      writeJSON(SESSION_KEY, snap);
+    }
+    savedOffset = snap.start;
   }
   function savePos(s) {
     writeJSON(POS_KEY, {
-      i: s.index,
+      i: s.index - savedOffset, // same coordinates as the persisted window
       id: s.queue[s.index]?.deezer_id ?? null,
       t: s.currentTime,
       at: Date.now(),
+    });
+  }
+  // Serialising a long queue and handing it to localStorage is synchronous
+  // main-thread work — localStorage is disk I/O — so a queue change defers it to
+  // the next idle moment instead of running it inside the store update. Measured
+  // at 6× CPU throttle with a 1000-track queue: ~255 KB and 5–7 ms of blocking
+  // per write, right in the frame where the new cover has to fade in.
+  function scheduleSave() {
+    if (saveIdle !== null) return;
+    saveIdle = runIdle(() => {
+      saveIdle = null;
+      if (latest) save(latest);
     });
   }
   // Write the freshest full state NOW — called when the page is hidden/frozen/
@@ -383,16 +482,47 @@ function createPlayer() {
     if (!latest) return;
     clearTimeout(posTimer);
     posTimer = null;
+    if (saveIdle !== null) {
+      cancelIdle(saveIdle);
+      saveIdle = null;
+    }
     save(latest);
   }
   subscribe((s) => {
     latest = s;
-    const key = `${s.index}|${s.queue[s.index]?.deezer_id ?? ""}|${s.queue.length}|${s.playing}`;
-    if (key !== lastStructKey) {
-      lastStructKey = key;
+    // Three tiers, cheapest first:
+    //  - a plain TRACK CHANGE (same queue, still playing) writes only the ~60
+    //    byte position tick, which carries the index and the track id;
+    //    readSession trusts it over the snapshot when it's fresher. This is by
+    //    far the most common event, and it used to re-serialise the entire
+    //    queue — the source of the hitch at every track change.
+    //  - a QUEUE change writes the full snapshot, but on the next idle moment.
+    //  - PLAY/PAUSE writes the full snapshot immediately: a pause in the
+    //    background is often the last code that runs before Android kills the
+    //    tab, so it can't wait for an idle callback that may never come.
+    const queueChanged = s.queue !== lastQueue;
+    const playChanged = s.playing !== lastPlaying;
+    const idxKey = `${s.index}|${s.queue[s.index]?.deezer_id ?? ""}`;
+    const moved = idxKey !== lastIndexKey;
+    lastQueue = s.queue;
+    lastPlaying = s.playing;
+    lastIndexKey = idxKey;
+    if (playChanged) {
       clearTimeout(posTimer);
       posTimer = null;
+      if (saveIdle !== null) {
+        cancelIdle(saveIdle);
+        saveIdle = null;
+      }
       save(s);
+    } else if (queueChanged) {
+      clearTimeout(posTimer);
+      posTimer = null;
+      scheduleSave();
+    } else if (moved) {
+      clearTimeout(posTimer);
+      posTimer = null;
+      savePos(s);
     } else if (!posTimer) {
       posTimer = setTimeout(() => {
         posTimer = null;

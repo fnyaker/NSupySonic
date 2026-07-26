@@ -288,10 +288,23 @@
       holdRecenter(420); // re-arm from the start of the SMOOTH scroll
     });
   }
+  // `scrollend` fires exactly when the scroll settles — INCLUDING the browser's
+  // own snap animation — which is precisely when a swipe should commit. The old
+  // 110 ms guess after the last scroll event fired while the snap was still
+  // animating, so it measured a position that wasn't final yet and then had to
+  // correct itself: that double-take is what made the swipe feel unsettled.
+  // Fall back to the timer where the event isn't supported (Safari < 18.2).
+  const HAS_SCROLLEND = typeof window !== "undefined" && "onscrollend" in window;
   function onScroll() {
-    if (recentering) return;
+    if (recentering || HAS_SCROLLEND) return;
     clearTimeout(settleTimer);
     settleTimer = setTimeout(onSettled, 110);
+  }
+  function onScrollEnd() {
+    if (recentering) return;
+    clearTimeout(settleTimer);
+    settleTimer = null;
+    onSettled();
   }
   function onSettled() {
     if (recentering || !scroller) return;
@@ -402,7 +415,12 @@
       {/if}
     </div>
 
-    <div class="scroller" bind:this={scroller} on:scroll|passive={onScroll}>
+    <div
+      class="scroller"
+      bind:this={scroller}
+      on:scroll|passive={onScroll}
+      on:scrollend={onScrollEnd}
+    >
       {#each slots as s (s.key)}
         <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} kind={s.track.podcast ? "podcast" : "album"} fallbackId={s.track.deezer_id} eager /></div>
       {/each}
@@ -564,13 +582,25 @@
     display: flex;
     gap: 14px;
     overflow-x: auto;
-    /* proximity (not mandatory) keeps the fling's inertia and only eases into
-       the snap near the end, instead of braking abruptly on finger-up */
-    scroll-snap-type: x proximity;
+    /* MANDATORY, not proximity. With proximity the browser often doesn't snap
+       at all: the fling just stops wherever momentum ran out, and our own timer
+       then had to notice and animate the cover back into place — a visible
+       second movement after the finger had left, which is what made the swipe
+       feel loose. Mandatory hands the settle to the browser's native snap
+       animation, so the cover lands where the finger aimed, in one motion.
+       `scroll-snap-stop: always` on the slides keeps a hard fling to one track
+       at a time instead of shooting past to the far edge. */
+    scroll-snap-type: x mandatory;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
     padding: 10px 7.5%;
     overscroll-behavior-x: contain;
+    /* Claim the horizontal axis outright. Without this the browser spends the
+       first few pixels of every drag deciding whether the gesture is meant for
+       this scroller or the sheet behind it, which reads as the swipe hesitating
+       before it starts. The sheet's swipe-down-to-dismiss already ignores
+       gestures that begin on the carousel, so there's nothing to give up. */
+    touch-action: pan-x;
   }
   .scroller::-webkit-scrollbar {
     display: none;
@@ -578,6 +608,7 @@
   .slide {
     flex: 0 0 85%;
     scroll-snap-align: center;
+    scroll-snap-stop: always;
     aspect-ratio: 1 / 1;
   }
   .slide :global(.cover) {

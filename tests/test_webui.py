@@ -1545,6 +1545,115 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(rv.status_code, 503)
         self.assertIn(b"not built", rv.data)
 
+    # -- bulk ZIP export -------------------------------------------------
+
+    def _playlist_with_local_track(self, title="Export Me"):
+        from supysonic.db import Playlist
+
+        t = self._make_local_track(title)
+        from supysonic.db import User
+
+        pl = Playlist.create(user=User.get(name="alice"), name="Ma sélection")
+        pl.add(t)
+        pl.save()
+        return pl, t
+
+    def test_export_requires_login(self):
+        self.assertEqual(self.client.get("/api/export/favorites/me").status_code, 401)
+        self.assertEqual(self.client.get("/api/export/formats").status_code, 401)
+
+    def test_export_formats_lists_flac_without_ffmpeg(self):
+        from supysonic.webui import export
+
+        self._login()
+        orig = export._ffmpeg_available
+        export._ffmpeg_available = lambda: False
+        try:
+            body = self.client.get("/api/export/formats").get_json()
+        finally:
+            export._ffmpeg_available = orig
+        ids = [f["id"] for f in body["formats"]]
+        self.assertEqual(ids, ["flac"])  # only the no-re-encode format survives
+        self.assertEqual(body["default"], "flac")
+
+    def test_export_playlist_zip(self):
+        import io
+        import zipfile
+
+        self._login()
+        pl, _t = self._playlist_with_local_track("Export Me")
+        rv = self.client.get("/api/export/playlist/%s?fmt=flac" % pl.id)
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.mimetype, "application/zip")
+        self.assertIn("attachment", rv.headers["Content-Disposition"])
+
+        z = zipfile.ZipFile(io.BytesIO(rv.data))
+        self.assertIsNone(z.testzip())  # a valid, complete archive
+        names = z.namelist()
+        self.assertIn("001 - Local Band - Export Me.flac", names)
+        self.assertIn("Ma sélection.m3u", names)
+        self.assertEqual(z.read("001 - Local Band - Export Me.flac"), b"localaudio")
+        self.assertNotIn("_erreurs.txt", names)
+
+    def test_export_rejects_bad_kind_and_format(self):
+        self._login()
+        self.assertEqual(self.client.get("/api/export/bogus/1").status_code, 400)
+        self.assertEqual(
+            self.client.get("/api/export/favorites/me?fmt=wav").status_code, 400
+        )
+
+    def test_export_unknown_playlist_404(self):
+        self._login()
+        rv = self.client.get(
+            "/api/export/playlist/00000000-0000-0000-0000-000000000000?fmt=flac"
+        )
+        self.assertEqual(rv.status_code, 404)
+
+    def test_export_empty_favorites_404(self):
+        self._login()
+        self.assertEqual(
+            self.client.get("/api/export/favorites/me?fmt=flac").status_code, 404
+        )
+
+    def test_export_filename_is_sanitised(self):
+        from supysonic.webui.export import _safe
+
+        # path separators, traversal, and the trailing dot Windows drops
+        self.assertEqual(_safe("../../etc/passwd"), "_.._etc_passwd")
+        self.assertEqual(_safe(".."), "sans-titre")  # nothing left -> fallback
+        self.assertEqual(_safe("nul."), "nul")
+        self.assertEqual(_safe(""), "sans-titre")
+        self.assertEqual(_safe("a" * 400), "a" * 120)
+
+    def test_export_skips_a_failing_track_instead_of_aborting(self):
+        import io
+        import zipfile
+
+        from supysonic.webui import export
+
+        self._login()
+        pl, _t = self._playlist_with_local_track("Export Me")
+        orig = export._media_file
+        export._media_file = lambda mid: (None, None, ("boom", 502))
+        try:
+            rv = self.client.get("/api/export/playlist/%s?fmt=flac" % pl.id)
+            self.assertEqual(rv.status_code, 200)
+            z = zipfile.ZipFile(io.BytesIO(rv.data))
+            self.assertIsNone(z.testzip())
+            self.assertIn("_erreurs.txt", z.namelist())
+        finally:
+            export._media_file = orig
+
+    def test_export_slot_is_released_after_the_download(self):
+        self._login()
+        pl, _t = self._playlist_with_local_track("Export Me")
+        url = "/api/export/playlist/%s?fmt=flac" % pl.id
+        self.assertEqual(self.client.get(url).status_code, 200)
+        # A second export must not be refused because the first held the slot.
+        self.assertEqual(self.client.get(url).status_code, 200)
+
+
+
 
 class WebUIGuestTestCase(unittest.TestCase):
     """Non-admin users are guests: Deezer is just a content source. No owner
@@ -1667,7 +1776,5 @@ class WebUIGuestTestCase(unittest.TestCase):
         self._login()
         self.assertEqual(self.client.post("/api/sync").status_code, 403)
         self.assertEqual(self.client.get("/api/sync/status").status_code, 403)
-
-
 if __name__ == "__main__":
     unittest.main()
