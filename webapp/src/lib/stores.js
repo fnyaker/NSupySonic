@@ -188,6 +188,9 @@ function createToasts() {
   return {
     subscribe,
     push(message, kind = "info", ttl = 2600) {
+      // Every verdict the app shows the user belongs in the log — a toast is
+      // often the ONLY trace of a failure that was handled and swallowed.
+      logInfo("toast", `[${kind}] ${message}`, null, { important: kind === "error" });
       const t = { id: ++id, message, kind };
       update((list) => [...list, t]);
       setTimeout(() => update((list) => list.filter((x) => x.id !== t.id)), ttl);
@@ -836,6 +839,10 @@ if (typeof document !== "undefined") {
     logInfo("page", "visibilitychange -> " + document.visibilityState, null, { important: true });
     if (document.visibilityState === "hidden") player.flushSession();
   });
+  window.addEventListener("hashchange", () => {
+    logInfo("nav", location.hash || "#/");
+  });
+  logInfo("nav", "start at " + (location.hash || "#/"));
   window.addEventListener("pagehide", () => {
     logInfo("page", "pagehide", null, { important: true });
     player.flushSession();
