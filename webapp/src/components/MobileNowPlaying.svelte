@@ -61,6 +61,12 @@
   }
   function onVisibility() {
     document.hidden ? stopViz() : startViz();
+    // Returning to the foreground re-runs layout; put the strip back on the
+    // current cover ourselves rather than letting a drifted scroll be measured.
+    if (!document.hidden) {
+      gestured = false;
+      tick().then(centerCurrent);
+    }
   }
   onMount(() => {
     startViz();
@@ -381,6 +387,7 @@
       return;
     }
     covActive = true;
+    gestured = true; // a finger is on the carousel: settles may change track
     stopAnim();
     clearTimeout(settleTimer);
     setSnap(false);
@@ -562,8 +569,23 @@
     settleTimer = null;
     onSettled();
   }
+  // True only between a finger landing on the carousel and the settle that
+  // follows it. Everything below keys off this.
+  let gestured = false;
+
   function onSettled() {
     if (recentering || covDragging || !scroller) return;
+    // A settle the USER did not cause must never change track. Coming back to
+    // the foreground makes the WebView re-lay-out the page, which moves this
+    // scroll-snap strip on its own; without this guard that landed here 25 ms
+    // after `visibilitychange -> visible`, was read as "settled on the previous
+    // cover", and quietly jumped playback a track backwards — the long-standing
+    // "returning to the app goes back to the track I started".
+    if (!gestured) {
+      centerCurrent();
+      return;
+    }
+    gestured = false;
     const center = scroller.scrollLeft + scroller.clientWidth / 2;
     const slides = scroller.children;
     let nearest = curSlot,
