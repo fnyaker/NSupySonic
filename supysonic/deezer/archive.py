@@ -171,10 +171,78 @@ def ensure_episode_archived(provider, episode: PodcastEpisode) -> None:
             episode.save()
             raise
 
-        episode.path = path
-        episode.bitrate = _bitrate_for(path, "MP3_128", episode.duration)
-        episode.status = "completed"
-        episode.save()
+        _finalize_episode(episode, path)
+
+
+def open_live_episode_stream(provider, episode: PodcastEpisode, on_abort=None):
+    """Stream-first playback for a not-yet-archived podcast episode.
+
+    The episode counterpart of ``open_live_stream``, and for podcasts it is not
+    an optimisation but the difference between working and not: an hour-long
+    show is tens of megabytes, and archiving it in full before sending the first
+    byte meant a long episode simply never started. Resolving the URL is a row
+    lookup, so this returns almost immediately and the listener hears audio as
+    it arrives, while every chunk is teed to the archive.
+
+    Returns ``(mimetype, generator)``. Like the track version, the first live
+    play is not seekable (no Content-Length) and a client that disconnects early
+    drops the partial and falls back to ``on_abort`` for background archiving.
+    """
+    url = provider.resolve_episode(episode)
+    path = library.episode_archive_path(
+        provider.archive_dir,
+        episode.channel.title,
+        episode.publish_date,
+        episode.title,
+    )
+    dest = Path(path)
+    mimetype = episode.mimetype or "audio/mpeg"
+
+    def generate():
+        # Archived in the gap between resolve and first read? Serve from disk.
+        if dest.is_file():
+            with open(dest, "rb") as fh:
+                yield from iter(lambda: fh.read(65536), b"")
+            return
+
+        tmp = dest.with_name(f"{dest.name}.{uuid4().hex}.part")
+        complete = False
+        try:
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "wb") as fh:
+                for chunk in provider.iter_episode(url):
+                    fh.write(chunk)
+                    yield chunk
+            complete = True
+        finally:
+            try:
+                if complete and not dest.is_file():
+                    with provider.track_lock(f"ep:{episode.deezer_id}"):
+                        if dest.is_file():
+                            _safe_unlink(tmp)
+                        else:
+                            os.replace(tmp, dest)
+                            _finalize_episode(episode, str(dest))
+                else:
+                    _safe_unlink(tmp)
+                    if not complete and not dest.is_file() and on_abort is not None:
+                        on_abort()
+            except Exception:
+                logger.warning(
+                    "Live episode archive finalize failed for %s",
+                    episode.deezer_id,
+                    exc_info=True,
+                )
+
+    return mimetype, generate()
+
+
+def _finalize_episode(episode: PodcastEpisode, path: str) -> None:
+    """Publish an episode's archive on the row (shared by both fetch paths)."""
+    episode.path = path
+    episode.bitrate = _bitrate_for(path, "MP3_128", episode.duration)
+    episode.status = "completed"
+    episode.save()
 
 
 def find_local_episode(episode_id) -> PodcastEpisode | None:

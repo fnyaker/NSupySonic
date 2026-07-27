@@ -3,7 +3,7 @@
 #
 # Distributed under terms of the GNU AGPLv3 license.
 
-"""Bulk export: download a whole playlist / album / your favorites as one ZIP.
+"""Bulk export: a whole playlist / album / podcast / your favorites as one ZIP.
 
 Meant for getting music *off* the server and onto something else — a USB stick,
 another player, a car radio. The client picks the audio format; every track is
@@ -32,11 +32,12 @@ import zipfile
 
 from flask import current_app, jsonify, request, stream_with_context
 
-from ..db import Album
+from ..db import Album, PodcastEpisode
 from . import (
     _db_album_tracks,
     _db_playlist_track_rows,
     _db_track,
+    _episode,
     _need_provider,
     _resolve_db_playlist,
     _tracks,
@@ -207,6 +208,23 @@ def _favorite_tracks():
     return "Favoris", [_db_track(t) for t in _user_starred()]
 
 
+def _show_episodes(ident):
+    """(title, episodes) for a podcast show — a local channel UUID.
+
+    Episodes are already shaped like tracks by ``_episode`` (their stream id is
+    the episode UUID), and ``_media_file`` archives one on demand exactly like a
+    track, so the whole export pipeline below works on them unchanged.
+    """
+    from ..db import PodcastChannel
+
+    try:
+        channel = PodcastChannel[uuid.UUID(str(ident))]
+    except (ValueError, PodcastChannel.DoesNotExist):
+        return None, None
+    episodes = channel.episodes.order_by(PodcastEpisode.publish_date.desc())
+    return channel.title or "podcast", [_episode(e, channel) for e in episodes]
+
+
 # -- one export at a time, per user -----------------------------------------
 
 _exports_lock = threading.Lock()
@@ -249,8 +267,8 @@ def export_formats():
 @webapi.route("/export/<kind>/<ident>")
 @login_required
 def export_zip(kind, ident):
-    """Stream a playlist / album / favorites as a ZIP of audio files."""
-    if kind not in ("playlist", "album", "favorites"):
+    """Stream a playlist / album / favorites / podcast as a ZIP of audio files."""
+    if kind not in ("playlist", "album", "favorites", "podcast"):
         return jsonify({"error": "invalid kind"}), 400
 
     fmt = (request.args.get("fmt") or DEFAULT_FORMAT).lower()
@@ -264,6 +282,8 @@ def export_zip(kind, ident):
         title, tracks = _favorite_tracks()
     elif kind == "playlist":
         title, tracks = _playlist_tracks(ident)
+    elif kind == "podcast":
+        title, tracks = _show_episodes(ident)
     else:
         title, tracks = _album_tracks(ident)
 
@@ -309,6 +329,14 @@ def export_zip(kind, ident):
                         path, _meta, err = _media_file(tid)
                         if err or not path or not os.path.isfile(path):
                             raise RuntimeError("unavailable")
+                        # "Copy the original" has to take the extension from the
+                        # SOURCE, not from the format table: a podcast episode is
+                        # an MP3, and naming it .flac produces a file players
+                        # refuse to open.
+                        item_ext = ext
+                        if args is None:
+                            item_ext = (os.path.splitext(path)[1] or ".flac").lstrip(".")
+                        arc = f"{i:03d} - {base}.{item_ext}"
                         with zf.open(arc, "w") as dst:
                             if args is None:
                                 with open(path, "rb") as src:

@@ -1786,9 +1786,13 @@ class WebUITestCase(unittest.TestCase):
         z = zipfile.ZipFile(io.BytesIO(rv.data))
         self.assertIsNone(z.testzip())  # a valid, complete archive
         names = z.namelist()
-        self.assertIn("001 - Local Band - Export Me.flac", names)
+        # `fmt=flac` means "copy the original, don't transcode", so the entry
+        # keeps the SOURCE file's extension — this fixture's track is an mp3.
+        # Naming every copied file .flac produced archives players refused to
+        # open (and podcasts, which are mp3, made that obvious).
+        self.assertIn("001 - Local Band - Export Me.mp3", names)
         self.assertIn("Ma sélection.m3u", names)
-        self.assertEqual(z.read("001 - Local Band - Export Me.flac"), b"localaudio")
+        self.assertEqual(z.read("001 - Local Band - Export Me.mp3"), b"localaudio")
         self.assertNotIn("_erreurs.txt", names)
 
     def test_export_rejects_bad_kind_and_format(self):

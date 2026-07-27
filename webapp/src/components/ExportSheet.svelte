@@ -54,7 +54,9 @@
       ? "cet album"
       : target?.kind === "favorites"
         ? "vos favoris"
-        : "cette playlist";
+        : target?.kind === "podcast"
+          ? "ce podcast"
+          : "cette playlist";
 </script>
 
 <svelte:window on:keydown={onKey} />
