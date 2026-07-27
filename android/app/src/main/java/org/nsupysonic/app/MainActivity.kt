@@ -10,7 +10,9 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.http.SslError
+import android.content.ContentValues
 import android.os.Build
+import android.provider.MediaStore
 import android.os.Bundle
 import android.os.Environment
 import android.os.IBinder
@@ -257,6 +259,41 @@ class MainActivity : AppCompatActivity() {
         errorView.visibility = View.VISIBLE
     }
 
+    /** Save `text` as `name` in the public Downloads folder. */
+    private fun writeToDownloads(name: String, text: String) {
+        val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
+            .ifEmpty { "nsupysonic.txt" }
+        try {
+            val bytes = text.toByteArray(Charsets.UTF_8)
+            if (Build.VERSION.SDK_INT >= 29) {
+                // Scoped storage: MediaStore owns Downloads, no permission needed.
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, safe)
+                    put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val resolver = contentResolver
+                val uri = resolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
+                ) ?: throw java.io.IOException("no download uri")
+                resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: throw java.io.IOException("no output stream")
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            } else {
+                val dir = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_DOWNLOADS
+                )
+                dir.mkdirs()
+                java.io.File(dir, safe).writeBytes(bytes)
+            }
+            Toast.makeText(this, getString(R.string.download_started, safe), Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun startDownload(
         url: String, userAgent: String?, contentDisposition: String?, mimeType: String?
     ) {
@@ -392,6 +429,20 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun shareFile(url: String) {
             startShare(url)
+        }
+
+        /**
+         * Write a text file straight to Downloads.
+         *
+         * The web path builds a Blob and clicks an <a download>, which reaches
+         * setDownloadListener as a `blob:` URL — and DownloadManager only speaks
+         * http(s), so saving the diagnostic log from the app failed with nothing
+         * to show for it. There is no way to read a blob: URL from the native
+         * side, so the text comes across the bridge instead.
+         */
+        @JavascriptInterface
+        fun saveText(name: String, text: String) {
+            runOnUiThread { writeToDownloads(name, text) }
         }
     }
 

@@ -10,6 +10,7 @@
 import { get } from "svelte/store";
 import { api } from "./api.js";
 import { coverKey } from "./format.js";
+import { logInfo } from "./log.js";
 import {
   downloads,
   downloadsSize,
@@ -239,6 +240,8 @@ export async function downloadTrack(track, quality, onProgress = null) {
   const id = String(track.deezer_id);
   if (isDownloaded(id) || get(downloading).has(id)) return true;
   setDownloading(id, true);
+  const t0 = Date.now();
+  logInfo("download", `start ${id} "${track.title || ""}" q=${quality || "default"}`);
   try {
     const res = await fetch(api.streamUrl(id, quality), { credentials: "include" });
     if (!res.ok) throw new Error("stream " + res.status);
@@ -281,8 +284,13 @@ export async function downloadTrack(track, quality, onProgress = null) {
     downloadsSize.update((n) => n + blob.size);
     // Also cache the archived cover so the pochette shows offline.
     await cacheCover(track.album?.cover, id);
+    logInfo("download", `ok ${id} ${(blob.size / 1048576).toFixed(1)} MB in ${Date.now() - t0}ms`);
     return true;
   } catch (e) {
+    // This is the line that was missing: a download that fails only ever
+    // surfaced as a toast, so nothing about WHY reached the log.
+    logInfo("download", `FAILED ${id} after ${Date.now() - t0}ms: ${e && e.name === "QuotaExceededError" ? "device storage full" : String(e && e.message || e)}`,
+            null, { important: true });
     return false;
   } finally {
     setDownloading(id, false);
