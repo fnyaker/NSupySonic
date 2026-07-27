@@ -161,14 +161,39 @@
 
   // -- swipe-down to dismiss -------------------------------------------------
   // Drag the whole sheet down with the finger; release past a threshold closes
-  // it. Ignore gestures that start on the cover carousel, the sliders or the
-  // queue sheet so we don't fight their own horizontal/scroll behaviour.
+  // it. Gestures on the sliders or the queue sheet are left alone (they have
+  // their own behaviour). The COVER is not excluded: it's the biggest, most
+  // natural thing to grab, so it forwards a clearly-vertical gesture here —
+  // see onCoverMove. Which is why the three steps below are functions rather
+  // than inline code: the carousel drives exactly the same state.
   let dragY = 0;
   let dragging = false;
   let dragArmed = false;
   let dragStartX = 0;
   let dragStartY = 0;
   let dragAxis = null;
+  // Distance (px) a gesture must travel before we commit it to an axis, and how
+  // far it must be dragged down to actually dismiss on release.
+  const AXIS_LOCK = 8;
+  const DISMISS_PX = 110;
+
+  function dismissMove(dy) {
+    if (dy <= 0) return;
+    dragging = true;
+    dragY = dy;
+  }
+  // Returns true when the release actually dismissed the sheet.
+  function dismissEnd() {
+    const go = dragging && dragY > DISMISS_PX;
+    dragging = false;
+    if (go) {
+      close(); // fade out from the dragged position; the component unmounts
+      return true;
+    }
+    dragY = 0; // snap back
+    return false;
+  }
+
   function onTouchStart(e) {
     if (e.touches.length !== 1 || showQueue) {
       dragArmed = false;
@@ -188,26 +213,19 @@
     if (!dragArmed) return;
     const dx = e.touches[0].clientX - dragStartX;
     const dy = e.touches[0].clientY - dragStartY;
-    if (dragAxis === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8))
+    if (dragAxis === null && (Math.abs(dx) > AXIS_LOCK || Math.abs(dy) > AXIS_LOCK))
       dragAxis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
     if (dragAxis === "y" && dy > 0) {
       // cancel the browser's native pull-to-refresh while we drag to dismiss
       if (e.cancelable) e.preventDefault();
-      dragging = true;
-      dragY = dy;
+      dismissMove(dy);
     }
   }
   function onTouchEnd() {
     if (!dragArmed) return;
     dragArmed = false;
     dragAxis = null;
-    if (dragging && dragY > 110) {
-      close(); // fade out from the dragged position; component unmounts
-      dragging = false;
-      return;
-    }
-    dragging = false; // snap back
-    dragY = 0;
+    dismissEnd();
   }
 
   function go(p) {
@@ -304,6 +322,7 @@
     if (Math.abs(dist) < 1) {
       scroller.scrollLeft = to;
       setSnap(true);
+      holdRecenter(80); // release the guard the caller may have raised
       done?.();
       return;
     }
@@ -340,8 +359,11 @@
   // `touch-action: none` on the scroller hands us the gesture outright. Left to
   // the browser, the fling is intercepted by native snapping with its own
   // easing — which is the very thing we're replacing.
-  let covDragging = false;
+  let covActive = false; // a gesture we accepted is in progress
+  let covDragging = false; // committed to the horizontal carousel drag
+  let covAxis = null; // null until the gesture commits: "x" | "y"
   let covStartX = 0;
+  let covStartY = 0;
   let covStartScroll = 0;
   // Velocity is measured over a short TRAILING window, not as a running
   // average from the start of the gesture. The first sample of a swipe is
@@ -353,15 +375,21 @@
   let covSamples = []; // [t, clientX]
 
   function onCoverStart(e) {
-    if (!scroller || e.touches.length !== 1) return;
+    if (!scroller || e.touches.length !== 1 || showQueue) {
+      covActive = false; // a second finger, or the queue sheet is up: not ours
+      return;
+    }
+    covActive = true;
     stopAnim();
     clearTimeout(settleTimer);
     setSnap(false);
-    covDragging = true;
+    covDragging = false; // not yet — we don't know whose gesture this is
+    covAxis = null;
     recentering = true; // our scroll writes must not look like a user settle
     clearTimeout(recenterTimer);
     recenterTimer = null;
     covStartX = e.touches[0].clientX;
+    covStartY = e.touches[0].clientY;
     covStartScroll = scroller.scrollLeft;
     covSamples = [[performance.now(), covStartX]];
   }
@@ -375,8 +403,30 @@
     return dt > 0 ? (x0 - x1) / dt : 0;
   }
   function onCoverMove(e) {
-    if (!covDragging || e.touches.length !== 1) return;
+    if (!covActive || !scroller || e.touches.length !== 1) return;
     const x = e.touches[0].clientX;
+    const y = e.touches[0].clientY;
+
+    // The cover is the biggest, most inviting thing on the screen, so a gesture
+    // that starts on it might mean either "next track" or "put this away".
+    // Decide once, at AXIS_LOCK pixels, and stick to it: a gesture that keeps
+    // changing its mind mid-drag is the thing that feels broken.
+    //
+    // `touch-action: none` means the browser hands us the whole gesture and
+    // never scrolls the page itself, so forwarding the vertical case is just a
+    // matter of driving the same two functions the sheet's own handler uses.
+    if (covAxis === null) {
+      const dx = x - covStartX;
+      const dy = y - covStartY;
+      if (Math.abs(dx) < AXIS_LOCK && Math.abs(dy) < AXIS_LOCK) return;
+      covAxis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
+      covDragging = covAxis === "x";
+    }
+    if (covAxis === "y") {
+      dismissMove(y - covStartY);
+      return;
+    }
+
     const now = performance.now();
     covSamples.push([now, x]);
     // Keep the window, but never fewer than two points — a very fast flick may
@@ -391,8 +441,33 @@
     else if (next > max) next = max + (next - max) * 0.35;
     scroller.scrollLeft = next;
   }
+  // Put the carousel back on its current cover and hand the scroll position
+  // back to the browser. Used whenever a gesture ends without being a
+  // horizontal swipe — a tap, or a vertical drag that went to the sheet.
+  function settleCover() {
+    covDragging = false;
+    const el = scroller?.children[curSlot];
+    if (!el) {
+      recentering = false;
+      setSnap(true);
+      return;
+    }
+    glideTo(elCenterLeft(el));
+  }
   function onCoverEnd() {
-    if (!covDragging) return;
+    if (!covActive) return;
+    covActive = false;
+    const axis = covAxis;
+    covAxis = null;
+    if (axis === "y") {
+      // Dismissing unmounts the component, so don't touch the carousel then.
+      if (!dismissEnd()) settleCover();
+      return;
+    }
+    if (!covDragging) {
+      settleCover(); // a tap, or a gesture that never committed
+      return;
+    }
     covDragging = false;
     const slides = scroller?.children;
     if (!slides || !slides.length) {
