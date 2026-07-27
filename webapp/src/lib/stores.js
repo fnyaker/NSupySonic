@@ -341,18 +341,46 @@ function readSession() {
   //
   // The tick carries the INDEX as well as the time, and is trusted for both:
   // that's what lets a plain track change skip rewriting the whole queue (see
-  // the subscriber below). We still verify the id at that index matches, so a
-  // tick pointing into a queue that has since been replaced is ignored.
+  // the subscriber below). The id at that index still has to match — but a
+  // mismatch is repaired rather than dropped, see below.
   const pos = readJSON(POS_KEY);
-  if (
-    pos &&
-    Number.isInteger(pos.i) &&
-    typeof pos.t === "number" &&
-    (pos.at || 0) >= (sess.at || 0) &&
-    sess.queue?.[pos.i]?.deezer_id === pos.id
-  ) {
+  if (!pos || !Number.isInteger(pos.i) || typeof pos.t !== "number") return sess;
+  if ((pos.at || 0) < (sess.at || 0)) return sess; // the snapshot is the fresh one
+  const queue = Array.isArray(sess.queue) ? sess.queue : [];
+  if (queue[pos.i]?.deezer_id === pos.id) {
     sess.index = pos.i;
     sess.currentTime = pos.t;
+    return sess;
+  }
+
+  // The tick doesn't line up with the snapshot's queue — but it is still the
+  // FRESHER of the two, so simply ignoring it rewinds playback to wherever it
+  // was at the last full save. That is what "coming back to the app jumps
+  // several tracks back" was: the queue had been extended in the background
+  // (Flow/radio topping itself up) and that write hadn't landed, while the
+  // position ticks kept running on into the tracks it never recorded.
+  // Recover rather than rewind.
+  let found = -1;
+  let ambiguous = false;
+  for (let k = 0; k < queue.length; k++) {
+    if (queue[k]?.deezer_id !== pos.id) continue;
+    if (found >= 0) {
+      ambiguous = true; // the same track twice: no way to tell which one
+      break;
+    }
+    found = k;
+  }
+  if (found >= 0 && !ambiguous) {
+    // Same queue, shifted indices (a re-windowed snapshot).
+    sess.index = found;
+    sess.currentTime = pos.t;
+  } else if (found < 0 && queue.length && pos.i >= queue.length) {
+    // Playback ran past everything the snapshot knows about. The exact track
+    // is unrecoverable, but the last one we DO know about is far closer than
+    // the stale index — and resuming forward never replays a whole run of
+    // tracks the listener already heard.
+    sess.index = queue.length - 1;
+    sess.currentTime = 0;
   }
   return sess;
 }
@@ -518,7 +546,15 @@ function createPlayer() {
     } else if (queueChanged) {
       clearTimeout(posTimer);
       posTimer = null;
-      scheduleSave();
+      // Deferring exists to keep a VISIBLE frame smooth. Hidden, there is no
+      // frame to protect — and requestIdleCallback doesn't run in a hidden
+      // page (its timeout falls back to a timer, which a backgrounded tab
+      // throttles and a frozen one stops altogether). So a queue that grows in
+      // the background — Flow and radio top themselves up on every track
+      // change — could go unsaved indefinitely while the position ticks, which
+      // are synchronous, ran on into tracks the snapshot never learned about.
+      if (typeof document !== "undefined" && document.hidden) save(s);
+      else scheduleSave();
     } else if (moved) {
       clearTimeout(posTimer);
       posTimer = null;
