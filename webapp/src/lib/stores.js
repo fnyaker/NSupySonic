@@ -1,4 +1,5 @@
 import { writable, derived, get } from "svelte/store";
+import { logInfo, flushLog } from "./log.js";
 
 // -- auth -------------------------------------------------------------------
 
@@ -344,12 +345,26 @@ function readSession() {
   // the subscriber below). The id at that index still has to match — but a
   // mismatch is repaired rather than dropped, see below.
   const pos = readJSON(POS_KEY);
-  if (!pos || !Number.isInteger(pos.i) || typeof pos.t !== "number") return sess;
-  if ((pos.at || 0) < (sess.at || 0)) return sess; // the snapshot is the fresh one
+  // The single most valuable line in the log: exactly what the two keys held at
+  // boot, so a resume that lands on the wrong track can be explained instead of
+  // guessed at.
+  logInfo("restore", "read", {
+    sess: sess && { i: sess.index, n: sess.queue?.length, age: Date.now() - (sess.at || 0) },
+    pos: pos && { i: pos.i, id: pos.id, t: pos.t, age: Date.now() - (pos.at || 0) },
+  }, { important: true });
+  if (!pos || !Number.isInteger(pos.i) || typeof pos.t !== "number") {
+    logInfo("restore", "no usable tick -> snapshot index " + sess.index);
+    return sess;
+  }
+  if ((pos.at || 0) < (sess.at || 0)) {
+    logInfo("restore", "snapshot is fresher -> index " + sess.index);
+    return sess; // the snapshot is the fresh one
+  }
   const queue = Array.isArray(sess.queue) ? sess.queue : [];
   if (queue[pos.i]?.deezer_id === pos.id) {
     sess.index = pos.i;
     sess.currentTime = pos.t;
+    logInfo("restore", `tick accepted -> index ${pos.i} @ ${pos.t.toFixed(1)}s`);
     return sess;
   }
 
@@ -374,6 +389,7 @@ function readSession() {
     // Same queue, shifted indices (a re-windowed snapshot).
     sess.index = found;
     sess.currentTime = pos.t;
+    logInfo("restore", `tick relocated ${pos.i} -> ${found}`, null, { important: true });
   } else if (found < 0 && queue.length && pos.i >= queue.length) {
     // Playback ran past everything the snapshot knows about. The exact track
     // is unrecoverable, but the last one we DO know about is far closer than
@@ -381,6 +397,11 @@ function readSession() {
     // tracks the listener already heard.
     sess.index = queue.length - 1;
     sess.currentTime = 0;
+    logInfo("restore", `tick ran past the queue (${pos.i} >= ${queue.length}) -> clamped`,
+            null, { important: true });
+  } else {
+    logInfo("restore", `tick unusable (found=${found}, ambiguous=${ambiguous}) -> snapshot index ${sess.index}`,
+            null, { important: true });
   }
   return sess;
 }
@@ -486,9 +507,12 @@ function createPlayer() {
       writeJSON(SESSION_KEY, snap);
     }
     savedOffset = snap.start;
+    logInfo("session", `queue written: n=${snap.queue.length} i=${snap.index} start=${snap.start}`,
+            null, { important: true });
   }
   function savePos(s) {
     lastPosAt = Date.now();
+    logInfo("pos", `i=${s.index - savedOffset} id=${s.queue[s.index]?.deezer_id ?? "-"} t=${(s.currentTime || 0).toFixed(1)}`);
     writeJSON(POS_KEY, {
       i: s.index - savedOffset, // same coordinates as the persisted window
       id: s.queue[s.index]?.deezer_id ?? null,
@@ -577,6 +601,14 @@ function createPlayer() {
     update,
 
     playQueue(tracks, start = 0, context = null) {
+      // Logged with a stack hint: if the player ever resets itself on returning
+      // to the foreground, this is what will name the culprit.
+      logInfo(
+        "queue",
+        `playQueue n=${(tracks || []).length} start=${start} ctx=${context?.kind || "-"}:${context?.id || "-"}`,
+        { from: (new Error().stack || "").split("\n").slice(2, 5).join(" | ") },
+        { important: true }
+      );
       // Resolve the tapped track from the ORIGINAL list first: `start` is an
       // index into what the user saw, but clean() drops unplayable entries and
       // would shift the index, starting playback on the wrong track.
@@ -801,11 +833,20 @@ export const player = createPlayer();
 // what makes the position/queue survive the OS reclaiming a paused player.
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
+    logInfo("page", "visibilitychange -> " + document.visibilityState, null, { important: true });
     if (document.visibilityState === "hidden") player.flushSession();
   });
-  window.addEventListener("pagehide", () => player.flushSession());
+  window.addEventListener("pagehide", () => {
+    logInfo("page", "pagehide", null, { important: true });
+    player.flushSession();
+    flushLog();
+  });
   // Page Lifecycle API (Chrome): fired right before a hidden tab is frozen.
-  document.addEventListener("freeze", () => player.flushSession());
+  document.addEventListener("freeze", () => {
+    logInfo("page", "freeze", null, { important: true });
+    player.flushSession();
+    flushLog();
+  });
 }
 
 export const current = derived(player, ($p) =>
