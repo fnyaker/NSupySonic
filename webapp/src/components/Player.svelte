@@ -26,7 +26,7 @@
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
-  import { duration as fmtDuration, resolveCover, coverKey, baseCover } from "../lib/format.js";
+  import { duration as fmtDuration, resolveCover, coverKey, baseCover, artistLine } from "../lib/format.js";
   import { registerSource, resumeAudio, setTrackGain } from "../lib/visualizer.js";
   import {
     getEpisodeProgress,
@@ -1294,7 +1294,9 @@
         add(baseCover(track.album?.cover));
         navigator.mediaSession.metadata = new MediaMetadata({
           title: track.title,
-          artist: track.artist?.name,
+          // The full credit line, so the lockscreen / car head unit shows the
+          // features too — same string as the app's own now-playing.
+          artist: artistLine(track),
           album: track.album?.title,
           artwork,
         });
@@ -1351,7 +1353,7 @@
         <!-- While the player is working toward playback, the subtitle line says
              WHAT is happening (Chargement…, Nouvel essai…) instead of the artist,
              so silence under a "playing" icon is never unexplained. -->
-        <span class="a muted" class:status={$playbackLabel}>{$playbackLabel || $current.artist?.name}</span>
+        <span class="a muted" class:status={$playbackLabel}>{$playbackLabel || artistLine($current)}</span>
       </span>
     {:else}
       <span class="muted ph">Rien en lecture</span>

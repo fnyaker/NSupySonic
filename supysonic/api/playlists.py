@@ -53,7 +53,7 @@ def show_playlist():
     if res.user != request.user and not res.public and not request.user.admin:
         raise Forbidden()
 
-    tracks = res.get_tracks()
+    tracks = Track.prime_credits(res.get_tracks())
     info = res.as_subsonic_playlist(request.user)
     info["entry"] = [
         t.as_subsonic_child(request.user, request.client) for t in tracks

@@ -8,10 +8,11 @@
     nowPlayingOpen,
   } from "../lib/stores.js";
   import { toggleFavorite } from "../lib/actions.js";
-  import { duration as fmtDuration } from "../lib/format.js";
+  import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
   import Icon from "./Icon.svelte";
+  import ArtistLine from "./ArtistLine.svelte";
   import VirtualList from "./VirtualList.svelte";
 
   let tab = "queue"; // queue | lyrics
@@ -40,9 +41,7 @@
         <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>
           {$current.title}
         </button>
-        <button class="a muted" on:click={() => $current.artist && go("/artist/" + $current.artist.deezer_id)}>
-          {$current.artist?.name}
-        </button>
+        <span class="a muted"><ArtistLine track={$current} navigate={go} /></span>
       </div>
       <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
         <Icon name={fav ? "heartFilled" : "heart"} size={20} />
@@ -63,7 +62,7 @@
                 <Cover src={item.album?.cover} alt={item.title} size={40} kind="track" fallbackId={item.deezer_id} />
                 <span class="qmeta">
                   <span class="qt">{item.title}</span>
-                  <span class="qa muted">{item.artist?.name}</span>
+                  <span class="qa muted">{artistLine(item)}</span>
                 </span>
                 <span class="qd muted">{fmtDuration(item.duration)}</span>
               </button>
@@ -149,14 +148,15 @@
   .t:hover {
     text-decoration: underline;
   }
+  /* `display: block` is load-bearing: this used to be a <button> and now wraps
+     one button per credited artist (each with its own hover), and ellipsis
+     doesn't apply to an inline. */
   .a {
+    display: block;
     text-align: left;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .a:hover {
-    color: var(--text);
   }
   .fav {
     color: var(--text-dim);

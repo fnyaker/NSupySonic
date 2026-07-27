@@ -4,7 +4,7 @@
   import { api } from "../lib/api.js";
   import { player, isAdmin, toasts, lastPlaylist, openExport } from "../lib/stores.js";
   import { toggleEntityFavorite, invalidatePlaylists, downloadTracks } from "../lib/actions.js";
-  import { duration as fmtDuration, isLocalId } from "../lib/format.js";
+  import { duration as fmtDuration, isLocalId, artistSearch } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -48,7 +48,8 @@
     const q = _lc(query.trim());
     if (q)
       list = list.filter(
-        (t) => _lc(t.title).includes(q) || _lc(t.artist?.name).includes(q) || _lc(t.album?.title).includes(q)
+        // artistSearch, not the artist name: a featured artist is findable too.
+        (t) => _lc(t.title).includes(q) || artistSearch(t).includes(q) || _lc(t.album?.title).includes(q)
       );
     if (sort !== "default") {
       const key = {

@@ -225,6 +225,10 @@ def api_track(i=1):
         "duration": 200,
         "explicit_lyrics": False,
         "artist": {"id": 1, "name": "Artist", "picture_medium": "p"},
+        "contributors": [
+            {"id": 1, "name": "Artist", "role": "Main"},
+            {"id": 2, "name": "Guest", "role": "Featured"},
+        ],
         "album": {"id": 10, "title": "Album", "cover_medium": "https://img/c.jpg"},
     }
 
@@ -724,6 +728,81 @@ class WebUITestCase(unittest.TestCase):
         self._make_deezer_track(sng_id="42", title="Ghost Only", archived=False)
         data = self.client.get("/api/search?q=Ghost").get_json()
         self.assertFalse(any(x["deezer_id"] == "42" for x in data["tracks"]))
+
+    def _make_feat_track(self, sng_id="7", title="Feat Song"):
+        """An archived DB track credited to a main artist plus a guest."""
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        t = library.upsert_track(
+            {
+                "SNG_ID": sng_id,
+                "SNG_TITLE": title,
+                "ART_NAME": "Main Act",
+                "ART_ID": "500",
+                "ALB_TITLE": "Archived Album",
+                "ALB_ID": "600",
+                "DURATION": "200",
+                "TRACK_NUMBER": "1",
+                "DISK_NUMBER": "1",
+                "ARTISTS": [
+                    {"ART_ID": "500", "ART_NAME": "Main Act", "ROLE_ID": "0",
+                     "ARTISTS_SONGS_ORDER": "0"},
+                    {"ART_ID": "501", "ART_NAME": "Guest Act", "ROLE_ID": "5",
+                     "ARTISTS_SONGS_ORDER": "1"},
+                ],
+            },
+            root,
+        )
+        os.makedirs(os.path.dirname(t.path), exist_ok=True)
+        with open(t.path, "wb") as fh:
+            fh.write(b"flacdata")
+        return t
+
+    def test_db_track_exposes_credits(self):
+        self._login()
+        self._make_feat_track(sng_id="7", title="Feat Song")
+        data = self.client.get("/api/search?q=Feat Song").get_json()
+        hit = [x for x in data["tracks"] if x["deezer_id"] == "7"][0]
+        # The classic field still names the primary — archive paths, Subsonic
+        # clients and the old UI all read it.
+        self.assertEqual(hit["artist"]["name"], "Main Act")
+        self.assertEqual([a["name"] for a in hit["artists"]], ["Main Act", "Guest Act"])
+        self.assertEqual(hit["display_artist"], "Main Act feat. Guest Act")
+
+    def test_db_track_without_credits_falls_back_to_primary(self):
+        # Rows imported before credits existed have no TrackArtist rows at all;
+        # they must still serialize a usable one-entry list.
+        self._login()
+        self._make_deezer_track(sng_id="8", title="Plain Song", archived=True)
+        data = self.client.get("/api/search?q=Plain Song").get_json()
+        hit = [x for x in data["tracks"] if x["deezer_id"] == "8"][0]
+        self.assertEqual(hit["artists"],
+                         [{"deezer_id": "500", "name": "Archived Artist", "role": "Main"}])
+        self.assertEqual(hit["display_artist"], "Archived Artist")
+
+    def test_credits_are_not_an_n_plus_one(self):
+        # Serializing a LIST must resolve every credit in one batched query.
+        # A per-row lookup is what turns a 4000-track favourites page into a
+        # multi-second wait, so guard it with a test rather than a comment.
+        from supysonic import webui
+
+        self._login()
+        for i in range(6):
+            self._make_feat_track(sng_id=str(100 + i), title=f"Batch Song {i}")
+
+        calls = []
+        original = webui._db_credits
+        webui._db_credits = lambda t: (calls.append(t.id), original(t))[1]
+        try:
+            data = self.client.get("/api/search?q=Batch Song").get_json()
+        finally:
+            webui._db_credits = original
+
+        hits = [x for x in data["tracks"] if x["title"].startswith("Batch Song")]
+        self.assertEqual(len(hits), 6)
+        self.assertTrue(all(h["display_artist"] == "Main Act feat. Guest Act" for h in hits))
+        self.assertEqual(calls, [])  # batched, never per-row
 
     def _deezer_down(self):
         """Simulate a Deezer outage: the provider stays set but every call fails,
@@ -1893,5 +1972,77 @@ class WebUIGuestTestCase(unittest.TestCase):
         self._login()
         self.assertEqual(self.client.post("/api/sync").status_code, 403)
         self.assertEqual(self.client.get("/api/sync/status").status_code, 403)
+
+
+class MultiArtistTestCase(unittest.TestCase):
+    """Multi-artist ("feat.") credits, from the three serializers to the wire."""
+
+    def test_credit_list_from_gateway(self):
+        from supysonic.webui import _credit_list
+
+        # No ARTISTS (the trimmed favourites payload): the primary artist alone.
+        # A serializer must ALWAYS hand the UI something to render, which is why
+        # this falls back where library._credits deliberately doesn't.
+        self.assertEqual(
+            _credit_list(raw_track(1)),
+            [{"deezer_id": "1", "name": "Artist", "role": "Main"}],
+        )
+        # A full list: label order (ARTISTS_SONGS_ORDER), ROLE_ID 0/5 mapped.
+        raw = raw_track(1)
+        raw["ARTISTS"] = [
+            {"ART_ID": "3", "ART_NAME": "C", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "2"},
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        self.assertEqual([c["name"] for c in _credit_list(raw)], ["A", "B", "C"])
+        self.assertEqual([c["role"] for c in _credit_list(raw)], ["Main", "Featured", "Featured"])
+        # Hostile shapes never crash and never invent an id.
+        self.assertEqual(_credit_list({}), [])
+        self.assertEqual(_credit_list({"ARTISTS": [None, 5, {"ART_NAME": "no id"}]}), [])
+
+    def test_display_artist_line(self):
+        from supysonic.webui import _display_artist
+
+        main = {"deezer_id": "1", "name": "A", "role": "Main"}
+        feat = {"deezer_id": "2", "name": "B", "role": "Featured"}
+        feat2 = {"deezer_id": "3", "name": "C", "role": "Featured"}
+        self.assertEqual(_display_artist([main]), "A")
+        self.assertEqual(_display_artist([main, feat]), "A feat. B")
+        self.assertEqual(_display_artist([main, feat, feat2]), "A feat. B, C")
+        self.assertEqual(_display_artist([main, dict(main, deezer_id="9", name="A2")]), "A, A2")
+        # No Main at all (an unmapped ROLE_ID): list everyone rather than
+        # promoting the first name and then repeating it after a "feat.".
+        self.assertEqual(_display_artist([feat, feat2]), "B, C")
+        self.assertEqual(_display_artist([], "Fallback"), "Fallback")
+
+    def test_gateway_track_carries_credits(self):
+        from supysonic.webui import _track
+
+        raw = raw_track(1)
+        raw["ARTISTS"] = [
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        out = _track(raw)
+        # The classic single-artist field is untouched — every existing caller
+        # (and every old cached client payload) keeps working.
+        self.assertEqual(out["artist"], {"deezer_id": "1", "name": "Artist"})
+        self.assertEqual([a["name"] for a in out["artists"]], ["A", "B"])
+        self.assertEqual(out["display_artist"], "A feat. B")
+
+    def test_public_api_track_maps_contributors(self):
+        from supysonic.webui import _track_api
+
+        out = _track_api(api_track(1))
+        self.assertEqual([a["name"] for a in out["artists"]], ["Artist", "Guest"])
+        self.assertEqual(out["display_artist"], "Artist feat. Guest")
+        # A track with no contributors still exposes its single artist.
+        bare = api_track(2)
+        bare.pop("contributors")
+        self.assertEqual(_track_api(bare)["artists"],
+                         [{"deezer_id": "1", "name": "Artist", "role": "Main"}])
+        self.assertEqual(_track_api(bare)["display_artist"], "Artist")
+
+
 if __name__ == "__main__":
     unittest.main()

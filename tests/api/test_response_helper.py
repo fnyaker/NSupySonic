@@ -101,6 +101,24 @@ class ResponseHelperJsonTestCase(TestBase, UnwrapperMixin.create_from(JSONFormat
         self.assertEqual(lst, [{"b": "B"}, {"c": "C"}, [4, 5, 6], "final string"])
 
 
+    def test_opensubsonic_fields_survive(self):
+        # The other half of the XML case: JSON is where OpenSubsonic clients
+        # read the credit list, so it must pass through untouched.
+        song = self.process_and_extract(
+            {
+                "song": {
+                    "id": "1",
+                    "artist": "A",
+                    "artists": [{"id": "1", "name": "A"}, {"id": "2", "name": "B"}],
+                    "displayArtist": "A feat. B",
+                }
+            }
+        )["song"]
+        self.assertEqual(song["artist"], "A")
+        self.assertEqual([a["name"] for a in song["artists"]], ["A", "B"])
+        self.assertEqual(song["displayArtist"], "A feat. B")
+
+
 class ResponseHelperJsonpTestCase(TestBase, UnwrapperMixin.create_from(JSONPFormatter)):
     def test_basic(self):
         self._JSONPFormatter__callback = "callback"  # hacky
@@ -192,6 +210,30 @@ class ResponseHelperXMLTestCase(TestBase, UnwrapperMixin.create_from(XMLFormatte
         self.assertAttributesMatchDict(lists[0], {"b": "B"})
         self.assertAttributesMatchDict(lists[1], {"c": "C"})
         self.assertEqual(lists[2].text, "final string")
+
+
+    def test_opensubsonic_fields_are_json_only(self):
+        # `artists` / `displayArtist` are OpenSubsonic extensions. The official
+        # Subsonic XML schema is closed, so emitting them as XML attributes or
+        # child elements makes a validating client reject the whole response.
+        song = {
+            "id": "1",
+            "artist": "A",
+            "artists": [{"id": "1", "name": "A"}, {"id": "2", "name": "B"}],
+            "displayArtist": "A feat. B",
+        }
+        tag = self.process_and_extract({"song": song})
+        elem = tag.find("song")
+        self.assertEqual(elem.get("artist"), "A")  # the classic field stays
+        self.assertIsNone(elem.get("displayArtist"))
+        self.assertEqual(elem.findall("artists"), [])
+
+    def test_get_artists_response_element_is_not_stripped(self):
+        # `artists` is ALSO the top-level element of getArtists — the JSON-only
+        # filter must not swallow it.
+        rv = self.make_response("artists", {"index": [{"name": "A"}]})
+        self.assertIsNotNone(rv.find("artists"))
+        self.assertEqual(rv.find("artists/index").get("name"), "A")
 
 
 if __name__ == "__main__":

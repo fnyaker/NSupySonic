@@ -18,7 +18,7 @@
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { addMarkerAt } from "../lib/markers.js";
-  import { duration as fmtDuration, hiResCover, resolveCover, cssUrl } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover, resolveCover, cssUrl, artistLine } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
 
   // Blurred backdrop, as a stack of crossfading layers. Each new cover is
@@ -85,6 +85,7 @@
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
   import Icon from "./Icon.svelte";
+  import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
   import VirtualList from "./VirtualList.svelte";
 
@@ -212,7 +213,7 @@
       <div class="info">
         <div class="txt">
           <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
-          <button class="a" class:status={$playbackLabel} on:click={() => !$playbackLabel && $current.artist && go("/artist/" + $current.artist.deezer_id)}>{$playbackLabel || $current.artist?.name}</button>
+          <span class="a" class:status={$playbackLabel}>{#if $playbackLabel}{$playbackLabel}{:else}<ArtistLine track={$current} navigate={go} />{/if}</span>
         </div>
         <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
           <Icon name={fav ? "heartFilled" : "heart"} size={24} />
@@ -272,7 +273,7 @@
               <div class="qitem" class:now={index === idx} class:past={index < idx}>
                 <button on:click={() => player.jump(index)}>
                   <Cover src={item.album?.cover} alt="" size={42} kind="track" fallbackId={item.deezer_id} />
-                  <span class="qm"><span class="qt">{item.title}</span><span class="qa">{item.artist?.name}</span></span>
+                  <span class="qm"><span class="qt">{item.title}</span><span class="qa">{artistLine(item)}</span></span>
                   <span class="qd">{fmtDuration(item.duration)}</span>
                 </button>
               </div>
@@ -431,7 +432,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* `display: block` is load-bearing: this used to be a <button> and now wraps
+     one button per credited artist (each with its own hover), and ellipsis
+     doesn't apply to an inline. */
   .a {
+    display: block;
     font-size: 1.05rem;
     text-align: left;
     color: rgba(255, 255, 255, 0.75);
@@ -439,8 +444,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .t:hover,
-  .a:hover {
+  .t:hover {
     text-decoration: underline;
   }
   .fav {

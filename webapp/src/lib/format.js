@@ -9,8 +9,54 @@ export function duration(sec) {
   return m + ":" + String(s).padStart(2, "0");
 }
 
+// The credited artists of a track, normalized to [{deezer_id, name, role}].
+//
+// `artists` is what the API sends for every track shape, but a track can reach
+// us from elsewhere — an offline record written before credits existed, a queue
+// entry restored from an old session — so an absent list falls back to the
+// single primary artist. Callers never have to special-case it.
+export function credits(track) {
+  const list = track && Array.isArray(track.artists) ? track.artists.filter((a) => a && a.name) : [];
+  if (list.length) return list;
+  return track && track.artist && track.artist.name
+    ? [{ deezer_id: track.artist.deezer_id, name: track.artist.name, role: "Main" }]
+    : [];
+}
+
+// The credit line as one string: "A", or "A feat. B, C". Prefers the ready-made
+// `display_artist` from the API and only rebuilds it for tracks that lack one.
+export function artistLine(track) {
+  if (track && track.display_artist) return track.display_artist;
+  const list = credits(track);
+  if (!list.length) return "";
+  const main = list.filter((a) => a.role === "Main").map((a) => a.name);
+  const feat = list.filter((a) => a.role !== "Main").map((a) => a.name);
+  // Nobody credited as Main (an unmapped role, a compilation): list everyone
+  // plainly rather than promoting the first one and then repeating them after
+  // a "feat." that has no primary to hang off.
+  if (!main.length) return feat.join(", ");
+  return feat.length ? `${main.join(", ")} feat. ${feat.join(", ")}` : main.join(", ");
+}
+
+// Every credited name as one lowercase haystack, so filtering a list finds a
+// track by its FEATURED artist too. Deliberately not `artistLine`: that one
+// carries the literal word "feat.", which would match every track with a guest.
+//
+// This runs once per track on every keystroke of a list filter — 4000 times for
+// a big favourites page — so it deliberately avoids `credits()` and builds no
+// intermediate arrays for the overwhelmingly common one-artist case.
+export function artistSearch(track) {
+  const list = track && track.artists;
+  if (!Array.isArray(list) || list.length === 0)
+    return ((track && track.artist && track.artist.name) || "").toLowerCase();
+  if (list.length === 1) return ((list[0] && list[0].name) || "").toLowerCase();
+  let s = "";
+  for (const a of list) if (a && a.name) s += (s ? " " : "") + a.name;
+  return s.toLowerCase();
+}
+
 export function artists(track) {
-  return track && track.artist ? track.artist.name : "";
+  return artistLine(track);
 }
 
 // Human-readable byte size, e.g. 1536 -> "1.5 Ko", 4e9 -> "3.7 Go".

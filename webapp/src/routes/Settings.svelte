@@ -15,7 +15,7 @@
   import { api } from "../lib/api.js";
   import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
   import { clearPlayCache, enforce } from "../lib/playcache.js";
-  import { bytes as fmtBytes, duration as fmtDuration } from "../lib/format.js";
+  import { bytes as fmtBytes, duration as fmtDuration, artistLine } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
@@ -214,7 +214,7 @@
           <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} kind="track" fallbackId={m.track?.deezer_id} /></div>
           <div class="meta">
             <div class="t">{m.track?.title}</div>
-            <div class="a muted">{m.track?.artist?.name}</div>
+            <div class="a muted">{artistLine(m.track)}</div>
           </div>
           <span class="q-badge">{qualityLabel(m.quality)}</span>
           <span class="sz muted">{fmtBytes(m.size)}</span>

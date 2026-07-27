@@ -15,6 +15,7 @@ from supysonic.db import (
     PlaylistTrack,
     StarredTrack,
     Track,
+    TrackArtist,
     User,
     init_database,
     migrate_database,
@@ -68,6 +69,9 @@ class DbMigrateTestCase(unittest.TestCase):
         pl = Playlist.create(user=alice, name="Fav")
         PlaylistTrack.create(playlist=pl, track=track, index=0)
         StarredTrack.create(user=alice, starred=track)
+        guest = Artist.create(name="The Guest")
+        TrackArtist.create(track=track, artist=artist, role="Main", position=0)
+        TrackArtist.create(track=track, artist=guest, role="Featured", position=1)
         release_database()
 
     def test_migrate_copies_all_data(self):
@@ -76,14 +80,18 @@ class DbMigrateTestCase(unittest.TestCase):
 
         # The proxy is now bound to the destination, so models read from it.
         self.assertEqual(Folder.select().count(), 2)
-        self.assertEqual(Artist.select().count(), 1)
+        self.assertEqual(Artist.select().count(), 2)  # primary + featured
         self.assertEqual(Album.select().count(), 1)
         self.assertEqual(Track.select().count(), 1)
         self.assertEqual(User.select().count(), 1)
         self.assertEqual(PlaylistTrack.select().count(), 1)
         self.assertEqual(StarredTrack.select().count(), 1)
+        # The multi-artist credits travel too — dropping them would silently
+        # flatten every "feat." track on a SQLite -> Postgres move.
+        self.assertEqual(TrackArtist.select().count(), 2)
 
         track = Track.get()
+        self.assertEqual(track.display_artist(), "The Artist feat. The Guest")
         self.assertEqual(track.title, "Song")
         self.assertEqual(track.deezer_id, "123")
         # Foreign keys (incl. the self-referential folder parent) are preserved.

@@ -90,8 +90,21 @@ class JSONPFormatter(JSONBaseFormatter):
         return rv
 
 
+# OpenSubsonic extension fields, emitted on entities by `as_subsonic_child`.
+#
+# They are JSON-only on purpose: the official Subsonic XML schema is closed
+# (`xs:attribute` lists with no `anyAttribute`), so an unknown attribute or
+# child element makes a validating XML client reject the WHOLE response. Every
+# OpenSubsonic-aware client speaks JSON, and the classic `artist`/`artistId`
+# attributes are still there, so XML clients lose nothing.
+#
+# Only stripped BELOW the top level: `artists` is also the legitimate response
+# element of getArtists, which must keep serializing.
+_JSON_ONLY_FIELDS = frozenset({"artists", "displayArtist"})
+
+
 class XMLFormatter(BaseFormatter):
-    def __dict2xml(self, elem, dictionary):
+    def __dict2xml(self, elem, dictionary, top=False):
         """Convert a dict structure to xml. The game is trivial. Nesting uses the [] parenthesis.
         ex.  { 'musicFolder': {'id': 1234, 'name': "sss" } }
           ex. { 'musicFolder': [{'id': 1234, 'name': "sss" }, {'id': 456, 'name': "aaa" }]}
@@ -106,6 +119,8 @@ class XMLFormatter(BaseFormatter):
             raise TypeError("Dictionary keys must be strings")
 
         for name, value in dictionary.items():
+            if not top and name in _JSON_ONLY_FIELDS:
+                continue
             if name == "value":
                 elem.text = self.__value_tostring(value)
             elif isinstance(value, dict):
@@ -143,7 +158,7 @@ class XMLFormatter(BaseFormatter):
             response[elem] = data
 
         root = ElementTree.Element("subsonic-response")
-        self.__dict2xml(root, response)
+        self.__dict2xml(root, response, top=True)
 
         rv = make_response(ElementTree.tostring(root))
         rv.mimetype = "text/xml"

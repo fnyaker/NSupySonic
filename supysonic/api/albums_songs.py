@@ -27,6 +27,17 @@ from . import api_routing, get_root_folder
 from .exceptions import GenericError
 
 
+def _primed_stars(query):
+    """Starred-track rows with their tracks' credits already loaded.
+
+    getStarred(2) serializes every favourite the user has — thousands of rows
+    for a heavy user — so the per-track credits lookup has to be batched.
+    """
+    rows = list(query)
+    Track.prime_credits([r.starred for r in rows])
+    return rows
+
+
 @api_routing("/getRandomSongs")
 def rand_songs():
     size = request.values.get("size", "10")
@@ -54,7 +65,7 @@ def rand_songs():
         {
             "song": [
                 t.as_subsonic_child(request.user, request.client)
-                for t in query.order_by(random()).limit(size)
+                for t in Track.prime_credits(query.order_by(random()).limit(size))
             ]
         },
     )
@@ -221,7 +232,7 @@ def songs_by_genre():
         {
             "song": [
                 t.as_subsonic_child(request.user, request.client)
-                for t in query.limit(count).offset(offset)
+                for t in Track.prime_credits(query.limit(count).offset(offset))
             ]
         },
     )
@@ -282,7 +293,8 @@ def get_starred():
             "artist": [sf.starred.as_subsonic_artist(request.user) for sf in arq],
             "album": [sf.starred.as_subsonic_child(request.user) for sf in alq],
             "song": [
-                st.starred.as_subsonic_child(request.user, request.client) for st in trq
+                st.starred.as_subsonic_child(request.user, request.client)
+                for st in _primed_stars(trq)
             ],
         },
     )
@@ -320,7 +332,8 @@ def get_starred_id3():
             "artist": [sa.starred.as_subsonic_artist(request.user) for sa in arq],
             "album": [sa.starred.as_subsonic_album(request.user) for sa in alq],
             "song": [
-                st.starred.as_subsonic_child(request.user, request.client) for st in trq
+                st.starred.as_subsonic_child(request.user, request.client)
+                for st in _primed_stars(trq)
             ],
         },
     )

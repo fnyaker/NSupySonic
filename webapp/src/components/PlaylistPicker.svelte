@@ -9,7 +9,7 @@
   import { userPlaylists, addTrackToPlaylist, invalidatePlaylists } from "../lib/actions.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
-  import { isLocalId } from "../lib/format.js";
+  import { isLocalId, artistLine } from "../lib/format.js";
 
   // Modal (desktop) / bottom-sheet (mobile) to pick the playlist a track goes
   // into. Searchable (typing filters by title), last-used playlist pinned on
@@ -82,7 +82,7 @@
         <button class="close" on:click={closePlaylistPicker} aria-label="Fermer"><Icon name="close" size={20} /></button>
       </header>
       {#if track}
-        <p class="which muted">{track.title}{track.artist?.name ? " · " + track.artist.name : ""}</p>
+        <p class="which muted">{track.title}{artistLine(track) ? " · " + artistLine(track) : ""}</p>
       {/if}
 
       <div class="searchbox">

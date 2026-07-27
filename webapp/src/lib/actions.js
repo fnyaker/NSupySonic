@@ -17,6 +17,7 @@ import {
 } from "./stores.js";
 import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
 import { addMarkerAt } from "./markers.js";
+import { credits } from "./format.js";
 
 // Quality choices offered in the "download as…" submenu.
 export const DL_QUALITIES = [
@@ -457,11 +458,25 @@ export function buildTrackMenu(track, nav) {
     },
     "divider"
   );
-  if (track.artist?.deezer_id)
+  // One entry per credited artist. A single credit stays a plain item (the
+  // common case shouldn't grow a submenu for nothing); a feat. track opens a
+  // submenu so the guest is reachable too.
+  const people = credits(track).filter((a) => a.deezer_id);
+  if (people.length === 1)
     items.push({
       label: "Aller à l'artiste",
       icon: "user",
-      action: () => nav("/artist/" + track.artist.deezer_id),
+      action: () => nav("/artist/" + people[0].deezer_id),
+    });
+  else if (people.length > 1)
+    items.push({
+      label: "Aller à l'artiste",
+      icon: "user",
+      sub: people.map((a) => ({
+        label: a.name,
+        icon: "user",
+        action: () => nav("/artist/" + a.deezer_id),
+      })),
     });
   if (track.album?.deezer_id)
     items.push({

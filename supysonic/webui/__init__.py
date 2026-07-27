@@ -36,6 +36,7 @@ from ..db import (
     PodcastProgress,
     StarredTrack,
     Track,
+    TrackArtist,
     User,
     db,
     now,
@@ -63,6 +64,64 @@ def _title(t):
     return f"{title} {version}".strip() if version and version not in title else title
 
 
+# Deezer's per-credit ROLE_ID; anything unrecognised is a feature, not a drop.
+_ROLE_NAMES = {"0": "Main", "5": "Featured"}
+
+
+def _credit_list(t: dict) -> list[dict]:
+    """Credited artists for a raw gateway track, in the label's own order.
+
+    ``ARTISTS`` is the gateway's full credit list, but it isn't on every
+    response (the trimmed favourites payload has only ART_ID/ART_NAME), so an
+    absent list falls back to the single primary artist. Callers can therefore
+    always read `artists` and never have to special-case it.
+    """
+    raw = t.get("ARTISTS")
+    primary = {
+        "deezer_id": str(t.get("ART_ID") or ""),
+        "name": t.get("ART_NAME", "") or "",
+        "role": "Main",
+    }
+    if not isinstance(raw, list) or not raw:
+        return [primary] if primary["deezer_id"] else []
+
+    def order(e):
+        try:
+            return int(e.get("ARTISTS_SONGS_ORDER") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    out, seen = [], set()
+    for e in sorted((x for x in raw if isinstance(x, dict)), key=order):
+        aid = str(e.get("ART_ID") or "")
+        name = e.get("ART_NAME", "") or ""
+        if not aid or not name or aid in seen:
+            continue  # Deezer lists an artist twice when they hold two roles
+        seen.add(aid)
+        out.append(
+            {
+                "deezer_id": aid,
+                "name": name,
+                "role": _ROLE_NAMES.get(str(e.get("ROLE_ID")), "Featured"),
+            }
+        )
+    return out or ([primary] if primary["deezer_id"] else [])
+
+
+def _display_artist(artists: list[dict], fallback: str = "") -> str:
+    """The credit line: "A", or "A feat. B, C"."""
+    if not artists:
+        return fallback
+    main = [a["name"] for a in artists if a.get("role") == "Main"]
+    feat = [a["name"] for a in artists if a.get("role") != "Main"]
+    # Nobody credited as Main (an unmapped ROLE_ID, a compilation): list
+    # everyone plainly rather than promoting the first one and then repeating
+    # them after a "feat." that has no primary to hang off.
+    if not main:
+        return ", ".join(feat) or fallback
+    return f"{', '.join(main)} feat. {', '.join(feat)}" if feat else ", ".join(main)
+
+
 def _gain(raw):
     """Per-track ReplayGain (dB) as a float for the web player's normalization,
     or None. Deezer sends it as a string on the gateway, a number on the API."""
@@ -78,6 +137,7 @@ def _track(t):
     if not t or not t.get("SNG_ID"):
         return None
     expl = str(t.get("EXPLICIT_LYRICS", ""))
+    artists = _credit_list(t)
     return {
         "deezer_id": str(t.get("SNG_ID")),
         "title": _title(t),
@@ -85,7 +145,12 @@ def _track(t):
         "added": int(t.get("DATE_ADD") or 0),
         "explicit": expl == "1",
         "gain": _gain(t.get("GAIN")),
+        # `artist` stays the primary one — every existing caller reads it.
+        # `artists` is the full credit list and `display_artist` the ready-made
+        # "A feat. B" line, so the UI never has to assemble it itself.
         "artist": {"deezer_id": str(t.get("ART_ID")), "name": t.get("ART_NAME", "")},
+        "artists": artists,
+        "display_artist": _display_artist(artists, t.get("ART_NAME", "") or ""),
         "album": {
             "deezer_id": str(t.get("ALB_ID")),
             "title": t.get("ALB_TITLE", ""),
@@ -163,6 +228,22 @@ def _track_api(t):
         return None
     alb = t.get("album") or {}
     art = t.get("artist") or {}
+    # The public API calls the credit list `contributors` and already carries a
+    # role per entry ("Main" / "Featured"), so it maps straight across.
+    artists, seen = [], set()
+    for c in t.get("contributors") or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "")
+        name = c.get("name") or ""
+        if not cid or not name or cid in seen:
+            continue
+        seen.add(cid)
+        artists.append({"deezer_id": cid, "name": name, "role": c.get("role") or "Main"})
+    if not artists and art.get("id"):
+        artists = [
+            {"deezer_id": str(art.get("id")), "name": art.get("name", ""), "role": "Main"}
+        ]
     return {
         "deezer_id": str(t.get("id")),
         "title": t.get("title") or t.get("title_short") or "",
@@ -170,6 +251,8 @@ def _track_api(t):
         "explicit": bool(t.get("explicit_lyrics")),
         "gain": _gain(t.get("gain")),
         "artist": {"deezer_id": str(art.get("id")), "name": art.get("name", "")},
+        "artists": artists,
+        "display_artist": _display_artist(artists, art.get("name", "")),
         "album": {
             "deezer_id": str(alb.get("id")),
             "title": alb.get("title", ""),
@@ -389,6 +472,12 @@ def _local_track(t: Track) -> dict:
         "explicit": False,
         "gain": t.gain,
         "artist": {"deezer_id": str(t.artist.id), "name": t.artist.name},
+        # An uploaded file has a single tagged artist; keep the shape uniform so
+        # the UI never has to special-case local tracks.
+        "artists": [
+            {"deezer_id": str(t.artist.id), "name": t.artist.name, "role": "Main"}
+        ],
+        "display_artist": t.artist.name,
         "album": {
             "deezer_id": str(t.album.id),
             "title": t.album.name,
@@ -419,14 +508,14 @@ def _local_search_tracks(query: str, limit: int) -> list:
         # archived-state filter can't be expressed cleanly in SQL here).
         .limit(min(limit * 5, 200))
     )
-    out = []
+    keep = []
     for t in q:
         if t.deezer_id is not None and not os.path.isfile(t.path):
             continue  # imported metadata only — not on disk, needs Deezer
-        out.append(_db_track(t))
-        if len(out) >= limit:
+        keep.append(t)
+        if len(keep) >= limit:
             break
-    return out
+    return _db_tracks(keep)
 
 
 def _local_starred() -> list:
@@ -458,12 +547,90 @@ def _user_starred() -> list:
     )
 
 
-def _db_track(t: Track) -> dict:
+def _primary_credit(t: Track) -> list[dict]:
+    """The credit list of a track that has no credit rows — rows imported before
+    the feature existed, or tracks Deezer only ever described with one artist."""
+    return [
+        {
+            "deezer_id": str(t.artist.deezer_id or t.artist.id),
+            "name": t.artist.name,
+            "role": "Main",
+        }
+    ]
+
+
+def _db_credits(t: Track) -> list[dict]:
+    """Credited artists for ONE DB track. Serialising a list goes through
+    ``_db_tracks`` instead — this query per row is an N+1 on a big page."""
+    rows = (
+        TrackArtist.select(TrackArtist, Artist)
+        .join(Artist)
+        .where(TrackArtist.track == t.id)
+        .order_by(TrackArtist.position)
+    )
+    out = [
+        {
+            "deezer_id": str(r.artist.deezer_id or r.artist.id),
+            "name": r.artist.name,
+            "role": r.role,
+        }
+        for r in rows
+    ]
+    return out or _primary_credit(t)
+
+
+# SQLite's default parameter limit is 999; stay well under it when expanding an
+# id list into an IN (...) clause.
+_IN_CHUNK = 400
+
+
+def _credits_by_track(tracks: list) -> dict:
+    """``{track id: [credit dicts]}`` for a whole page in one round trip.
+
+    A 4000-track favourites list would otherwise run 4000 credit queries — the
+    exact N+1 that makes a big list crawl. Only tracks that actually have credit
+    rows appear; callers fall back to ``_primary_credit`` for the rest.
+    """
+    tids = [t.id for t in tracks if t.deezer_id is not None]
+    out: dict = {}
+    for i in range(0, len(tids), _IN_CHUNK):
+        rows = (
+            TrackArtist.select(TrackArtist, Artist)
+            .join(Artist)
+            .where(TrackArtist.track << tids[i : i + _IN_CHUNK])
+            .order_by(TrackArtist.track, TrackArtist.position)
+        )
+        for r in rows:
+            out.setdefault(r.track_id, []).append(
+                {
+                    "deezer_id": str(r.artist.deezer_id or r.artist.id),
+                    "name": r.artist.name,
+                    "role": r.role,
+                }
+            )
+    return out
+
+
+def _db_tracks(rows) -> list:
+    """Serialize a list of DB tracks, resolving every credit in one query."""
+    rows = list(rows)
+    by_track = _credits_by_track(rows)
+    # `.get(id, [])`, not `.get(id)`: an empty list says "already resolved, this
+    # one simply has no credit rows". None would send it back to the per-row
+    # query and undo the batching for every plain single-artist track.
+    return [_db_track(t, by_track.get(t.id, [])) for t in rows]
+
+
+def _db_track(t: Track, credits: list | None = None) -> dict:
     """Normalize a DB Track row to the API track shape. Local files go through
     ``_local_track``; Deezer-imported rows rebuild their cover from the stored
-    ``cover_md5`` so no Deezer call is needed."""
+    ``cover_md5`` so no Deezer call is needed.
+
+    `credits` is the batched lookup from ``_db_tracks``: a list (even an empty
+    one) means already resolved, None means look this row up on its own."""
     if t.deezer_id is None:
         return _local_track(t)
+    artists = _db_credits(t) if credits is None else (credits or _primary_credit(t))
     return {
         "deezer_id": str(t.deezer_id),
         "title": t.title,
@@ -471,6 +638,8 @@ def _db_track(t: Track) -> dict:
         "explicit": False,
         "gain": t.gain,
         "artist": {"deezer_id": str(t.artist.deezer_id or ""), "name": t.artist.name},
+        "artists": artists,
+        "display_artist": _display_artist(artists, t.artist.name),
         "album": {
             "deezer_id": str(t.album.deezer_id or ""),
             "title": t.album.name,
@@ -505,7 +674,7 @@ def _db_album_tracks(alb: Album) -> list:
         .where(Track.album == alb)
         .order_by(Track.disc, Track.number)
     )
-    return [_db_track(t) for t in q]
+    return _db_tracks(q)
 
 
 def _db_album_response(alb: Album) -> dict:
@@ -552,7 +721,7 @@ def _db_artist_response(ar: Artist) -> dict:
             "nb_fan": None,
         },
         "bio": None,
-        "top": [_db_track(t) for t in top_q],
+        "top": _db_tracks(top_q),
         "albums": cards,
         "related": [],
     }
@@ -881,7 +1050,9 @@ def home():
                 "id": sid,
                 "title": title,
                 "subtitle": pl.comment or "",
-                "cover": _db_playlist_cover([_db_track(tracks[0])]),
+                # credits=[]: only the cover is read here, so skip the
+                # per-row credits query on every card in the list.
+                "cover": _db_playlist_cover([_db_track(tracks[0], credits=[])]),
             }
         )
     return jsonify({"mixes": mixes})
@@ -913,7 +1084,7 @@ def smarttracklist(sid):
     # Deezer down/disabled: serve the last synced copy of this mix from the DB.
     pl = _db_mix_for(sid)
     if pl is not None:
-        tracks = [_db_track(t) for t in pl.get_tracks()]
+        tracks = _db_tracks(pl.get_tracks())
         title = pl.name[len("Deezer · "):] if pl.name.startswith("Deezer · ") else pl.name
         return jsonify(
             {
@@ -1107,7 +1278,7 @@ def artist_tracks(artist_id):
             .where(Track.artist == ar)
             .order_by(Album.name, Track.disc, Track.number)
         )
-        return jsonify({"tracks": [_db_track(t) for t in rows]})
+        return jsonify({"tracks": _db_tracks(rows)})
     if provider is None:
         return jsonify({"error": "Deezer proxy disabled"}), 503
     return jsonify({"error": "not found"}), 404
@@ -1153,7 +1324,7 @@ def playlist(playlist_id):
     # recommendation/editorial playlist is read straight from Deezer (read-only).
     pl = _resolve_db_playlist(playlist_id)
     if pl is not None:
-        tracks = [_db_track(t) for t in _db_playlist_track_rows(pl)]
+        tracks = _db_tracks(_db_playlist_track_rows(pl))
         return jsonify(
             {
                 "playlist": {
@@ -1475,7 +1646,8 @@ def my_playlists():
                 "id": str(pl.id),
                 "deezer_id": pl.deezer_id,
                 "title": pl.name,
-                "cover": _db_playlist_cover([_db_track(first)]) if first else None,
+                # credits=[]: only the cover is read (see above).
+                "cover": _db_playlist_cover([_db_track(first, credits=[])]) if first else None,
                 "nb_tracks": nb,
                 "editable": True,
             }
@@ -1530,7 +1702,7 @@ def my_local():
 def my_favorites():
     # Guests: their own private stars only (no Deezer-account favorites).
     if not _is_admin():
-        return jsonify({"tracks": [_db_track(t) for t in _user_starred()]})
+        return jsonify({"tracks": _db_tracks(_user_starred())})
     # Prefer the live Deezer favorites (they carry the "added" date and any
     # brand-new stars not yet synced), but never let a Deezer outage 500 the
     # route — fall back to the favorites already mirrored into the DB.
@@ -1551,14 +1723,13 @@ def my_favorites():
             # Include the admin's DB Deezer stars that AREN'T in the live list —
             # e.g. starred with push_to_deezer off, or whose push failed. Without
             # this they vanished from the library while still showing a full heart.
-            for t in _deezer_starred():
-                if str(t.deezer_id) not in have:
-                    tracks.append(_db_track(t))
+            extra = [t for t in _deezer_starred() if str(t.deezer_id) not in have]
+            tracks.extend(_db_tracks(extra))
             return jsonify({"tracks": tracks})
         except Exception:
             logger.warning("Deezer favorites fetch failed; serving from DB", exc_info=True)
     # Deezer disabled or unreachable: every star from the DB (local + synced).
-    return jsonify({"tracks": [_db_track(t) for t in _user_starred()]})
+    return jsonify({"tracks": _db_tracks(_user_starred())})
 
 
 # -- podcasts ---------------------------------------------------------------
