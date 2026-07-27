@@ -53,11 +53,16 @@ run it through these questions. They are not optional polish; they are the bar.
 
 ```sh
 # Python tests (no network). Discovery is driven by tests/__init__.py load_tests.
-python -m unittest                                   # whole suite
+python -m unittest                                   # whole suite (~90s)
 python -m unittest tests.test_deezer                 # one module
 python -m unittest tests.test_webui.SomeClass.test_x # one test
 coverage run -m unittest                             # what CI runs
 coverage run -a -m unittest tests.net.suite          # network tests (CI only; hit real services)
+
+# Same suite across processes — ~25s on 4 cores. Takes the same test ids.
+python tools/partest.py                              # whole suite
+python tools/partest.py -j8 tests.test_webui
+python tools/partest.py --coverage && coverage combine
 
 # Dev install (a project .venv is expected)
 pip install -e . && pip install lxml coverage        # == ci-requirements.txt
@@ -80,7 +85,10 @@ supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics f
 docker compose up --build                            # web player at :5722/app, Subsonic at :5722/rest
 ```
 
-Note: the upstream `tests/` are unittest-based; there is no pytest config. CI runs three
+Note: the upstream `tests/` are unittest-based; there is no pytest config.
+`tests/__init__.py` swaps argon2 for cheap parameters — hashing was half the
+suite's wall clock — which is test-only and guarded by a test that pins the
+production defaults. CI runs three
 workflows — `tests.yaml` (unittest across py3.10–3.14), `docker.yaml` (image build) and
 `android.yaml` (native app APK, uploaded as a run artifact / attached to `v*` releases).
 

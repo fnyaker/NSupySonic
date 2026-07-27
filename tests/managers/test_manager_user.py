@@ -220,6 +220,26 @@ class UserManagerTestCase(unittest.TestCase):
             db.User.DoesNotExist, UserManager.change_password2, "null", "newpass"
         )
 
+    def test_production_password_hashing_is_not_weakened(self):
+        """The suite swaps in cheap argon2 parameters (see tests/__init__.py)
+        because hashing was half its wall clock. This guards that the swap stays
+        TEST-only: production must go on using argon2's own defaults, and those
+        defaults must stay above the OWASP floor."""
+        import inspect
+
+        from argon2 import PasswordHasher
+
+        from supysonic.managers import user as user_module
+
+        # What the module constructs at import time, evaluated fresh.
+        prod = PasswordHasher()
+        self.assertGreaterEqual(prod.memory_cost, 19 * 1024, "argon2id wants >=19 MiB")
+        self.assertGreaterEqual(prod.time_cost, 2)
+
+        # …and the module really does take those defaults, unparameterised. If
+        # this line ever changes, the change is security-relevant: read it.
+        self.assertIn("_hasher = PasswordHasher()", inspect.getsource(user_module))
+
 
 if __name__ == "__main__":
     unittest.main()
