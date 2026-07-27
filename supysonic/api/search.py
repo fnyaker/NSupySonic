@@ -161,7 +161,10 @@ def new_search():
                 ("album", [f.as_subsonic_child(request.user) for f in albums]),
                 (
                     "song",
-                    [t.as_subsonic_child(request.user, request.client) for t in songs],
+                    [
+                        t.as_subsonic_child(request.user, request.client)
+                        for t in Track.prime_credits(songs)
+                    ],
                 ),
             )
         ),
@@ -221,7 +224,10 @@ def search_id3():
                 ("album", [a.as_subsonic_album(request.user) for a in albums]),
                 (
                     "song",
-                    [t.as_subsonic_child(request.user, request.client) for t in songs],
+                    [
+                        t.as_subsonic_child(request.user, request.client)
+                        for t in Track.prime_credits(songs)
+                    ],
                 ),
             )
         ),

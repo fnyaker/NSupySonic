@@ -3,6 +3,7 @@
   import Icon from "./Icon.svelte";
   import { api } from "../lib/api.js";
   import { toasts } from "../lib/stores.js";
+  import { artistSearch } from "../lib/format.js";
 
   export let tracks = [];
   export let context = null;
@@ -33,7 +34,7 @@
       list = list.filter(
         (t) =>
           lc(t.title).includes(q) ||
-          lc(t.artist?.name).includes(q) ||
+          artistSearch(t).includes(q) || // matches featured artists too
           lc(t.album?.title).includes(q)
       );
     if (sort !== "default") {

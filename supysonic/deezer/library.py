@@ -18,7 +18,15 @@ import os.path
 import re
 from datetime import datetime
 
-from ..db import Folder, Artist, Album, Track, PodcastChannel, PodcastEpisode
+from ..db import (
+    Folder,
+    Artist,
+    Album,
+    Track,
+    TrackArtist,
+    PodcastChannel,
+    PodcastEpisode,
+)
 from . import ids
 from .provider import EXT_FOR_FORMAT, NOMINAL_BITRATE
 
@@ -154,6 +162,46 @@ def _parse_gain(raw):
         return None
 
 
+# Deezer's ROLE_ID on a track credit. Anything we don't recognise is treated as
+# a featured credit rather than dropped — better an extra name than a lost one.
+_ROLES = {"0": "Main", "5": "Featured"}
+
+
+def _credits(t: dict) -> list[tuple[str, str, str]]:
+    """``[(deezer artist id, name, role)]`` for a gateway track, in label order.
+
+    The gateway's ``ARTISTS`` is the full credit list — main artist plus any
+    features — but it is only present on some calls (album/playlist song lists,
+    the track page; NOT the trimmed favourites payload).
+
+    An empty result means "Deezer told us nothing", never "this track has one
+    artist" — and that distinction is the whole point: ``_sync_credits`` writes
+    nothing on empty, so re-importing a track through favourites can't replace
+    a known "A feat. B" with a lonely A. A track with no credit rows reads its
+    primary artist instead (``Track.credited_artists``), which is what every
+    row imported before this feature existed does.
+    """
+    raw = t.get("ARTISTS")
+    if not isinstance(raw, list) or not raw:
+        return []
+
+    def order(entry):
+        try:
+            return int(entry.get("ARTISTS_SONGS_ORDER") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    out, seen = [], set()
+    for entry in sorted((e for e in raw if isinstance(e, dict)), key=order):
+        aid = str(entry.get("ART_ID") or "")
+        name = entry.get("ART_NAME", "") or ""
+        if not aid or not name or aid in seen:
+            continue  # Deezer repeats an artist that holds two roles
+        seen.add(aid)
+        out.append((aid, name, _ROLES.get(str(entry.get("ROLE_ID")), "Featured")))
+    return out
+
+
 def normalize_track(t: dict) -> dict:
     """Flatten a gateway track dict (song.getData / playlist / album list)."""
     title = t.get("SNG_TITLE", "")
@@ -168,6 +216,7 @@ def normalize_track(t: dict) -> dict:
         "title": title or "[unknown]",
         "artist": t.get("ART_NAME", "") or "[unknown]",
         "art_id": str(t.get("ART_ID")),
+        "credits": _credits(t),
         "album": t.get("ALB_TITLE", "") or "[non-album tracks]",
         "alb_id": str(t.get("ALB_ID")),
         "cover_md5": t.get("ALB_PICTURE", "") or None,
@@ -253,6 +302,7 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
         track.title = f["title"]
         track.artist = artist
         track.album = album
+        _sync_credits(track, f["credits"], artist, cache=cache)
         track.disc = f["disc"]
         track.number = f["number"]
         track.duration = f["duration"]
@@ -265,7 +315,7 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
     except Track.DoesNotExist:
         ext = EXT_FOR_FORMAT.get(default_quality, ".flac")
         path = _unique_path(_track_path(root, f["artist"], f["album"], f["number"], f["title"], ext), tid)
-        return Track.create(
+        track = Track.create(
             id=tid,
             deezer_id=f["sng_id"],
             disc=f["disc"],
@@ -284,6 +334,36 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
             root_folder=root,
             folder=folder,
         )
+        _sync_credits(track, f["credits"], artist, cache=cache)
+        return track
+
+
+def _sync_credits(track, credits, primary, cache=None):
+    """Replace this track's credit rows with `credits` (main artist + features).
+
+    Rewritten wholesale rather than merged: a re-sync is the only thing that
+    ever changes them, the list is a handful of rows, and diffing would risk
+    leaving a stale credit behind after a label corrects one.
+
+    Nothing is written when Deezer gave us no credit list (see ``_credits``) —
+    that would otherwise wipe good data from an earlier, richer response with
+    the trimmed one from a favourites payload.
+    """
+    if not credits:
+        return
+    TrackArtist.delete().where(TrackArtist.track == track.id).execute()
+    rows = []
+    for position, (art_id, name, role) in enumerate(credits):
+        a = upsert_artist(art_id, name, cache=cache)
+        rows.append(
+            {"track": track.id, "artist": a.id, "role": role, "position": position}
+        )
+    # The primary artist must always be credited, even if Deezer left them out
+    # of ARTISTS — the UI reads this list, and a track with no main artist
+    # would render blank.
+    if not any(r["artist"] == primary.id for r in rows):
+        rows.insert(0, {"track": track.id, "artist": primary.id, "role": "Main", "position": -1})
+    TrackArtist.insert_many(rows).execute()
 
 
 # -- podcasts (shows / episodes) -----------------------------------------

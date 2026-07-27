@@ -231,3 +231,12 @@ CREATE TABLE IF NOT EXISTS podcast_marker (
 );
 CREATE INDEX IF NOT EXISTS index_podcast_marker_user_id_fk ON podcast_marker(user_id);
 CREATE INDEX IF NOT EXISTS index_podcast_marker_episode_id_fk ON podcast_marker(episode_id);
+
+CREATE TABLE IF NOT EXISTS track_artist (
+    track_id UUID NOT NULL REFERENCES track,
+    artist_id UUID NOT NULL REFERENCES artist,
+    role VARCHAR(32) NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (track_id, artist_id)
+);
+CREATE INDEX IF NOT EXISTS index_track_artist_artist_id_fk ON track_artist(artist_id);

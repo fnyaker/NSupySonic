@@ -16,7 +16,7 @@
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { wirePreview, releasePreview, setPreviewGain } from "../lib/visualizer.js";
-  import { duration as fmtDuration } from "../lib/format.js";
+  import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import { episodeMarkers, loadEpisodeMarkers } from "../lib/markers.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
@@ -712,7 +712,7 @@
       : api.shareFileUrl(id, fullFmt === "orig" ? null : fullFmt);
 
   function fallbackName() {
-    const artist = track.artist?.name || "";
+    const artist = artistLine(track);
     const base = (artist ? artist + " - " : "") + (track.title || "audio");
     // "orig" = whatever the archive holds (mp3 for podcasts, else flac); a
     // named format (mp3/m4a/flac) is its own extension.
@@ -815,7 +815,7 @@
           <Cover src={track.album?.cover} alt={track.title} size={46} kind="track" fallbackId={track.deezer_id} />
           <div class="txt">
             <span class="t">{track.title}</span>
-            <span class="a muted">{track.artist?.name}</span>
+            <span class="a muted">{artistLine(track)}</span>
           </div>
         </div>
         <button class="ic" on:click={close} aria-label="Fermer"><Icon name="close" size={20} /></button>

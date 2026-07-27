@@ -8,6 +8,7 @@
   import { playbackIdle } from "../lib/playback.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
+  import ArtistLine from "./ArtistLine.svelte";
 
   // Editable, reorderable playlist list. Reordering uses svelte-dnd-action's
   // native drag-handle support (dragHandleZone + dragHandle), which handles
@@ -132,9 +133,7 @@
             {track.title}
             {#if track.explicit}<span class="explicit">E</span>{/if}
           </div>
-          <button class="a muted" on:click|stopPropagation={() => track.artist && push("/artist/" + track.artist.deezer_id)}>
-            {track.artist?.name}
-          </button>
+          <span class="a muted"><ArtistLine {track} /></span>
         </div>
       </div>
 
@@ -282,17 +281,16 @@
     border-radius: 3px;
     vertical-align: 1px;
   }
+  /* One hoverable button per credited artist lives inside (ArtistLine), so the
+     hover treatment is applied there, per name, not on the whole line. */
   .a {
+    display: block;
     text-align: left;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 100%;
     font-size: 0.85rem;
-  }
-  .a:hover {
-    color: var(--text);
-    text-decoration: underline;
   }
   .dur {
     text-align: right;

@@ -1,7 +1,7 @@
 <script>
   import { api } from "../lib/api.js";
   import { toasts } from "../lib/stores.js";
-  import { duration as fmtDuration } from "../lib/format.js";
+  import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
 
@@ -97,7 +97,7 @@
               {#if t.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
               {t.title}
             </div>
-            <div class="sub muted">{t.artist?.name}{t.album?.title ? " · " + t.album.title : ""}</div>
+            <div class="sub muted">{artistLine(t)}{t.album?.title ? " · " + t.album.title : ""}</div>
           </div>
           <span class="dur muted">{fmtDuration(t.duration)}</span>
           <button class="add" class:done={isIn(t)} disabled={isIn(t)} on:click={() => add(t)} aria-label="Ajouter">

@@ -9,7 +9,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from supysonic.db import Track, Album, Artist, Folder, Playlist, PlaylistTrack, StarredTrack, User
+from supysonic.db import (
+    Track,
+    Album,
+    Artist,
+    ClientPrefs,
+    Folder,
+    Playlist,
+    PlaylistTrack,
+    StarredTrack,
+    User,
+)
 from supysonic.deezer import ids
 from supysonic.deezer.provider import DeezerProvider
 from supysonic.deezer import archive, importer
@@ -160,6 +170,168 @@ class DeezerTestCase(TestBase):
         self.assertEqual(t2.id, t.id)
         self.assertEqual(Track.select().where(Track.deezer_id == "1").count(), 1)
         self.assertEqual(t2.title, "Song (remastered)")
+
+    # -- multi-artist credits --------------------------------------------
+
+    def test_credits_from_gateway_payload(self):
+        from supysonic.deezer.library import _credits
+
+        # No ARTISTS list (the trimmed favourites payload) means "Deezer told
+        # us nothing" — NOT "one artist". Anything else and re-importing a
+        # track through favourites would overwrite a known feature credit.
+        self.assertEqual(_credits(raw_track(1)), [])
+
+        # A full list is ordered by ARTISTS_SONGS_ORDER, not by array position,
+        # and ROLE_ID 0/5 map to Main/Featured.
+        raw = raw_track(1)
+        raw["ARTISTS"] = [
+            {"ART_ID": "3", "ART_NAME": "C", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "2"},
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        self.assertEqual(
+            _credits(raw),
+            [("1", "A", "Main"), ("2", "B", "Featured"), ("3", "C", "Featured")],
+        )
+
+        # Deezer repeats an artist that holds two roles; the first wins.
+        raw["ARTISTS"].append(
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "9"}
+        )
+        self.assertEqual([c[0] for c in _credits(raw)], ["1", "2", "3"])
+
+        # Junk never crashes and never invents a credit.
+        self.assertEqual(_credits({}), [])
+        self.assertEqual(_credits({"ART_ID": "1", "ART_NAME": "A", "ARTISTS": "nope"}), [])
+        self.assertEqual(_credits({"ARTISTS": [{"ART_NAME": "no id"}]}), [])
+
+    def test_upsert_track_stores_credits(self):
+        from supysonic.db import TrackArtist
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        raw = raw_track(1, "Feature")
+        raw["ARTISTS"] = [
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        t = library.upsert_track(raw, root, "FLAC")
+
+        # Track.artist stays the PRIMARY — archive paths and the classic
+        # Subsonic `artist` field must not move.
+        self.assertEqual(t.artist.deezer_id, "1")
+        self.assertEqual(
+            [(a.name, r) for a, r in t.credited_artists()], [("A", "Main"), ("B", "Featured")]
+        )
+        self.assertEqual(t.display_artist(), "A feat. B")
+        # The featured artist got a real Artist row of its own.
+        self.assertTrue(Artist.select().where(Artist.deezer_id == "2").exists())
+
+        # Re-importing replaces the credits rather than duplicating them.
+        library.upsert_track(raw, root, "FLAC")
+        self.assertEqual(TrackArtist.select().where(TrackArtist.track == t.id).count(), 2)
+
+        # A LATER, poorer payload (favourites: no ARTISTS) must not wipe them.
+        library.upsert_track(raw_track(1, "Feature"), root, "FLAC")
+        self.assertEqual(TrackArtist.select().where(TrackArtist.track == t.id).count(), 2)
+
+    def test_credits_always_include_the_primary_artist(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        # ARTISTS that omits ART_ID entirely (Deezer does this on some remixes).
+        raw = raw_track(1, "Orphan")
+        raw["ARTISTS"] = [
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+        ]
+        t = library.upsert_track(raw, root, "FLAC")
+        names = [a.name for a, _r in t.credited_artists()]
+        self.assertIn("Artist", names)  # the primary is never dropped
+        self.assertIn("B", names)
+
+    def test_credited_only_artist_survives_prune(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        raw = raw_track(1, "Feature")
+        raw["ARTISTS"] = [
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        library.upsert_track(raw, root, "FLAC")
+        # B owns no Track of its own, only a credit — pruning must keep it, or
+        # the "feat." link would dangle after the next scan.
+        Artist.prune()
+        self.assertTrue(Artist.select().where(Artist.deezer_id == "2").exists())
+
+    def test_deleting_a_folder_hierarchy_takes_the_credits_with_it(self):
+        from supysonic.db import TrackArtist
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        raw = raw_track(1, "Feature")
+        raw["ARTISTS"] = [
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        library.upsert_track(raw, root, "FLAC")
+        self.assertEqual(TrackArtist.select().count(), 2)
+
+        # A bulk hierarchy delete doesn't cascade; orphan credit rows would pin
+        # the featured artist against prune() for good.
+        root.delete_hierarchy()
+        self.assertEqual(TrackArtist.select().count(), 0)
+        Artist.prune()
+        self.assertFalse(Artist.select().where(Artist.deezer_id == "2").exists())
+
+    def test_deleting_one_track_takes_its_credits_with_it(self):
+        from supysonic.db import TrackArtist
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        raw = raw_track(1, "Feature")
+        raw["ARTISTS"] = [
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        t = library.upsert_track(raw, root, "FLAC")
+        # This is the path the scanner and the local importer take.
+        t.delete_instance(recursive=True)
+        self.assertEqual(TrackArtist.select().count(), 0)
+
+    def test_subsonic_child_exposes_credits(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        raw = raw_track(1, "Feature", art=("1", "A"))
+        raw["ARTISTS"] = [
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "0", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "5", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        t = library.upsert_track(raw, root, "FLAC")
+        user = User.create(name="sub", password="x", salt="x", mail="s@x")
+        prefs = ClientPrefs.create(user=user, client_name="tests")
+        child = t.as_subsonic_child(user, prefs)
+
+        # Classic clients keep the single-string artist they've always parsed…
+        self.assertEqual(child["artist"], "A")
+        # …and OpenSubsonic clients get the full list plus the credit line.
+        self.assertEqual([a["name"] for a in child["artists"]], ["A", "B"])
+        self.assertEqual(child["displayArtist"], "A feat. B")
+
+    def test_display_artist_without_a_main_credit(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        raw = raw_track(1, "Odd")
+        # An unmapped ROLE_ID makes everyone "Featured"; the line must not read
+        # "A feat. A, B" by promoting the first name and repeating it.
+        raw["ARTISTS"] = [
+            {"ART_ID": "1", "ART_NAME": "A", "ROLE_ID": "77", "ARTISTS_SONGS_ORDER": "0"},
+            {"ART_ID": "2", "ART_NAME": "B", "ROLE_ID": "77", "ARTISTS_SONGS_ORDER": "1"},
+        ]
+        t = library.upsert_track(raw, root, "FLAC")
+        self.assertEqual(t.display_artist(), "A, B")
 
     def test_upsert_track_stores_replaygain(self):
         from supysonic.deezer import library

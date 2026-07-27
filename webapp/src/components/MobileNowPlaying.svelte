@@ -20,12 +20,13 @@
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { addMarkerAt } from "../lib/markers.js";
-  import { duration as fmtDuration, hiResCover, resolveCover, cssUrl } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover, resolveCover, cssUrl, artistLine } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
+  import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
   import VirtualList from "./VirtualList.svelte";
 
@@ -686,7 +687,7 @@
     <div class="info">
       <div class="txt">
         <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
-        <button class="a" class:status={$playbackLabel} on:click={() => !$playbackLabel && $current.artist && go("/artist/" + $current.artist.deezer_id)}>{$playbackLabel || $current.artist?.name}</button>
+        <span class="a" class:status={$playbackLabel}>{#if $playbackLabel}{$playbackLabel}{:else}<ArtistLine track={$current} navigate={go} />{/if}</span>
       </div>
       <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
         <Icon name={fav ? "heartFilled" : "heart"} size={24} />
@@ -737,7 +738,7 @@
           <div class="qitem" class:now={index === idx} class:past={index < idx}>
             <button on:click={() => { player.jump(index); showQueue = false; }}>
               <Cover src={item.album?.cover} alt="" size={42} kind="track" fallbackId={item.deezer_id} />
-              <span class="qm"><span class="qt">{item.title}</span><span class="qa">{item.artist?.name}</span></span>
+              <span class="qm"><span class="qt">{item.title}</span><span class="qa">{artistLine(item)}</span></span>
             </button>
           </div>
         </VirtualList>
@@ -905,7 +906,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* `display: block` is load-bearing: this used to be a <button> and now wraps
+     one button per credited artist, and ellipsis doesn't apply to an inline. */
   .a {
+    display: block;
     font-size: 1rem;
     text-align: left;
     color: rgba(255, 255, 255, 0.75);

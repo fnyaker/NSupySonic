@@ -195,7 +195,7 @@ def artist_info():
 def album_info():
     res = get_entity(Album)
     info = res.as_subsonic_album(request.user)
-    tracks = sorted(res.tracks, key=lambda t: t.sort_key())
+    tracks = Track.prime_credits(sorted(res.tracks, key=lambda t: t.sort_key()))
     info["song"] = [
         t.as_subsonic_child(request.user, request.client) for t in tracks
     ]

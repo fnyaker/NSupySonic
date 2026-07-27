@@ -6,6 +6,7 @@
   import { playbackIdle } from "../lib/playback.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
+  import ArtistLine from "./ArtistLine.svelte";
 
   export let track;
   export let index = null; // optional track number
@@ -63,9 +64,7 @@
         {track.title}
         {#if track.explicit}<span class="explicit">E</span>{/if}
       </div>
-      <button class="a muted" on:click|stopPropagation={() => track.artist && push("/artist/" + track.artist.deezer_id)}>
-        {track.artist?.name}
-      </button>
+      <span class="a muted"><ArtistLine {track} /></span>
     </div>
   </div>
 
@@ -150,6 +149,7 @@
   }
   .a,
   .alb {
+    display: block;
     text-align: left;
     white-space: nowrap;
     overflow: hidden;
@@ -157,7 +157,8 @@
     max-width: 100%;
     font-size: 0.85rem;
   }
-  .a:hover,
+  /* `.a` holds one hoverable button per credited artist (ArtistLine), so the
+     hover treatment belongs on each name, not on the whole line. */
   .alb:hover {
     color: var(--text);
     text-decoration: underline;

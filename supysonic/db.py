@@ -31,7 +31,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260720"
+SCHEMA_VERSION = "20260727"
 
 
 def now():
@@ -157,7 +157,9 @@ class Folder(PathMixin, _Model):
             ]
             + [
                 t.as_subsonic_child(user, client)
-                for t in sorted(self.tracks, key=lambda t: t.sort_key())
+                for t in Track.prime_credits(
+                    sorted(self.tracks, key=lambda t: t.sort_key())
+                )
             ],
         }
         if not self.root:
@@ -197,6 +199,11 @@ class Folder(PathMixin, _Model):
         tracks = Track.select(Track.id).where(cond)
         RatingTrack.delete().where(RatingTrack.rated.in_(tracks)).execute()
         StarredTrack.delete().where(StarredTrack.starred.in_(tracks)).execute()
+        # This is a bulk delete, so nothing cascades for us the way it does on
+        # delete_instance(recursive=True) — the credit rows have to go by hand
+        # like the two above, or they'd outlive their track and keep every
+        # featured artist pinned against Artist.prune() forever.
+        TrackArtist.delete().where(TrackArtist.track.in_(tracks)).execute()
 
         path_cond = Folder.path.startswith(self.path)
         folders = Folder.select(Folder.id).where(path_cond)
@@ -242,10 +249,14 @@ class Artist(_Model):
     def prune(cls):
         album_artists = Album.select(Album.artist)
         track_artists = Track.select(Track.artist)
+        # An artist who only ever appears as a FEATURED credit is still in use;
+        # without this they'd be pruned and their credits deleted with them.
+        credited = TrackArtist.select(TrackArtist.artist)
 
         StarredArtist.delete().where(
             StarredArtist.starred.not_in(album_artists),
             StarredArtist.starred.not_in(track_artists),
+            StarredArtist.starred.not_in(credited),
         ).execute()
 
         return (
@@ -253,6 +264,7 @@ class Artist(_Model):
             .where(
                 cls.id.not_in(album_artists),
                 cls.id.not_in(track_artists),
+                cls.id.not_in(credited),
             )
             .execute()
         )
@@ -357,13 +369,82 @@ class Track(PathMixin, _Model):
     root_folder = ForeignKeyField(Folder, backref="+")
     folder = ForeignKeyField(Folder, backref="tracks")
 
+    @classmethod
+    def prime_credits(cls, tracks):
+        """Load the credit rows for a whole response in ONE query.
+
+        ``as_subsonic_child`` reads the credits per track, which is an N+1 as
+        soon as a list endpoint is involved (a 4000-track getStarred). Call this
+        with the tracks about to be serialized and each one answers from a
+        cache instead. Returns the tracks as a list, so a lazy query can be
+        primed and iterated in one go. Not priming is always safe — a track
+        that wasn't primed simply pays for its own lookup.
+        """
+        tracks = list(tracks)
+        ids = [t.id for t in tracks]
+        by_track = {}
+        # SQLite caps host parameters (999 by default); chunk the IN clause.
+        for i in range(0, len(ids), 400):
+            rows = (
+                TrackArtist.select(TrackArtist, Artist)
+                .join(Artist)
+                .where(TrackArtist.track << ids[i : i + 400])
+                .order_by(TrackArtist.track, TrackArtist.position)
+            )
+            for r in rows:
+                by_track.setdefault(r.track_id, []).append((r.artist, r.role))
+        for t in tracks:
+            t._credits_cache = by_track.get(t.id, [])
+        return tracks
+
+    def credited_artists(self):
+        """Every artist credited on this track, in Deezer's own order.
+
+        ``Track.artist`` stays the PRIMARY artist — it owns the archive folder
+        and every existing query — and this is the full credit list on top:
+        the main artist plus any featured ones. Falls back to just the primary
+        for tracks imported before the credits existed, or for local files.
+        """
+        cached = getattr(self, "_credits_cache", None)
+        if cached is not None:
+            return cached or [(self.artist, "Main")]
+        rows = (
+            TrackArtist.select(TrackArtist, Artist)
+            .join(Artist)
+            .where(TrackArtist.track == self.id)
+            .order_by(TrackArtist.position)
+        )
+        out = [(r.artist, r.role) for r in rows]
+        return out or [(self.artist, "Main")]
+
+    def display_artist(self, credits=None):
+        """The credit line: "A", or "A feat. B" / "A feat. B, C".
+
+        `credits` lets a caller that already has the list pass it back in — it
+        is the single most expensive thing on this row, so looking it up twice
+        to serialize one track is pure waste."""
+        credits = self.credited_artists() if credits is None else credits
+        main = [a.name for a, role in credits if role == "Main"]
+        feat = [a.name for a, role in credits if role != "Main"]
+        # Nobody credited as Main (an unmapped Deezer role, a compilation): fall
+        # back to the track's own primary artist rather than promoting a guest
+        # and then repeating them after a "feat." with nothing to hang off.
+        if not main:
+            return ", ".join(feat) or self.artist.name
+        return f"{', '.join(main)} feat. {', '.join(feat)}" if feat else ", ".join(main)
+
     def as_subsonic_child(self, user, prefs):
+        credits = self.credited_artists()
         info = {
             "id": str(self.id),
             "parent": str(self.folder.id),
             "isDir": False,
             "title": self.title,
             "album": self.album.name,
+            # Classic Subsonic is single-artist and every client understands
+            # this field, so it keeps the primary artist. The full credit list
+            # goes in the OpenSubsonic `artists`/`displayArtist` fields below,
+            # which clients that don't know them simply ignore.
             "artist": self.artist.name,
             "track": self.number,
             "size": os.path.getsize(self.path) if os.path.isfile(self.path) else -1,
@@ -378,6 +459,9 @@ class Track(PathMixin, _Model):
             "albumId": str(self.album.id),
             "artistId": str(self.artist.id),
             "type": "music",
+            # OpenSubsonic multi-artist fields.
+            "artists": [{"id": str(a.id), "name": a.name} for a, _r in credits],
+            "displayArtist": self.display_artist(credits),
         }
 
         if self.year:
@@ -535,6 +619,29 @@ def _make_rating_model(target_model):
 
 RatingFolder = _make_rating_model(Folder)
 RatingTrack = _make_rating_model(Track)
+
+
+class TrackArtist(_Model):
+    """One credited artist on a track — the multi-artist ("feat.") link.
+
+    Deezer hands out a full credit list per track (the gateway's ``ARTISTS``:
+    an ordered list with a role per entry), but a Track can only point at one
+    artist. This carries the rest without disturbing that: ``Track.artist``
+    remains the primary, so archive paths, browse queries and the classic
+    Subsonic ``artist`` field are all untouched.
+
+    `role` is Deezer's ("Main" / "Featured"); `position` is its own ordering,
+    kept so the credit line reads the way the label wrote it.
+    """
+
+    track = ForeignKeyField(Track, backref="artist_credits", on_delete="CASCADE")
+    artist = ForeignKeyField(Artist, backref="track_credits")
+    role = CharField(32, default="Main")
+    position = IntegerField(default=0)
+
+    class Meta:
+        primary_key = CompositeKey("track", "artist")
+        table_name = "track_artist"
 
 
 class ChatMessage(_Model):
@@ -929,6 +1036,7 @@ def _migration_order():
         Artist,
         Album,
         Track,
+        TrackArtist,  # after Track and Artist: it references both
         User,
         ClientPrefs,
         StarredFolder,
