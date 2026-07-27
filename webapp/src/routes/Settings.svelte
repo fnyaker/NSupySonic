@@ -16,6 +16,7 @@
   import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
   import { clearPlayCache, enforce } from "../lib/playcache.js";
   import { bytes as fmtBytes, duration as fmtDuration, artistLine } from "../lib/format.js";
+  import { logsEnabled, logCount, clearLog, downloadLog, copyLog } from "../lib/log.js";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
@@ -46,6 +47,26 @@
     { id: "account", label: "Compte" },
   ];
   let tab = "fx";
+
+  // -- diagnostic log ---------------------------------------------------------
+  // The count is re-read whenever the panel could have changed, rather than
+  // subscribed to: the logger is deliberately a plain module (no store on the
+  // hot path) so that logging costs one boolean read when it is switched off.
+  let logLines = logCount();
+  let copied = false;
+  $: if ($logsEnabled !== undefined) logLines = logCount();
+  function saveLog() {
+    if (!downloadLog()) toasts.push("Téléchargement refusé par le navigateur", "error");
+  }
+  async function copyLogToClipboard() {
+    copied = await copyLog();
+    toasts.push(copied ? "Journal copié" : "Copie impossible", copied ? undefined : "error");
+    if (copied) setTimeout(() => (copied = false), 2000);
+  }
+  function wipeLog() {
+    clearLog();
+    logLines = 0;
+  }
 
   let items = [];
   async function refresh() {
@@ -251,6 +272,38 @@
     </div>
   </section>
 {/if}
+
+<section class="card">
+  <h2>Diagnostic</h2>
+  <p class="muted sub">
+    Enregistre ce que fait l'application (lecture, reprise de session, erreurs
+    audio) dans un journal local, à joindre à un rapport de bug. Désactivé par
+    défaut&nbsp;: rien n'est enregistré ni envoyé tant que vous ne l'activez pas,
+    et le journal ne quitte jamais l'appareil.
+  </p>
+  <label class="dbg-toggle">
+    <input type="checkbox" checked={$logsEnabled} on:change={(e) => logsEnabled.set(e.target.checked)} />
+    <span>Enregistrer le journal</span>
+  </label>
+  {#if $logsEnabled}
+    <p class="muted sub logline">
+      {logLines} ligne{logLines > 1 ? "s" : ""} enregistrée{logLines > 1 ? "s" : ""}.
+      Le journal survit à la fermeture de l'application&nbsp;: reproduisez le
+      problème, puis revenez ici le récupérer.
+    </p>
+    <div class="logbtns">
+      <button class="save" on:click={saveLog} disabled={!logLines}>
+        <Icon name="download" size={16} /> Télécharger (.txt)
+      </button>
+      <button class="ghost" on:click={copyLogToClipboard} disabled={!logLines}>
+        <Icon name="share" size={16} /> {copied ? "Copié" : "Copier"}
+      </button>
+      <button class="ghost" on:click={wipeLog} disabled={!logLines}>
+        <Icon name="trash" size={16} /> Vider
+      </button>
+    </div>
+  {/if}
+</section>
 {/if}
 
 <style>
@@ -359,6 +412,50 @@
   .sub {
     font-size: 0.85rem;
     margin: 4px 0 14px;
+  }
+  .dbg-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-weight: 600;
+    user-select: none;
+  }
+  .dbg-toggle input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .logline {
+    margin: 14px 0 12px;
+  }
+  .logbtns {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .logbtns .save,
+  .ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .ghost {
+    padding: 9px 16px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .ghost:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .ghost:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .quality {
     display: grid;

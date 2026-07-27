@@ -23,6 +23,7 @@
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
+  import { logInfo } from "../lib/log.js";
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
   import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
@@ -146,6 +147,9 @@
     wakeLock = null;
   }
   function onVisibility() {
+    const s = get(player);
+    logInfo("player", `visibility=${document.visibilityState} index=${s.index} playing=${s.playing} t=${(s.currentTime || 0).toFixed(1)}`,
+            null, { important: true });
     if (document.visibilityState !== "visible") return;
     // Coming back to the foreground: re-arm the visualizer's AudioContext (the
     // OS may have suspended it while hidden) and re-take the screen lock if the
@@ -216,6 +220,7 @@
 
   function onElError(e) {
     if (e && e.target !== audio) return;
+    logInfo("audio", "error code=" + (audio?.error?.code ?? "?"), null, { important: true });
     if (loadingTrack) return; // stale error from the outgoing source
     // A failing chase reload (network dropped mid-chase): fold back into the
     // normal recovery path, which parks offline / resumes at the last position.
@@ -598,6 +603,8 @@
 
   async function loadTrack(track) {
     const firstLoad = curId === null;
+    logInfo("load", `${track.podcast ? "episode" : "track"} ${track.deezer_id} "${track.title}"`
+      + (firstLoad ? " (first load after restore)" : ""), null, { important: firstLoad });
     // Where to (re)start this track:
     //  - a podcast episode always resumes from its own saved position, whenever
     //    it's loaded (replaying it days later still picks up where you stopped);
@@ -1111,6 +1118,7 @@
   }
 
   async function onEnded(e) {
+    logInfo("audio", "ended", null, { important: true });
     if (e && e.target !== audio) return; // ignore the idle/preloading element
     // A track change is mid-flight: this `ended` comes from the OUTGOING source
     // finishing during the load gap — acting on it would double-advance.
