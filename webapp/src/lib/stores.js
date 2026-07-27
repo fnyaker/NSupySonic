@@ -432,15 +432,15 @@ function createPlayer() {
     _orig: Array.isArray(sess._orig) ? sess._orig : null,
   });
 
-  // Persist the state in two tiers. The FULL session (queue and all) is only
-  // written when something real happens: track/queue change, play/pause — one
-  // write per user action. Mere position progress during playback refreshes
-  // only the tiny POS_KEY tick (throttled to ~2s, ~60 bytes), so continuous
-  // playback never re-serializes the whole queue. Play/pause counts as a full
-  // save on purpose: a pause in the background is often the LAST code that
-  // runs before Android kills the tab (hidden+silent pages get their timers
-  // frozen), so the exact position can't wait for any timer.
-  let posTimer = null;
+  // Persistence is split by WHAT CHANGES, not by when:
+  //   POS_KEY  — {index, id, time}, ~60 bytes. Where playback is. Written
+  //              synchronously on every track change and roughly every 2s of
+  //              progress, and it is what a resume reads.
+  //   SESSION_KEY — the queue (plus context/shuffle/repeat). Big, and written
+  //              only when the queue itself changes, on an idle callback.
+  // Splitting it this way is what keeps a track change costing 60 bytes instead
+  // of a quarter of a megabyte, and it means a resume never depends on the two
+  // keys agreeing with each other — see readSession.
   let saveIdle = null;
   let lastQueue = null;
   let lastPlaying = null;
@@ -454,7 +454,6 @@ function createPlayer() {
   // When the last position tick was written, so the background path can pace
   // itself off the clock rather than off a timer the browser may not run.
   let lastPosAt = 0;
-  const hidden = () => typeof document !== "undefined" && document.hidden;
   function snapshot(s, cap = SESSION_CAP) {
     // Cap the persisted queue with a window AROUND the playing track — a plain
     // head slice restored the wrong track whenever the index was past the cap.
@@ -498,10 +497,13 @@ function createPlayer() {
     });
   }
   // Serialising a long queue and handing it to localStorage is synchronous
-  // main-thread work — localStorage is disk I/O — so a queue change defers it to
-  // the next idle moment instead of running it inside the store update. Measured
-  // at 6× CPU throttle with a 1000-track queue: ~255 KB and 5–7 ms of blocking
-  // per write, right in the frame where the new cover has to fade in.
+  // main-thread work — localStorage is disk I/O — so it runs on the next idle
+  // moment instead of inside the store update. Measured at 6× CPU throttle with
+  // a 1000-track queue: ~255 KB and 5–7 ms of blocking. That is why only a real
+  // QUEUE change comes through here; a track change costs the ~60 byte tick.
+  // Losing one of these to an idle callback that never fires is survivable —
+  // the tick was already written synchronously and carries the track id, so the
+  // restore repairs itself against the older queue (see readSession).
   function scheduleSave() {
     if (saveIdle !== null) return;
     saveIdle = runIdle(() => {
@@ -513,26 +515,32 @@ function createPlayer() {
   // closed, the moments after which timers can't be trusted.
   function flushSession() {
     if (!latest) return;
-    clearTimeout(posTimer);
-    posTimer = null;
     if (saveIdle !== null) {
       cancelIdle(saveIdle);
       saveIdle = null;
     }
+    savePos(latest); // the position first: it is what a resume actually needs
     save(latest);
   }
   subscribe((s) => {
     latest = s;
-    // Three tiers, cheapest first:
-    //  - a plain TRACK CHANGE (same queue, still playing) writes only the ~60
-    //    byte position tick, which carries the index and the track id;
-    //    readSession trusts it over the snapshot when it's fresher. This is by
-    //    far the most common event, and it used to re-serialise the entire
-    //    queue — the source of the hitch at every track change.
-    //  - a QUEUE change writes the full snapshot, but on the next idle moment.
-    //  - PLAY/PAUSE writes the full snapshot immediately: a pause in the
-    //    background is often the last code that runs before Android kills the
-    //    tab, so it can't wait for an idle callback that may never come.
+    // What gets written, and how often:
+    //
+    //  - the POSITION tick ({index, id, time}, ~60 bytes) on every track change
+    //    and, while playing, about every two seconds. It is the AUTHORITATIVE
+    //    record of where playback is — readSession takes the position from it,
+    //    never from the queue blob, so the two never have to agree.
+    //  - the QUEUE blob only when the queue itself actually changes. It is the
+    //    expensive one (a 1000-track queue is ~255 KB of JSON, 5-7 ms of
+    //    blocking at 6x CPU throttle), and re-writing it on every track change
+    //    is what used to hitch the player — and what made a resume depend on
+    //    two keys agreeing.
+    //
+    // Deliberately NOT keyed off `document.hidden`. The Android app never calls
+    // webView.onPause() (that is what kept background playback alive), so the
+    // WebView is never told it is hidden and `document.hidden` stays false the
+    // whole time the screen is off. A hidden-only path is dead code exactly
+    // where it is needed most.
     const queueChanged = s.queue !== lastQueue;
     const playChanged = s.playing !== lastPlaying;
     const idxKey = `${s.index}|${s.queue[s.index]?.deezer_id ?? ""}`;
@@ -540,58 +548,22 @@ function createPlayer() {
     lastQueue = s.queue;
     lastPlaying = s.playing;
     lastIndexKey = idxKey;
-    if (playChanged) {
-      clearTimeout(posTimer);
-      posTimer = null;
-      if (saveIdle !== null) {
-        cancelIdle(saveIdle);
-        saveIdle = null;
-      }
-      save(s);
-    } else if (queueChanged) {
-      clearTimeout(posTimer);
-      posTimer = null;
-      // Deferring exists to keep a VISIBLE frame smooth. Hidden, there is no
-      // frame to protect — and requestIdleCallback doesn't run in a hidden
-      // page (its timeout falls back to a timer, which a backgrounded tab
-      // throttles and a frozen one stops altogether). So a queue that grows in
-      // the background — Flow and radio top themselves up on every track
-      // change — could go unsaved indefinitely while the position ticks, which
-      // are synchronous, ran on into tracks the snapshot never learned about.
-      if (hidden()) save(s);
-      else scheduleSave();
-    } else if (moved) {
-      clearTimeout(posTimer);
-      posTimer = null;
-      // Screen off / app in the background: write the WHOLE session, not just
-      // the tick. The two-key split (queue in one, index in the other) is a
-      // speed optimisation for the foreground, and it only restores correctly
-      // if the two agree — every way they can drift ends with the listener
-      // thrown back to whatever track was playing when the screen went off.
-      // Backgrounded there is no frame to keep smooth and a track change comes
-      // around every few minutes, so paying for one full write buys a session
-      // that is correct on its own, whatever happens to the tick afterwards.
-      //
-      // `currentTime` is forced to 0: next()/jump() move the index without
-      // touching it, so the store still holds the OUTGOING track's playhead at
-      // this instant (the incoming one resets it a moment later, from the audio
-      // element). Snapshotting that as-is would pair the new track with the old
-      // one's position and resume it 3 minutes in.
-      if (hidden()) save({ ...s, currentTime: 0 });
-      else savePos(s);
-    } else if (hidden()) {
-      // Same reasoning as the queue write above, for the playhead: a hidden
-      // page's timers are throttled to as little as once a minute, and stop
-      // outright once it's frozen, so a `setTimeout` tick can't be relied on to
-      // keep the position fresh. `timeupdate` keeps firing while audio plays,
-      // which is what got us here, so rate-limit off the CLOCK instead of off a
-      // timer — same ~2s cadence, no timer to throttle.
-      if (Date.now() - lastPosAt >= 2000) savePos(s);
-    } else if (!posTimer) {
-      posTimer = setTimeout(() => {
-        posTimer = null;
-        savePos(latest);
-      }, 2000);
+
+    if (queueChanged) {
+      // Write the position FIRST and synchronously: it is tiny, it can't fail
+      // for want of an idle moment, and it keeps the resume correct however
+      // late the blob lands (or if it never does).
+      savePos(s);
+      scheduleSave();
+    } else if (moved || playChanged) {
+      savePos(s);
+    } else if (Date.now() - lastPosAt >= 2000) {
+      // Plain progress inside a track. Rate-limited off the CLOCK rather than a
+      // timer: the store is updated ~4x/second by the audio element's
+      // `timeupdate`, which keeps firing while audio plays, whereas a
+      // setTimeout is throttled to as little as once a minute in a backgrounded
+      // page and never runs at all in a frozen one.
+      savePos(s);
     }
   });
 
