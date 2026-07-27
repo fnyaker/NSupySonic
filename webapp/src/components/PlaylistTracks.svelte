@@ -124,7 +124,7 @@
       {/if}
 
       <div class="titles">
-        <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} /></div>
+        <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} kind="track" fallbackId={track.deezer_id} /></div>
         <div class="meta">
           <div class="t">
             {#if track.local}<span class="local" title="Fichier local (pas sur Deezer)"><Icon name="cloudOff" size={13} /></span>{/if}
@@ -166,6 +166,15 @@
     border-radius: 8px;
     user-select: none;
     background: var(--bg);
+    /* This list can't be windowed — svelte-dnd-action needs every drop target
+       in the DOM — so instead we make the off-screen rows nearly free: the
+       browser skips their style/layout/paint entirely (and never fetches their
+       lazily-loaded cover). The row BOX itself is still laid out at its
+       intrinsic height, so drag hit-testing and scroll geometry stay exact.
+       Rows are uniform, so the placeholder height below is the real one. */
+    content-visibility: auto;
+    contain-intrinsic-size: 64px; /* fallback: engines without the `auto` keyword */
+    contain-intrinsic-size: auto 64px;
   }
   .row:hover {
     background: var(--bg-hover);
@@ -396,6 +405,8 @@
       grid-template-columns: 44px 40px 1fr 44px;
       padding: 12px 6px;
       align-items: center;
+      contain-intrinsic-size: 88px; /* taller edit rows on phones */
+      contain-intrinsic-size: auto 88px;
     }
     .list.editing .updown button {
       width: 40px;

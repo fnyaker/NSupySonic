@@ -18,7 +18,7 @@
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { addMarkerAt } from "../lib/markers.js";
-  import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover, resolveCover, cssUrl } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
 
   // Blurred backdrop, as a stack of crossfading layers. Each new cover is
@@ -68,8 +68,13 @@
   }
   function pushBgLayer(src, url) {
     const id = ++bgN;
-    bgLayers = [...bgLayers, { id, src, url }];
-    // Drop the covered-up layers once the fade-in has finished.
+    // Keep at most ONE layer under the incoming one — that's all that shows
+    // through while the new art fades in. The stack used to grow until 420ms of
+    // quiet finally arrived, so skipping through a dozen tracks left a dozen
+    // full-screen `blur(60px)` layers composited on top of each other, which is
+    // enough on its own to drag the whole view to a crawl.
+    bgLayers = [...bgLayers.slice(-1), { id, src, url }];
+    // Drop the covered-up layer once the fade-in has finished.
     clearTimeout(bgTimer);
     bgTimer = setTimeout(() => (bgLayers = bgLayers.filter((l) => l.id === id)), 420);
   }
@@ -161,6 +166,7 @@
     if (typeof document !== "undefined")
       document.removeEventListener("visibilitychange", onVisibility);
     clearTimeout(bgTimer);
+    clearTimeout(bgRetryTimer);
     if (bgLoader) {
       bgLoader.onload = bgLoader.onerror = null;
       bgLoader.src = "";
@@ -171,7 +177,7 @@
 
 <div class="d" transition:fade={{ duration: 150 }}>
   {#each bgLayers as layer (layer.id)}
-    <div class="bg" style={`background-image:url(${layer.src})`} in:fade={{ duration: 350 }}></div>
+    <div class="bg" style={`background-image:${cssUrl(layer.src)}`} in:fade={{ duration: 350 }}></div>
   {/each}
   <div class="scrim"></div>
 
@@ -192,13 +198,13 @@
       </div>
 
       <div class="cover">
-        <div class="glow" style={`background-image:url(${glowSrc})`}></div>
+        <div class="glow" style={`background-image:${cssUrl(glowSrc)}`}></div>
         {#key $current.deezer_id}
           <div class="cover-fade" in:fade={{ duration: 260 }} out:fade={{ duration: 260 }}>
             <!-- 1000px: 1500 is 2-3× the bytes for a marginal gain, and the CDN
                  generates big sizes on demand (slow). Cover.svelte shows the
                  cached 500px instantly and upgrades when this one is decoded. -->
-            <Cover src={hiResCover($current.album?.cover, 1000)} alt={$current.title} />
+            <Cover src={hiResCover($current.album?.cover, 1000)} alt={$current.title} kind={$current.podcast ? "podcast" : "album"} fallbackId={$current.deezer_id} eager />
           </div>
         {/key}
       </div>
@@ -265,7 +271,7 @@
             <VirtualList items={q} bind:this={queueVL} let:item let:index>
               <div class="qitem" class:now={index === idx} class:past={index < idx}>
                 <button on:click={() => player.jump(index)}>
-                  <Cover src={item.album?.cover} alt="" size={42} />
+                  <Cover src={item.album?.cover} alt="" size={42} kind="track" fallbackId={item.deezer_id} />
                   <span class="qm"><span class="qt">{item.title}</span><span class="qa">{item.artist?.name}</span></span>
                   <span class="qd">{fmtDuration(item.duration)}</span>
                 </button>

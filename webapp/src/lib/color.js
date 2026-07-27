@@ -5,19 +5,35 @@
 import { loResCover } from "./format.js";
 
 const cache = new Map();
+const CACHE_MAX = 200; // bounded: a long browse session shouldn't grow forever
+// Extractions already running, keyed by URL — two views asking for the same
+// cover at once (the header and the now-playing backdrop) shared one decode
+// instead of racing two.
+const inFlight = new Map();
 const FALLBACK = [60, 40, 90];
+
+function remember(url, value) {
+  if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
+  cache.set(url, value);
+}
 
 export function dominantColor(url) {
   if (!url) return Promise.resolve(FALLBACK);
   if (cache.has(url)) return Promise.resolve(cache.get(url));
+  const running = inFlight.get(url);
+  if (running) return running;
   // The canvas below is 24px — the tiny Deezer variant (a few KB) is plenty.
   // Fetching the full 500px in CORS mode re-downloaded the whole cover just
   // for this. Non-Deezer URLs (local art, blobs) pass through unchanged.
   const fetchUrl = loResCover(url, 96) || url;
 
-  return new Promise((resolve) => {
+  const p = new Promise((resolve) => {
     const img = new Image();
-    img.crossOrigin = "anonymous";
+    // crossOrigin is only needed to un-taint the canvas for a CROSS-origin
+    // source — and it actively hurts on our own routes: it drops the session
+    // cookie, so the login-protected /api/cover and /api/localcover art came
+    // back 401 and every local file's header fell back to the default purple.
+    if (!sameOrigin(fetchUrl)) img.crossOrigin = "anonymous";
     img.referrerPolicy = "no-referrer";
     img.onload = () => {
       try {
@@ -57,15 +73,29 @@ export function dominantColor(url) {
         }
         // If the image is basically grayscale, use the average instead.
         const result = bestScore > 0.15 && n ? best : n ? [r / n, g / n, b / n].map(Math.round) : FALLBACK;
-        cache.set(url, result);
+        remember(url, result);
         resolve(result);
       } catch {
         resolve(FALLBACK);
       }
     };
+    // No colour to extract (CDN drop, 404): DON'T memoize the fallback — the
+    // next visit should get a real colour once the art is reachable again.
     img.onerror = () => resolve(FALLBACK);
     img.src = fetchUrl;
-  });
+  }).finally(() => inFlight.delete(url));
+  inFlight.set(url, p);
+  return p;
+}
+
+function sameOrigin(u) {
+  if (!u) return true;
+  if (u.startsWith("blob:") || u.startsWith("data:")) return true;
+  try {
+    return new URL(u, window.location.href).origin === window.location.origin;
+  } catch {
+    return true;
+  }
 }
 
 export function rgb([r, g, b], a = 1) {

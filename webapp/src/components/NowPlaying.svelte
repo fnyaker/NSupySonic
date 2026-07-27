@@ -33,7 +33,7 @@
 
   {#if $current}
     <div class="art">
-      <Cover src={$current.album?.cover} alt={$current.title} />
+      <Cover src={$current.album?.cover} alt={$current.title} kind={$current.podcast ? "podcast" : "album"} fallbackId={$current.deezer_id} eager />
     </div>
     <div class="meta">
       <div class="info">
@@ -60,7 +60,7 @@
           <VirtualList items={queue} let:item let:index>
             <div class="qitem" class:now={index === idx} class:past={index < idx}>
               <button class="qrow" on:click={() => player.jump(index)}>
-                <Cover src={item.album?.cover} alt={item.title} size={40} />
+                <Cover src={item.album?.cover} alt={item.title} size={40} kind="track" fallbackId={item.deezer_id} />
                 <span class="qmeta">
                   <span class="qt">{item.title}</span>
                   <span class="qa muted">{item.artist?.name}</span>

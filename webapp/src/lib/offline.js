@@ -106,11 +106,19 @@ export async function loadCoverCache() {
   try {
     const db = await openDB();
     const rows = await reqp(tx(db, "covers", "readonly").objectStore("covers").getAll());
+    // Merge (don't clobber) — the playback cache also feeds this map, and it
+    // loads first. Skip the keys it already owns instead of minting object URLs
+    // the merge would then discard: those were never revoked, so every cover
+    // present in BOTH stores leaked its blob for the whole session.
+    const have = get(offlineCovers);
     const map = {};
     for (const r of rows) {
-      if (r && r.url && r.blob) map[coverKey(r.url)] = URL.createObjectURL(r.blob);
+      if (!r || !r.url || !r.blob) continue;
+      const key = coverKey(r.url);
+      if (have[key] || map[key]) continue;
+      map[key] = URL.createObjectURL(r.blob);
     }
-    // Merge (don't clobber) — the playback cache also feeds this map.
+    if (!Object.keys(map).length) return;
     offlineCovers.update((m) => ({ ...map, ...m }));
   } catch {
     /* IndexedDB unavailable — covers just fall back to the network URL */

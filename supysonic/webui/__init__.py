@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os.path
+import re
 import threading
 import time
 import uuid
@@ -327,6 +328,41 @@ def _user_upload_usage(archive_dir: str, user) -> int:
             except OSError:
                 pass
     return total
+
+
+_UPLOAD_BAD = re.compile(r'[/\\:*?"<>|\x00-\x1f\x7f]')
+
+
+def _safe_upload_name(raw: str):
+    """``(filename, extension)`` for an uploaded file — Unicode-safe.
+
+    werkzeug's ``secure_filename`` ASCII-folds, which **erases** a name written
+    in a non-Latin script entirely: ``Песня.mp3`` came back as ``mp3`` and
+    ``曲.flac`` as ``flac``, so the extension check below then rejected a
+    perfectly good file as an unsupported format. Anyone whose library isn't in
+    Latin script simply couldn't upload.
+
+    So we do the dangerous-character removal ourselves and keep the rest of the
+    name, and we read the extension from the ORIGINAL string so it survives
+    whatever the sanitiser does to the stem. The result can contain no path
+    separator, no ``..`` and no control character, so it is safe to join onto
+    the destination directory.
+    """
+    raw = str(raw or "")
+    ext = os.path.splitext(raw)[1][1:].lower()
+    # Last path component under EITHER separator (a Windows client sends "\").
+    stem = raw.replace("\\", "/").rsplit("/", 1)[-1]
+    if ext:
+        stem = stem[: -(len(ext) + 1)]
+    stem = _UPLOAD_BAD.sub("_", stem)
+    # No dotfiles, no "..", and no trailing dot/space (Windows drops those,
+    # which would silently collide two distinct uploads).
+    stem = stem.strip().lstrip(".").rstrip(". ")
+    # Filesystems cap a component at 255 bytes; leave room for a " (n)" suffix.
+    stem = stem.encode("utf-8")[:180].decode("utf-8", "ignore").strip(" .")
+    if not stem or not ext:
+        return "", ext
+    return f"{stem}.{ext}", ext
 
 
 def _stream_size(stream) -> int:
@@ -2185,6 +2221,10 @@ def reorder_playlist(playlist_id):
     return jsonify({"ok": True})
 
 
+# Most tracks one /api/download call may queue for background archiving.
+_DOWNLOAD_BATCH_MAX = 2000
+
+
 @webapi.route("/download", methods=["POST"])
 @login_required
 def download():
@@ -2192,8 +2232,22 @@ def download():
     provider, err = _need_provider()
     if err:
         return err
-    ids = [str(x) for x in ((request.get_json(silent=True) or {}).get("ids") or [])]
-    ids = [x for x in ids if _valid_id(x)]
+    raw = (request.get_json(silent=True) or {}).get("ids") or []
+    if not isinstance(raw, list):
+        return jsonify({"error": "no ids"}), 400
+    # De-duplicate (order-preserving) and cap the batch. The queue behind this is
+    # unbounded and each entry means a full FLAC download, so one POST carrying
+    # a hundred thousand ids would pin the archiver for days and fill the disk —
+    # available to any logged-in account. A whole playlist still fits in one
+    # request; anything larger is a client bug or an attack.
+    seen, ids = set(), []
+    for x in raw:
+        x = str(x)
+        if _valid_id(x) and x not in seen:
+            seen.add(x)
+            ids.append(x)
+            if len(ids) >= _DOWNLOAD_BATCH_MAX:
+                break
     if not ids:
         return jsonify({"error": "no ids"}), 400
     pf = getattr(current_app, "deezer_prefetch", None)
@@ -2271,8 +2325,6 @@ def upload():
     if not files:
         return jsonify({"error": "no files"}), 400
 
-    from werkzeug.utils import secure_filename
-
     from ..deezer import library, local
 
     user = request.webuser
@@ -2293,8 +2345,7 @@ def upload():
     imported, skipped = [], []
     quota_hit = False
     for f in files:
-        name = secure_filename(f.filename or "")
-        ext = os.path.splitext(name)[1][1:].lower()
+        name, ext = _safe_upload_name(f.filename)
         if not name or ext not in local.AUDIO_EXTS:
             skipped.append(f.filename)
             continue
@@ -2310,6 +2361,11 @@ def upload():
         while os.path.exists(dest):
             n += 1
             dest = f"{base} ({n}){e}"
+        # Belt and braces: _safe_upload_name already strips separators and
+        # leading dots, so this can only fail if that ever regresses.
+        if os.path.dirname(os.path.abspath(dest)) != os.path.abspath(dest_dir):
+            skipped.append(f.filename)
+            continue
         f.save(dest)
         try:
             track = local.import_local_file(dest, root)
@@ -2628,3 +2684,4 @@ def stream(deezer_id):
 # it registers its routes on this blueprint. Must stay at the bottom: it
 # imports helpers defined above.
 from . import share  # noqa: E402,F401  isort:skip
+from . import export  # noqa: E402,F401  isort:skip

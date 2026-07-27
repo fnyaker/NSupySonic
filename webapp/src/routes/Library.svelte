@@ -1,6 +1,6 @@
 <script>
-  import { onMount } from "svelte";
-  import { player, favTracks, toasts, isAdmin, syncing, downloads } from "../lib/stores.js";
+  import { onDestroy, onMount } from "svelte";
+  import { player, favTracks, toasts, isAdmin, syncing, downloads, openExport } from "../lib/stores.js";
   import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
   import { api } from "../lib/api.js";
@@ -47,11 +47,23 @@
   });
 
   // Downloaded tracks come straight from IndexedDB, so this tab works offline.
-  async function loadOffline() {
-    offline = (await listDownloads()).map((m) => m.track).filter(Boolean);
+  // Refreshed whenever the downloaded set changes (add / remove / evict), but
+  // COALESCED: downloading a 50-track album flips that store once per track,
+  // and every flip used to re-read the entire IndexedDB meta store. The
+  // sequence guard stops a slower earlier read from landing on a newer one.
+  let offlineSeq = 0;
+  let offlineTimer = null;
+  $: $downloads, scheduleOffline();
+  function scheduleOffline() {
+    clearTimeout(offlineTimer);
+    offlineTimer = setTimeout(loadOffline, 200);
   }
-  // Refresh whenever the downloaded set changes (add / remove / evict).
-  $: $downloads, loadOffline();
+  async function loadOffline() {
+    const mine = ++offlineSeq;
+    const list = (await listDownloads()).map((m) => m.track).filter(Boolean);
+    if (mine === offlineSeq) offline = list;
+  }
+  onDestroy(() => clearTimeout(offlineTimer));
 
   function playOffline() {
     if (offline?.length) player.playQueue(offline, 0, { kind: "downloads" });
@@ -146,6 +158,9 @@
   {:else}
     <div class="row fav-head">
       <button class="pill" on:click={playFavorites}><Icon name="play" size={18} /> Tout lire</button>
+      <button class="ghost-btn" on:click={() => openExport("favorites", "me", "Favoris")} title="Exporter en ZIP (clé USB, autre lecteur…)">
+        <Icon name="archive" size={17} /> Exporter
+      </button>
       <span class="muted">{favorites.length} titres</span>
     </div>
     <TrackBrowser tracks={favorites} context={{ kind: "favorites" }} />
@@ -276,6 +291,21 @@
   .fav-head {
     margin-bottom: 14px;
     gap: 16px;
+  }
+  .ghost-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 15px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .ghost-btn:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
   }
   .pl-search {
     display: flex;

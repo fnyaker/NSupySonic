@@ -882,6 +882,54 @@ class WebUITestCase(unittest.TestCase):
         locals_ = self.client.get("/api/me/local").get_json()["tracks"]
         self.assertTrue(any(t["title"] == "Uploaded Song" for t in locals_))
 
+    def test_upload_accepts_a_cyrillic_filename(self):
+        """End to end: a name with no Latin characters at all used to come back
+        from secure_filename as just "mp3", losing the extension, so the file was
+        rejected as an unsupported format — non-Latin libraries couldn't upload."""
+        import os
+        from io import BytesIO
+
+        from supysonic.deezer import local
+
+        self._login()
+
+        class FakeTag:
+            artist = "Артист"
+            albumartist = None
+            album = "Альбом"
+            genre = "Pop"
+            title = "Песня"
+            disc = 1
+            track = 1
+            year = None
+            length = 200.0
+            bitrate = 256000
+            images = []
+
+        orig = local._load_tag
+        local._load_tag = lambda p: FakeTag()
+        try:
+            rv = self.client.post(
+                "/api/upload",
+                data={"files": (BytesIO(b"audiobytes"), "Песня.mp3")},
+                content_type="multipart/form-data",
+            )
+        finally:
+            local._load_tag = orig
+        self.assertEqual(rv.status_code, 200)
+        j = rv.get_json()
+        self.assertEqual(j["skipped"], [])
+        self.assertEqual(j["count"], 1)
+        self.assertEqual(j["imported"][0]["title"], "Песня")
+        # the file really landed on disk, under the user's upload folder, with
+        # its own name intact
+        found = [
+            os.path.join(d, f)
+            for d, _s, fs in os.walk(os.path.join(self.archive, "Uploads"))
+            for f in fs
+        ]
+        self.assertEqual([os.path.basename(x) for x in found], ["Песня.mp3"])
+
     def test_upload_rejects_non_audio(self):
         from io import BytesIO
 
@@ -1545,6 +1593,184 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(rv.status_code, 503)
         self.assertIn(b"not built", rv.data)
 
+    # -- hardening -------------------------------------------------------
+
+    def test_upload_name_keeps_non_latin_scripts(self):
+        """secure_filename ASCII-folds, which erased a whole non-Latin name and
+        took the extension with it — the file was then rejected as an
+        unsupported format. Names must survive; paths must still be safe."""
+        from supysonic.webui import _safe_upload_name
+
+        self.assertEqual(_safe_upload_name("Песня.mp3"), ("Песня.mp3", "mp3"))
+        self.assertEqual(_safe_upload_name("曲.flac"), ("曲.flac", "flac"))
+        self.assertEqual(
+            _safe_upload_name("Chanson française.mp3"), ("Chanson française.mp3", "mp3")
+        )
+        # …while still being a single, safe path component
+        self.assertEqual(_safe_upload_name("../../etc/passwd.mp3"), ("passwd.mp3", "mp3"))
+        self.assertEqual(_safe_upload_name("..\\..\\x.mp3"), ("x.mp3", "mp3"))
+        self.assertEqual(_safe_upload_name(".hidden.flac"), ("hidden.flac", "flac"))
+        self.assertEqual(_safe_upload_name("a\x00b.mp3"), ("a_b.mp3", "mp3"))
+        self.assertEqual(_safe_upload_name("noext"), ("", ""))
+        name, _ = _safe_upload_name("a" * 400 + ".opus")
+        self.assertLessEqual(len(name.encode("utf-8")), 190)
+
+    def test_archive_path_sanitizer_is_filesystem_safe(self):
+        """Path components come from Deezer metadata and from uploaded files'
+        own tags, so they must survive a NUL and an over-long name."""
+        from supysonic.deezer.library import sanitize
+
+        self.assertEqual(sanitize("a\x00b"), "ab")  # NUL would raise on every fs call
+        self.assertEqual(sanitize(".."), "untitled")
+        self.assertEqual(sanitize("../../etc"), "_.._etc")
+        self.assertEqual(sanitize("a/b"), "a_b")
+        self.assertEqual(sanitize("nul."), "nul")  # Windows drops trailing dots
+        # 255 CJK characters is ~765 bytes: over every filesystem's limit.
+        long_cjk = sanitize("曲" * 300)
+        self.assertLessEqual(len(long_cjk.encode("utf-8")), 200)
+        self.assertTrue(long_cjk.startswith("曲"))
+        # and the cut never splits a multi-byte character
+        long_cjk.encode("utf-8").decode("utf-8")
+
+    def test_download_batch_is_capped_and_deduped(self):
+        from supysonic.webui import _DOWNLOAD_BATCH_MAX
+
+        self._login()
+        queued = []
+        self.app.deezer_prefetch.download_ids = lambda ids: queued.extend(ids) or len(ids)
+
+        # duplicates collapse
+        rv = self.client.post("/api/download", json={"ids": ["1", "1", "2"]})
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(queued, ["1", "2"])
+
+        # an oversized batch is capped rather than queueing a full FLAC download
+        # per entry (the queue behind this is unbounded)
+        queued.clear()
+        huge = [str(i) for i in range(_DOWNLOAD_BATCH_MAX + 500)]
+        rv = self.client.post("/api/download", json={"ids": huge})
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(len(queued), _DOWNLOAD_BATCH_MAX)
+
+        # junk is still rejected
+        queued.clear()
+        self.assertEqual(
+            self.client.post("/api/download", json={"ids": ["abc", "../x"]}).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post("/api/download", json={"ids": "not-a-list"}).status_code, 400
+        )
+
+    # -- bulk ZIP export -------------------------------------------------
+
+    def _playlist_with_local_track(self, title="Export Me"):
+        from supysonic.db import Playlist
+
+        t = self._make_local_track(title)
+        from supysonic.db import User
+
+        pl = Playlist.create(user=User.get(name="alice"), name="Ma sélection")
+        pl.add(t)
+        pl.save()
+        return pl, t
+
+    def test_export_requires_login(self):
+        self.assertEqual(self.client.get("/api/export/favorites/me").status_code, 401)
+        self.assertEqual(self.client.get("/api/export/formats").status_code, 401)
+
+    def test_export_formats_lists_flac_without_ffmpeg(self):
+        from supysonic.webui import export
+
+        self._login()
+        orig = export._ffmpeg_available
+        export._ffmpeg_available = lambda: False
+        try:
+            body = self.client.get("/api/export/formats").get_json()
+        finally:
+            export._ffmpeg_available = orig
+        ids = [f["id"] for f in body["formats"]]
+        self.assertEqual(ids, ["flac"])  # only the no-re-encode format survives
+        self.assertEqual(body["default"], "flac")
+
+    def test_export_playlist_zip(self):
+        import io
+        import zipfile
+
+        self._login()
+        pl, _t = self._playlist_with_local_track("Export Me")
+        rv = self.client.get("/api/export/playlist/%s?fmt=flac" % pl.id)
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.mimetype, "application/zip")
+        self.assertIn("attachment", rv.headers["Content-Disposition"])
+
+        z = zipfile.ZipFile(io.BytesIO(rv.data))
+        self.assertIsNone(z.testzip())  # a valid, complete archive
+        names = z.namelist()
+        self.assertIn("001 - Local Band - Export Me.flac", names)
+        self.assertIn("Ma sélection.m3u", names)
+        self.assertEqual(z.read("001 - Local Band - Export Me.flac"), b"localaudio")
+        self.assertNotIn("_erreurs.txt", names)
+
+    def test_export_rejects_bad_kind_and_format(self):
+        self._login()
+        self.assertEqual(self.client.get("/api/export/bogus/1").status_code, 400)
+        self.assertEqual(
+            self.client.get("/api/export/favorites/me?fmt=wav").status_code, 400
+        )
+
+    def test_export_unknown_playlist_404(self):
+        self._login()
+        rv = self.client.get(
+            "/api/export/playlist/00000000-0000-0000-0000-000000000000?fmt=flac"
+        )
+        self.assertEqual(rv.status_code, 404)
+
+    def test_export_empty_favorites_404(self):
+        self._login()
+        self.assertEqual(
+            self.client.get("/api/export/favorites/me?fmt=flac").status_code, 404
+        )
+
+    def test_export_filename_is_sanitised(self):
+        from supysonic.webui.export import _safe
+
+        # path separators, traversal, and the trailing dot Windows drops
+        self.assertEqual(_safe("../../etc/passwd"), "_.._etc_passwd")
+        self.assertEqual(_safe(".."), "sans-titre")  # nothing left -> fallback
+        self.assertEqual(_safe("nul."), "nul")
+        self.assertEqual(_safe(""), "sans-titre")
+        self.assertEqual(_safe("a" * 400), "a" * 120)
+
+    def test_export_skips_a_failing_track_instead_of_aborting(self):
+        import io
+        import zipfile
+
+        from supysonic.webui import export
+
+        self._login()
+        pl, _t = self._playlist_with_local_track("Export Me")
+        orig = export._media_file
+        export._media_file = lambda mid: (None, None, ("boom", 502))
+        try:
+            rv = self.client.get("/api/export/playlist/%s?fmt=flac" % pl.id)
+            self.assertEqual(rv.status_code, 200)
+            z = zipfile.ZipFile(io.BytesIO(rv.data))
+            self.assertIsNone(z.testzip())
+            self.assertIn("_erreurs.txt", z.namelist())
+        finally:
+            export._media_file = orig
+
+    def test_export_slot_is_released_after_the_download(self):
+        self._login()
+        pl, _t = self._playlist_with_local_track("Export Me")
+        url = "/api/export/playlist/%s?fmt=flac" % pl.id
+        self.assertEqual(self.client.get(url).status_code, 200)
+        # A second export must not be refused because the first held the slot.
+        self.assertEqual(self.client.get(url).status_code, 200)
+
+
+
 
 class WebUIGuestTestCase(unittest.TestCase):
     """Non-admin users are guests: Deezer is just a content source. No owner
@@ -1667,7 +1893,5 @@ class WebUIGuestTestCase(unittest.TestCase):
         self._login()
         self.assertEqual(self.client.post("/api/sync").status_code, 403)
         self.assertEqual(self.client.get("/api/sync/status").status_code, 403)
-
-
 if __name__ == "__main__":
     unittest.main()

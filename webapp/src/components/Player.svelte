@@ -1345,7 +1345,7 @@
   <!-- now playing (left / tap to open the immersive view) -->
   <button class="now" on:click={() => immersiveOpen.set(true)}>
     {#if $current}
-      <Cover src={$current.album?.cover} alt={$current.title} size={56} />
+      <Cover src={$current.album?.cover} alt={$current.title} size={56} kind={$current.podcast ? "podcast" : "album"} fallbackId={$current.deezer_id} eager />
       <span class="info">
         <span class="t">{$current.title}</span>
         <!-- While the player is working toward playback, the subtitle line says

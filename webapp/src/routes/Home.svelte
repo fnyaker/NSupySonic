@@ -41,7 +41,19 @@
       loading = false;
       return;
     }
-    const [h, r] = await Promise.allSettled([api.home(), api.recommendations()]);
+    // Stale-while-revalidate: the home shelves paint from the last-seen copy
+    // right away and quietly correct themselves — both of these calls go out to
+    // Deezer server-side, so waiting on them is seconds of empty page.
+    const [h, r] = await Promise.allSettled([
+      api.swr("/home", (d) => {
+        mixes = d.mixes || [];
+        loading = false;
+      }),
+      api.swr("/recommendations", (d) => {
+        reco = d;
+        loading = false;
+      }),
+    ]);
     if (h.status === "fulfilled") mixes = h.value.mixes || [];
     if (r.status === "fulfilled") reco = r.value;
     loading = false;

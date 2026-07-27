@@ -20,7 +20,7 @@
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { addMarkerAt } from "../lib/markers.js";
-  import { duration as fmtDuration, hiResCover, resolveCover } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover, resolveCover, cssUrl } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
@@ -118,7 +118,13 @@
   }
   function pushBgLayer(src, url) {
     const id = ++bgN;
-    bgLayers = [...bgLayers, { id, src, url }];
+    // Keep at most ONE layer under the incoming one — that's all that shows
+    // through while the new art fades in. The stack used to grow until 420ms of
+    // quiet finally arrived, so skipping through a dozen tracks left a dozen
+    // full-screen `blur(60px)` layers composited on top of each other, which is
+    // enough on its own to drag the whole view to a crawl.
+    bgLayers = [...bgLayers.slice(-1), { id, src, url }];
+    // Drop the covered-up layer once the fade-in has finished.
     clearTimeout(bgTimer);
     bgTimer = setTimeout(() => (bgLayers = bgLayers.filter((l) => l.id === id)), 420);
   }
@@ -240,14 +246,29 @@
   function elCenterLeft(el) {
     return el.offsetLeft - (scroller.clientWidth - el.clientWidth) / 2;
   }
+  // Hold the "this scroll is ours, not the user's" flag for `ms`. It MUST be a
+  // single tracked timer: the three call sites each used to fire their own
+  // untracked setTimeout, so two overlapping re-centres (tapping next twice
+  // quickly) let the first one clear the flag while the second was still
+  // animating. onSettled then ran mid-animation, measured a transient scroll
+  // position and fired a bogus player.jump() — the carousel skipping a track on
+  // its own.
+  let recenterTimer = null;
+  function holdRecenter(ms) {
+    recentering = true;
+    clearTimeout(recenterTimer);
+    recenterTimer = setTimeout(() => {
+      recenterTimer = null;
+      recentering = false;
+    }, ms);
+  }
   function centerCurrent() {
     if (!scroller) return;
     const el = scroller.children[curSlot];
     if (!el) return;
-    recentering = true;
+    holdRecenter(60);
     scroller.scrollTo({ left: elCenterLeft(el), behavior: "instant" });
     clearTimeout(settleTimer);
-    setTimeout(() => (recentering = false), 60);
   }
   // Slide the new current in from the side (used for button / auto advance, so
   // they get the same motion as a swipe instead of teleporting).
@@ -259,18 +280,31 @@
     }
     const center = elCenterLeft(el);
     const step = el.clientWidth + GAP;
-    recentering = true;
+    holdRecenter(420);
     scroller.scrollTo({ left: center - step * dir, behavior: "instant" });
     requestAnimationFrame(() => {
       scroller.scrollTo({ left: center, behavior: "smooth" });
       clearTimeout(settleTimer);
-      setTimeout(() => (recentering = false), 420);
+      holdRecenter(420); // re-arm from the start of the SMOOTH scroll
     });
   }
+  // `scrollend` fires exactly when the scroll settles — INCLUDING the browser's
+  // own snap animation — which is precisely when a swipe should commit. The old
+  // 110 ms guess after the last scroll event fired while the snap was still
+  // animating, so it measured a position that wasn't final yet and then had to
+  // correct itself: that double-take is what made the swipe feel unsettled.
+  // Fall back to the timer where the event isn't supported (Safari < 18.2).
+  const HAS_SCROLLEND = typeof window !== "undefined" && "onscrollend" in window;
   function onScroll() {
-    if (recentering) return;
+    if (recentering || HAS_SCROLLEND) return;
     clearTimeout(settleTimer);
     settleTimer = setTimeout(onSettled, 110);
+  }
+  function onScrollEnd() {
+    if (recentering) return;
+    clearTimeout(settleTimer);
+    settleTimer = null;
+    onSettled();
   }
   function onSettled() {
     if (recentering || !scroller) return;
@@ -302,9 +336,8 @@
       if (el) {
         const want = elCenterLeft(el);
         if (Math.abs(scroller.scrollLeft - want) > 6) {
-          recentering = true;
+          holdRecenter(380);
           scroller.scrollTo({ left: want, behavior: "smooth" });
-          setTimeout(() => (recentering = false), 380);
         }
       }
     }
@@ -339,6 +372,8 @@
   }
   onDestroy(() => {
     clearTimeout(settleTimer);
+    clearTimeout(recenterTimer);
+    clearTimeout(bgRetryTimer);
     clearTimeout(bgTimer);
     if (bgLoader) {
       bgLoader.onload = bgLoader.onerror = null;
@@ -361,7 +396,7 @@
   transition:fade={{ duration: 140 }}
 >
   {#each bgLayers as layer (layer.id)}
-    <div class="bg" style={`background-image:url(${layer.src})`} in:fade={{ duration: 350 }}></div>
+    <div class="bg" style={`background-image:${cssUrl(layer.src)}`} in:fade={{ duration: 350 }}></div>
   {/each}
   <div class="scrim"></div>
 
@@ -380,9 +415,14 @@
       {/if}
     </div>
 
-    <div class="scroller" bind:this={scroller} on:scroll|passive={onScroll}>
+    <div
+      class="scroller"
+      bind:this={scroller}
+      on:scroll|passive={onScroll}
+      on:scrollend={onScrollEnd}
+    >
       {#each slots as s (s.key)}
-        <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} /></div>
+        <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} kind={s.track.podcast ? "podcast" : "album"} fallbackId={s.track.deezer_id} eager /></div>
       {/each}
     </div>
 
@@ -439,7 +479,7 @@
         <VirtualList items={q} bind:this={queueVL} let:item let:index>
           <div class="qitem" class:now={index === idx} class:past={index < idx}>
             <button on:click={() => { player.jump(index); showQueue = false; }}>
-              <Cover src={item.album?.cover} alt="" size={42} />
+              <Cover src={item.album?.cover} alt="" size={42} kind="track" fallbackId={item.deezer_id} />
               <span class="qm"><span class="qt">{item.title}</span><span class="qa">{item.artist?.name}</span></span>
             </button>
           </div>
@@ -542,13 +582,25 @@
     display: flex;
     gap: 14px;
     overflow-x: auto;
-    /* proximity (not mandatory) keeps the fling's inertia and only eases into
-       the snap near the end, instead of braking abruptly on finger-up */
-    scroll-snap-type: x proximity;
+    /* MANDATORY, not proximity. With proximity the browser often doesn't snap
+       at all: the fling just stops wherever momentum ran out, and our own timer
+       then had to notice and animate the cover back into place — a visible
+       second movement after the finger had left, which is what made the swipe
+       feel loose. Mandatory hands the settle to the browser's native snap
+       animation, so the cover lands where the finger aimed, in one motion.
+       `scroll-snap-stop: always` on the slides keeps a hard fling to one track
+       at a time instead of shooting past to the far edge. */
+    scroll-snap-type: x mandatory;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
     padding: 10px 7.5%;
     overscroll-behavior-x: contain;
+    /* Claim the horizontal axis outright. Without this the browser spends the
+       first few pixels of every drag deciding whether the gesture is meant for
+       this scroller or the sheet behind it, which reads as the swipe hesitating
+       before it starts. The sheet's swipe-down-to-dismiss already ignores
+       gestures that begin on the carousel, so there's nothing to give up. */
+    touch-action: pan-x;
   }
   .scroller::-webkit-scrollbar {
     display: none;
@@ -556,6 +608,7 @@
   .slide {
     flex: 0 0 85%;
     scroll-snap-align: center;
+    scroll-snap-stop: always;
     aspect-ratio: 1 / 1;
   }
   .slide :global(.cover) {

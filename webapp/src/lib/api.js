@@ -113,7 +113,45 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
 
 const body = (b) => (b === undefined ? undefined : JSON.stringify(b));
 
+// The last cached copy of a content GET, read straight from disk with no
+// network at all. Returns null when there's nothing cached (or the path isn't
+// cacheable).
+function peek(path) {
+  if (!isCacheable(path)) return Promise.resolve(null);
+  return cacheGet(path).catch(() => null);
+}
+
+// Stale-while-revalidate: paint the last-seen copy the instant it comes off
+// disk, then again with the fresh one. This is what turns "the favorites show
+// up in four seconds on a slow link" into "the favorites are already there and
+// quietly correct themselves" — /me/favorites in particular costs the server
+// two live Deezer round-trips, which no amount of client tuning can shorten.
+//
+// `onData(data, stale)` is called at most twice: once with the cached copy (only
+// if it lands BEFORE the network does, and only if there is one), then once with
+// the network copy. Returns the network promise, so callers still handle errors.
+function swr(path, onData) {
+  let fresh = false;
+  peek(path).then((cached) => {
+    if (cached != null && !fresh) onData(cached, true);
+  });
+  const p = req(path);
+  p.then(
+    (data) => {
+      fresh = true;
+      onData(data, false);
+    },
+    () => {
+      fresh = true; // a late cache read must not overwrite an error state
+    }
+  );
+  return p;
+}
+
 export const api = {
+  peek,
+  swr,
+
   // auth
   login: (username, password) =>
     req("/login", { method: "POST", body: body({ username, password }) }),
@@ -181,6 +219,13 @@ export const api = {
     "/share/clip/" +
     id +
     `?start=${(+start).toFixed(3)}&end=${(+end).toFixed(3)}&fmt=${fmt}`,
+
+  // bulk export (whole playlist / album / favorites as one ZIP). The URL is
+  // handed to the browser's download manager rather than fetched, so a
+  // multi-gigabyte archive streams to disk instead of into memory.
+  exportFormats: () => req("/export/formats"),
+  exportUrl: (kind, id, fmt) =>
+    BASE + "/export/" + kind + "/" + encodeURIComponent(id) + "?fmt=" + encodeURIComponent(fmt),
 
   // library
   myPlaylists: () => req("/me/playlists"),

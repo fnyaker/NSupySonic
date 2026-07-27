@@ -439,9 +439,17 @@ export function createVisualizer() {
     const cw = canvas.clientWidth,
       ch = canvas.clientHeight;
     if (!cw || !ch) return;
-    if (canvas.width !== cw) canvas.width = cw;
-    if (canvas.height !== ch) canvas.height = ch;
+    // Back the canvas at device resolution, else every bar edge is resampled and
+    // the strip reads as soft//smeared on any HiDPI screen (i.e. every phone).
+    // Capped at 2× so a 3× display doesn't pay 9× the fill cost for no visible
+    // gain; the drawing below stays in CSS pixels thanks to the transform.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const pw = Math.round(cw * dpr),
+      ph = Math.round(ch * dpr);
+    if (canvas.width !== pw) canvas.width = pw;
+    if (canvas.height !== ph) canvas.height = ph;
     const g = canvas.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, cw, ch);
 
     const bars = Math.max(24, Math.min(72, Math.floor(cw / 8)));

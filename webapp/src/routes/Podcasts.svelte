@@ -121,7 +121,7 @@
           on:click={() => push("/podcast/" + c.id)}
           on:keydown={(e) => e.key === "Enter" && push("/podcast/" + c.id)}
         >
-          <Cover src={c.cover} alt={c.title} />
+          <Cover src={c.cover} alt={c.title} kind="podcast" fallbackId={c.id} />
           <div class="meta">
             <div class="title">{c.title}</div>
             <div class="sub muted">

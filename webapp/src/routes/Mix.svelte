@@ -27,10 +27,14 @@
     loading = true;
     data = null;
     try {
-      const r = await api.smartTracklist(mixId);
-      if (mine === loadSeq) data = r;
+      // Cached copy first, fresh one right after — no skeleton on a revisit.
+      await api.swr("/smarttracklist/" + mixId, (r) => {
+        if (mine !== loadSeq) return;
+        data = r;
+        loading = false;
+      });
     } catch {
-      if (mine === loadSeq) data = null;
+      if (mine === loadSeq && !data) data = null;
     }
     if (mine === loadSeq) loading = false;
   }
@@ -53,7 +57,7 @@
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.playlist.cover}>
-      <div class="art"><Cover src={data.playlist.cover} alt={data.playlist.title} /></div>
+      <div class="art"><Cover src={data.playlist.cover} alt={data.playlist.title} kind="mix" eager /></div>
       <div class="meta">
         <span class="kind">Mix</span>
         <h1>{data.playlist.title}</h1>

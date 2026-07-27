@@ -9,6 +9,7 @@
   import { userPlaylists, addTrackToPlaylist, invalidatePlaylists } from "../lib/actions.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
+  import { isLocalId } from "../lib/format.js";
 
   // Modal (desktop) / bottom-sheet (mobile) to pick the playlist a track goes
   // into. Searchable (typing filters by title), last-used playlist pinned on
@@ -103,7 +104,7 @@
         {:else}
           {#each shown as p (p.id)}
             <button class="res" on:click={() => pick(p)} disabled={busy}>
-              <span class="thumb"><Cover src={p.cover} alt={p.title} size={42} /></span>
+              <span class="thumb"><Cover src={p.cover} alt={p.title} size={42} kind="playlist" fallbackId={isLocalId(p.id) ? p.id : null} /></span>
               <span class="meta">
                 <span class="t">
                   {p.title}

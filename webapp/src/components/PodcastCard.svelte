@@ -30,7 +30,7 @@
   on:keydown={(e) => e.key === "Enter" && add()}
 >
   <div class="cv">
-    <Cover src={item.cover} alt={item.title} />
+    <Cover src={item.cover} alt={item.title} kind="podcast" />
     <button
       class="add"
       class:spin={busy}

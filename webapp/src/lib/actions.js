@@ -110,7 +110,19 @@ export async function loadMyFavorites(force = false) {
     refreshFavTracks();
     return cached;
   }
+  // Nothing in memory (first library open of the session): paint the last-seen
+  // list off disk while the network call runs. /me/favorites costs the server
+  // two live Deezer round-trips, so on a slow link that's the difference
+  // between an instant list and several seconds of skeleton.
+  primeFavTracksFromCache();
   return refreshFavTracks();
+}
+
+async function primeFavTracksFromCache() {
+  if (get(favTracks) !== null) return;
+  const cached = await api.peek("/me/favorites");
+  // Only fill the gap — never clobber a fresh response that landed meanwhile.
+  if (cached && get(favTracks) === null) favTracks.set(cached.tracks || []);
 }
 function refreshFavTracks() {
   if (favTracksInFlight) return favTracksInFlight;
