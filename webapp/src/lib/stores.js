@@ -558,7 +558,16 @@ function createPlayer() {
     } else if (moved) {
       clearTimeout(posTimer);
       posTimer = null;
-      savePos(s);
+      // Screen off / app in the background: write the WHOLE session, not just
+      // the tick. The two-key split (queue in one, index in the other) is a
+      // speed optimisation for the foreground, and it only restores correctly
+      // if the two agree — every way they can drift ends with the listener
+      // thrown back to whatever track was playing when the screen went off.
+      // Backgrounded there is no frame to keep smooth and a track change comes
+      // around every few minutes, so paying for one full write buys a session
+      // that is correct on its own, whatever happens to the tick afterwards.
+      if (typeof document !== "undefined" && document.hidden) save(s);
+      else savePos(s);
     } else if (!posTimer) {
       posTimer = setTimeout(() => {
         posTimer = null;
