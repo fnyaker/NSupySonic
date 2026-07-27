@@ -92,3 +92,6 @@ webapp/node_modules/
 webapp/dist/
 webapp/package-lock.json
 supysonic/webui/dist/
+
+# partest: recorded per-test durations, used only to balance the next run
+.partest-timings.json
