@@ -93,13 +93,33 @@ class DeezerPrefetcher:
             n += 1
         return n
 
+    def download_episode_ids(self, episode_ids) -> int:
+        """Queue podcast episode UUIDs for background archiving. Returns count.
+
+        Shares the download queue with tracks; the worker tells the two apart by
+        shape (a bare string is a Deezer track id, a tuple is tagged).
+        """
+        n = 0
+        for eid in episode_ids:
+            eid = str(eid)
+            if not eid:
+                continue
+            self._dl_queue.put(("episode", eid))
+            n += 1
+        return n
+
     @property
     def download_pending(self) -> int:
         return self._dl_queue.qsize()
 
     def _dl_worker(self) -> None:
-        from ..db import db
-        from .archive import ensure_archived, find_local_track, import_track
+        from ..db import PodcastEpisode, db
+        from .archive import (
+            ensure_archived,
+            ensure_episode_archived,
+            find_local_track,
+            import_track,
+        )
 
         try:
             db.connect(reuse_if_open=True)
@@ -107,18 +127,22 @@ class DeezerPrefetcher:
             pass
 
         while True:
-            did = self._dl_queue.get()
+            item = self._dl_queue.get()
             try:
-                if did is None:
+                if item is None:
                     return
+                if isinstance(item, tuple):  # ("episode", uuid)
+                    _, eid = item
+                    ensure_episode_archived(self.provider, PodcastEpisode[eid])
+                    continue
                 # Cheap DB lookup first (no network): if we already imported this
                 # track, reuse the row and let ensure_archived skip the audio when
                 # the file is on disk — so an already-archived track costs nothing.
                 # Only hit Deezer for metadata when the track is genuinely new.
-                track = find_local_track(did) or import_track(self.provider, did)
+                track = find_local_track(item) or import_track(self.provider, item)
                 ensure_archived(self.provider, track)
             except Exception as exc:
-                logger.info("Download failed for Deezer track %s: %s", did, exc)
+                logger.info("Background download failed for %s: %s", item, exc)
             finally:
                 self._dl_queue.task_done()
 

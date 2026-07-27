@@ -228,25 +228,30 @@ class DeezerProvider:
             raise DeezerError(f"no stream URL for episode {getattr(episode, 'deezer_id', '?')}")
         return url
 
-    def download_episode_to(self, url: str, dest: Path) -> None:
-        """Stream a podcast episode's MP3 into ``dest`` (atomic .part temp file).
+    def iter_episode(self, url: str):
+        """Yield a podcast episode's MP3 bytes from its host.
 
         Plain HTTP: follows redirects (rss.com -> CDN), no decryption. A Referer
         matching the web player is sent since some hosts gate on it.
         """
-        dest = Path(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(dest.name + ".part")
         headers = dict(self.dz.http_headers)
         headers["Referer"] = "https://www.deezer.com/"
         with self.dz.session.get(
             url, headers=headers, stream=True, timeout=(10, 120), allow_redirects=True
         ) as resp:
             resp.raise_for_status()
-            with open(tmp, "wb") as fh:
-                for chunk in resp.iter_content(65536):
-                    if chunk:
-                        fh.write(chunk)
+            for chunk in resp.iter_content(65536):
+                if chunk:
+                    yield chunk
+
+    def download_episode_to(self, url: str, dest: Path) -> None:
+        """Stream a podcast episode's MP3 into ``dest`` (atomic .part temp file)."""
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        with open(tmp, "wb") as fh:
+            for chunk in self.iter_episode(url):
+                fh.write(chunk)
         tmp.replace(dest)
 
     def set_episode_position(self, episode_id, offset, duration, is_heard=False) -> bool:

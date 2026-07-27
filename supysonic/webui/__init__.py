@@ -2647,6 +2647,22 @@ def _stream_episode(episode, bitrate):
         provider, err = _need_provider()
         if err:
             return err
+        if not bitrate:
+            # Stream it AS it downloads. Episodes run to tens of megabytes, so
+            # archiving the whole thing before the first byte went out is why a
+            # long show never started playing at all.
+            pf = getattr(current_app, "deezer_prefetch", None)
+            eid = str(episode.id)
+            on_abort = (lambda: pf.download_episode_ids([eid])) if pf else None
+            try:
+                mimetype, gen = archive.open_live_episode_stream(
+                    provider, episode, on_abort
+                )
+            except Exception:
+                logger.warning("Episode live stream failed for %s", episode.id, exc_info=True)
+                return jsonify({"error": "episode unavailable"}), 502
+            return current_app.response_class(gen, mimetype=mimetype)
+        # An Opus transcode needs the whole source on disk first.
         try:
             archive.ensure_episode_archived(provider, episode)
         except Exception:

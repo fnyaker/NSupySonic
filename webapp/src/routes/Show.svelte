@@ -1,10 +1,11 @@
 <script>
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
-  import { player, currentId, playing, isAdmin, toasts, seekTo, openMenu } from "../lib/stores.js";
+  import { player, currentId, playing, isAdmin, toasts, seekTo, openMenu, openExport } from "../lib/stores.js";
   import { podcastProgress, setResumePoint } from "../lib/podcastProgress.js";
   import { episodeMarkers, loadShowMarkers, removeMarker } from "../lib/markers.js";
   import { buildTrackMenu } from "../lib/actions.js";
+  import { downloadTrack } from "../lib/offline.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
@@ -69,6 +70,37 @@
     e.stopPropagation();
     const coords = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
     openMenu(coords, buildTrackMenu(ep, push));
+  }
+
+  // Download every episode to the device, one at a time. Sequential on purpose:
+  // an episode is tens of megabytes, and a show can hold hundreds of them —
+  // firing them all at once would saturate the connection and the server's
+  // archiver both. Already-downloaded episodes are skipped by downloadTrack.
+  let dlBusy = false;
+  let dlDone = 0;
+  async function downloadAll() {
+    if (dlBusy || !episodes.length) return;
+    dlBusy = true;
+    dlDone = 0;
+    let failed = 0;
+    try {
+      for (const ep of episodes) {
+        try {
+          await downloadTrack(ep, null);
+        } catch {
+          failed++;
+        }
+        dlDone++;
+      }
+      toasts.push(
+        failed
+          ? `${episodes.length - failed} épisode(s) téléchargé(s), ${failed} en échec`
+          : `${episodes.length} épisode(s) disponibles hors-ligne`,
+        failed ? "error" : undefined
+      );
+    } finally {
+      dlBusy = false;
+    }
   }
 
   function toggleExpand(eid) {
@@ -139,6 +171,15 @@
     <div class="row actions">
       <button class="pill" on:click={playAll} disabled={!episodes.length}>
         <Icon name="play" size={18} /> Lire
+      </button>
+      <button class="ghost-btn" on:click={downloadAll} disabled={!episodes.length || dlBusy}
+              title="Télécharger tous les épisodes sur cet appareil (écoute hors-ligne)">
+        <Icon name={dlBusy ? "downloaded" : "download"} size={17} />
+        {dlBusy ? `${dlDone}/${episodes.length}…` : "Tout télécharger"}
+      </button>
+      <button class="ghost-btn" on:click={() => openExport("podcast", id, data.title)}
+              disabled={!episodes.length} title="Exporter en ZIP (clé USB, autre lecteur…)">
+        <Icon name="archive" size={17} /> Exporter
       </button>
       {#if $isAdmin}
         <button class="icon-btn" on:click={unsubscribe} aria-label="Se désabonner" title="Se désabonner">
@@ -254,11 +295,35 @@
   }
   .actions {
     margin: 16px 0 18px;
-    gap: 18px;
+    gap: 12px;
     align-items: center;
+    flex-wrap: wrap;
+  }
+  /* Same secondary action as the library/playlist pages, so "Tout télécharger"
+     and "Exporter" read identically wherever they appear. */
+  .ghost-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 15px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.9rem;
+    white-space: nowrap;
+  }
+  .ghost-btn:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .ghost-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .icon-btn {
     color: var(--text-dim);
+    margin-left: auto;
   }
   .icon-btn:hover {
     color: var(--text);

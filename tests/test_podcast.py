@@ -93,6 +93,7 @@ class MockProvider:
         self.fav_added = []
         self.fav_removed = []
         self.downloaded = []
+        self.streamed = []
         self._locks = {}
         episode_to_show = {
             e["EPISODE_ID"]: sid
@@ -142,10 +143,17 @@ class MockProvider:
             raise RuntimeError("no stream url")
         return episode.stream_url
 
+    def iter_episode(self, url):
+        self.streamed.append(url)
+        yield b"ID3"
+        yield b"fakeaudio" * 200
+
     def download_episode_to(self, url, dest):
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"ID3" + b"fakeaudio" * 200)
+        with open(dest, "wb") as fh:
+            for chunk in self.iter_episode(url):
+                fh.write(chunk)
         self.downloaded.append((url, str(dest)))
 
 
@@ -499,6 +507,80 @@ class PodcastWebUITestCase(unittest.TestCase):
         self.assertEqual(rv.status_code, 200)
         self.assertTrue(rv.data.startswith(b"ID3"))
         self.assertEqual(PodcastEpisode[ids.episode_uuid("1")].status, "completed")
+
+    def test_stream_starts_before_the_episode_is_archived(self):
+        # The whole point of the live path: a long episode must start playing
+        # without waiting for the full download. Assert on the ORDER — the
+        # response is handed back, and the archive is only published once the
+        # body has been consumed.
+        self._login()
+        self._subscribe()
+        eid = str(ids.episode_uuid("1"))
+        episode = PodcastEpisode[ids.episode_uuid("1")]
+        self.assertIsNone(episode.path)
+
+        rv = self.client.get("/api/stream/" + eid)
+        self.assertEqual(rv.status_code, 200)
+        # Nothing has been read yet, so nothing can have been archived.
+        self.assertIsNone(PodcastEpisode[ids.episode_uuid("1")].path)
+
+        body = rv.get_data()
+        self.assertTrue(body.startswith(b"ID3"))
+        fresh = PodcastEpisode[ids.episode_uuid("1")]
+        self.assertEqual(fresh.status, "completed")
+        self.assertTrue(os.path.isfile(fresh.path))
+        # And the bytes that were streamed are the bytes that got archived.
+        with open(fresh.path, "rb") as fh:
+            self.assertEqual(fh.read(), body)
+
+    def test_second_play_is_served_from_the_archive(self):
+        self._login()
+        self._subscribe()
+        eid = str(ids.episode_uuid("1"))
+        self.client.get("/api/stream/" + eid).get_data()
+        before = len(self.provider.streamed)
+
+        rv = self.client.get("/api/stream/" + eid)
+        self.assertEqual(rv.status_code, 200)
+        self.assertTrue(rv.get_data().startswith(b"ID3"))
+        # Served from disk — the podcast host is not hit again.
+        self.assertEqual(len(self.provider.streamed), before)
+        # And it is seekable now, unlike the first live play.
+        self.assertEqual(rv.headers.get("Accept-Ranges"), "bytes")
+
+    def test_export_show_as_zip(self):
+        # Same bulk export a playlist gets, for a show: every episode archived
+        # on demand and streamed into one ZIP.
+        import io
+        import zipfile
+
+        self._login()
+        self._subscribe()
+        cid = str(ids.show_uuid("1002156761"))
+        rv = self.client.get("/api/export/podcast/" + cid + "?fmt=flac")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.mimetype, "application/zip")
+
+        zf = zipfile.ZipFile(io.BytesIO(rv.get_data()))
+        names = zf.namelist()
+        # One entry per episode, plus the playlist file the exporter writes.
+        self.assertEqual(len([n for n in names if n.endswith(".mp3")]), 3)
+        self.assertTrue(any(n.endswith(".m3u") for n in names))
+        self.assertNotIn("_erreurs.txt", names)
+        first = [n for n in names if n.endswith(".mp3")][0]
+        self.assertTrue(zf.read(first).startswith(b"ID3"))
+
+    def test_export_rejects_an_unknown_kind(self):
+        self._login()
+        self._subscribe()
+        rv = self.client.get("/api/export/nope/" + str(ids.show_uuid("1002156761")))
+        self.assertEqual(rv.status_code, 400)
+
+    def test_export_unknown_show_is_404(self):
+        self._login()
+        self._subscribe()
+        rv = self.client.get("/api/export/podcast/" + str(ids.show_uuid("999")) + "?fmt=flac")
+        self.assertEqual(rv.status_code, 404)
 
     def test_unsubscribe(self):
         self._login()
