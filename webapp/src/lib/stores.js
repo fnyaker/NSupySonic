@@ -451,6 +451,10 @@ function createPlayer() {
   // the position tick has to record its index in the same coordinate space or
   // the restore would land on the wrong track.
   let savedOffset = 0;
+  // When the last position tick was written, so the background path can pace
+  // itself off the clock rather than off a timer the browser may not run.
+  let lastPosAt = 0;
+  const hidden = () => typeof document !== "undefined" && document.hidden;
   function snapshot(s, cap = SESSION_CAP) {
     // Cap the persisted queue with a window AROUND the playing track — a plain
     // head slice restored the wrong track whenever the index was past the cap.
@@ -485,6 +489,7 @@ function createPlayer() {
     savedOffset = snap.start;
   }
   function savePos(s) {
+    lastPosAt = Date.now();
     writeJSON(POS_KEY, {
       i: s.index - savedOffset, // same coordinates as the persisted window
       id: s.queue[s.index]?.deezer_id ?? null,
@@ -553,7 +558,7 @@ function createPlayer() {
       // the background — Flow and radio top themselves up on every track
       // change — could go unsaved indefinitely while the position ticks, which
       // are synchronous, ran on into tracks the snapshot never learned about.
-      if (typeof document !== "undefined" && document.hidden) save(s);
+      if (hidden()) save(s);
       else scheduleSave();
     } else if (moved) {
       clearTimeout(posTimer);
@@ -566,8 +571,22 @@ function createPlayer() {
       // Backgrounded there is no frame to keep smooth and a track change comes
       // around every few minutes, so paying for one full write buys a session
       // that is correct on its own, whatever happens to the tick afterwards.
-      if (typeof document !== "undefined" && document.hidden) save(s);
+      //
+      // `currentTime` is forced to 0: next()/jump() move the index without
+      // touching it, so the store still holds the OUTGOING track's playhead at
+      // this instant (the incoming one resets it a moment later, from the audio
+      // element). Snapshotting that as-is would pair the new track with the old
+      // one's position and resume it 3 minutes in.
+      if (hidden()) save({ ...s, currentTime: 0 });
       else savePos(s);
+    } else if (hidden()) {
+      // Same reasoning as the queue write above, for the playhead: a hidden
+      // page's timers are throttled to as little as once a minute, and stop
+      // outright once it's frozen, so a `setTimeout` tick can't be relied on to
+      // keep the position fresh. `timeupdate` keeps firing while audio plays,
+      // which is what got us here, so rate-limit off the CLOCK instead of off a
+      // timer — same ~2s cadence, no timer to throttle.
+      if (Date.now() - lastPosAt >= 2000) savePos(s);
     } else if (!posTimer) {
       posTimer = setTimeout(() => {
         posTimer = null;
