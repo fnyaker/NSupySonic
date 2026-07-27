@@ -246,6 +246,187 @@
   function elCenterLeft(el) {
     return el.offsetLeft - (scroller.clientWidth - el.clientWidth) / 2;
   }
+
+  // -- motion ----------------------------------------------------------------
+  // Neither the browser's snap animation nor `behavior: "smooth"` lets us pick
+  // an easing, and both start braking almost immediately: the cover shoots off,
+  // then spends most of the travel crawling toward the target. However hard you
+  // flick it, it feels like it's arriving late.
+  //
+  // So we drive scrollLeft ourselves with a curve that HOLDS the speed the
+  // finger left it at and only decelerates over a short, fixed tail. Both parts
+  // are dynamic: the duration comes from the release velocity, and the brake is
+  // always the last ~BRAKE_MS of it — so a long glide holds speed for longer
+  // rather than braking proportionally earlier.
+  const BRAKE_MS = 110; // wall-clock length of the deceleration itself
+  // The floor is deliberately low: it only exists so a few-pixel correction
+  // still animates. Set any higher and it swallows the velocity term — a hard
+  // flick and a lazy drag end up taking the same time, which is precisely the
+  // "it slows down too early" feeling we're getting rid of.
+  const MIN_MS = 130;
+  const MAX_MS = 420; // even a lazy release can't dawdle
+  const MIN_SPEED = 1.2; // px/ms floor, so a gentle release still feels brisk
+
+  // Fraction of the distance covered at time `t` (0..1) by a run that holds a
+  // constant speed for the first (1 - b) of its duration, then decelerates
+  // uniformly to a stop over the last `b`. Position AND velocity are continuous
+  // at the join (the constant phase runs at exactly the speed the brake starts
+  // from), so there's no kink where the braking begins.
+  function holdThenBrake(t, b) {
+    if (b <= 0) return t;
+    const v = 1 / (1 - b / 2); // constant-phase speed; total distance = 1
+    if (t <= 1 - b) return v * t;
+    const u = (t - (1 - b)) / b;
+    return v * (1 - b) + v * b * (u - (u * u) / 2);
+  }
+
+  // Snapping is the fallback for input we don't handle (trackpad, wheel). It
+  // must be off while WE own the scroll position, or the browser re-snaps every
+  // frame we write and fights the animation.
+  function setSnap(on) {
+    if (scroller) scroller.style.scrollSnapType = on ? "" : "none";
+  }
+
+  let animId = null;
+  function stopAnim() {
+    if (animId !== null) {
+      cancelAnimationFrame(animId);
+      animId = null;
+    }
+  }
+  // Glide scrollLeft to `to`. `speed` is the gesture's release velocity in
+  // px/ms (0 when there's no gesture behind it, e.g. a button press).
+  function glideTo(to, speed = 0, done = null) {
+    if (!scroller) return;
+    stopAnim();
+    const from = scroller.scrollLeft;
+    const dist = to - from;
+    if (Math.abs(dist) < 1) {
+      scroller.scrollLeft = to;
+      setSnap(true);
+      done?.();
+      return;
+    }
+    const ms = Math.min(
+      MAX_MS,
+      Math.max(MIN_MS, Math.abs(dist) / Math.max(speed, MIN_SPEED))
+    );
+    const b = Math.min(0.75, BRAKE_MS / ms);
+    setSnap(false);
+    holdRecenter(ms + 400); // safety net if a frame is dropped; cleared below
+    const t0 = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / ms);
+      scroller.scrollLeft = from + dist * holdThenBrake(t, b);
+      if (t < 1) {
+        animId = requestAnimationFrame(step);
+        return;
+      }
+      animId = null;
+      scroller.scrollLeft = to; // land exactly on the target
+      done?.();
+      // Restore snapping a frame later and keep the guard up a moment longer:
+      // re-enabling the property can itself fire a scroll/scrollend that must
+      // not be read as a fresh user settle.
+      requestAnimationFrame(() => {
+        setSnap(true);
+        holdRecenter(80);
+      });
+    };
+    animId = requestAnimationFrame(step);
+  }
+
+  // -- the drag --------------------------------------------------------------
+  // `touch-action: none` on the scroller hands us the gesture outright. Left to
+  // the browser, the fling is intercepted by native snapping with its own
+  // easing — which is the very thing we're replacing.
+  let covDragging = false;
+  let covStartX = 0;
+  let covStartScroll = 0;
+  // Velocity is measured over a short TRAILING window, not as a running
+  // average from the start of the gesture. The first sample of a swipe is
+  // almost always a slow one — the finger planting and taking up the slack —
+  // and an average seeded with it stays low for the rest of a short flick, so a
+  // genuine flick was scored as a slow drag and didn't change track. Only the
+  // last few milliseconds describe how fast the finger was actually leaving.
+  const VEL_WINDOW_MS = 80;
+  let covSamples = []; // [t, clientX]
+
+  function onCoverStart(e) {
+    if (!scroller || e.touches.length !== 1) return;
+    stopAnim();
+    clearTimeout(settleTimer);
+    setSnap(false);
+    covDragging = true;
+    recentering = true; // our scroll writes must not look like a user settle
+    clearTimeout(recenterTimer);
+    recenterTimer = null;
+    covStartX = e.touches[0].clientX;
+    covStartScroll = scroller.scrollLeft;
+    covSamples = [[performance.now(), covStartX]];
+  }
+  // px/ms over the trailing window; positive = content moving left, i.e. the
+  // finger is heading left, i.e. the user is reaching for the NEXT cover.
+  function releaseVelocity() {
+    if (covSamples.length < 2) return 0;
+    const [t0, x0] = covSamples[0];
+    const [t1, x1] = covSamples[covSamples.length - 1];
+    const dt = t1 - t0;
+    return dt > 0 ? (x0 - x1) / dt : 0;
+  }
+  function onCoverMove(e) {
+    if (!covDragging || e.touches.length !== 1) return;
+    const x = e.touches[0].clientX;
+    const now = performance.now();
+    covSamples.push([now, x]);
+    // Keep the window, but never fewer than two points — a very fast flick may
+    // only produce a couple of moves in total.
+    while (covSamples.length > 2 && now - covSamples[0][0] > VEL_WINDOW_MS)
+      covSamples.shift();
+    const max = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+    let next = covStartScroll + (covStartX - x);
+    // Rubber-band past the ends rather than stopping dead: it says "there's
+    // nothing that way" without feeling broken.
+    if (next < 0) next *= 0.35;
+    else if (next > max) next = max + (next - max) * 0.35;
+    scroller.scrollLeft = next;
+  }
+  function onCoverEnd() {
+    if (!covDragging) return;
+    covDragging = false;
+    const slides = scroller?.children;
+    if (!slides || !slides.length) {
+      recentering = false;
+      setSnap(true);
+      return;
+    }
+    const el = slides[curSlot];
+    const step = (el?.clientWidth || scroller.clientWidth) + GAP;
+    const moved = el ? scroller.scrollLeft - elCenterLeft(el) : 0;
+    const vel = releaseVelocity();
+    // A flick decides by INTENT, not distance: past ~0.3 px/ms we follow the
+    // direction the finger was going even if it barely travelled. A slow drag
+    // has to cross a third of a cover to count. The two must agree in
+    // direction — a flick BACK toward centre after over-dragging means "no".
+    let target = curSlot;
+    if (Math.abs(vel) > 0.3) target = curSlot + (vel > 0 ? 1 : -1);
+    else if (Math.abs(moved) > step * 0.34) target = curSlot + (moved > 0 ? 1 : -1);
+    target = Math.max(0, Math.min(slides.length - 1, target));
+    const dest = slides[target];
+    if (!dest) {
+      recentering = false;
+      setSnap(true);
+      return;
+    }
+    glideTo(elCenterLeft(dest), Math.abs(vel), () => {
+      if (target === curSlot) return;
+      swipeAdvance = true;
+      // The adjacent track unconditionally — NOT player.prev(), whose "restart
+      // if past 3 s" semantics (right for the button) would replay the same
+      // track while the carousel has already moved to the previous cover.
+      player.jump(idx + (target - curSlot));
+    });
+  }
   // Hold the "this scroll is ours, not the user's" flag for `ms`. It MUST be a
   // single tracked timer: the three call sites each used to fire their own
   // untracked setTimeout, so two overlapping re-centres (tapping next twice
@@ -266,27 +447,26 @@
     if (!scroller) return;
     const el = scroller.children[curSlot];
     if (!el) return;
+    stopAnim();
     holdRecenter(60);
-    scroller.scrollTo({ left: elCenterLeft(el), behavior: "instant" });
+    scroller.scrollLeft = elCenterLeft(el);
     clearTimeout(settleTimer);
   }
   // Slide the new current in from the side (used for button / auto advance, so
-  // they get the same motion as a swipe instead of teleporting).
+  // they get the same motion as a swipe instead of teleporting) — through the
+  // same glide, so every way the carousel moves shares one motion language.
   function slideToCurrent(dir) {
     if (!scroller) return;
     const el = scroller.children[curSlot];
-    if (!el) {
-      return;
-    }
+    if (!el) return;
     const center = elCenterLeft(el);
     const step = el.clientWidth + GAP;
-    holdRecenter(420);
-    scroller.scrollTo({ left: center - step * dir, behavior: "instant" });
-    requestAnimationFrame(() => {
-      scroller.scrollTo({ left: center, behavior: "smooth" });
-      clearTimeout(settleTimer);
-      holdRecenter(420); // re-arm from the start of the SMOOTH scroll
-    });
+    stopAnim();
+    setSnap(false);
+    holdRecenter(600);
+    scroller.scrollLeft = center - step * dir; // start off-centre
+    clearTimeout(settleTimer);
+    requestAnimationFrame(() => glideTo(center));
   }
   // `scrollend` fires exactly when the scroll settles — INCLUDING the browser's
   // own snap animation — which is precisely when a swipe should commit. The old
@@ -296,18 +476,18 @@
   // Fall back to the timer where the event isn't supported (Safari < 18.2).
   const HAS_SCROLLEND = typeof window !== "undefined" && "onscrollend" in window;
   function onScroll() {
-    if (recentering || HAS_SCROLLEND) return;
+    if (recentering || covDragging || HAS_SCROLLEND) return;
     clearTimeout(settleTimer);
     settleTimer = setTimeout(onSettled, 110);
   }
   function onScrollEnd() {
-    if (recentering) return;
+    if (recentering || covDragging) return;
     clearTimeout(settleTimer);
     settleTimer = null;
     onSettled();
   }
   function onSettled() {
-    if (recentering || !scroller) return;
+    if (recentering || covDragging || !scroller) return;
     const center = scroller.scrollLeft + scroller.clientWidth / 2;
     const slides = scroller.children;
     let nearest = curSlot,
@@ -335,10 +515,7 @@
       const el = scroller.children[curSlot];
       if (el) {
         const want = elCenterLeft(el);
-        if (Math.abs(scroller.scrollLeft - want) > 6) {
-          holdRecenter(380);
-          scroller.scrollTo({ left: want, behavior: "smooth" });
-        }
+        if (Math.abs(scroller.scrollLeft - want) > 6) glideTo(want);
       }
     }
   }
@@ -371,6 +548,7 @@
     else slideToCurrent(dir);
   }
   onDestroy(() => {
+    stopAnim();
     clearTimeout(settleTimer);
     clearTimeout(recenterTimer);
     clearTimeout(bgRetryTimer);
@@ -420,6 +598,10 @@
       bind:this={scroller}
       on:scroll|passive={onScroll}
       on:scrollend={onScrollEnd}
+      on:touchstart|passive={onCoverStart}
+      on:touchmove|passive={onCoverMove}
+      on:touchend={onCoverEnd}
+      on:touchcancel={onCoverEnd}
     >
       {#each slots as s (s.key)}
         <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} kind={s.track.podcast ? "podcast" : "album"} fallbackId={s.track.deezer_id} eager /></div>
@@ -579,6 +761,11 @@
 
   /* native scroll-snap cover carousel */
   .scroller {
+    /* Sized off the viewport so the slide width and the side padding share one
+       base and can be made to total exactly 100 (see the padding below). The
+       sheet is `position: fixed; inset: 0`, so the scroller spans the viewport. */
+    --slide-w: 72vw;
+    --slide-pad: 14vw;
     display: flex;
     gap: 14px;
     overflow-x: auto;
@@ -593,20 +780,27 @@
     scroll-snap-type: x mandatory;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
-    padding: 10px 7.5%;
+    /* The side padding MUST be exactly what's left over once a slide is
+       centred, or the first and last covers can never reach the middle: the
+       scroll simply clamps short of them. It did — `flex-basis: 85%` resolves
+       against the scroller's CONTENT box while `padding: 7.5%` resolves against
+       its containing block, so the two never added up to a full width. Both are
+       in vw here so they're guaranteed to: 72 + 14 + 14 = 100. */
+    padding: 10px var(--slide-pad);
     overscroll-behavior-x: contain;
-    /* Claim the horizontal axis outright. Without this the browser spends the
-       first few pixels of every drag deciding whether the gesture is meant for
-       this scroller or the sheet behind it, which reads as the swipe hesitating
-       before it starts. The sheet's swipe-down-to-dismiss already ignores
-       gestures that begin on the carousel, so there's nothing to give up. */
-    touch-action: pan-x;
+    /* The gesture is ours (see onCoverStart): the browser must not scroll,
+       fling or snap this element on touch, because its fling easing is exactly
+       what we're replacing. Snapping stays declared above as the fallback for
+       input we don't handle — a trackpad, a wheel — and is switched off
+       inline while we're driving. The sheet's swipe-down-to-dismiss already
+       ignores gestures that begin on the carousel, so nothing is given up. */
+    touch-action: none;
   }
   .scroller::-webkit-scrollbar {
     display: none;
   }
   .slide {
-    flex: 0 0 85%;
+    flex: 0 0 var(--slide-w);
     scroll-snap-align: center;
     scroll-snap-stop: always;
     aspect-ratio: 1 / 1;
