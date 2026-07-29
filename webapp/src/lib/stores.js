@@ -673,19 +673,30 @@ function createPlayer() {
 
     // Append more tracks to the end of the queue, de-duplicated, no toast,
     // without changing the current index (used to keep Flow/radio endless).
+    // Returns how many tracks were actually appended, so the caller can tell an
+    // extension that did something from one that was entirely duplicates.
     extend(tracks) {
       const extra = clean(tracks);
-      if (!extra.length) return;
-      update((s) => {
-        const have = new Set(s.queue.map((t) => t.deezer_id));
-        const add = extra.filter((t) => !have.has(t.deezer_id));
-        if (!add.length) return s;
-        return {
-          ...s,
-          queue: [...s.queue, ...add],
-          _orig: s._orig ? [...s._orig, ...add] : null,
-        };
-      });
+      if (!extra.length) return 0;
+      // Compute the delta BEFORE touching the store, and leave the store alone
+      // when there is nothing to add. Returning the unchanged state from
+      // update() is NOT free: svelte's safe_not_equal is unconditionally true
+      // for objects, so subscribers fire anyway — and this store's subscribers
+      // include the reactive block that calls the queue top-up, which then asks
+      // for more tracks, gets the same duplicates, and notifies again. A radio
+      // whose tracks are all already queued span that into a permanent request
+      // storm (a /api/radio/track call every ~250ms, for hours), which pegs the
+      // main thread and makes the whole UI stop responding.
+      const s = get({ subscribe });
+      const have = new Set(s.queue.map((t) => t.deezer_id));
+      const add = extra.filter((t) => !have.has(t.deezer_id));
+      if (!add.length) return 0;
+      update((cur) => ({
+        ...cur,
+        queue: [...cur.queue, ...add],
+        _orig: cur._orig ? [...cur._orig, ...add] : null,
+      }));
+      return add.length;
     },
 
     // Append + advance silently (used by autoplay/radio continuation).

@@ -21,12 +21,19 @@
   import { duration as fmtDuration, hiResCover, resolveCover, cssUrl, artistLine } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createBackdrop } from "../lib/backdrop.js";
+  import { api } from "../lib/api.js";
 
   // Blurred backdrop — crossfading layers driven by lib/backdrop.js (shared
   // with the mobile view). Resolved through the offline cache so it also works
   // in airplane mode.
   const bg = createBackdrop();
-  $: bg.set(resolveCover($offlineCovers, $current?.album?.cover));
+  // The second argument is the same-origin, server-cached copy of the same art,
+  // used only if the (Deezer CDN) URL turns out to be unreachable — the backdrop
+  // used to just keep the previous track's blur forever in that case.
+  $: bg.set(
+    resolveCover($offlineCovers, $current?.album?.cover),
+    $current?.deezer_id ? api.coverUrl($current.deezer_id) : ""
+  );
   // The cover glow reuses the last *decoded* backdrop (never a loading URL).
   $: glowSrc = $bg.length ? $bg[$bg.length - 1].src : "";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
