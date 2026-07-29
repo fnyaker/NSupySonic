@@ -25,6 +25,7 @@
 {% block body %}
 <h2 class="mt-4 pb-2 border-bottom">{{ user.name }}</h2>
 <form method="post">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
   {% if request.user.id == user.id %}
   <div class="input-group mb-3">
     <span class="input-group-text" id="current_passwd">

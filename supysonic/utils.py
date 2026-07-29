@@ -14,6 +14,31 @@ from supysonic.db import Meta
 
 __key_cache = {}
 
+# The shortest search term we're willing to run a full-table LIKE scan for.
+LIKE_MIN_LENGTH = 2
+
+
+def like_term(raw, minimum=LIKE_MIN_LENGTH):
+    """Normalise a client search string before it reaches a LIKE query.
+
+    peewee's ``.contains()`` interpolates the term into ``LIKE '%term%'`` with
+    no ESCAPE clause, so a client-supplied ``%`` is a wildcard: ``?q=%`` matched
+    — and serialised — the *entire* library for the cost of one request. Adding
+    backslash escapes is not an option (SQLite defines no default escape
+    character, so ``\\%`` would then stop matching a literal "50%"), so the
+    multi-character wildcard is simply dropped.
+
+    ``_`` is left alone on purpose: it matches any single character, so it can
+    only over-match by the term's own length — no amplification — and stripping
+    it would break searching for names that really contain an underscore.
+
+    Returns None when nothing worth scanning for is left.
+    """
+    term = str(raw or "").replace("%", "").strip()
+    if len(term) < minimum:
+        return None
+    return term
+
 
 def get_secret_key(keyname):
     """Return a server secret by name.

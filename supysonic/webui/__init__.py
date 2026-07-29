@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from functools import wraps
+from urllib.parse import urlsplit
 
 from flask import Blueprint, current_app, jsonify, request, send_file, session
 from peewee import fn
@@ -43,10 +44,36 @@ from ..db import (
 )
 from ..managers.user import UserManager
 from ..ratelimit import auth_limiter
+from ..utils import like_term
 
 logger = logging.getLogger(__name__)
 
 webapi = Blueprint("webapi", __name__)
+
+
+# Same-origin guard for every state-changing /api call. The SPA is same-origin,
+# so a cross-site POST is by definition not us: this stops a hostile page from
+# driving the API with the visitor's session cookie, and it's the layer that
+# still holds if SameSite is ignored (old browsers, or a cookie replayed by an
+# embedded webview). Fetch metadata is preferred; Origin is the fallback for
+# clients that don't send Sec-Fetch-*.
+@webapi.before_request
+def reject_cross_site():
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    site = request.headers.get("Sec-Fetch-Site")
+    if site is not None:
+        if site not in ("same-origin", "none"):
+            return jsonify({"error": "cross-site request rejected"}), 403
+        return
+    origin = request.headers.get("Origin")
+    if origin:
+        # Compare hosts only: a TLS-terminating proxy that isn't declared with
+        # proxy_fix_hops makes the app see http:// while the browser sends an
+        # https:// Origin, and that mismatch is a deployment artifact, not an
+        # attack (a hostile origin always differs by host).
+        if urlsplit(origin).netloc != request.host:
+            return jsonify({"error": "cross-site request rejected"}), 403
 
 _CDN = "https://e-cdns-images.dzcdn.net/images/{kind}/{md5}/{w}x{w}-000000-80-0-0.jpg"
 
@@ -308,10 +335,16 @@ def login_required(f):
         if not uid:
             return jsonify({"error": "unauthorized"}), 401
         try:
-            request.webuser = User[uid]
+            user = User[uid]
         except (User.DoesNotExist, ValueError):
             session.clear()
             return jsonify({"error": "unauthorized"}), 401
+        # Signed cookies aren't revocable; the epoch is. A password change or a
+        # role change bumps it, which invalidates every cookie minted before.
+        if session.get("epoch", 0) != (user.session_epoch or 0):
+            session.clear()
+            return jsonify({"error": "unauthorized"}), 401
+        request.webuser = user
         return f(*args, **kwargs)
 
     return wrapper
@@ -338,6 +371,39 @@ def admin_required(f):
         return f(*args, **kwargs)
 
     return wrapper
+
+
+# -- upload ownership -------------------------------------------------------
+# A Track with a non-NULL owner is somebody's private upload; NULL means it is
+# part of the shared library (scanned music folders, Deezer-backed rows) and
+# stays visible to everyone. Guests used to see — and stream, and download —
+# each other's uploaded files, because nothing tied a Track to a user at all.
+
+
+def _visible_track_clause():
+    """Peewee expression: shared-library tracks + the caller's own uploads."""
+    user = getattr(request, "webuser", None)
+    if user is not None and user.admin:
+        return None  # admins see everything
+    if user is None:  # pragma: no cover - login_required runs first
+        return Track.owner.is_null(True)
+    return Track.owner.is_null(True) | (Track.owner == user.id)
+
+
+def _visible_tracks(query):
+    clause = _visible_track_clause()
+    return query if clause is None else query.where(clause)
+
+
+def _may_access_track(track) -> bool:
+    """Whether the caller may read this specific track."""
+    if track is None:
+        return False
+    owner_id = getattr(track, "owner_id", None)
+    if owner_id is None:
+        return True
+    user = getattr(request, "webuser", None)
+    return bool(user and (user.admin or user.id == owner_id))
 
 
 def _provider():
@@ -493,21 +559,24 @@ def _local_search_tracks(query: str, limit: int) -> list:
     a Deezer call. Imported-but-not-yet-archived rows are skipped: they'd need
     Deezer to stream, so they surface through the live Deezer search instead.
     """
-    q = (
+    like = like_term(query)
+    if like is None:
+        return []
+    q = _visible_tracks(
         Track.select(Track, Album, Artist)
         .join(Album)
         .switch(Track)
         .join(Artist)
         .where(
-            Track.title.contains(query)
-            | Album.name.contains(query)
-            | Artist.name.contains(query)
+            Track.title.contains(like)
+            | Album.name.contains(like)
+            | Artist.name.contains(like)
         )
-        .order_by(Track.title)
-        # Over-fetch, then keep only offline-playable rows up to `limit` (an
-        # archived-state filter can't be expressed cleanly in SQL here).
-        .limit(min(limit * 5, 200))
-    )
+    ).order_by(
+        Track.title
+    # Over-fetch, then keep only offline-playable rows up to `limit` (an
+    # archived-state filter can't be expressed cleanly in SQL here).
+    ).limit(min(limit * 5, 200))
     keep = []
     for t in q:
         if t.deezer_id is not None and not os.path.isfile(t.path):
@@ -834,7 +903,10 @@ def _resolve_tracks(provider, raw_ids) -> list:
     for raw in raw_ids:
         sid = str(raw)
         try:
-            out.append(Track[uuid.UUID(sid)])
+            row = Track[uuid.UUID(sid)]
+            # Don't let a playlist smuggle in another user's private upload.
+            if _may_access_track(row):
+                out.append(row)
             continue
         except (ValueError, Track.DoesNotExist):
             pass
@@ -951,21 +1023,28 @@ def _push_async(label, fn, *args):
 @webapi.route("/login", methods=["POST"])
 def login():
     throttled = not current_app.testing
-    if throttled and auth_limiter.is_blocked(request.remote_addr):
-        return jsonify({"error": "too many attempts, try again later"}), 429
     data = request.get_json(silent=True) or request.form
     username = data.get("username")
     password = data.get("password")
+    if throttled and auth_limiter.is_blocked_any(request.remote_addr, username):
+        return jsonify({"error": "too many attempts, try again later"}), 429
     user = UserManager.try_auth(username, password) if username and password else None
     if user is None:
         logger.error(
             "Failed web login for user %s (IP: %s)", username, request.remote_addr
         )
         if throttled:
-            auth_limiter.record_failure(request.remote_addr)
+            auth_limiter.record_failure(request.remote_addr, username)
         return jsonify({"error": "invalid credentials"}), 401
-    auth_limiter.reset(request.remote_addr)
+    # A success clears the per-account counter only: letting it also clear the
+    # per-IP one handed any attacker who owns one valid account a free reset
+    # between brute-force bursts.
+    auth_limiter.reset_user(username)
+    # Never keep anything the pre-auth session carried (session fixation), and
+    # stamp the epoch so a later password/role change revokes this cookie.
+    session.clear()
     session["uid"] = str(user.id)
+    session["epoch"] = user.session_epoch or 0
     session.permanent = True
     return jsonify({"user": {"name": user.name, "admin": user.admin}})
 
@@ -1684,16 +1763,14 @@ def my_favorite_ids():
 @login_required
 def my_local():
     """All local (imported/uploaded) tracks — the home of your own files."""
-    q = (
+    q = _visible_tracks(
         Track.select(Track, Album, Artist)
         .join(Album)
         .switch(Track)
         .join(Artist)
         .switch(Track)
         .where(Track.deezer_id.is_null(True))
-        .order_by(Artist.name, Album.name, Track.disc, Track.number)
-        .limit(5000)
-    )
+    ).order_by(Artist.name, Album.name, Track.disc, Track.number).limit(5000)
     return jsonify({"tracks": [_local_track(t) for t in q]})
 
 
@@ -2129,6 +2206,8 @@ def favorite():
             track = Track[uuid.UUID(deezer_id)]
         except (ValueError, Track.DoesNotExist):
             return jsonify({"error": "invalid deezer_id"}), 400
+        if not _may_access_track(track):
+            return jsonify({"error": "invalid deezer_id"}), 400
         _set_star(track, on)
         return jsonify({"ok": True, "favorite": on, "local": True})
 
@@ -2539,7 +2618,9 @@ def upload():
             continue
         f.save(dest)
         try:
-            track = local.import_local_file(dest, root)
+            # Tagged with its uploader: uploads are private to their owner
+            # (see Track.visible_clause), unlike scanned library files.
+            track = local.import_local_file(dest, root, owner=user)
         except Exception:
             logger.warning("Upload import failed for %s", name, exc_info=True)
             track = None
@@ -2562,6 +2643,34 @@ def upload():
         resp["used"] = used
         resp["quota_exceeded"] = quota_hit
     return jsonify(resp)
+
+
+@webapi.route("/local/<track_id>", methods=["DELETE"])
+@login_required
+def delete_local(track_id):
+    """Delete one of your own uploads — row and file.
+
+    There was no way to remove an upload at all, so a mistaken (or unwanted)
+    file stayed on the server, counted against the quota, forever. Only the
+    owner (or an admin) can delete, and only uploaded files: shared-library
+    tracks and Deezer rows are refused.
+    """
+    try:
+        track = Track[uuid.UUID(str(track_id))]
+    except (ValueError, Track.DoesNotExist):
+        return jsonify({"error": "not found"}), 404
+    if track.owner_id is None or track.deezer_id is not None:
+        return jsonify({"error": "not an upload"}), 403
+    if not _may_access_track(track):
+        return jsonify({"error": "not found"}), 404
+
+    path = track.path
+    track.delete_instance(recursive=True)
+    try:
+        os.remove(path)
+    except OSError:
+        logger.info("Upload file already gone: %s", path)
+    return jsonify({"ok": True})
 
 
 @webapi.route("/upload/usage")
@@ -2724,6 +2833,8 @@ def local_cover(track_id):
         track = Track[uuid.UUID(str(track_id))]
     except (ValueError, Track.DoesNotExist):
         return jsonify({"error": "not found"}), 404
+    if not _may_access_track(track):
+        return jsonify({"error": "not found"}), 404
     return _serve_embedded_cover(track)
 
 
@@ -2745,6 +2856,10 @@ def cover(cid):
             track = Track[uuid.UUID(str(cid))]
         except (ValueError, Track.DoesNotExist):
             track = None
+        # A UUID that isn't a track is fine (album/artist/playlist/podcast art,
+        # resolved below) — but a track we may not read must not leak its cover.
+        if track is not None and not _may_access_track(track):
+            return jsonify({"error": "not found"}), 404
     if track is not None and os.path.isfile(track.path):
         return _serve_embedded_cover(track)
 
@@ -2815,6 +2930,9 @@ def stream(deezer_id):
             except PodcastEpisode.DoesNotExist:
                 return jsonify({"error": "invalid id"}), 400
             return _stream_episode(episode, bitrate)
+        if not _may_access_track(track):
+            # Someone else's private upload: indistinguishable from an unknown id.
+            return jsonify({"error": "invalid id"}), 400
 
     if track is None or not os.path.isfile(track.path):
         if not _valid_id(deezer_id):

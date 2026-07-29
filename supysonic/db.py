@@ -19,6 +19,7 @@ from peewee import (
     BooleanField,
     CharField,
     DateTimeField,
+    DeferredForeignKey,
     FixedCharField,
     FloatField,
     ForeignKeyField,
@@ -31,7 +32,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260727"
+SCHEMA_VERSION = "20260730"
 
 
 def now():
@@ -158,7 +159,9 @@ class Folder(PathMixin, _Model):
             + [
                 t.as_subsonic_child(user, client)
                 for t in Track.prime_credits(
-                    sorted(self.tracks, key=lambda t: t.sort_key())
+                    sorted(
+                        Track.visible(self.tracks, user), key=lambda t: t.sort_key()
+                    )
                 )
             ],
         }
@@ -369,6 +372,42 @@ class Track(PathMixin, _Model):
     root_folder = ForeignKeyField(Folder, backref="+")
     folder = ForeignKeyField(Folder, backref="tracks")
 
+    # Who uploaded this file, for user-uploaded tracks only. NULL means "part of
+    # the shared library" (everything scanned from a music folder, and every
+    # Deezer-backed row) and stays visible to everyone; a non-NULL owner is
+    # private to that user (and to admins). Deferred because User is declared
+    # further down — it already carries a FK back to Track.
+    owner = DeferredForeignKey("User", null=True, backref="+")
+
+    @classmethod
+    def visible_clause(cls, user):
+        """Filter expression for the tracks ``user`` is allowed to see.
+
+        Shared-library rows (``owner IS NULL``) plus the user's own uploads.
+        Returns None for an admin, meaning "no restriction" — callers use
+        ``visible()`` rather than testing this themselves.
+        """
+        if user is not None and getattr(user, "admin", False):
+            return None
+        if user is None:
+            return cls.owner.is_null(True)
+        return cls.owner.is_null(True) | (cls.owner == user.id)
+
+    @classmethod
+    def visible(cls, query, user):
+        """Apply :meth:`visible_clause` to a select query."""
+        clause = cls.visible_clause(user)
+        return query if clause is None else query.where(clause)
+
+    def readable_by(self, user) -> bool:
+        """Single-row equivalent of :meth:`visible_clause`."""
+        if self.owner_id is None:
+            return True
+        return bool(
+            user is not None
+            and (getattr(user, "admin", False) or user.id == self.owner_id)
+        )
+
     @classmethod
     def prime_credits(cls, tracks):
         """Load the credit rows for a whole response in ONE query.
@@ -542,6 +581,12 @@ class User(_Model):
 
     admin = BooleanField(default=False)
     jukebox = BooleanField(default=False)
+
+    # Bumped whenever the account's credentials or privileges change. Web
+    # sessions record the epoch they were minted with and are refused once it
+    # moves on, which is what makes a signed (otherwise unrevocable) session
+    # cookie die on a password change or an admin downgrade.
+    session_epoch = IntegerField(default=0)
 
     lastfm_session = FixedCharField(32, null=True)
     lastfm_status = BooleanField(

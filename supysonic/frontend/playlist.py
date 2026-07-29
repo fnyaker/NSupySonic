@@ -83,7 +83,7 @@ def playlist_update(uid, playlist):
     return playlist_details(str(uid))
 
 
-@frontend.route("/playlist/del/<uid>")
+@frontend.route("/playlist/del/<uid>", methods=["POST"])
 @resolve_and_inject_playlist
 def playlist_delete(uid, playlist):
     if playlist.user_id != request.user.id:

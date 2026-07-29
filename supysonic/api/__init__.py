@@ -57,8 +57,10 @@ def decode_password(password):
         return password
 
 
-def _auth_rate_limited():
-    return not current_app.testing and auth_limiter.is_blocked(request.remote_addr)
+def _auth_rate_limited(username=None):
+    return not current_app.testing and auth_limiter.is_blocked_any(
+        request.remote_addr, username
+    )
 
 
 def _record_auth_failure(username):
@@ -66,7 +68,7 @@ def _record_auth_failure(username):
         "Failed login attempt for user %s (IP: %s)", username, request.remote_addr
     )
     if not current_app.testing:
-        auth_limiter.record_failure(request.remote_addr)
+        auth_limiter.record_failure(request.remote_addr, username)
 
 
 @api.before_request
@@ -76,9 +78,11 @@ def authorize():
 
     if request.authorization:
         username = request.authorization.username
+        if _auth_rate_limited(username):
+            raise Unauthorized()
         user = UserManager.try_auth(username, request.authorization.password)
         if user is not None:
-            auth_limiter.reset(request.remote_addr)
+            auth_limiter.reset_user(username)
             request.user = user
             return
 
@@ -86,6 +90,8 @@ def authorize():
         raise Unauthorized()
 
     username = request.values["u"]
+    if _auth_rate_limited(username):
+        raise Unauthorized()
 
     token, salt = map(request.values.get, ("t", "s"))
     if token and salt and "p" not in request.values:
@@ -99,7 +105,8 @@ def authorize():
         _record_auth_failure(username)
         raise Unauthorized()
 
-    auth_limiter.reset(request.remote_addr)
+    # Only the per-account counter is cleared on success — see ratelimit.py.
+    auth_limiter.reset_user(username)
     request.user = user
 
 

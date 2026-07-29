@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS track (
     play_count INTEGER NOT NULL,
     last_play DATETIME,
     root_folder_id INTEGER NOT NULL REFERENCES folder(id),
-    folder_id INTEGER NOT NULL REFERENCES folder(id)
+    folder_id INTEGER NOT NULL REFERENCES folder(id),
+    owner_id CHAR(32) REFERENCES user(id)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE INDEX index_track_album_id_fk ON track(album_id);
 CREATE INDEX index_track_artist_id_fk ON track(artist_id);
@@ -63,6 +64,7 @@ CREATE TABLE IF NOT EXISTS user (
     password_clear VARCHAR(512),
     admin BOOLEAN NOT NULL,
     jukebox BOOLEAN NOT NULL,
+    session_epoch INTEGER NOT NULL DEFAULT 0,
     listenbrainz_session CHAR(36),
     listenbrainz_status BOOLEAN NOT NULL,
     lastfm_session CHAR(32),

@@ -30,7 +30,7 @@ import uuid
 from flask import current_app, jsonify, request, send_file
 
 from ..db import PodcastEpisode, Track
-from . import _need_provider, _valid_id, login_required, webapi
+from . import _may_access_track, _need_provider, _valid_id, login_required, webapi
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,10 @@ def _resolve_media(mid):
     except ValueError:
         return None, None
     try:
-        return Track[key], None
+        track = Track[key]
+        # Another user's private upload reads as "not found" — the share sheet
+        # (waveform / full file / clip) was a straight read of anyone's file.
+        return (track if _may_access_track(track) else None), None
     except Track.DoesNotExist:
         pass
     try:

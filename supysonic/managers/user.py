@@ -61,8 +61,19 @@ class UserManager:
 
         return User[uid]
 
+    # The only User columns a caller may set at creation time. Everything else
+    # (password, salt, password_clear, session_epoch, last_play...) is derived
+    # here. Without this whitelist, any form field that reached **kwargs became
+    # a column write — `admin=1` on the add-user form was a one-request
+    # privilege escalation.
+    CREATABLE_FIELDS = frozenset({"mail", "admin", "jukebox"})
+
     @staticmethod
     def add(name, password, **kwargs):
+        unknown = set(kwargs) - UserManager.CREATABLE_FIELDS
+        if unknown:
+            raise ValueError("Unknown field: " + ", ".join(sorted(unknown)))
+
         if User.select().where(User.name == name).exists():
             raise ValueError(f"User '{name}' exists")
 

@@ -85,6 +85,10 @@ def _resolve_stream_entity():
     uid = get_entity_id(Track, request.values["id"])
     try:
         res = Track[uid]
+        if not res.readable_by(request.user):
+            # Another user's private upload: same answer as a nonexistent id, so
+            # the endpoint can't be used to probe what others have uploaded.
+            raise NotFound("Track")
         _ensure_deezer_archived(res)
         return res
     except Track.DoesNotExist:
@@ -338,6 +342,8 @@ def download_media():
     if uid is not None:
         try:
             rv = Track[uid]
+            if not rv.readable_by(request.user):
+                raise NotFound("Track")
             _ensure_deezer_archived(rv)
             return send_file(rv.path, mimetype=rv.mimetype, conditional=True)
         except Track.DoesNotExist:
@@ -362,12 +368,34 @@ def download_media():
     # Stream a zip of multiple files to the client
     z = ZipStream(sized=True)
     if isinstance(rv, Folder):
-        # Add the entire folder tree to the zip
-        z.add_path(rv.path, recurse=True)
+        # Zip the folder's *tracks*, not its directory tree. `add_path(recurse)`
+        # shipped every file living under the folder — other users' private
+        # uploads, stray .txt/.log/.conf files, anything an admin happened to
+        # keep next to the music — to any logged-in account.
+        prefix = rv.path.rstrip(os.sep) + os.sep
+        tracks = Track.visible(
+            Track.select().where(Track.path.startswith(prefix)), request.user
+        )
+        seen = set()
+        for track in tracks:
+            filename = os.path.basename(track.path)
+            name, ext = os.path.splitext(filename)
+            index = 0
+            while filename in seen:
+                index += 1
+                filename = f"{name} ({index})"
+                if ext:
+                    filename += ext
+            z.add_path(track.path, filename)
+            seen.add(filename)
+
+        cover_path = _cover_from_collection(rv, extract=False)
+        if cover_path:
+            z.add_path(cover_path)
     else:
         # Add tracks + cover art to the zip, preventing potential naming collisions
         seen = set()
-        for track in rv.tracks:
+        for track in Track.visible(rv.tracks, request.user):
             filename = os.path.basename(track.path)
             name, ext = os.path.splitext(filename)
             index = 0

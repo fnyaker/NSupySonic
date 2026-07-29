@@ -43,7 +43,7 @@
         {% if api_key != None %}
         {% if user.lastfm_session %}
         <input type="text" class="form-control" id="lastfm" placeholder="{% if user.lastfm_status %}Linked{% else %}Invalid session{% endif %}" aria-label="LastFM {% if user.lastfm_status %}linked{% else %}invalid session{% endif %}" readonly>
-        <a href="{% if request.user.id == user.id %}{{ url_for('frontend.lastfm_unreg', uid = 'me') }}{% else %}{{ url_for('frontend.lastfm_unreg', uid = user.id) }}{% endif %}" class="btn btn-outline-secondary" type="button">Unlink</a>
+        <a href="{% if request.user.id == user.id %}{{ url_for('frontend.lastfm_unreg', uid = 'me') }}{% else %}{{ url_for('frontend.lastfm_unreg', uid = user.id) }}{% endif %}" data-method="post" class="btn btn-outline-secondary" type="button">Unlink</a>
         {% else %}
         <input type="text" class="form-control" id="lastfm" placeholder="Unlinked" aria-label="LastFM unlinked" readonly>
         <a href="https://www.last.fm/api/auth/?api_key={{ api_key }}&cb={% if request.user.id == user.id %}{{ request.url_root[:-(request.script_root|length+1)] + url_for('frontend.lastfm_reg', uid = 'me') }}{% else %}{{ request.url_root[:-(request.script_root|length+1)] + url_for('frontend.lastfm_reg', uid = user.id) }}{% endif %}" class="btn btn-outline-secondary" type="button">Link</a>
@@ -57,12 +57,13 @@
 </div>
 <div class="row">
   <div class="col-md-6 mb-3">
-    <form>
+    <form method="post">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <div class="input-group">
         <span class="input-group-text">ListenBrainz status</span>
         {% if user.listenbrainz_session %}
         <input type="text" class="form-control" id="listenbrainz" placeholder="{% if user.listenbrainz_status %}Linked{% else %}Invalid token{% endif %}" aria-label="ListenBrainz {% if user.listenbrainz_status %}linked{% else %}invalid token{% endif %}" readonly>
-        <a href="{% if request.user.id == user.id %}{{ url_for('frontend.listenbrainz_unreg', uid = 'me') }}{% else %}{{ url_for('frontend.listenbrainz_unreg', uid = user.id) }}{% endif %}" class="btn btn-outline-secondary" type="button">Unlink</a>
+        <a href="{% if request.user.id == user.id %}{{ url_for('frontend.listenbrainz_unreg', uid = 'me') }}{% else %}{{ url_for('frontend.listenbrainz_unreg', uid = user.id) }}{% endif %}" data-method="post" class="btn btn-outline-secondary" type="button">Unlink</a>
         {% else %}
         <input type="text" class="form-control" name="token" id="listenbrainz" placeholder="Unlinked, insert auth token" maxlength="36" aria-label="ListenBrainz auth token">
         <button class="btn btn-outline-secondary" type="submit" formaction="{% if request.user.id == user.id %}{{ url_for('frontend.listenbrainz_reg', uid = 'me') }}{% else %}{{ url_for('frontend.listenbrainz_reg', uid = user.id) }}{% endif %}">Link</button>
@@ -93,6 +94,7 @@ out, for instance you can only enter a bitrate so files will be streamed using
 their original format, only transcoded if their bitrate exceed the selected
 one.</p>
 <form method="post">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
   <div class="table-responsive">
     <table id="clients" class="table table-striped align-middle">
       <thead>
