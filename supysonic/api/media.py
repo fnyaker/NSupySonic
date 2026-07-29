@@ -13,7 +13,6 @@ import mediafile
 import mimetypes
 import os.path
 import re
-import requests
 import shlex
 import subprocess
 import zlib
@@ -21,7 +20,6 @@ import zlib
 from flask import request, Response, send_file
 from flask import current_app
 from PIL import Image
-from xml.etree import ElementTree
 from zipstream import ZipStream
 
 from ..cache import CacheMiss
@@ -37,6 +35,14 @@ from .exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Cover art comes from files users upload, so it is attacker-controlled input to
+# PIL. Cap the decompressed pixel count (a "decompression bomb" is a tiny file
+# that expands to gigabytes) and the requested thumbnail size.
+MAX_COVER_PIXELS = 64_000_000  # 8000x8000
+MAX_COVER_SIZE = 2048
+if Image.MAX_IMAGE_PIXELS is None or Image.MAX_IMAGE_PIXELS > MAX_COVER_PIXELS:
+    Image.MAX_IMAGE_PIXELS = MAX_COVER_PIXELS
 
 
 def _ensure_deezer_archived(res):
@@ -85,6 +91,10 @@ def _resolve_stream_entity():
     uid = get_entity_id(Track, request.values["id"])
     try:
         res = Track[uid]
+        if not res.readable_by(request.user):
+            # Another user's private upload: same answer as a nonexistent id, so
+            # the endpoint can't be used to probe what others have uploaded.
+            raise NotFound("Track")
         _ensure_deezer_archived(res)
         return res
     except Track.DoesNotExist:
@@ -338,6 +348,8 @@ def download_media():
     if uid is not None:
         try:
             rv = Track[uid]
+            if not rv.readable_by(request.user):
+                raise NotFound("Track")
             _ensure_deezer_archived(rv)
             return send_file(rv.path, mimetype=rv.mimetype, conditional=True)
         except Track.DoesNotExist:
@@ -362,12 +374,34 @@ def download_media():
     # Stream a zip of multiple files to the client
     z = ZipStream(sized=True)
     if isinstance(rv, Folder):
-        # Add the entire folder tree to the zip
-        z.add_path(rv.path, recurse=True)
+        # Zip the folder's *tracks*, not its directory tree. `add_path(recurse)`
+        # shipped every file living under the folder — other users' private
+        # uploads, stray .txt/.log/.conf files, anything an admin happened to
+        # keep next to the music — to any logged-in account.
+        prefix = rv.path.rstrip(os.sep) + os.sep
+        tracks = Track.visible(
+            Track.select().where(Track.path.startswith(prefix)), request.user
+        )
+        seen = set()
+        for track in tracks:
+            filename = os.path.basename(track.path)
+            name, ext = os.path.splitext(filename)
+            index = 0
+            while filename in seen:
+                index += 1
+                filename = f"{name} ({index})"
+                if ext:
+                    filename += ext
+            z.add_path(track.path, filename)
+            seen.add(filename)
+
+        cover_path = _cover_from_collection(rv, extract=False)
+        if cover_path:
+            z.add_path(cover_path)
     else:
         # Add tracks + cover art to the zip, preventing potential naming collisions
         seen = set()
-        for track in rv.tracks:
+        for track in Track.visible(rv.tracks, request.user):
             filename = os.path.basename(track.path)
             name, ext = os.path.splitext(filename)
             index = 0
@@ -493,7 +527,9 @@ def cover_art():
 
     size = request.values.get("size")
     if size:
-        size = int(size)
+        # Clamp: an unbounded size is a memory/CPU amplifier on the resize path
+        # (and every real client asks for a thumbnail, not a 100k-pixel image).
+        size = max(1, min(int(size), MAX_COVER_SIZE))
     else:
         # If the cover was extracted from a track it won't have an accurate
         # extension for Flask to derive the mimetype from - derive it from the
@@ -576,25 +612,19 @@ def lyrics():
             zlib.decompress(current_app.cache.get_value(cache_key)).decode("utf-8")
         )
     except (CacheMiss, zlib.error, TypeError, ValueError):
-        try:
-            r = requests.get(
-                "http://api.chartlyrics.com/apiv1.asmx/SearchLyricDirect",
-                params={"artist": artist, "song": title},
-                timeout=5,
-            )
-            root = ElementTree.fromstring(r.content)
+        # LRCLIB (https + JSON) instead of the old ChartLyrics endpoint, which
+        # was fetched over plain http and parsed as XML — an on-path attacker
+        # could answer with an entity-expansion bomb, and the result was then
+        # CACHED, making the poisoning persistent. LRCLIB is the same source the
+        # Deezer archiver already uses, so this drops a whole parser (and a
+        # cleartext dependency) instead of trying to harden it.
+        from ..deezer.lyrics import fetch_lrclib
 
-            ns = {"cl": "http://api.chartlyrics.com/"}
-            lyrics = {
-                "artist": root.find("cl:LyricArtist", namespaces=ns).text,
-                "title": root.find("cl:LyricSong", namespaces=ns).text,
-                "value": root.find("cl:Lyric", namespaces=ns).text,
-            }
-
+        found = fetch_lrclib(title, artist)
+        if found and found.get("text"):
+            lyrics = {"artist": artist, "title": title, "value": found["text"]}
             current_app.cache.set(
                 cache_key, zlib.compress(json.dumps(lyrics).encode("utf-8"), 9)
             )
-        except requests.exceptions.RequestException as e:  # pragma: nocover
-            logger.warning("Error while requesting the ChartLyrics API: " + str(e))
 
     return request.formatter("lyrics", lyrics)

@@ -9,6 +9,7 @@
 import base64
 import hashlib
 import hmac
+import os
 import secrets
 import string
 import uuid
@@ -35,21 +36,93 @@ def _password_key():
     return hashlib.sha256(get_secret_key("password_secret")).digest()
 
 
+# Marker for the authenticated (AES-GCM) format. Blobs written before this are
+# raw base64 of `iv || AES-CFB(password)`: unauthenticated, hence malleable —
+# anyone with write access to the database could flip plaintext bits without
+# detection. They still decrypt (see below) and are rewritten in the new format
+# on the user's next password change or login backfill.
+_GCM_PREFIX = "gcm:"
+
+
 def encrypt_password(plaintext):
     """Reversibly encrypt a password with the server secret (for token auth)."""
-    iv = get_random_bytes(16)
-    cipher = AES.new(_password_key(), AES.MODE_CFB, iv)
-    return base64.b64encode(iv + cipher.encrypt(plaintext.encode("utf-8"))).decode()
+    nonce = get_random_bytes(12)
+    cipher = AES.new(_password_key(), AES.MODE_GCM, nonce=nonce)
+    ct, tag = cipher.encrypt_and_digest(plaintext.encode("utf-8"))
+    return _GCM_PREFIX + base64.b64encode(nonce + tag + ct).decode()
 
 
 def decrypt_password(blob):
+    if blob.startswith(_GCM_PREFIX):
+        raw = base64.b64decode(blob[len(_GCM_PREFIX) :])
+        nonce, tag, ct = raw[:12], raw[12:28], raw[28:]
+        cipher = AES.new(_password_key(), AES.MODE_GCM, nonce=nonce)
+        # Raises ValueError if the ciphertext was tampered with.
+        return cipher.decrypt_and_verify(ct, tag).decode("utf-8")
+
+    # Legacy unauthenticated AES-CFB blob.
     raw = base64.b64decode(blob)
     iv, ct = raw[:16], raw[16:]
     cipher = AES.new(_password_key(), AES.MODE_CFB, iv)
     return cipher.decrypt(ct).decode("utf-8")
 
 
+# Passwords that are effectively public knowledge — including the ones this
+# project's own docs and docker-compose use as placeholders, which is exactly
+# how they end up in production untouched. Always refused, no configuration.
+BANNED_PASSWORDS = frozenset(
+    {
+        "changeme",
+        "supysonic",
+        "password",
+        "passw0rd",
+        "admin",
+        "administrator",
+        "letmein",
+        "qwerty",
+        "azerty",
+        "123456",
+        "1234567",
+        "12345678",
+        "123456789",
+        "1234567890",
+        "iloveyou",
+        "welcome",
+        "abc123",
+        "motdepasse",
+    }
+)
+
+# Minimum password length. Off (0) by default so existing accounts and small
+# LAN installs keep working; set SUPYSONIC_MIN_PASSWORD_LENGTH=12 on anything
+# reachable from the internet.
+_MIN_PASSWORD_LENGTH_ENV = "SUPYSONIC_MIN_PASSWORD_LENGTH"
+
+
+def _min_password_length() -> int:
+    try:
+        return max(0, int(os.environ.get(_MIN_PASSWORD_LENGTH_ENV, "0")))
+    except ValueError:
+        return 0
+
+
 class UserManager:
+    @staticmethod
+    def check_password_policy(password):
+        """Raise ValueError if `password` is unacceptable.
+
+        Deliberately minimal by default: the only unconditional rules are "not
+        empty" and "not one of the passwords everybody tries first". A length
+        floor is opt-in through SUPYSONIC_MIN_PASSWORD_LENGTH.
+        """
+        if not password:
+            raise ValueError("The password can't be empty")
+        if password.strip().lower() in BANNED_PASSWORDS:
+            raise ValueError("This password is too common, pick another one")
+        minimum = _min_password_length()
+        if minimum and len(password) < minimum:
+            raise ValueError(f"The password must be at least {minimum} characters long")
+
     @staticmethod
     def get(uid):
         if isinstance(uid, uuid.UUID):
@@ -61,11 +134,23 @@ class UserManager:
 
         return User[uid]
 
+    # The only User columns a caller may set at creation time. Everything else
+    # (password, salt, password_clear, session_epoch, last_play...) is derived
+    # here. Without this whitelist, any form field that reached **kwargs became
+    # a column write — `admin=1` on the add-user form was a one-request
+    # privilege escalation.
+    CREATABLE_FIELDS = frozenset({"mail", "admin", "jukebox"})
+
     @staticmethod
     def add(name, password, **kwargs):
+        unknown = set(kwargs) - UserManager.CREATABLE_FIELDS
+        if unknown:
+            raise ValueError("Unknown field: " + ", ".join(sorted(unknown)))
+
         if User.select().where(User.name == name).exists():
             raise ValueError(f"User '{name}' exists")
 
+        UserManager.check_password_policy(password)
         crypt, salt = UserManager._hash_fields(password)
         return User.create(
             name=name,
@@ -89,6 +174,11 @@ class UserManager:
     def try_auth(name, password):
         user = User.get_or_none(name=name)
         if user is None:
+            # Verify against a throwaway hash so a missing account costs the
+            # same as a wrong password. Returning early made the response time
+            # a reliable "does this user exist?" oracle with production argon2
+            # parameters (~60 ms vs ~1 ms).
+            UserManager._burn_verify_time()
             return None
         if not UserManager._verify_password(user, password):
             return None
@@ -120,8 +210,11 @@ class UserManager:
         if not UserManager._verify_password(user, old_pass):
             raise ValueError("Wrong password")
 
+        UserManager.check_password_policy(new_pass)
         user.password, user.salt = UserManager._hash_fields(new_pass)
         user.password_clear = encrypt_password(new_pass)
+        # Revoke every session minted with the old password (see db.User).
+        user.session_epoch = (user.session_epoch or 0) + 1
         user.save()
 
     @staticmethod
@@ -133,9 +226,25 @@ class UserManager:
         else:
             raise TypeError("Requires a User instance or a user name (string)")
 
+        UserManager.check_password_policy(new_pass)
         user.password, user.salt = UserManager._hash_fields(new_pass)
         user.password_clear = encrypt_password(new_pass)
+        user.session_epoch = (user.session_epoch or 0) + 1
         user.save()
+
+    # A hash of a value nobody can supply, used to equalise the timing of a
+    # login for a nonexistent user. Built lazily so importing this module stays
+    # cheap, and reused so the cost matches a real verify.
+    __dummy_hash = None
+
+    @staticmethod
+    def _burn_verify_time():
+        if UserManager.__dummy_hash is None:
+            UserManager.__dummy_hash = _hasher.hash(secrets.token_hex(16))
+        try:
+            _hasher.verify(UserManager.__dummy_hash, "")
+        except Argon2Error:
+            pass
 
     @staticmethod
     def _hash_fields(password):

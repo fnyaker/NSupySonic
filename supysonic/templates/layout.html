@@ -13,6 +13,7 @@
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Supysonic</title>
 
     <link rel="icon" href="{{ url_for('static', filename='img/vinyl.svg') }}" type="image/svg+xml">
@@ -87,7 +88,7 @@
                 {% endblock %}
               </li>
               <li><hr class="dropdown-divider"></li>
-              <li><a class="dropdown-item" href="{{ url_for('frontend.logout') }}">Log out</a></li>
+              <li><a class="dropdown-item" href="{{ url_for('frontend.logout') }}" data-method="post">Log out</a></li>
             </ul>
           </li>
           </ul>

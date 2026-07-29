@@ -15,11 +15,14 @@ three).
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
+import socket
 import threading
 import time
 import weakref
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -55,6 +58,41 @@ class DeezerError(Exception):
     """Any failure talking to Deezer."""
 
 
+# Podcast audio URLs come from third-party feed metadata, so they are attacker
+# influenced. Only ordinary http(s) to a public address is fetched.
+MAX_EPISODE_REDIRECTS = 5
+
+
+def check_public_url(url: str) -> None:
+    """Raise unless ``url`` is http(s) pointing at a public IP address.
+
+    Blocks the SSRF targets that matter for a self-hosted server: loopback (the
+    app's own admin API), link-local (169.254.169.254 cloud metadata) and RFC
+    1918 / ULA neighbours on the LAN.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise DeezerError(f"refusing non-HTTP episode URL ({parts.scheme or 'none'})")
+    host = parts.hostname
+    if not host:
+        raise DeezerError("refusing episode URL without a host")
+    try:
+        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80))
+    except socket.gaierror as exc:
+        raise DeezerError(f"cannot resolve {host}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise DeezerError(f"refusing episode URL resolving to {ip}")
+
+
 def blowfish_key(track_id) -> bytes:
     """Per-track Blowfish key: md5(track_id) folded with the static secret."""
     md5 = hashlib.md5(str(track_id).encode()).hexdigest()
@@ -79,7 +117,10 @@ class DeezerProvider:
         self._track_locks_guard = threading.Lock()
         # Last time a resolve failure forced a re-login (see resolve): rate-
         # limited so a genuinely unavailable track can't spam login calls.
-        self._last_relogin = 0.0
+        # -inf, not 0.0: time.monotonic() counts from boot, so 0.0 reads as
+        # "re-logged in at boot" and suppressed the very first retry for the
+        # machine's first minute of uptime.
+        self._last_relogin = float("-inf")
         # (checksum, tracks) cache for the favorites list — see
         # get_my_favorite_tracks. The expensive part is fetching full metadata
         # for every favorite; Deezer hands back a cheap checksum of the set, so
@@ -231,18 +272,40 @@ class DeezerProvider:
     def iter_episode(self, url: str):
         """Yield a podcast episode's MP3 bytes from its host.
 
-        Plain HTTP: follows redirects (rss.com -> CDN), no decryption. A Referer
-        matching the web player is sent since some hosts gate on it.
+        Plain HTTP, no decryption. A Referer matching the web player is sent
+        since some hosts gate on it.
+
+        The URL comes from third-party podcast metadata and the result is
+        archived and then served back by /api/stream, so an unchecked fetch is a
+        readable SSRF: a redirect chain ending at 169.254.169.254 or at this
+        very server would be stored and handed to the client. Redirects are
+        therefore followed one hop at a time, and every hop is validated
+        (scheme + resolved IP) before it is requested.
         """
         headers = dict(self.dz.http_headers)
         headers["Referer"] = "https://www.deezer.com/"
-        with self.dz.session.get(
-            url, headers=headers, stream=True, timeout=(10, 120), allow_redirects=True
-        ) as resp:
-            resp.raise_for_status()
-            for chunk in resp.iter_content(65536):
-                if chunk:
-                    yield chunk
+        current = url
+        for _ in range(MAX_EPISODE_REDIRECTS + 1):
+            check_public_url(current)
+            with self.dz.session.get(
+                current,
+                headers=headers,
+                stream=True,
+                timeout=(10, 120),
+                allow_redirects=False,
+            ) as resp:
+                if resp.is_redirect or resp.is_permanent_redirect:
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise DeezerError("redirect without a Location header")
+                    current = urljoin(current, location)
+                    continue
+                resp.raise_for_status()
+                for chunk in resp.iter_content(65536):
+                    if chunk:
+                        yield chunk
+                return
+        raise DeezerError(f"too many redirects fetching {url}")
 
     def download_episode_to(self, url: str, dest: Path) -> None:
         """Stream a podcast episode's MP3 into ``dest`` (atomic .part temp file)."""

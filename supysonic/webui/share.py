@@ -19,18 +19,21 @@ podcast episode UUID — exactly what ``/api/stream`` accepts.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 import uuid
 
 from flask import current_app, jsonify, request, send_file
 
 from ..db import PodcastEpisode, Track
-from . import _need_provider, _valid_id, login_required, webapi
+from . import _may_access_track, _need_provider, _valid_id, login_required, webapi
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,42 @@ _PEAKS_MAX = 4000
 
 # A shared clip is an excerpt, not a redistribution channel: bound its length.
 CLIP_MAX_SECONDS = 600
+
+# These three routes each run ffmpeg over a whole file, synchronously, before
+# answering. With gunicorn on one worker / eight threads, eight concurrent
+# requests pinned every thread and the server stopped answering anything — the
+# admin UI and the healthcheck included. Cap concurrent ffmpeg work well below
+# the thread count and answer 503 + Retry-After past it, so the box stays
+# responsive under load instead of wedging.
+MAX_CONCURRENT_FFMPEG = 2
+FFMPEG_ACQUIRE_TIMEOUT = 20  # seconds a request waits for a slot
+# Hard ceiling on a single ffmpeg run: a crafted/broken file must not leave a
+# process spinning forever holding a slot.
+FFMPEG_TIMEOUT = 900
+
+_ffmpeg_slots = threading.BoundedSemaphore(MAX_CONCURRENT_FFMPEG)
+
+
+@contextlib.contextmanager
+def _ffmpeg_slot():
+    """Hold one of the transcoding slots, or raise ``_Busy``."""
+    if not _ffmpeg_slots.acquire(timeout=FFMPEG_ACQUIRE_TIMEOUT):
+        raise _Busy()
+    try:
+        yield
+    finally:
+        _ffmpeg_slots.release()
+
+
+class _Busy(Exception):
+    """No transcoding slot available in time."""
+
+
+def _busy_response():
+    resp = jsonify({"error": "server busy, try again shortly"})
+    resp.headers["Retry-After"] = "10"
+    return resp, 503
+
 
 # fmt -> (ffmpeg codec args, extension, mimetype). MP3 320 is the "opens
 # anywhere" choice for messaging apps; AAC/m4a is the Apple-native equivalent;
@@ -77,7 +116,10 @@ def _resolve_media(mid):
     except ValueError:
         return None, None
     try:
-        return Track[key], None
+        track = Track[key]
+        # Another user's private upload reads as "not found" — the share sheet
+        # (waveform / full file / clip) was a straight read of anyone's file.
+        return (track if _may_access_track(track) else None), None
     except Track.DoesNotExist:
         pass
     try:
@@ -174,8 +216,14 @@ def _audio_peaks(path, buckets):
         "ffmpeg", "-v", "0", "-i", path,
         "-map", "0:a:0", "-ac", "1", "-ar", "4000", "-f", "u8", "pipe:1",
     ]
+    # timeout=: without it a file ffmpeg can't make progress on parks an HTTP
+    # thread forever. subprocess.run kills the child on timeout.
     raw = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=FFMPEG_TIMEOUT,
     ).stdout
     if not raw:
         raise ValueError("no audio decoded")
@@ -204,10 +252,16 @@ def _clip_generator(path, start, length, codec_args):
     ]
     # stderr -> /dev/null so an unread, full stderr pipe can't deadlock ffmpeg.
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + FFMPEG_TIMEOUT
     try:
         while True:
             data = proc.stdout.read(8192)
             if not data:
+                break
+            if time.monotonic() > deadline:
+                # Runaway encode: kill it rather than stream forever.
+                logger.warning("share: ffmpeg exceeded %ss, killing", FFMPEG_TIMEOUT)
+                proc.kill()
                 break
             yield data
     except GeneratorExit:
@@ -240,7 +294,10 @@ def share_waveform(mid):
     if not _ffmpeg_available():
         return jsonify({"error": "waveform unavailable"}), 503
     try:
-        peaks = _audio_peaks(path, buckets)
+        with _ffmpeg_slot():
+            peaks = _audio_peaks(path, buckets)
+    except _Busy:
+        return _busy_response()
     except Exception:
         logger.warning("share: waveform decode failed for %s", mid, exc_info=True)
         return jsonify({"error": "waveform unavailable"}), 502
@@ -281,10 +338,13 @@ def share_file(mid):
         try:
             # +5s of slack over the metadata duration; a whole day when unknown.
             length = (meta["duration"] + 5) if meta["duration"] else 86400
-            for _ in cache.set_generated(
-                key, lambda: _clip_generator(path, 0, length, codec_args)
-            ):
-                pass
+            with _ffmpeg_slot():
+                for _ in cache.set_generated(
+                    key, lambda: _clip_generator(path, 0, length, codec_args)
+                ):
+                    pass
+        except _Busy:
+            return _busy_response()
         except Exception:
             logger.warning("share: full transcode failed for %s", mid, exc_info=True)
             return jsonify({"error": "transcode failed"}), 502
@@ -339,10 +399,13 @@ def share_clip(mid):
     # Same reasoning as share_file: the Web Share API needs the complete blob,
     # and a clip is small/fast (bounded length), so cut it to completion first.
     try:
-        for _ in cache.set_generated(
-            key, lambda: _clip_generator(path, start, end - start, codec_args)
-        ):
-            pass
+        with _ffmpeg_slot():
+            for _ in cache.set_generated(
+                key, lambda: _clip_generator(path, start, end - start, codec_args)
+            ):
+                pass
+    except _Busy:
+        return _busy_response()
     except Exception:
         logger.warning("share: clip failed for %s", mid, exc_info=True)
         return jsonify({"error": "clip failed"}), 502

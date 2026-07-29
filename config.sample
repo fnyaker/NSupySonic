@@ -50,6 +50,12 @@ log_rotate = yes
 ; Default: off
 ;session_cookie_secure = off
 
+; How long a web UI session cookie stays valid, in days (1-31). A signed cookie
+; can't be revoked on its own, so this is the upper bound on a stolen one; a
+; password change or a role change revokes outstanding sessions immediately
+; regardless. Default: 7
+;session_lifetime_days = 7
+
 ; Maximum accepted request body size in MB. Mainly bounds the web UI's
 ; "import files" upload; oversized requests are rejected with 413.
 ; 0 disables the limit. Default: 1024
@@ -73,7 +79,8 @@ log_rotate = yes
 ; Default: El La Le Las Les Los The
 index_ignored_prefixes = El La Le Las Les Los The
 
-; Enable the ChartLyrics API. Default: off
+; Look lyrics up online (LRCLIB, https://lrclib.net) when a track carries none
+; of its own. Default: off
 online_lyrics = off
 
 [daemon]
@@ -206,3 +213,28 @@ sync_at = 04:00
 ; Or sync every N minutes instead (overrides sync_at when > 0). Default: 0
 sync_interval = 0
 
+
+; ---------------------------------------------------------------------------
+; Server secrets (environment only — never set in this file)
+; ---------------------------------------------------------------------------
+;
+; Three secrets protect the whole install: `password_secret` (decrypts the
+; reversibly-stored passwords that Subsonic token auth needs), `cookies_secret`
+; (signs session cookies) and `daemon_key` (authenticates to the management
+; daemon). By default they are generated into the database — which means a
+; leaked database dump contains both the data and the keys that protect it.
+;
+; On anything reachable from the internet, supply them out of band instead:
+;
+;   SUPYSONIC_SECRET_PASSWORD_SECRET=<long random string>
+;   SUPYSONIC_SECRET_COOKIES_SECRET=<long random string>
+;   SUPYSONIC_SECRET_DAEMON_KEY=<long random string>
+;   SUPYSONIC_SECRETS_ENV_ONLY=1
+;
+; With SUPYSONIC_SECRETS_ENV_ONLY set, the server refuses to start rather than
+; fall back to the database. Changing password_secret invalidates the stored
+; recoverable passwords (token auth stops working until each user logs in once
+; with a password); changing cookies_secret logs everyone out.
+;
+; SUPYSONIC_MIN_PASSWORD_LENGTH=12 additionally enforces a minimum password
+; length on account creation and password changes (off by default).

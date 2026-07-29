@@ -10,6 +10,7 @@
 # It also auto-creates an admin user on first boot when SUPYSONIC_ADMIN_USER and
 # SUPYSONIC_ADMIN_PASSWORD are set (idempotent).
 set -e
+umask 077
 
 mkdir -p /data/db /data/cache /data/archive 2>/dev/null || true
 
@@ -51,6 +52,9 @@ render_config() {
             printf '\n'
         fi
     } >"$CONF"
+    # The file holds the ARL — a full-account Deezer credential. Default umask
+    # 022 left it world-readable on a shared volume.
+    chmod 600 "$CONF"
     echo "Rendered $CONF from environment."
 }
 
@@ -78,12 +82,38 @@ auto_migrate() {
 }
 
 bootstrap_admin() {
-    [ -n "$SUPYSONIC_ADMIN_USER" ] && [ -n "$SUPYSONIC_ADMIN_PASSWORD" ] || return 0
+    [ -n "$SUPYSONIC_ADMIN_USER" ] || return 0
+
+    if [ -z "$SUPYSONIC_ADMIN_PASSWORD" ]; then
+        # No password given: mint one instead of silently doing nothing, and
+        # print it once. Beats any shared default.
+        SUPYSONIC_ADMIN_PASSWORD=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')
+        GENERATED_PASSWORD=1
+    fi
+
+    # The documented placeholder is the password that actually ships to
+    # production more often than any other. Refuse to start with it.
+    case "$SUPYSONIC_ADMIN_PASSWORD" in
+        changeme|supysonic|password|admin|123456)
+            echo "Refusing to create the admin account with the placeholder password" >&2
+            echo "'$SUPYSONIC_ADMIN_PASSWORD'. Set SUPYSONIC_ADMIN_PASSWORD to a real secret." >&2
+            exit 1
+            ;;
+    esac
+
     # `user add` initializes the DB schema and is non-interactive with -p.
     # It fails if the user already exists, which we treat as "nothing to do".
-    if supysonic-cli user add "$SUPYSONIC_ADMIN_USER" -p "$SUPYSONIC_ADMIN_PASSWORD" 2>/dev/null; then
+    #
+    # The password goes in on stdin: passing it as an argv element exposes it to
+    # every process on the host through `ps`.
+    if printf '%s' "$SUPYSONIC_ADMIN_PASSWORD" \
+        | supysonic-cli user add "$SUPYSONIC_ADMIN_USER" --password-stdin 2>/dev/null; then
         supysonic-cli user setroles "$SUPYSONIC_ADMIN_USER" -A 2>/dev/null || true
         echo "Created admin user '$SUPYSONIC_ADMIN_USER'."
+        if [ -n "$GENERATED_PASSWORD" ]; then
+            echo "Generated admin password: $SUPYSONIC_ADMIN_PASSWORD"
+            echo "Store it now — it is not printed again."
+        fi
     fi
 }
 

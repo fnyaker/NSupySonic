@@ -29,6 +29,7 @@ class DeezerPrefetcher:
         workers: int = 2,
         max_queue: int = 256,
         dl_workers: int = 4,
+        max_download_queue: int = 5000,
     ):
         self.provider = provider
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
@@ -40,13 +41,19 @@ class DeezerPrefetcher:
             t.start()
             self._workers.append(t)
 
-        # Separate, unbounded queue for explicit "download this playlist now"
-        # requests (archive the whole thing ahead of any playback). Served by a
-        # small POOL of workers so a full album/playlist downloads several tracks
-        # at once instead of trickling through a single thread — each track is
+        # Separate queue for explicit "download this playlist now" requests
+        # (archive the whole thing ahead of any playback). Served by a small
+        # POOL of workers so a full album/playlist downloads several tracks at
+        # once instead of trickling through a single thread — each track is
         # still serialized per id by ``ensure_archived``'s per-track lock, so
         # parallel workers never fetch the same track twice.
-        self._dl_queue: queue.Queue = queue.Queue()
+        #
+        # BOUNDED: it used to have no maxsize, and every entry means a full FLAC
+        # (20-60 MB) landing on disk, so any logged-in account could loop
+        # POST /api/download and fill the volume — taking the database and the
+        # transcode cache down with it. Past the cap, extra ids are refused and
+        # reported back to the caller instead of being queued.
+        self._dl_queue: queue.Queue = queue.Queue(maxsize=max_download_queue)
         for _ in range(max(1, dl_workers)):
             dl = threading.Thread(
                 target=self._dl_worker, name="deezer-download", daemon=True
@@ -82,14 +89,29 @@ class DeezerPrefetcher:
             self.enqueue(t)
             n += 1
 
+    def _offer(self, item) -> bool:
+        """Queue one download, or refuse it when the queue is full."""
+        try:
+            self._dl_queue.put_nowait(item)
+            return True
+        except queue.Full:
+            logger.info("Download queue full, dropping %s", item)
+            return False
+
     def download_ids(self, deezer_ids) -> int:
-        """Queue Deezer track ids for full background archiving. Returns count."""
+        """Queue Deezer track ids for full background archiving.
+
+        Returns how many were actually accepted — the caller reports that back,
+        so a client that overruns the queue sees it instead of silently
+        believing everything is downloading.
+        """
         n = 0
         for did in deezer_ids:
             did = str(did)
             if not did:
                 continue
-            self._dl_queue.put(did)
+            if not self._offer(did):
+                break
             n += 1
         return n
 
@@ -104,7 +126,8 @@ class DeezerPrefetcher:
             eid = str(eid)
             if not eid:
                 continue
-            self._dl_queue.put(("episode", eid))
+            if not self._offer(("episode", eid)):
+                break
             n += 1
         return n
 

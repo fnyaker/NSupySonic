@@ -113,6 +113,33 @@ class DefaultConfig:
         current_config = self
 
 
+# The only settings a config object may hand to the Flask application. Flask's
+# ``from_object`` copies EVERY uppercase attribute, so without this list a
+# config file could define, say, a [secret_key] section and quietly replace the
+# app's session-signing key (or any other Flask setting) from disk.
+APP_CONFIG_KEYS = frozenset(
+    {
+        "DEBUG",
+        "TESTING",
+        "BASE",
+        "WEBAPP",
+        "DAEMON",
+        "LASTFM",
+        "LISTENBRAINZ",
+        "TRANSCODING",
+        "MIMETYPES",
+        "DEEZER",
+    }
+)
+
+
+def app_config_from(config):
+    """The subset of `config` that may be pushed into ``app.config``."""
+    return {
+        key: getattr(config, key) for key in APP_CONFIG_KEYS if hasattr(config, key)
+    }
+
+
 class IniConfig(DefaultConfig):
     common_paths = [
         "/etc/supysonic",
@@ -132,7 +159,13 @@ class IniConfig(DefaultConfig):
             section = section.upper()
 
             if hasattr(self, section):
-                getattr(self, section).update(options)
+                # Copy before mutating: getattr(self, section) resolves to the
+                # dict object defined on DefaultConfig, so updating it in place
+                # edited CLASS state shared by every config instance in the
+                # process (and leaked between them).
+                merged = dict(getattr(self, section))
+                merged.update(options)
+                setattr(self, section, merged)
             else:
                 setattr(self, section, options)
 

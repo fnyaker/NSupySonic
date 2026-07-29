@@ -26,6 +26,19 @@ from ..db import now, random
 from . import api_routing, get_root_folder
 from .exceptions import GenericError
 
+# Client-supplied list sizes are clamped: `getRandomSongs?size=1000000000`
+# turned one request into a full-library dump (LIMIT 1000000000). 500 is well
+# above what any real client asks for.
+MAX_LIST_SIZE = 500
+MAX_OFFSET = 10**6
+
+
+def _bounded(value, default, maximum=MAX_LIST_SIZE):
+    """Clamp a client-supplied size/offset; non-numeric input still raises
+    ValueError, which the blueprint turns into a Subsonic error as before."""
+    value = int(value) if value else default
+    return max(0, min(value, maximum))
+
 
 def _primed_stars(query):
     """Starred-track rows with their tracks' credits already loaded.
@@ -45,12 +58,12 @@ def rand_songs():
         request.values.get, ("genre", "fromYear", "toYear", "musicFolderId")
     )
 
-    size = int(size) if size else 10
+    size = _bounded(size, 10)
     fromYear = int(fromYear) if fromYear else None
     toYear = int(toYear) if toYear else None
     root = get_root_folder(musicFolderId)
 
-    query = Track.select()
+    query = Track.visible(Track.select(), request.user)
     if fromYear:
         query = query.where(Track.year >= fromYear)
     if toYear:
@@ -76,8 +89,8 @@ def album_list():
     ltype = request.values["type"]
 
     size, offset, mfid = map(request.values.get, ("size", "offset", "musicFolderId"))
-    size = int(size) if size else 10
-    offset = int(offset) if offset else 0
+    size = _bounded(size, 10)
+    offset = _bounded(offset, 0, MAX_OFFSET)
     root = get_root_folder(mfid)
 
     query = Folder.select().join(Track, on=Track.folder).switch().group_by(Folder.id)
@@ -149,8 +162,8 @@ def album_list_id3():
     ltype = request.values["type"]
 
     size, offset, mfid = map(request.values.get, ("size", "offset", "musicFolderId"))
-    size = int(size) if size else 10
-    offset = int(offset) if offset else 0
+    size = _bounded(size, 10)
+    offset = _bounded(offset, 0, MAX_OFFSET)
     root = get_root_folder(mfid)
 
     query = Album.select().join(Track).group_by(Album.id)
@@ -220,11 +233,11 @@ def songs_by_genre():
     genre = request.values["genre"]
 
     count, offset, mfid = map(request.values.get, ("count", "offset", "musicFolderId"))
-    count = int(count) if count else 10
-    offset = int(offset) if offset else 0
+    count = _bounded(count, 10)
+    offset = _bounded(offset, 0, MAX_OFFSET)
     root = get_root_folder(mfid)
 
-    query = Track.select().where(Track.genre == genre)
+    query = Track.visible(Track.select().where(Track.genre == genre), request.user)
     if root is not None:
         query = query.where(Track.root_folder == root)
     return request.formatter(

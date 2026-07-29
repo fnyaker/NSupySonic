@@ -109,6 +109,10 @@ def user_edit():
 
     if admin is not None:
         admin = admin in (True, "True", "true", 1, "1")
+        if user.admin != admin:
+            # A privilege change invalidates the sessions that were minted
+            # under the old role (see db.User.session_epoch).
+            user.session_epoch = (user.session_epoch or 0) + 1
         user.admin = admin
 
     if jukebox is not None:

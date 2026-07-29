@@ -10,11 +10,12 @@
 import logging
 import mimetypes
 
+from datetime import timedelta
 from flask import Flask, request
 from logging.handlers import TimedRotatingFileHandler
 from os import makedirs, path
 
-from .config import IniConfig
+from .config import IniConfig, app_config_from
 from .cache import Cache
 from .db import init_database, open_connection, close_connection
 from .utils import get_secret_key
@@ -31,7 +32,10 @@ def create_application(config=None):
 
     if not config:  # pragma: nocover
         config = IniConfig.from_common_locations()
-    app.config.from_object(config)
+    # Allowlist, not from_object(): that copies every uppercase attribute, so a
+    # stray (or malicious) section in a config file could overwrite a Flask
+    # setting — SECRET_KEY included.
+    app.config.update(app_config_from(config))
 
     # Set loglevel
     logfile = app.config["WEBAPP"]["log_file"]
@@ -107,14 +111,29 @@ def create_application(config=None):
     # Harden the web UI session cookie (the Subsonic API uses its own per-request
     # auth, so this only affects the /api + /app session). SameSite=Lax blocks the
     # cookie on cross-site POSTs, mitigating CSRF on the mutating /api endpoints.
-    app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
-    app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
+    #
+    # These MUST be plain assignments: Flask's own default_config already defines
+    # every SESSION_COOKIE_* key, so `setdefault` silently did nothing and neither
+    # SameSite nor Secure ever reached the wire (session_cookie_secure = yes was a
+    # placebo). Verified by tests/test_security.py against the real Set-Cookie.
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     # Set the Secure flag when served behind TLS (recommended for internet
     # exposure). Off by default so plain-HTTP LAN setups keep working; enable
     # via [webapp] session_cookie_secure = yes.
-    app.config.setdefault(
-        "SESSION_COOKIE_SECURE",
-        bool(app.config["WEBAPP"].get("session_cookie_secure", False)),
+    app.config["SESSION_COOKIE_SECURE"] = bool(
+        app.config["WEBAPP"].get("session_cookie_secure", False)
+    )
+    # Signed cookies can't be revoked server-side, so a stolen one stays valid
+    # for its whole lifetime. Flask's default is 31 days; cut it to a week (and
+    # see User.session_epoch in db.py, which does make sessions revocable on a
+    # password change or a role downgrade).
+    try:
+        session_days = int(app.config["WEBAPP"].get("session_lifetime_days") or 7)
+    except (TypeError, ValueError):
+        session_days = 7
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
+        days=max(1, min(session_days, 31))
     )
 
     # Bound request body size (the /api/upload endpoint accepts audio files from
@@ -129,16 +148,24 @@ def create_application(config=None):
 
     # Baseline security response headers for the admin UI and the bundled SPA.
     # CSP: scripts are served from this origin (admin assets are local, the
-    # Svelte build emits external bundles), Deezer cover art / audio come over
-    # https, and Svelte injects scoped <style> blocks (style 'unsafe-inline').
+    # Svelte build emits external bundles) and Svelte injects scoped <style>
+    # blocks (style 'unsafe-inline').
+    #
+    # img-src/connect-src are pinned to the hosts actually used rather than a
+    # blanket `https:`: a wildcard turns any injection (or the JSONP gadget on
+    # /rest) into an exfiltration channel to the whole HTTPS internet. Audio is
+    # always same-origin (/api/stream proxies + transcodes everything), and the
+    # only remote images are Deezer's art CDN plus api.deezer.com's redirecting
+    # /image endpoints — everything else already goes through /api/cover.
     csp = (
         "default-src 'self'; "
         "script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https:; "
-        "media-src 'self' blob: https:; "
-        "connect-src 'self' https:; "
+        "img-src 'self' data: https://*.dzcdn.net https://api.deezer.com; "
+        "media-src 'self' blob:; "
+        "connect-src 'self'; "
         "font-src 'self' data:; "
+        "object-src 'none'; "
         "frame-ancestors 'self'; "
         "base-uri 'self'; "
         "form-action 'self'"
@@ -150,6 +177,15 @@ def create_application(config=None):
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Content-Security-Policy", csp)
+        response.headers.setdefault(
+            "Permissions-Policy", "geolocation=(), camera=(), microphone=()"
+        )
+        # Only over a real TLS connection: sending HSTS on plain HTTP is a no-op
+        # per spec, but pinning a LAN host to https:// would lock users out.
+        if request.is_secure:
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
         return response
 
     # gzip the JSON API responses (playlists/favorites track lists are large and

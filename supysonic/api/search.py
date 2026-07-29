@@ -10,9 +10,25 @@ from datetime import datetime
 from flask import request
 
 from ..db import Folder, Track, Artist, Album
+from ..utils import like_term
 
 from . import api_routing, get_root_folder
 from .exceptions import MissingParameter
+
+# Subsonic clients legitimately search for a single character, so only the
+# multi-character LIKE wildcard is taken away here (see utils.like_term):
+# "?any=%" used to return — and serialise — the whole library.
+_MIN_TERM = 1
+
+
+def _bounded(value, default, maximum=500):
+    """A client-supplied count/offset, clamped to something serialisable.
+
+    A non-numeric value still raises ValueError, which the blueprint's
+    errorhandler turns into a proper Subsonic error — same as before.
+    """
+    value = int(value) if value else default
+    return max(0, min(value, maximum))
 
 
 @api_routing("/search")
@@ -22,10 +38,17 @@ def old_search():
         ("artist", "album", "title", "any", "count", "offset", "newerThan"),
     )
 
-    count = int(count) if count else 20
-    offset = int(offset) if offset else 0
+    count = _bounded(count, 20)
+    offset = _bounded(offset, 0, 10**6)
     newer_than = int(newer_than) / 1000 if newer_than else 0
     min_date = datetime.fromtimestamp(newer_than)
+
+    # A term made only of wildcards normalises to None; treat it as "no term"
+    # so it falls through to the MissingParameter below instead of matching the
+    # whole library.
+    artist, album, title, anyf = (
+        like_term(x, _MIN_TERM) if x else None for x in (artist, album, title, anyf)
+    )
 
     if artist:
         Child = Folder.alias()
@@ -44,15 +67,17 @@ def old_search():
             .distinct()
         )
     elif title:
-        query = Track.select().where(
-            Track.title.contains(title), Track.created > min_date
+        query = Track.visible(
+            Track.select().where(Track.title.contains(title), Track.created > min_date),
+            request.user,
         )
     elif anyf:
         folders = Folder.select().where(
             Folder.name.contains(anyf), Folder.created > min_date
         )
-        tracks = Track.select().where(
-            Track.title.contains(anyf), Track.created > min_date
+        tracks = Track.visible(
+            Track.select().where(Track.title.contains(anyf), Track.created > min_date),
+            request.user,
         )
         res = folders[offset : offset + count]
         fcount = folders.count()
@@ -120,13 +145,16 @@ def new_search():
         ),
     )
 
-    artist_count = int(artist_count) if artist_count else 20
-    artist_offset = int(artist_offset) if artist_offset else 0
-    album_count = int(album_count) if album_count else 20
-    album_offset = int(album_offset) if album_offset else 0
-    song_count = int(song_count) if song_count else 20
-    song_offset = int(song_offset) if song_offset else 0
+    artist_count = _bounded(artist_count, 20)
+    artist_offset = _bounded(artist_offset, 0, 10**6)
+    album_count = _bounded(album_count, 20)
+    album_offset = _bounded(album_offset, 0, 10**6)
+    song_count = _bounded(song_count, 20)
+    song_offset = _bounded(song_offset, 0, 10**6)
     root = get_root_folder(mfid)
+    query = like_term(query, _MIN_TERM)
+    if query is None:  # wildcard-only query: nothing to match
+        return request.formatter("searchResult2", {})
 
     Child = Folder.alias()
     artists = (
@@ -142,7 +170,9 @@ def new_search():
         .where(Folder.name.contains(query))
         .distinct()
     )
-    songs = Track.select().where(Track.title.contains(query))
+    songs = Track.visible(
+        Track.select().where(Track.title.contains(query)), request.user
+    )
 
     if root is not None:
         artists = artists.where(Track.root_folder == root)
@@ -195,17 +225,22 @@ def search_id3():
         ),
     )
 
-    artist_count = int(artist_count) if artist_count else 20
-    artist_offset = int(artist_offset) if artist_offset else 0
-    album_count = int(album_count) if album_count else 20
-    album_offset = int(album_offset) if album_offset else 0
-    song_count = int(song_count) if song_count else 20
-    song_offset = int(song_offset) if song_offset else 0
+    artist_count = _bounded(artist_count, 20)
+    artist_offset = _bounded(artist_offset, 0, 10**6)
+    album_count = _bounded(album_count, 20)
+    album_offset = _bounded(album_offset, 0, 10**6)
+    song_count = _bounded(song_count, 20)
+    song_offset = _bounded(song_offset, 0, 10**6)
     root = get_root_folder(mfid)
+    query = like_term(query, _MIN_TERM)
+    if query is None:  # wildcard-only query: nothing to match
+        return request.formatter("searchResult3", {})
 
     artists = Artist.select().where(Artist.name.contains(query))
     albums = Album.select().where(Album.name.contains(query))
-    songs = Track.select().where(Track.title.contains(query))
+    songs = Track.visible(
+        Track.select().where(Track.title.contains(query)), request.user
+    )
 
     if root is not None:
         artists = artists.join(Track).where(Track.root_folder == root)

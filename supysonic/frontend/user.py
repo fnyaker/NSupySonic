@@ -18,19 +18,39 @@ from ..listenbrainz import ListenBrainz
 from ..managers.user import UserManager
 from ..ratelimit import auth_limiter
 
-from . import admin_only, frontend
+from . import admin_only, csrf_token, frontend
 
 logger = logging.getLogger(__name__)
+
+_TRUTHY = ("on", "true", "1", "yes", "checked", "selected")
+
+
+def _checkbox(value):
+    """An HTML checkbox as a bool: absent means unchecked, present means on."""
+    if value is None:
+        return False
+    return str(value).strip().lower() in _TRUTHY
 
 
 def safe_redirect_target(target, fallback):
     """Only allow same-site relative redirect targets (blocks open redirects)."""
     if not target:
         return fallback
+    # Browsers normalise backslashes to forward slashes per the WHATWG URL
+    # standard, so "/\evil.com" reaches the network stack as "//evil.com" — a
+    # protocol-relative URL — even though urlsplit() reports an empty netloc for
+    # it. Fold them first so the checks below see what the browser will see.
+    # Same for leading C0 controls and spaces, which browsers also strip.
+    target = target.replace("\\", "/").lstrip("".join(map(chr, range(0x21))))
     # Reject absolute URLs, protocol-relative (//evil), and anything with a
     # scheme or host; only a path that stays on this site is allowed.
     parts = urlsplit(target)
-    if parts.scheme or parts.netloc or not target.startswith("/") or target.startswith("//"):
+    if (
+        parts.scheme
+        or parts.netloc
+        or not target.startswith("/")
+        or target.startswith("//")
+    ):
         return fallback
     return target
 
@@ -168,12 +188,13 @@ def change_username_post(uid):
         except User.DoesNotExist:
             pass
 
-    if request.form.get("admin") is None:
-        admin = False
-    else:
-        admin = True
+    admin = _checkbox(request.form.get("admin"))
 
     if user.name != username or user.admin != admin:
+        if user.admin != admin:
+            # Revoke the user's outstanding sessions so a downgraded admin
+            # doesn't keep admin rights until their cookie expires.
+            user.session_epoch = (user.session_epoch or 0) + 1
         user.name = username
         user.admin = admin
         user.save()
@@ -229,6 +250,11 @@ def change_password_post(uid, user):
         try:
             if user.id == request.user.id:
                 UserManager.change_password(user.id, current, new)
+                # The epoch bump above revokes every session of this account —
+                # including this one. The user just proved they know the old
+                # password, so re-stamp the session they're sitting in instead
+                # of bouncing them to the login page.
+                session["epoch"] = User[user.id].session_epoch or 0
             else:
                 UserManager.change_password2(user.name, new)
 
@@ -250,10 +276,18 @@ def add_user_form():
 @admin_only
 def add_user_post():
     error = False
-    args = request.form.copy()
-    (name, passwd, passwd_confirm) = map(
-        args.pop, ("user", "passwd", "passwd_confirm"), (None,) * 3
+    name, passwd, passwd_confirm = map(
+        request.form.get, ("user", "passwd", "passwd_confirm")
     )
+    # Explicit whitelist: the form used to be forwarded wholesale to
+    # UserManager.add(**args), so any extra field became a User column write
+    # (`admin=1` -> instant privilege escalation). Checkboxes are read as
+    # booleans here rather than trusting whatever string the client sent.
+    args = {
+        "mail": request.form.get("mail", ""),
+        "admin": _checkbox(request.form.get("admin")),
+        "jukebox": _checkbox(request.form.get("jukebox")),
+    }
     if not name:
         flash("The name is required.", "danger")
         error = True
@@ -275,7 +309,7 @@ def add_user_post():
     return add_user_form()
 
 
-@frontend.route("/user/del/<uid>")
+@frontend.route("/user/del/<uid>", methods=["POST"])
 @admin_only
 def del_user(uid):
     try:
@@ -307,7 +341,7 @@ def lastfm_reg(uid, user):
     return redirect(url_for("frontend.user_profile", uid=uid))
 
 
-@frontend.route("/user/<uid>/lastfm/unlink")
+@frontend.route("/user/<uid>/lastfm/unlink", methods=["POST"])
 @me_or_uuid
 def lastfm_unreg(uid, user):
     lfm = LastFm(current_app.config["LASTFM"], user)
@@ -316,10 +350,10 @@ def lastfm_unreg(uid, user):
     return redirect(url_for("frontend.user_profile", uid=uid))
 
 
-@frontend.route("/user/<uid>/listenbrainz/link")
+@frontend.route("/user/<uid>/listenbrainz/link", methods=["POST"])
 @me_or_uuid
 def listenbrainz_reg(uid, user):
-    token = request.args.get("token")
+    token = request.form.get("token") or request.args.get("token")
     if not token:
         flash("Missing ListenBrainz auth token", "warning")
         return redirect(url_for("frontend.user_profile", uid=uid))
@@ -334,7 +368,7 @@ def listenbrainz_reg(uid, user):
     return redirect(url_for("frontend.user_profile", uid=uid))
 
 
-@frontend.route("/user/<uid>/listenbrainz/unlink")
+@frontend.route("/user/<uid>/listenbrainz/unlink", methods=["POST"])
 @me_or_uuid
 def listenbrainz_unreg(uid, user):
     lbz = ListenBrainz(current_app.config["LISTENBRAINZ"], user)
@@ -355,12 +389,13 @@ def login():
     if request.method == "GET":
         return render_template("login.html")
 
+    name, password = map(request.form.get, ("user", "password"))
+
     throttled = not current_app.testing
-    if throttled and auth_limiter.is_blocked(request.remote_addr):
+    if throttled and auth_limiter.is_blocked_any(request.remote_addr, name):
         flash("Too many failed attempts. Try again later.", "danger")
         return render_template("login.html"), 429
 
-    name, password = map(request.form.get, ("user", "password"))
     error = False
     if not name:
         flash("Missing user name", "danger")
@@ -374,8 +409,15 @@ def login():
         if user:
             logger.info("Logged user %s (IP: %s)", name, request.remote_addr)
             if throttled:
-                auth_limiter.reset(request.remote_addr)
+                auth_limiter.reset_user(name)
+            # Drop everything the pre-auth session carried before writing the
+            # identity into it: otherwise an attacker who can plant a session
+            # cookie keeps a handle on the account once the victim logs in
+            # (session fixation). A fresh CSRF token is minted on next use.
+            session.clear()
             session["userid"] = str(user.id)
+            session["epoch"] = user.session_epoch or 0
+            csrf_token()
             flash("Logged in!", "success")
             return redirect(return_url)
         else:
@@ -383,13 +425,13 @@ def login():
                 "Failed login attempt for user %s (IP: %s)", name, request.remote_addr
             )
             if throttled:
-                auth_limiter.record_failure(request.remote_addr)
+                auth_limiter.record_failure(request.remote_addr, name)
             flash("Wrong username or password", "danger")
 
     return render_template("login.html")
 
 
-@frontend.route("/user/logout")
+@frontend.route("/user/logout", methods=["POST"])
 def logout():
     session.clear()
     flash("Logged out!", "success")

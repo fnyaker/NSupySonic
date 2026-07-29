@@ -14,6 +14,50 @@ from supysonic.db import Meta
 
 __key_cache = {}
 
+# The shortest search term we're willing to run a full-table LIKE scan for.
+LIKE_MIN_LENGTH = 2
+
+
+def like_term(raw, minimum=LIKE_MIN_LENGTH):
+    """Normalise a client search string before it reaches a LIKE query.
+
+    peewee's ``.contains()`` interpolates the term into ``LIKE '%term%'`` with
+    no ESCAPE clause, so a client-supplied ``%`` is a wildcard: ``?q=%`` matched
+    — and serialised — the *entire* library for the cost of one request. Adding
+    backslash escapes is not an option (SQLite defines no default escape
+    character, so ``\\%`` would then stop matching a literal "50%"), so the
+    multi-character wildcard is simply dropped.
+
+    ``_`` is left alone on purpose: it matches any single character, so it can
+    only over-match by the term's own length — no amplification — and stripping
+    it would break searching for names that really contain an underscore.
+
+    Returns None when nothing worth scanning for is left.
+    """
+    term = str(raw or "").replace("%", "").strip()
+    if len(term) < minimum:
+        return None
+    return term
+
+
+def secrets_env_only() -> bool:
+    """Whether falling back to the database for server secrets is forbidden.
+
+    Set ``SUPYSONIC_SECRETS_ENV_ONLY=1`` on an internet-exposed deployment. The
+    default (database fallback) is what makes a leaked backup catastrophic: the
+    dump contains ``password_secret`` (decrypts every stored password),
+    ``cookies_secret`` (forges any session) and ``daemon_key`` (reaches the
+    daemon) alongside the data they protect, so there is no defence in depth
+    behind the database at all. With this on, the process refuses to start
+    unless each secret is supplied out of band.
+    """
+    return environ.get("SUPYSONIC_SECRETS_ENV_ONLY", "").strip().lower() in (
+        "1",
+        "yes",
+        "true",
+        "on",
+    )
+
 
 def get_secret_key(keyname):
     """Return a server secret by name.
@@ -24,14 +68,22 @@ def get_secret_key(keyname):
          a database leak alone can't decrypt anything derived from it (e.g. the
          reversible password store). Any string is accepted and stretched with
          SHA-256 so it doesn't have to be a specific length.
-      2. The ``Meta`` table in the database (auto-generated on first use).
+      2. The ``Meta`` table in the database (auto-generated on first use),
+         unless ``SUPYSONIC_SECRETS_ENV_ONLY`` forbids it.
     """
     if keyname in __key_cache:
         return __key_cache[keyname]
 
-    env_val = environ.get("SUPYSONIC_SECRET_" + keyname.upper())
+    env_name = "SUPYSONIC_SECRET_" + keyname.upper()
+    env_val = environ.get(env_name)
     if env_val:
         key = sha256(env_val.encode("utf-8")).digest()
+    elif secrets_env_only():
+        raise RuntimeError(
+            f"{env_name} is not set and SUPYSONIC_SECRETS_ENV_ONLY forbids "
+            "storing server secrets in the database. Set it (any long random "
+            "string) and keep it out of the database backups."
+        )
     else:
         try:
             key = b64decode(Meta[keyname].value)

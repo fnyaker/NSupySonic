@@ -23,11 +23,12 @@ from __future__ import annotations
 import logging
 import os
 import os.path
+import uuid
 from datetime import datetime
 
 import mediafile
 
-from ..db import Album, Artist, Track
+from ..db import Album, Artist, Track, User
 from . import ids, library
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,33 @@ def _local_album(artist: Artist, album_name: str) -> Album:
         )
 
 
-def import_local_file(path: str, root) -> Track | None:
-    """Create the local Track row for one audio file (None if unreadable)."""
+def owner_from_path(path: str):
+    """The uploading user of a file living under ``.../Uploads/<user-id>/...``.
+
+    Uploads are stored one directory per user, so ownership is recoverable from
+    the path alone — which keeps a rescan of the archive from turning private
+    uploads back into shared-library tracks. Returns None for anything else.
+    """
+    parts = os.path.normpath(path).split(os.sep)
+    try:
+        idx = len(parts) - 1 - parts[::-1].index("Uploads")
+    except ValueError:
+        return None
+    if idx + 1 >= len(parts):
+        return None
+    try:
+        uid = uuid.UUID(parts[idx + 1])
+    except ValueError:
+        return None
+    return User.get_or_none(User.id == uid)
+
+
+def import_local_file(path: str, root, owner=None) -> Track | None:
+    """Create the local Track row for one audio file (None if unreadable).
+
+    ``owner`` marks the track as a private upload of that user; None means it
+    belongs to the shared library and is visible to everyone.
+    """
     tag = _load_tag(path)
     if tag is None:
         return None
@@ -102,6 +128,7 @@ def import_local_file(path: str, root) -> Track | None:
         root_folder=root,
         folder=folder,
         created=datetime.fromtimestamp(mtime),
+        owner=owner,
     )
 
 
@@ -127,7 +154,10 @@ def scan_local(archive_dir: str) -> dict:
             if path in tracked:
                 continue
             try:
-                if import_local_file(path, root) is not None:
+                # A file sitting in someone's Uploads/<id>/ folder stays theirs
+                # even when it's the scanner (not the upload endpoint) that
+                # creates the row.
+                if import_local_file(path, root, owner_from_path(path)) is not None:
                     added += 1
             except Exception:  # pragma: no cover
                 logger.warning("Failed to import local file %s", path, exc_info=True)

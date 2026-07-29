@@ -222,17 +222,17 @@ class UserTestCase(FrontendTestBase):
         path = "/user/del/{}".format(self.users["bob"])
 
         self._login("bob", "B0b")
-        rv = self.client.get(path, follow_redirects=True)
+        rv = self.client.post(path, follow_redirects=True)
         self.assertIn("There's nothing much to see", rv.data)
         self.assertEqual(User.select().count(), 2)
         self._logout()
 
         self._login("alice", "Alic3")
-        rv = self.client.get("/user/del/string", follow_redirects=True)
+        rv = self.client.post("/user/del/string", follow_redirects=True)
         self.assertIn("badly formed", rv.data)
-        rv = self.client.get("/user/del/" + str(uuid.uuid4()), follow_redirects=True)
+        rv = self.client.post("/user/del/" + str(uuid.uuid4()), follow_redirects=True)
         self.assertIn("No such user", rv.data)
-        rv = self.client.get(path, follow_redirects=True)
+        rv = self.client.post(path, follow_redirects=True)
         self.assertIn("Deleted", rv.data)
         self.assertEqual(User.select().count(), 1)
         self._logout()
@@ -252,12 +252,12 @@ class UserTestCase(FrontendTestBase):
 
     def test_lastfm_unlink(self):
         self._login("alice", "Alic3")
-        rv = self.client.get("/user/me/lastfm/unlink", follow_redirects=True)
+        rv = self.client.post("/user/me/lastfm/unlink", follow_redirects=True)
         self.assertIn("Unlinked", rv.data)
 
     def test_listenbrainz_unlink(self):
         self._login("alice", "Alic3")
-        rv = self.client.get("/user/me/listenbrainz/unlink", follow_redirects=True)
+        rv = self.client.post("/user/me/listenbrainz/unlink", follow_redirects=True)
         self.assertIn("Unlinked", rv.data)
 
 

@@ -148,7 +148,7 @@ Configuration relative to the HTTP server.
    Defaults to ``El La Le Las Les Los The``.
 
 ``online_lyrics``
-   If enabled, will fetch the lyrics (when requested) from ChartLyrics if they
+   If enabled, will fetch the lyrics (when requested) from LRCLIB if they
    aren't available locally (either from metadata or from text files).
    Defaults to ``no``.
 
@@ -185,7 +185,7 @@ Sample configuration::
    ; Default: El La Le Las Les Los The
    index_ignored_prefixes = El La Le Las Les Los The
 
-   ; Enable the ChartLyrics API. Default: off
+   ; Enable online lyrics lookups (LRCLIB). Default: off
    online_lyrics = off
 
 .. _conf-daemon:
