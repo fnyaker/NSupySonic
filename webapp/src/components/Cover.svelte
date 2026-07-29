@@ -136,7 +136,13 @@
     if (hiLoader) {
       hiLoader.onload = null;
       hiLoader.onerror = null;
-      hiLoader.src = ""; // abort the in-flight fetch
+      // removeAttribute, not `src = ""`: an empty src resolves against the
+      // document URL, so cancelling used to queue a fetch of the SPA page.
+      try {
+        hiLoader.removeAttribute("src");
+      } catch {
+        /* ignore */
+      }
       hiLoader = null;
     }
   }

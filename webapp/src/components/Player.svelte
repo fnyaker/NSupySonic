@@ -550,6 +550,36 @@
     buffered.set(0);
     player.setProgress(0, 0);
     setPlaybackStatus("idle");
+    clearMediaSession();
+  }
+
+  // Nothing is loaded any more: tell the OS so, or the media notification
+  // outlives the queue that fed it. Nothing used to clear the session at all —
+  // on Android the shim keeps republishing the LAST track's metadata (its
+  // `active` flag is derived from title/duration), so emptying the queue left a
+  // notification up for a track the player no longer has, with transport
+  // buttons that did nothing.
+  function clearMediaSession() {
+    if (!("mediaSession" in navigator)) return;
+    artSeq++; // drop any in-flight artwork fetch for the track we just dropped
+    try {
+      navigator.mediaSession.metadata = null;
+    } catch {
+      /* ignore */
+    }
+    // Duration is half of what makes the session look "active"; a no-argument
+    // call is the spec's way of resetting it.
+    try {
+      navigator.mediaSession.setPositionState?.();
+    } catch {
+      /* ignore */
+    }
+    try {
+      navigator.mediaSession.playbackState = "none";
+      sessionPlaybackState = "none";
+    } catch {
+      /* ignore */
+    }
   }
   // A quality change for the SAME track is handed off gaplessly instead of
   // reloading the element in place.
@@ -1018,7 +1048,9 @@
   // unchanged value 4×/s was a constant Binder/CPU drain during playback.
   let sessionPlaybackState = null;
   $: if ("mediaSession" in navigator) {
-    const st = $player.playing ? "playing" : "paused";
+    // "none" once nothing is loaded — otherwise the next store tick after a
+    // teardown says "paused", which reads as a live-but-paused session.
+    const st = !$current ? "none" : $player.playing ? "playing" : "paused";
     if (st !== sessionPlaybackState) {
       sessionPlaybackState = st;
       navigator.mediaSession.playbackState = st;

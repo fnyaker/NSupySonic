@@ -22,6 +22,7 @@
   import { addMarkerAt } from "../lib/markers.js";
   import { duration as fmtDuration, hiResCover, resolveCover, cssUrl, artistLine } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
+  import { createBackdrop } from "../lib/backdrop.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
@@ -77,64 +78,11 @@
     };
   });
 
-  // Background crossfade: each new cover is PRELOADED first and only stacked
-  // once decoded, ON TOP of the previous one (which stays fully opaque) — then
-  // the covered layers are dropped after the fade. Preloading matters: stacking
-  // a still-loading URL and dropping the old layer on a fixed timer used to
-  // blank the backdrop on slow networks. Resolved through the offline cache so
-  // the background also shows in airplane mode.
-  let bgLayers = [];
-  let bgN = 0;
-  let bgTimer;
-  let bgLoader = null;
-  let bgRetryTimer = null;
-  $: setBg(resolveCover($offlineCovers, $current?.album?.cover) || "");
-  function setBg(url, attempt = 0) {
-    if (!url) return; // no art: keep the previous backdrop rather than blanking
-    const top = bgLayers[bgLayers.length - 1];
-    if (top && (top.url || top.src) === url) return;
-    if (bgLoader && bgLoader.__url === url && !attempt) return; // already preloading it
-    if (bgLoader) {
-      bgLoader.onload = bgLoader.onerror = null;
-      bgLoader.src = "";
-    }
-    clearTimeout(bgRetryTimer);
-    // Retries re-fetch under a cache-busted URL so the browser doesn't just
-    // replay the failed attempt from its cache.
-    const fetchSrc =
-      attempt && !url.startsWith("blob:")
-        ? url + (url.includes("?") ? "&" : "?") + "r=" + attempt
-        : url;
-    const im = new Image();
-    im.__url = url;
-    bgLoader = im;
-    im.onload = () => {
-      if (bgLoader !== im) return; // a newer cover superseded this one
-      bgLoader = null;
-      pushBgLayer(fetchSrc, url);
-    };
-    im.onerror = () => {
-      if (bgLoader !== im) return;
-      bgLoader = null;
-      // One delayed retry (the image CDN fails transiently); after that the
-      // previous backdrop simply stays up.
-      if (attempt < 1)
-        bgRetryTimer = setTimeout(() => setBg(url, attempt + 1), 1500);
-    };
-    im.src = fetchSrc;
-  }
-  function pushBgLayer(src, url) {
-    const id = ++bgN;
-    // Keep at most ONE layer under the incoming one — that's all that shows
-    // through while the new art fades in. The stack used to grow until 420ms of
-    // quiet finally arrived, so skipping through a dozen tracks left a dozen
-    // full-screen `blur(60px)` layers composited on top of each other, which is
-    // enough on its own to drag the whole view to a crawl.
-    bgLayers = [...bgLayers.slice(-1), { id, src, url }];
-    // Drop the covered-up layer once the fade-in has finished.
-    clearTimeout(bgTimer);
-    bgTimer = setTimeout(() => (bgLayers = bgLayers.filter((l) => l.id === id)), 420);
-  }
+  // Blurred backdrop — crossfading layers driven by lib/backdrop.js (shared
+  // with the desktop view). Resolved through the offline cache so the
+  // background also shows in airplane mode.
+  const bg = createBackdrop();
+  $: bg.set(resolveCover($offlineCovers, $current?.album?.cover));
 
   $: q = $player.queue;
   $: idx = $player.index;
@@ -649,13 +597,7 @@
     stopAnim();
     clearTimeout(settleTimer);
     clearTimeout(recenterTimer);
-    clearTimeout(bgRetryTimer);
-    clearTimeout(bgTimer);
-    if (bgLoader) {
-      bgLoader.onload = bgLoader.onerror = null;
-      bgLoader.src = "";
-      bgLoader = null;
-    }
+    bg.destroy();
   });
 </script>
 
@@ -671,7 +613,7 @@
   on:touchend={onTouchEnd}
   transition:fade={{ duration: 140 }}
 >
-  {#each bgLayers as layer (layer.id)}
+  {#each $bg as layer (layer.id)}
     <div class="bg" style={`background-image:${cssUrl(layer.src)}`} in:fade={{ duration: 350 }}></div>
   {/each}
   <div class="scrim"></div>
