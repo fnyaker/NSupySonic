@@ -6,6 +6,9 @@
 # Distributed under terms of the GNU AGPLv3 license.
 
 import logging
+import os
+import stat
+import sys
 import time
 
 from multiprocessing.connection import Listener, Client
@@ -44,12 +47,47 @@ class Daemon:
         elif isinstance(cmd, DaemonCommand):
             cmd.apply(connection, self)
         else:
-            logger.warn("Received unknown command %s", cmd)
+            logger.warning("Received unknown command %s", cmd)
+
+    @staticmethod
+    def __secure_socket_dir(address):
+        """Make sure the socket lives in a directory only we can reach.
+
+        multiprocessing.connection deserialises with pickle *before* any type
+        check, so anyone who can connect and authenticate gets code execution.
+        The authkey is the real gate, but the default socket path sits in a
+        shared, world-writable /tmp — where a local user can pre-create the
+        directory and sit in the middle. Own the directory at 0700, and refuse
+        to start if it is group/world-writable and not ours.
+        """
+        if sys.platform == "win32" or not address or address.startswith("\\\\"):
+            return  # named pipe: no filesystem directory involved
+        directory = os.path.dirname(os.path.abspath(address))
+        if not directory:
+            return
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        st = os.stat(directory)
+        if st.st_uid != os.getuid():
+            raise RuntimeError(
+                f"Refusing to listen in {directory}: it belongs to another user. "
+                "Point [daemon] socket at a directory you own (e.g. /run/supysonic)."
+            )
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            os.chmod(directory, 0o700)
+        # A stale socket from a previous run would make bind() fail.
+        if os.path.exists(address) and stat.S_ISSOCK(os.stat(address).st_mode):
+            os.unlink(address)
 
     def run(self):
-        self.__listener = Listener(
-            address=self.__config.DAEMON["socket"], authkey=get_secret_key("daemon_key")
-        )
+        address = self.__config.DAEMON["socket"]
+        self.__secure_socket_dir(address)
+        old_umask = os.umask(0o077)
+        try:
+            self.__listener = Listener(
+                address=address, authkey=get_secret_key("daemon_key")
+            )
+        finally:
+            os.umask(old_umask)
         logger.info("Listening to %s", self.__listener.address)
 
         if self.__config.DAEMON["run_watcher"]:

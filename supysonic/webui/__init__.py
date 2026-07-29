@@ -19,6 +19,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from urllib.parse import urlsplit
 
@@ -420,10 +421,24 @@ def _need_provider():
     return provider, None
 
 
+# A Deezer id is a plain positive integer. `str.isdigit()` was far too loose:
+# it accepts the whole Unicode Nd category and superscripts, so "١٢٣", "²" and
+# (after the lstrip) "-5" all passed and were concatenated into outgoing
+# api.deezer.com URLs.
+_DEEZER_ID_RE = re.compile(r"\A[0-9]{1,20}\Z")
+
+
 def _valid_id(value):
     """A Deezer numeric id (track/album/artist/playlist). Rejects junk early."""
-    value = str(value or "")
-    return value.lstrip("-").isdigit()
+    return bool(_DEEZER_ID_RE.fullmatch(str(value or "")))
+
+
+# Smart-tracklist ids are slugs ("new-releases", "inspired-by-3"), not numbers.
+_SLUG_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def _valid_slug(value):
+    return bool(_SLUG_RE.fullmatch(str(value or "")))
 
 
 # -- upload quota -----------------------------------------------------------
@@ -1001,6 +1016,25 @@ def _mirror_worker(app):
                     pass
 
 
+# One OS thread per push meant a request loop could exhaust the thread table
+# ("can't start new thread") and take the whole worker with it. A small shared
+# pool caps the damage; a full pool drops the push, which is fine — every
+# caller is already fail-soft, and the next sync reconciles.
+_PUSH_POOL_SIZE = 4
+_push_pool: ThreadPoolExecutor | None = None
+_push_pool_lock = threading.Lock()
+
+
+def _get_push_pool() -> ThreadPoolExecutor:
+    global _push_pool
+    with _push_pool_lock:
+        if _push_pool is None:
+            _push_pool = ThreadPoolExecutor(
+                max_workers=_PUSH_POOL_SIZE, thread_name_prefix="deezer-push"
+            )
+        return _push_pool
+
+
 def _push_async(label, fn, *args):
     """Run a single fail-soft Deezer push off the request thread (inline in
     tests). For calls that need no DB access — pass plain values, not rows."""
@@ -1014,7 +1048,10 @@ def _push_async(label, fn, *args):
     if current_app.testing:
         run()
         return
-    threading.Thread(target=run, name=f"deezer-{label}", daemon=True).start()
+    try:
+        _get_push_pool().submit(run)
+    except RuntimeError:  # interpreter shutting down
+        logger.debug("Deezer %s not queued (pool unavailable)", label)
 
 
 # -- auth -------------------------------------------------------------------
@@ -1140,6 +1177,8 @@ def home():
 @webapi.route("/smarttracklist/<sid>")
 @login_required
 def smarttracklist(sid):
+    if not _valid_slug(sid):
+        return jsonify({"error": "invalid id"}), 400
     provider = _provider()
     if provider is not None:
         try:
@@ -1279,7 +1318,9 @@ def search_podcasts():
 def artist(artist_id):
     """Artist page via the public API (the gateway pageArtist is legacy)."""
     provider = _provider()
-    if provider is not None:
+    # The id is concatenated into the outgoing api.deezer.com URL: validate it
+    # here rather than letting "%3F..." smuggle query parameters into the call.
+    if provider is not None and _valid_id(artist_id):
         dzapi = provider.dz.api
         try:
             info = dzapi.get_artist(artist_id)
@@ -1323,7 +1364,7 @@ def artist_tracks(artist_id):
     PAGE = 100
     MAX = 300
     provider = _provider()
-    if provider is not None:
+    if provider is not None and _valid_id(artist_id):
         dzapi = provider.dz.api
         tracks = []
         seen = set()
@@ -1374,7 +1415,7 @@ def _db_album_by_id(album_id):
 @login_required
 def album(album_id):
     provider = _provider()
-    if provider is not None:
+    if provider is not None and _valid_id(album_id):
         try:
             page = provider.dz.gw.get_album_page(album_id) or {}
             data = page.get("DATA") or {}
@@ -1447,7 +1488,7 @@ def playlist(playlist_id):
 def discography(artist_id):
     provider = _provider()
     tabs = {}
-    if provider is not None:
+    if provider is not None and _valid_id(artist_id):
         try:
             tabs = provider.get_artist_discography(artist_id)
         except Exception:
@@ -1494,7 +1535,7 @@ def lyrics(track_id):
     # Archived track: serve (and, on first view, archive) its .lrc sidecar. This
     # works even when Deezer is disabled/unreachable and upgrades to synced
     # lyrics from the public LRCLIB API when Deezer itself had none.
-    track = find_local_track(track_id) if str(track_id).isdigit() else None
+    track = find_local_track(track_id) if _valid_id(track_id) else None
     if track is not None and track.path and os.path.isfile(track.path):
         try:
             lyr = deezer_lyrics.ensure_lyrics(provider, track)
@@ -1505,7 +1546,7 @@ def lyrics(track_id):
 
     # Cold (not-yet-archived) track: live Deezer lookup, nothing to archive to.
     # Degrade to "no lyrics" when Deezer is disabled or unreachable.
-    if provider is None:
+    if provider is None or not _valid_id(track_id):
         return jsonify({"lyrics": None})
     try:
         raw = provider.get_lyrics(track_id)
@@ -1521,7 +1562,7 @@ def track_gain(track_id):
     # already carry it when known; this fills the gap for tracks whose row
     # predates the gain column (or was imported from a dict without GAIN) —
     # fetched once from Deezer, then cached on the row so it's instant after.
-    if not track_id.isdigit():  # Deezer tracks only (locals have no ReplayGain)
+    if not _valid_id(track_id):  # Deezer tracks only (locals have no ReplayGain)
         return jsonify({"gain": None})
 
     from ..deezer import ids
@@ -1668,6 +1709,8 @@ def artist_radio(artist_id):
     provider, err = _need_provider()
     if err:
         return err
+    if not _valid_id(artist_id):
+        return jsonify({"tracks": []})
     tracks = [
         _track_api(t)
         for t in _data(lambda: provider.dz.api.get_artist_radio(artist_id, limit=40))
@@ -1979,6 +2022,10 @@ _EPISODE_DONE_TAIL = 15
 _MAX_POSITION = 10**7
 # Cap markers per user per episode so a hostile client can't grow the table.
 _MAX_MARKERS = 100
+# ...and cap the totals per user: the per-episode cap alone bounds nothing,
+# because the number of episodes a client can name is itself unbounded.
+_MAX_MARKERS_PER_USER = 5000
+_MAX_PROGRESS_PER_USER = 10000
 
 
 def _episode_by_id(eid):
@@ -2027,11 +2074,29 @@ def save_podcast_progress():
     if duration and position >= max(0, duration - _EPISODE_DONE_TAIL):
         finished = True
 
-    row, created = PodcastProgress.get_or_create(
-        user=request.webuser,
-        episode=episode,
-        defaults={"position": position, "duration": duration, "finished": finished},
+    row = PodcastProgress.get_or_none(
+        PodcastProgress.user == request.webuser, PodcastProgress.episode == episode
     )
+    if row is None:
+        # Only a NEW row can grow the table, so the cap is checked here alone —
+        # updating an existing position stays free.
+        total = (
+            PodcastProgress.select()
+            .where(PodcastProgress.user == request.webuser)
+            .count()
+        )
+        if total >= _MAX_PROGRESS_PER_USER:
+            return jsonify({"error": "too many saved positions"}), 429
+        PodcastProgress.create(
+            user=request.webuser,
+            episode=episode,
+            position=position,
+            duration=duration,
+            finished=finished,
+        )
+        created = True
+    else:
+        created = False
     if not created:
         row.position = position
         row.duration = duration
@@ -2121,6 +2186,13 @@ def add_episode_marker(eid):
         .count()
     )
     if count >= _MAX_MARKERS:
+        return jsonify({"error": "too many markers"}), 400
+    # The per-episode cap bounds nothing on its own — the client picks the
+    # episode, so it can spread unlimited markers over unlimited episodes.
+    total = (
+        PodcastMarker.select().where(PodcastMarker.user == request.webuser).count()
+    )
+    if total >= _MAX_MARKERS_PER_USER:
         return jsonify({"error": "too many markers"}), 400
     m = PodcastMarker.create(
         user=request.webuser, episode=episode, position=position, label=label
@@ -2504,6 +2576,12 @@ def download():
     if pf is None:
         return jsonify({"error": "downloader unavailable"}), 503
     queued = pf.download_ids(ids)
+    if queued < len(ids):
+        # The archive queue is bounded (see prefetch.py): tell the client how
+        # much actually got in rather than pretending the whole batch is coming.
+        return jsonify(
+            {"ok": True, "queued": queued, "dropped": len(ids) - queued, "busy": True}
+        ), 202
     return jsonify({"ok": True, "queued": queued})
 
 

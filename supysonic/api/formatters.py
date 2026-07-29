@@ -5,10 +5,18 @@
 #
 # Distributed under terms of the GNU AGPLv3 license.
 
+import re
+
 from flask import json, jsonify, make_response
 from xml.etree import ElementTree
 
 from . import API_VERSION
+
+# A JSONP callback is emitted verbatim into a JavaScript response, so it must
+# be a plain identifier. Left unchecked, `?f=jsonp&callback=<any JS>` turned
+# every /rest endpoint into a script-injection gadget usable from a page whose
+# CSP allows script-src 'self'.
+_JSONP_CALLBACK_RE = re.compile(r"\A[A-Za-z_$][A-Za-z0-9_$]{0,63}\Z")
 
 
 class BaseFormatter:
@@ -81,6 +89,10 @@ class JSONPFormatter(JSONBaseFormatter):
         if not self.__callback:
             return jsonify(
                 self._subsonicify("error", {"code": 10, "message": "Missing callback"})
+            )
+        if not _JSONP_CALLBACK_RE.fullmatch(self.__callback):
+            return jsonify(
+                self._subsonicify("error", {"code": 10, "message": "Invalid callback"})
             )
 
         rv = self._subsonicify(elem, data)

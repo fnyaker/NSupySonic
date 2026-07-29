@@ -188,12 +188,13 @@ def change_username_post(uid):
         except User.DoesNotExist:
             pass
 
-    if request.form.get("admin") is None:
-        admin = False
-    else:
-        admin = True
+    admin = _checkbox(request.form.get("admin"))
 
     if user.name != username or user.admin != admin:
+        if user.admin != admin:
+            # Revoke the user's outstanding sessions so a downgraded admin
+            # doesn't keep admin rights until their cookie expires.
+            user.session_epoch = (user.session_epoch or 0) + 1
         user.name = username
         user.admin = admin
         user.save()
@@ -249,6 +250,11 @@ def change_password_post(uid, user):
         try:
             if user.id == request.user.id:
                 UserManager.change_password(user.id, current, new)
+                # The epoch bump above revokes every session of this account —
+                # including this one. The user just proved they know the old
+                # password, so re-stamp the session they're sitting in instead
+                # of bouncing them to the login page.
+                session["epoch"] = User[user.id].session_epoch or 0
             else:
                 UserManager.change_password2(user.name, new)
 

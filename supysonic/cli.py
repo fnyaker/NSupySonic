@@ -6,6 +6,7 @@
 # Distributed under terms of the GNU AGPLv3 license.
 
 import click
+import sys
 import time
 
 from click.exceptions import ClickException
@@ -248,13 +249,25 @@ def user_list():
 
 @user.command("add")
 @click.argument("name")
-@click.password_option("-p", "--password", help="Specifies the user's password")
+@click.password_option(
+    "-p", "--password", default=None, help="Specifies the user's password"
+)
+@click.option(
+    "--password-stdin",
+    is_flag=True,
+    help="Read the password from standard input instead of the command line "
+    "(keeps it out of the process list and the shell history)",
+)
 @click.option("-e", "--email", default="", help="Sets the user's email address")
-def user_add(name, password, email):
+def user_add(name, password, password_stdin, email):
     """Adds a new user.
 
     NAME is the name (or login) of the new user.
     """
+    if password_stdin:
+        password = sys.stdin.readline().rstrip("\n")
+    elif password is None:  # pragma: nocover - interactive prompt
+        password = click.prompt("Password", hide_input=True, confirmation_prompt=True)
 
     try:
         UserManager.add(name, password, mail=email)

@@ -13,7 +13,6 @@ import mediafile
 import mimetypes
 import os.path
 import re
-import requests
 import shlex
 import subprocess
 import zlib
@@ -21,7 +20,6 @@ import zlib
 from flask import request, Response, send_file
 from flask import current_app
 from PIL import Image
-from xml.etree import ElementTree
 from zipstream import ZipStream
 
 from ..cache import CacheMiss
@@ -37,6 +35,14 @@ from .exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Cover art comes from files users upload, so it is attacker-controlled input to
+# PIL. Cap the decompressed pixel count (a "decompression bomb" is a tiny file
+# that expands to gigabytes) and the requested thumbnail size.
+MAX_COVER_PIXELS = 64_000_000  # 8000x8000
+MAX_COVER_SIZE = 2048
+if Image.MAX_IMAGE_PIXELS is None or Image.MAX_IMAGE_PIXELS > MAX_COVER_PIXELS:
+    Image.MAX_IMAGE_PIXELS = MAX_COVER_PIXELS
 
 
 def _ensure_deezer_archived(res):
@@ -521,7 +527,9 @@ def cover_art():
 
     size = request.values.get("size")
     if size:
-        size = int(size)
+        # Clamp: an unbounded size is a memory/CPU amplifier on the resize path
+        # (and every real client asks for a thumbnail, not a 100k-pixel image).
+        size = max(1, min(int(size), MAX_COVER_SIZE))
     else:
         # If the cover was extracted from a track it won't have an accurate
         # extension for Flask to derive the mimetype from - derive it from the
@@ -604,25 +612,19 @@ def lyrics():
             zlib.decompress(current_app.cache.get_value(cache_key)).decode("utf-8")
         )
     except (CacheMiss, zlib.error, TypeError, ValueError):
-        try:
-            r = requests.get(
-                "http://api.chartlyrics.com/apiv1.asmx/SearchLyricDirect",
-                params={"artist": artist, "song": title},
-                timeout=5,
-            )
-            root = ElementTree.fromstring(r.content)
+        # LRCLIB (https + JSON) instead of the old ChartLyrics endpoint, which
+        # was fetched over plain http and parsed as XML — an on-path attacker
+        # could answer with an entity-expansion bomb, and the result was then
+        # CACHED, making the poisoning persistent. LRCLIB is the same source the
+        # Deezer archiver already uses, so this drops a whole parser (and a
+        # cleartext dependency) instead of trying to harden it.
+        from ..deezer.lyrics import fetch_lrclib
 
-            ns = {"cl": "http://api.chartlyrics.com/"}
-            lyrics = {
-                "artist": root.find("cl:LyricArtist", namespaces=ns).text,
-                "title": root.find("cl:LyricSong", namespaces=ns).text,
-                "value": root.find("cl:Lyric", namespaces=ns).text,
-            }
-
+        found = fetch_lrclib(title, artist)
+        if found and found.get("text"):
+            lyrics = {"artist": artist, "title": title, "value": found["text"]}
             current_app.cache.set(
                 cache_key, zlib.compress(json.dumps(lyrics).encode("utf-8"), 9)
             )
-        except requests.exceptions.RequestException as e:  # pragma: nocover
-            logger.warning("Error while requesting the ChartLyrics API: " + str(e))
 
     return request.formatter("lyrics", lyrics)

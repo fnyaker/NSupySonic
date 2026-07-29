@@ -15,7 +15,7 @@ from flask import Flask, request
 from logging.handlers import TimedRotatingFileHandler
 from os import makedirs, path
 
-from .config import IniConfig
+from .config import IniConfig, app_config_from
 from .cache import Cache
 from .db import init_database, open_connection, close_connection
 from .utils import get_secret_key
@@ -32,7 +32,10 @@ def create_application(config=None):
 
     if not config:  # pragma: nocover
         config = IniConfig.from_common_locations()
-    app.config.from_object(config)
+    # Allowlist, not from_object(): that copies every uppercase attribute, so a
+    # stray (or malicious) section in a config file could overwrite a Flask
+    # setting — SECRET_KEY included.
+    app.config.update(app_config_from(config))
 
     # Set loglevel
     logfile = app.config["WEBAPP"]["log_file"]
