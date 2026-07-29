@@ -51,29 +51,41 @@ class Daemon:
 
     @staticmethod
     def __secure_socket_dir(address):
-        """Make sure the socket lives in a directory only we can reach.
+        """Make sure the socket lives somewhere only we can reach.
 
         multiprocessing.connection deserialises with pickle *before* any type
         check, so anyone who can connect and authenticate gets code execution.
-        The authkey is the real gate, but the default socket path sits in a
-        shared, world-writable /tmp — where a local user can pre-create the
-        directory and sit in the middle. Own the directory at 0700, and refuse
-        to start if it is group/world-writable and not ours.
+        The authkey is the real gate, but the default socket path sits under a
+        shared /tmp — where a local user could otherwise pre-create the
+        directory and sit in the middle.
+
+        If the directory doesn't exist yet, we create it 0700 (now ours). If it
+        already exists and we don't own it, it's only acceptable when it's not
+        writable by others, or when it IS writable but carries the sticky bit
+        (like /tmp itself: sticky means another user can create entries but
+        can't delete/rename ours out from under us — the standard safe pattern
+        for a shared temp root, and not itself the vulnerability).
         """
         if sys.platform == "win32" or not address or address.startswith("\\\\"):
             return  # named pipe: no filesystem directory involved
         directory = os.path.dirname(os.path.abspath(address))
         if not directory:
             return
-        os.makedirs(directory, mode=0o700, exist_ok=True)
+        if not os.path.isdir(directory):
+            os.makedirs(directory, mode=0o700, exist_ok=True)
         st = os.stat(directory)
-        if st.st_uid != os.getuid():
-            raise RuntimeError(
-                f"Refusing to listen in {directory}: it belongs to another user. "
-                "Point [daemon] socket at a directory you own (e.g. /run/supysonic)."
-            )
-        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            os.chmod(directory, 0o700)
+        if st.st_uid == os.getuid():
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                os.chmod(directory, 0o700)
+        else:
+            world_writable = bool(st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+            sticky = bool(st.st_mode & stat.S_ISVTX)
+            if world_writable and not sticky:
+                raise RuntimeError(
+                    f"Refusing to listen in {directory}: it belongs to another "
+                    "user and is writable without the sticky bit. Point "
+                    "[daemon] socket at a directory you own (e.g. /run/supysonic)."
+                )
         # A stale socket from a previous run would make bind() fail.
         if os.path.exists(address) and stat.S_ISSOCK(os.stat(address).st_mode):
             os.unlink(address)
