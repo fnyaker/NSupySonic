@@ -164,7 +164,46 @@ const topOf = (layers) => (layers.length ? layers[layers.length - 1].url : null)
   bg.destroy();
 }
 
-// -- 6. destroy() stops everything -------------------------------------------
+// -- 6. the same-origin proxy takes over when the art itself is unreachable ---
+// The CDN wobbles often enough that this is the difference between a backdrop
+// that catches up and one that shows the previous track for the rest of the
+// session.
+{
+  pending.length = 0;
+  const bg = createBackdrop({ fadeMs: 10, timeoutMs: 500, retries: 1 });
+  let layers = [];
+  bg.subscribe((l) => (layers = l));
+  bg.set("A", "/api/cover/1");
+  pending.pop().finish();
+  await sleep(20);
+
+  bg.set("B", "/api/cover/2");
+  pending.pop().fail(); // direct art fails
+  let proxy = null;
+  for (let i = 0; i < 200 && !proxy; i++) {
+    await sleep(10);
+    proxy = pending.pop() || null;
+  }
+  // First the cache-busted retry of B, then the proxy.
+  while (proxy && !String(proxy.src).startsWith("/api/cover/")) {
+    proxy.fail();
+    proxy = null;
+    for (let i = 0; i < 200 && !proxy; i++) {
+      await sleep(10);
+      proxy = pending.pop() || null;
+    }
+  }
+  check("fell back to the same-origin proxy", !!proxy, true);
+  proxy.finish();
+  await sleep(20);
+  // The layer PAINTS the proxy but keeps the logical cover as its identity, so
+  // a later set() for the same cover still reads as "already on screen".
+  check("proxy art painted", layers[layers.length - 1]?.src, "/api/cover/2");
+  check("layer still identified as the cover it stands for", topOf(layers), "B");
+  bg.destroy();
+}
+
+// -- 7. destroy() stops everything -------------------------------------------
 {
   pending.length = 0;
   const bg = createBackdrop({ fadeMs: 10, timeoutMs: 30 });

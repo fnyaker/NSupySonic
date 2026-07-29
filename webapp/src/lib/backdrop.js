@@ -19,6 +19,10 @@
 // the wrong cover until the next track change.
 
 import { writable } from "svelte/store";
+import { logInfo } from "./log.js";
+
+// URLs are long and noisy; the tail is the part that identifies the art.
+const tag = (u) => (u ? String(u).slice(-44) : "(none)");
 
 export function createBackdrop({
   fadeMs = 420, // must match the layers' in:fade duration
@@ -36,6 +40,7 @@ export function createBackdrop({
   let watchdog = null;
   let dropTimer = null; // removes the covered-up layer after the fade
   let destroyed = false;
+  let fallback = ""; // same-origin proxy for `wanted`, tried when it fails
 
   // Abort the preload/retry in flight. Called on every change of `wanted`, so
   // nothing started for the previous track can still land.
@@ -67,6 +72,7 @@ export function createBackdrop({
     // enough on its own to drag the whole view to a crawl.
     layers = [...layers.slice(-1), { id, src, url }];
     set(layers);
+    logInfo("bg", `painted ${tag(url)}`);
     // Drop the covered-up layer once the fade-in has finished.
     clearTimeout(dropTimer);
     dropTimer = setTimeout(() => {
@@ -75,7 +81,16 @@ export function createBackdrop({
     }, fadeMs);
   }
 
-  function load(url, attempt) {
+  /**
+   * Fetch `url` and paint it, on behalf of the logical cover `forUrl`.
+   *
+   * The two are the same until we fall back to the same-origin proxy, which is
+   * a DIFFERENT url standing for the SAME cover. Keeping the logical identity
+   * separate is what lets the proxy paint (every check below is against the
+   * cover the track wants, not against the byte source we happen to be trying)
+   * and keeps the "already on screen" test meaningful afterwards.
+   */
+  function load(url, attempt, forUrl) {
     // Retries re-fetch under a cache-busted URL so the browser doesn't just
     // replay the failed attempt from its cache.
     const src =
@@ -101,18 +116,34 @@ export function createBackdrop({
           /* ignore */
         }
       }
-      if (destroyed || url !== wanted) return;
+      if (destroyed || forUrl !== wanted) return;
       if (ok) {
-        pushLayer(src, url);
+        pushLayer(src, forUrl);
         return;
       }
-      // The image CDN fails transiently; back off and try again. Once the
-      // budget is spent the previous backdrop simply stays up.
-      if (attempt < retries)
+      // The image CDN fails transiently; back off and try again.
+      if (attempt < retries) {
+        logInfo("bg", `load failed ${tag(url)} (attempt ${attempt + 1}) — retrying`);
         retryTimer = setTimeout(() => {
           retryTimer = null;
-          if (!destroyed && url === wanted) load(url, attempt + 1);
+          if (!destroyed && forUrl === wanted) load(url, attempt + 1, forUrl);
         }, 1200 * (attempt + 1));
+        return;
+      }
+      // Out of retries on the art itself. Fall back to the same-origin,
+      // server-cached copy before giving up — Cover.svelte has always had this
+      // step, and the backdrop not having it is why a Deezer-CDN wobble left it
+      // showing the PREVIOUS track for the rest of the session.
+      if (fallback && fallback !== url) {
+        const next = fallback;
+        fallback = "";
+        logInfo("bg", `${tag(url)} unreachable — falling back to ${tag(next)}`,
+                null, { important: true });
+        load(next, 0, forUrl);
+        return;
+      }
+      logInfo("bg", `gave up on ${tag(url)} — keeping the previous backdrop`,
+              null, { important: true });
     };
 
     im.onload = () => settle(true);
@@ -130,16 +161,33 @@ export function createBackdrop({
   return {
     subscribe,
 
-    /** Point the backdrop at `url` (falsy = this track has no art). */
-    set(url) {
+    /**
+     * Point the backdrop at `url` (falsy = this track has no art).
+     *
+     * `proxyUrl` is an optional same-origin, server-cached copy of the same art
+     * (`/api/cover/<id>`), used only if `url` turns out to be unreachable.
+     */
+    set(url, proxyUrl = "") {
       url = url || "";
-      if (destroyed || url === wanted) return;
+      if (destroyed) return;
+      if (url === wanted) return;
+      logInfo("bg", `want ${tag(url)}`);
       wanted = url;
+      fallback = proxyUrl || "";
       cancelLoad(); // whatever the previous track started is now irrelevant
-      if (!url) return; // no art: keep the previous backdrop rather than blanking
+      if (!url) {
+        // No art at all. Keep the previous backdrop rather than blanking — but
+        // say so, because "the blur did not change" looks identical from the
+        // outside whether it is this or a failure.
+        logInfo("bg", "track has no cover — keeping the previous backdrop");
+        return;
+      }
       const top = layers[layers.length - 1];
-      if (top && (top.url || top.src) === url) return; // already on screen
-      load(url, 0);
+      if (top && (top.url || top.src) === url) {
+        logInfo("bg", "already on screen");
+        return; // already on screen
+      }
+      load(url, 0, url);
     },
 
     destroy() {

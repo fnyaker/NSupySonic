@@ -23,6 +23,7 @@
   import { duration as fmtDuration, hiResCover, resolveCover, cssUrl, artistLine } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createBackdrop } from "../lib/backdrop.js";
+  import { api } from "../lib/api.js";
   import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
@@ -82,7 +83,13 @@
   // with the desktop view). Resolved through the offline cache so the
   // background also shows in airplane mode.
   const bg = createBackdrop();
-  $: bg.set(resolveCover($offlineCovers, $current?.album?.cover));
+  // The second argument is the same-origin, server-cached copy of the same art,
+  // used only if the (Deezer CDN) URL turns out to be unreachable — the backdrop
+  // used to just keep the previous track's blur forever in that case.
+  $: bg.set(
+    resolveCover($offlineCovers, $current?.album?.cover),
+    $current?.deezer_id ? api.coverUrl($current.deezer_id) : ""
+  );
 
   $: q = $player.queue;
   $: idx = $player.index;

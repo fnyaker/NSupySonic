@@ -1312,23 +1312,49 @@
   }
 
   // Keep the queue topped up so Flow / radio play endlessly without a gap.
+  //
+  // The trigger below runs on EVERY player-store notification (~4×/s during
+  // playback), so this function's job is to ask the server as rarely as
+  // possible. Two guards do that, and both are load-bearing:
+  //
+  //  - `exhausted`: a source that returned only tracks already in the queue
+  //    will return them again. Re-asking is a guaranteed no-op, so the same
+  //    (source, queue length) is never asked twice. Without it, a radio whose
+  //    tracks were all queued already turned into a permanent request storm —
+  //    a /api/radio/track call every ~250ms for hours, pegging the main thread
+  //    until the whole UI stopped responding to taps.
+  //  - `MIN_EXTEND_GAP`: a floor between attempts whatever the reason. The
+  //    top-up fires with three tracks (many minutes of audio) still to play,
+  //    so nothing here is time-critical — and it means no future change to the
+  //    conditions above can turn this back into a hot loop.
   let extending = false;
+  let exhausted = null; // "<source>|<queue length>" already asked, nothing new
+  let lastExtendAt = 0;
+  const MIN_EXTEND_GAP = 5000;
   async function ensureUpcoming() {
     if (!get(online)) return; // radio/flow need the network — skip while offline
     const s = get(player);
     if (!s.autoplay || s.index < 0) return;
     if (s.index < s.queue.length - 3) return; // still buffered
     if (extending) return;
+    const isFlow = !!(s.context && s.context.kind === "flow");
+    const seed = isFlow ? null : s.queue[s.queue.length - 1] || s.queue[s.index];
+    if (!isFlow && !seed) return;
+    const key = `${isFlow ? "flow" : seed.deezer_id}|${s.queue.length}`;
+    if (key === exhausted) return;
+    if (Date.now() - lastExtendAt < MIN_EXTEND_GAP) return;
+    lastExtendAt = Date.now();
     extending = true;
     try {
-      let more = [];
-      if (s.context && s.context.kind === "flow") {
-        more = (await api.flow()).tracks || [];
-      } else {
-        const seed = s.queue[s.queue.length - 1] || s.queue[s.index];
-        if (seed) more = (await api.trackRadio(seed.deezer_id)).tracks || [];
+      const more = isFlow
+        ? (await api.flow()).tracks || []
+        : (await api.trackRadio(seed.deezer_id)).tracks || [];
+      // extend() reports what it actually appended: nothing means this source
+      // has no more to give at this queue length, so stop asking it.
+      if (!player.extend(more)) {
+        exhausted = key;
+        logInfo("queue", `top-up found nothing new (${key}) — not asking again`);
       }
-      player.extend(more);
     } catch {
       /* ignore */
     } finally {
