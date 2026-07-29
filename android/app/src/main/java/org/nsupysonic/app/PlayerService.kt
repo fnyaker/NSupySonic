@@ -73,6 +73,10 @@ class PlayerService : Service() {
         const val CHANNEL_ID = "playback"
         const val NOTIFICATION_ID = 1
         const val ACTION_DISMISS = "org.nsupysonic.app.DISMISS"
+        /** Longest edge (px) a decoded cover is allowed to keep. */
+        const val ART_MAX = 1024
+        /** Ceiling on the encoded cover we're willing to buffer (8 MB). */
+        const val ART_BYTES_MAX = 8 * 1024 * 1024
     }
 
     inner class LocalBinder : Binder() {
@@ -94,8 +98,16 @@ class PlayerService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
 
     private val artExecutor = Executors.newSingleThreadExecutor()
+    private val main = Handler(Looper.getMainLooper())
+    // Read by the art worker thread to decide whether its download is still
+    // wanted, written on the main thread — @Volatile so the worker actually
+    // sees the new track instead of a stale cached value (which left the
+    // notification on the previous cover, or raced a newer fetch to the field).
+    @Volatile
     private var artUrl: String? = null
     private var artBitmap: Bitmap? = null
+    // The MediaSession is released in onDestroy; using it afterwards throws.
+    private var released = false
 
     override fun onBind(intent: Intent?): IBinder {
         hasClient = true
@@ -192,6 +204,7 @@ class PlayerService : Service() {
 
     /** Called from MainActivity (main thread) with each bridge state. */
     fun update(s: State) {
+        if (released) return // a late art callback after onDestroy
         state = s
         if (!s.active) {
             // Playback wound down (queue emptied / logged out): drop the
@@ -359,7 +372,8 @@ class PlayerService : Service() {
                     conn.readTimeout = 8000
                     conn.instanceFollowRedirects = true
                     if (!cookies.isNullOrEmpty()) conn.setRequestProperty("Cookie", cookies)
-                    conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                    if (conn.responseCode !in 200..299) null
+                    else conn.inputStream.use { decodeBounded(readCapped(it)) }
                 } catch (_: Exception) {
                     null
                 }
@@ -372,14 +386,50 @@ class PlayerService : Service() {
             }
             if (bmp != null && url == artUrl) {
                 val art = bmp
-                Handler(Looper.getMainLooper()).post {
-                    if (url == artUrl) {
+                main.post {
+                    if (!released && url == artUrl) {
                         artBitmap = art
                         state?.let { update(it) } // re-render metadata + notification
                     }
                 }
             }
         }
+    }
+
+    /** Read at most ART_BYTES_MAX; a longer body is not cover art. */
+    private fun readCapped(input: java.io.InputStream): ByteArray? {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        var total = 0
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > ART_BYTES_MAX) return null
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+
+    /**
+     * Decode cover bytes with a hard ceiling on the resulting bitmap.
+     *
+     * The art comes off the network, so its dimensions are not ours to trust:
+     * an unbounded decode turns an oversized image into tens of MB of heap that
+     * then gets parcelled across Binder on every metadata update. ART_MAX is
+     * well past what a notification, lockscreen or car head unit displays.
+     */
+    private fun decodeBounded(bytes: ByteArray?): Bitmap? {
+        if (bytes == null || bytes.isEmpty()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        if (w <= 0 || h <= 0) return null
+        var sample = 1
+        while (w / (sample * 2) >= ART_MAX || h / (sample * 2) >= ART_MAX) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
     }
 
     // -- locks ------------------------------------------------------------------
@@ -412,6 +462,10 @@ class PlayerService : Service() {
     }
 
     override fun onDestroy() {
+        // Set BEFORE releasing the session: a queued art callback runs update(),
+        // and setMetadata on a released MediaSession throws.
+        released = true
+        main.removeCallbacksAndMessages(null)
         releaseLocks()
         session.isActive = false
         session.release()

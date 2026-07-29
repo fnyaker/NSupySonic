@@ -52,6 +52,11 @@ import java.util.concurrent.Executors
  */
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        /** Upper bound on a single Bridge.saveText payload (16 MB of chars). */
+        private const val MAX_SAVE_TEXT = 16 * 1024 * 1024
+    }
+
     private lateinit var prefs: Prefs
     private lateinit var webView: WebView
     private lateinit var errorView: View
@@ -63,6 +68,13 @@ class MainActivity : AppCompatActivity() {
     private var pendingState: PlayerService.State? = null
     private var mainFrameFailed = false
     private val shareExecutor = Executors.newSingleThreadExecutor()
+    // Set the moment the WebView is destroyed (renderer death or activity
+    // teardown). TOUCHING a destroyed WebView — evaluateJavascript, loadUrl,
+    // even leaving it in the view tree to be drawn — is a native use-after-free
+    // in the WebView provider, which is exactly what a memory-tagging /
+    // hardened-allocator build turns from "usually gets away with it" into a
+    // hard crash. Every entry point below checks this first.
+    private var webViewDead = false
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -72,6 +84,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            // The sink closes over THIS activity's WebView; a service that comes
+            // back (onServiceConnected) installs a fresh one.
+            service?.commandSink = null
             service = null
         }
     }
@@ -132,17 +147,28 @@ class MainActivity : AppCompatActivity() {
             startDownload(url, userAgent, contentDisposition, mimeType)
         }
 
-        // Install the mediaSession-capturing shim before any page script runs.
-        // The onPageStarted fallback below covers WebViews without the feature
-        // (the shim is idempotent, double injection is harmless).
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT))
-            WebViewCompat.addDocumentStartJavaScript(webView, shimJs, setOf("*"))
+        // Install the mediaSession-capturing shim before any page script runs,
+        // scoped to the configured server's origin — NOT "*", which handed the
+        // shim (and the NSNative bridge it drives) to any page or cross-origin
+        // frame the WebView happened to load. The onPageStarted fallback below
+        // covers WebViews without the feature, and any origin rule the API
+        // rejects (the shim is idempotent, double injection is harmless).
+        val origin = serverOrigin()
+        if (origin != null &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+        ) {
+            try {
+                WebViewCompat.addDocumentStartJavaScript(webView, shimJs, setOf(origin))
+            } catch (_: Exception) {
+                // Unsupported origin rule — onPageStarted still injects it.
+            }
+        }
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(
                 view: WebView?, url: String?, favicon: android.graphics.Bitmap?
             ) {
-                view?.evaluateJavascript(shimJs, null)
+                if (isServerUrl(url)) view?.evaluateJavascript(shimJs, null)
             }
 
             override fun onReceivedSslError(
@@ -168,12 +194,10 @@ class MainActivity : AppCompatActivity() {
             ): Boolean {
                 val url = request?.url ?: return false
                 // Keep the app's own origin inside; hand anything else to the
-                // system. Compare scheme/host/port (a bare startsWith let
+                // system. Compares scheme/host/port (a bare startsWith let
                 // "https://host.evil.com" or "https://host:57223" masquerade as
                 // the configured "https://host[:5722]").
-                val base = android.net.Uri.parse(prefs.baseUrl())
-                if (url.scheme == base.scheme && url.host == base.host && url.port == base.port)
-                    return false
+                if (isServerUri(url)) return false
                 return try {
                     startActivity(Intent(Intent.ACTION_VIEW, url))
                     true
@@ -189,16 +213,21 @@ class MainActivity : AppCompatActivity() {
             override fun onRenderProcessGone(
                 view: WebView?, detail: RenderProcessGoneDetail?
             ): Boolean {
-                // The renderer died (OOM kill). Rebuild the whole activity —
-                // reusing the dead WebView would crash the app.
-                recreate()
+                // The renderer died (OOM kill). The WebView is now unusable: it
+                // must be detached and destroyed BEFORE anything else touches
+                // it. Merely leaving it in the layout until the activity is torn
+                // down means the view system keeps measuring/drawing a WebView
+                // whose renderer is gone — a native use-after-free, and one of
+                // the few crashes an app hosting a WebView can actually cause.
+                disposeWebView()
+                if (!isFinishing && !isDestroyed) recreate()
                 return true
             }
         }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (webView.canGoBack()) webView.goBack()
+                if (!webViewDead && webView.canGoBack()) webView.goBack()
                 // Keep the process (and the music) alive instead of finishing.
                 else moveTaskToBack(true)
             }
@@ -215,9 +244,7 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (!prefs.configured) return
-        if (::webView.isInitialized &&
-            webView.url?.startsWith(prefs.baseUrl()) != true
-        ) {
+        if (::webView.isInitialized && !webViewDead && !isServerUrl(webView.url)) {
             mainFrameFailed = false
             errorView.visibility = View.GONE
             webView.loadUrl(prefs.appUrl())
@@ -242,9 +269,65 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun reload() {
+        if (webViewDead || !::webView.isInitialized) return
         mainFrameFailed = false
         errorView.visibility = View.GONE
         webView.loadUrl(prefs.appUrl())
+    }
+
+    // -- origin checks ---------------------------------------------------------
+    // One place decides what "our server" means, so the navigation guard, the
+    // shim injection and the JS bridge can't drift apart.
+
+    /** The default port a scheme implies, so ":443" and "" compare equal. */
+    private fun effectivePort(u: Uri): Int =
+        if (u.port > 0) u.port
+        else when (u.scheme?.lowercase()) {
+            "https" -> 443
+            "http" -> 80
+            else -> -1
+        }
+
+    private fun isServerUri(u: Uri): Boolean {
+        val base = Uri.parse(prefs.baseUrl())
+        if (base.host.isNullOrEmpty()) return false
+        return u.scheme.equals(base.scheme, ignoreCase = true) &&
+            u.host.equals(base.host, ignoreCase = true) &&
+            effectivePort(u) == effectivePort(base)
+    }
+
+    private fun isServerUrl(url: String?): Boolean {
+        if (url.isNullOrEmpty()) return false
+        return try {
+            isServerUri(Uri.parse(url))
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** "scheme://host[:port]" of the configured server, for origin rules. */
+    private fun serverOrigin(): String? {
+        val u = Uri.parse(prefs.baseUrl())
+        val scheme = u.scheme ?: return null
+        val host = u.host ?: return null
+        if (host.isEmpty()) return null
+        return if (u.port > 0) "$scheme://$host:${u.port}" else "$scheme://$host"
+    }
+
+    /** Detach + destroy the WebView exactly once. */
+    private fun disposeWebView() {
+        if (webViewDead || !::webView.isInitialized) return
+        webViewDead = true
+        try {
+            // Nothing else may touch the WebView here — after a renderer death
+            // even stopLoading() goes through the dead process. Detach, destroy.
+            // Removing it from the view tree BEFORE destroy() is required — a
+            // destroyed WebView left attached is drawn from freed native memory.
+            (webView.parent as? android.view.ViewGroup)?.removeView(webView)
+            webView.destroy()
+        } catch (_: Exception) {
+            /* already gone */
+        }
     }
 
     private fun openSettings() {
@@ -324,6 +407,13 @@ class MainActivity : AppCompatActivity() {
     // handing off natively guarantees a real OS share sheet regardless of the
     // hosting WebView's Web Share API completeness.
     private fun startShare(rawUrl: String) {
+        // The bridge is reachable from any frame the WebView runs, so the URL is
+        // untrusted input: without this it would fetch ANY host with that host's
+        // cookies and hand the body to the OS share sheet. Only our own server.
+        if (!isServerUrl(rawUrl)) {
+            Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
+            return
+        }
         val verify = prefs.verifySsl
         val cookie = try {
             CookieManager.getInstance().getCookie(rawUrl)
@@ -373,11 +463,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runJsCommand(cmd: String, value: Double?) {
-        if (!::webView.isInitialized) return
+        // A media-button command is posted to the main looper, so it can land
+        // AFTER the activity tore its WebView down (or after the renderer died).
+        // Evaluating JS on a destroyed WebView is a native use-after-free.
+        if (webViewDead || !::webView.isInitialized) return
         val arg = value?.let { ", $it" } ?: ""
-        webView.evaluateJavascript(
-            "window.__nsNativeCmd && window.__nsNativeCmd('$cmd'$arg)", null
-        )
+        try {
+            webView.evaluateJavascript(
+                "window.__nsNativeCmd && window.__nsNativeCmd('$cmd'$arg)", null
+            )
+        } catch (_: Exception) {
+            /* WebView torn down under us */
+        }
     }
 
     private fun handleState(state: PlayerService.State) {
@@ -442,22 +539,33 @@ class MainActivity : AppCompatActivity() {
          */
         @JavascriptInterface
         fun saveText(name: String, text: String) {
+            // Bounded: the diagnostic log is a few hundred KB at most, and this
+            // writes to the shared Downloads folder.
+            if (text.length > MAX_SAVE_TEXT) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity, R.string.download_failed, Toast.LENGTH_SHORT
+                    ).show()
+                }
+                return
+            }
             runOnUiThread { writeToDownloads(name, text) }
         }
     }
 
     override fun onDestroy() {
+        service?.commandSink = null
         if (bound) {
-            service?.commandSink = null
             try {
                 unbindService(connection)
             } catch (_: Exception) {
             }
-            // The WebView (the actual audio) dies with us — take the service down.
-            if (isFinishing) stopService(Intent(this, PlayerService::class.java))
+            bound = false
         }
+        // The WebView (the actual audio) dies with us — take the service down.
+        if (isFinishing) stopService(Intent(this, PlayerService::class.java))
         shareExecutor.shutdownNow()
-        if (::webView.isInitialized) webView.destroy()
+        disposeWebView()
         super.onDestroy()
     }
 }
