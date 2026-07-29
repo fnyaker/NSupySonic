@@ -6,4 +6,4 @@ UPDATE track
    SET owner_id = u.id
   FROM "user" u
  WHERE track.owner_id IS NULL
-   AND track.path LIKE '%/Uploads/' || u.id::text || '/%';
+   AND track.path LIKE '%%/Uploads/' || u.id::text || '/%%';
