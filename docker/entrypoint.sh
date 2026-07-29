@@ -63,8 +63,7 @@ LEGACY_SQLITE=/data/db/supysonic.db
 auto_migrate() {
     # One-shot, transparent SQLite -> external DB migration. Triggers only when
     # the deployment has switched DATABASE_URI to Postgres/MySQL *and* a legacy
-    # SQLite database with data is still on the volume. It is idempotent: once
-    # the destination holds data the copy is skipped, so it is safe every boot.
+    # SQLite database with data is still on the volume.
     [ -n "$DATABASE_URI" ] || return 0
     case "$DATABASE_URI" in
         sqlite*) return 0 ;;  # still on SQLite, nothing to migrate
@@ -74,6 +73,17 @@ auto_migrate() {
     echo "Found legacy SQLite DB and an external DATABASE_URI; migrating data…"
     if supysonic-cli db migrate-to "$DATABASE_URI" \
         --from "sqlite:///$LEGACY_SQLITE" --skip-if-populated; then
+        # A deployment that has been on the external DB for a while (many
+        # boots, many upgrades) hits "already populated" every single time —
+        # that still ran a full connect-and-check against $DATABASE_URI on
+        # every startup for no reason, and one broken migration step (e.g. a
+        # bug in a migration script) then failed the boot outright even though
+        # the real database was already fine. Once the external DB is
+        # confirmed populated, retire the legacy file so this never runs
+        # again — rename, not delete, so the data is still there if needed.
+        if [ -f "$LEGACY_SQLITE" ]; then
+            mv "$LEGACY_SQLITE" "$LEGACY_SQLITE.migrated" 2>/dev/null || true
+        fi
         echo "Data migration step complete."
     else
         echo "Data migration step failed; check the destination database." >&2
