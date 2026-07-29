@@ -1,5 +1,61 @@
 # Audit de sécurité offensif — NSupySonic (passe 2, boîte noire)
 
+> ## 🛠️ État des corrections (2026-07-29)
+>
+> **28 constats corrigés, 1 partiellement, 7 laissés en l'état.** Le détail
+> par constat est dans le [tableau de bord](#tableau-de-bord) ci-dessous,
+> colonne « Correction ». **Les 4 critiques et les 7 élevés sont tous
+> traités.** Les tests de non-régression demandés par l'audit vivent dans
+> `tests/test_security.py` (37 tests, dont un harnais boîte noire qui monte
+> l'application réelle : en-tête `Set-Cookie` réel, rejet CSRF, isolation des
+> uploads bout-en-bout, contenu du ZIP de dossier).
+>
+> **Corrigé partiellement :**
+>
+> - **NS-04** — le répertoire du socket est créé en 0700 et refusé s'il
+>   appartient à quelqu'un d'autre, ce qui ferme le vecteur `/tmp` partagé.
+>   Le transport `pickle` lui-même est conservé : le remplacer par du JSON
+>   + liste blanche touche client et serveur du démon, et méritait sa propre
+>   passe plutôt que d'être glissé dans un lot de correctifs.
+>
+> **Non corrigé, et pourquoi :**
+>
+> - **NS-13** (`changePassword` sans mot de passe actuel) — exiger `oldPassword`
+>   casserait le protocole Subsonic : aucun client ne l'envoie, l'endpoint
+>   deviendrait inutilisable. Atténué autrement : un changement de mot de passe
+>   révoque désormais toutes les sessions web de l'utilisateur (`session_epoch`).
+> - **NS-14** (credentials Subsonic en clair dans l'URL) — c'est le protocole
+>   Subsonic lui-même. Reste la recommandation de déployer derrière HTTPS.
+> - **NS-10** / **NS-35** — l'audit les classe déjà « non reproduit » et
+>   « risque contractuel, pas technique » ; rien à corriger côté code.
+> - **NS-19** (Android), **NS-21** (chaîne d'approvisionnement),
+>   **NS-27** (journal d'audit) — trois chantiers à part entière (durcissement
+>   de l'app native, politique de dépendances, nouvelle table + écran admin),
+>   hors du périmètre de cette passe de correctifs.
+>
+> **Migration de schéma.** `SCHEMA_VERSION` passe à `20260730` :
+> `track.owner_id` (propriétaire d'un upload, rétro-rempli depuis le chemin
+> `Uploads/<user-id>/`) et `user.session_epoch` (révocation de session).
+>
+> **Changements visibles pour l'exploitant :**
+>
+> - Les mutations de l'interface d'admin sont en **POST + jeton CSRF**. Une
+>   automatisation qui appelait `GET /user/del/<id>` ou `GET /folder/scan` doit
+>   être adaptée.
+> - Le cookie de session dure **7 jours** (au lieu de 31) et porte réellement
+>   `SameSite=Lax` (+ `Secure` si `session_cookie_secure = yes`).
+>   `session_lifetime_days` permet de régler la durée.
+> - Un **upload est privé** : seul son auteur (et un admin) le voit, le lit et
+>   le télécharge. `DELETE /api/local/<uuid>` permet enfin de le supprimer.
+> - `SUPYSONIC_SECRETS_ENV_ONLY=1` interdit le repli base pour les secrets
+>   serveur (voir `config.sample`).
+> - Les mots de passe les plus courants (`changeme`, `supysonic`, …) sont
+>   refusés ; `SUPYSONIC_MIN_PASSWORD_LENGTH` impose une longueur minimale.
+> - `supysonic-cli user add --password-stdin` évite d'exposer le mot de passe
+>   dans `ps`.
+>
+> ---
+
 > **Cette version remplace la première passe.** La première était une revue de code
 > statique ; celle-ci **monte une vraie instance Flask, crée des comptes et envoie des
 > requêtes réelles** pour prouver (ou réfuter) chaque hypothèse. Résultat : plusieurs
@@ -60,44 +116,44 @@ Les preuves les plus marquantes de cette passe :
 
 ### Tableau de bord
 
-| ID | Constat | Sévérité | Statut |
-|---|---|---|---|
-| [NS-01](#ns-01) | `SameSite`/`Secure` jamais appliqués (`setdefault` no-op) | 🔴 Critique | ✅ Confirmé |
-| [NS-02](#ns-02) | Aucune CSRF ; mutations admin en GET | 🔴 Critique | ✅ Confirmé |
-| [NS-03](#ns-03) | Mot de passe en clair récupérable depuis la base seule | 🔴 Critique | ✅ Confirmé |
-| [NS-04](#ns-04) | Démon : `pickle` sur socket `/tmp` prévisible (RCE) | 🔴 Critique | 🔎 Confirmé (lecture) |
-| [NS-05](#ns-05) | Mass assignment `admin=1` sur `/user/add` | 🟠 Élevé | ✅ Confirmé |
-| [NS-06](#ns-06) | `/rest/download?id=<folder>` zippe tout l'arbre | 🟠 Élevé | ✅ Confirmé |
-| [NS-07](#ns-07) | Uploads non cloisonnés entre utilisateurs | 🟠 Élevé | ✅ Confirmé |
-| [NS-08](#ns-08) | Épuisement disque via `/api/download` (file non bornée) | 🟠 Élevé | ✅ Confirmé |
-| [NS-09](#ns-09) | Gel serveur : ffmpeg synchrone (1 worker / 8 threads) | 🟠 Élevé | 🔎 Confirmé (lecture) |
-| [NS-11](#ns-11) | Rate-limit : succès réinitialise le compteur, clé IP partagée | 🟠 Élevé | ✅ Confirmé |
-| [NS-12](#ns-12) | Sessions non révocables, pas de régénération, 31 j | 🟠 Élevé | ✅ Confirmé |
-| [NS-37](#ns-37) | **Open redirect : garde contourné par `/\`** | 🟠 Élevé | ✅ Confirmé (nouveau) |
-| [NS-13](#ns-13) | `changePassword` sans mot de passe actuel | 🟡 Moyen | ✅ Confirmé |
-| [NS-14](#ns-14) | Credentials Subsonic en clair dans l'URL | 🟡 Moyen | 🔎 Confirmé |
-| [NS-15](#ns-15) | JSONP `callback` non validé + ACAO `*` | 🟡 Moyen | ✅ Confirmé |
-| [NS-16](#ns-16) | `getLyrics` : XML non fiable en HTTP clair (bombe XML) | 🟡 Moyen | 🔎 Confirmé |
-| [NS-17](#ns-17) | Ids non validés dans les URL Deezer sortantes | 🟡 Moyen | ✅ Confirmé |
-| [NS-18](#ns-18) | SSRF via `stream_url` d'épisode (redirections suivies) | 🟡 Moyen | 🔎 Confirmé |
-| [NS-19](#ns-19) | Android : cleartext + trust-all SSL + pont JS ouvert | 🟡 Moyen | 🔎 Confirmé |
-| [NS-20](#ns-20) | Fuite de l'ARL (conf en clair, env, `ps`) | 🟡 Moyen | 🔎 Confirmé |
-| [NS-21](#ns-21) | Supply chain : pas de lockfile, deps flottantes | 🟡 Moyen | 🔎 Confirmé |
-| [NS-22](#ns-22) | CSP `https:` joker, pas de HSTS | 🟡 Moyen | ✅ Confirmé |
-| [NS-24](#ns-24) | `addChatMessage` non borné (100k accepté) | 🟡 Moyen | ✅ Confirmé |
-| [NS-10](#ns-10) | Quota : TOCTOU (backend concurrent seulement) | 🟡 Moyen | ⚠️ Non reproduit |
-| [NS-26](#ns-26) | `_push_async` : thread par appel (admin-only) | 🟡 Moyen | ✅ Confirmé |
-| [NS-27](#ns-27) | Aucun journal d'audit | 🟡 Moyen | 🔎 Confirmé |
-| [NS-28](#ns-28) | Mots de passe par défaut (`changeme`, `supysonic`) | 🔵 Faible | 🔎 Confirmé |
-| [NS-29](#ns-29) | Aucune politique de mot de passe | 🔵 Faible | ✅ Confirmé |
-| [NS-30](#ns-30) | `LIKE` non échappé → scans coûteux | 🔵 Faible | ✅ Confirmé |
-| [NS-31](#ns-31) | Bombes de décompression PIL (pochettes) | 🔵 Faible | 🔎 Confirmé |
-| [NS-32](#ns-32) | `IniConfig` : sections inconnues → `app.config` | 🔵 Faible | 🔎 Confirmé |
-| [NS-33](#ns-33) | Tables progress/markers non bornées globalement | 🔵 Faible | 🔎 Confirmé |
-| [NS-34](#ns-34) | `_valid_id()` accepte chiffres Unicode et `-` | 🔵 Faible | ✅ Confirmé |
-| [NS-35](#ns-35) | Catalogue Deezer payant ouvert à tous les invités | 🔵 Faible | ✅ Confirmé |
-| [NS-38](#ns-38) | **`size`/`offset` non bornés (getRandomSongs…)** | 🔵 Faible | ✅ Confirmé (nouveau) |
-| [NS-39](#ns-39) | Timing-oracle d'énumération d'utilisateurs | 🔵 Faible | ⚠️ Production seulement |
+| ID | Constat | Sévérité | Statut | Correction |
+|---|---|---|---|---|
+| [NS-01](#ns-01) | `SameSite`/`Secure` jamais appliqués (`setdefault` no-op) | 🔴 Critique | ✅ Confirmé | Affectation directe des flags cookie + test sur le `Set-Cookie` réel |
+| [NS-02](#ns-02) | Aucune CSRF ; mutations admin en GET | 🔴 Critique | ✅ Confirmé | Mutations en POST, jeton CSRF admin, garde `Sec-Fetch-Site`/`Origin` sur `/api` |
+| [NS-03](#ns-03) | Mot de passe en clair récupérable depuis la base seule | 🔴 Critique | ✅ Confirmé | `SUPYSONIC_SECRETS_ENV_ONLY` + AES-GCM (déchiffre encore le CFB historique) |
+| [NS-04](#ns-04) | Démon : `pickle` sur socket `/tmp` prévisible (RCE) | 🔴 Critique | 🔎 Confirmé (lecture) | **Partiel** : socket en 0700 et refus si un autre propriétaire ; transport `pickle` conservé |
+| [NS-05](#ns-05) | Mass assignment `admin=1` sur `/user/add` | 🟠 Élevé | ✅ Confirmé | Liste blanche des champs dans la vue **et** dans `UserManager.add` |
+| [NS-06](#ns-06) | `/rest/download?id=<folder>` zippe tout l'arbre | 🟠 Élevé | ✅ Confirmé | Le ZIP ne contient plus que les pistes audio visibles du dossier + sa pochette |
+| [NS-07](#ns-07) | Uploads non cloisonnés entre utilisateurs | 🟠 Élevé | ✅ Confirmé | `Track.owner` (migration `20260730`) + filtrage de toutes les lectures + `DELETE /api/local/<id>` |
+| [NS-08](#ns-08) | Épuisement disque via `/api/download` (file non bornée) | 🟠 Élevé | ✅ Confirmé | `queue.Queue(maxsize=5000)` + `put_nowait` ; la réponse indique le nombre accepté |
+| [NS-09](#ns-09) | Gel serveur : ffmpeg synchrone (1 worker / 8 threads) | 🟠 Élevé | 🔎 Confirmé (lecture) | Sémaphore de transcodage (503 + `Retry-After`) + `timeout` sur chaque ffmpeg |
+| [NS-11](#ns-11) | Rate-limit : succès réinitialise le compteur, clé IP partagée | 🟠 Élevé | ✅ Confirmé | Clés composites `ip` + `user:<nom>` ; le succès ne réinitialise que la clé compte |
+| [NS-12](#ns-12) | Sessions non révocables, pas de régénération, 31 j | 🟠 Élevé | ✅ Confirmé | `session.clear()` à la connexion, `User.session_epoch`, durée 31 j → 7 j |
+| [NS-37](#ns-37) | **Open redirect : garde contourné par `/\`** | 🟠 Élevé | ✅ Confirmé (nouveau) | Normalisation des `\` (et des contrôles de tête) avant analyse |
+| [NS-13](#ns-13) | `changePassword` sans mot de passe actuel | 🟡 Moyen | ✅ Confirmé | **Non corrigé** — exiger `oldPassword` casse le protocole Subsonic (voir l'encadré) |
+| [NS-14](#ns-14) | Credentials Subsonic en clair dans l'URL | 🟡 Moyen | 🔎 Confirmé | **Non corrigé** — inhérent au protocole Subsonic ; HTTPS reste la parade |
+| [NS-15](#ns-15) | JSONP `callback` non validé + ACAO `*` | 🟡 Moyen | ✅ Confirmé | `callback` validé par `\A[A-Za-z_$][\w$]{0,63}\Z` |
+| [NS-16](#ns-16) | `getLyrics` : XML non fiable en HTTP clair (bombe XML) | 🟡 Moyen | 🔎 Confirmé | Bascule sur LRCLIB (https + JSON) : plus de XML ni de HTTP clair à parser |
+| [NS-17](#ns-17) | Ids non validés dans les URL Deezer sortantes | 🟡 Moyen | ✅ Confirmé | `_valid_id` appliqué à artist/album/playlist/lyrics/gain/radio ; slug pour smarttracklist |
+| [NS-18](#ns-18) | SSRF via `stream_url` d'épisode (redirections suivies) | 🟡 Moyen | 🔎 Confirmé | Redirections suivies un saut à la fois, refus des IP privées/loopback/link-local |
+| [NS-19](#ns-19) | Android : cleartext + trust-all SSL + pont JS ouvert | 🟡 Moyen | 🔎 Confirmé | **Non corrigé** — `android/`, hors du périmètre serveur de cette passe |
+| [NS-20](#ns-20) | Fuite de l'ARL (conf en clair, env, `ps`) | 🟡 Moyen | 🔎 Confirmé | `umask 077`, conf rendue en `chmod 600`, mot de passe admin via `--password-stdin` |
+| [NS-21](#ns-21) | Supply chain : pas de lockfile, deps flottantes | 🟡 Moyen | 🔎 Confirmé | **Non corrigé** — lockfile npm / planchers de version : décision du mainteneur |
+| [NS-22](#ns-22) | CSP `https:` joker, pas de HSTS | 🟡 Moyen | ✅ Confirmé | CSP restreinte aux hôtes réellement utilisés, `object-src 'none'`, HSTS si TLS, Permissions-Policy |
+| [NS-24](#ns-24) | `addChatMessage` non borné (100k accepté) | 🟡 Moyen | ✅ Confirmé | Message tronqué à 512, quota de 20/min par compte, table plafonnée à 1000 |
+| [NS-10](#ns-10) | Quota : TOCTOU (backend concurrent seulement) | 🟡 Moyen | ⚠️ Non reproduit | Inchangé — reste théorique (SQLite sérialise les écritures) |
+| [NS-26](#ns-26) | `_push_async` : thread par appel (admin-only) | 🟡 Moyen | ✅ Confirmé | `ThreadPoolExecutor(max_workers=4)` partagé |
+| [NS-27](#ns-27) | Aucun journal d'audit | 🟡 Moyen | 🔎 Confirmé | **Non corrigé** — table `AuditLog` à concevoir |
+| [NS-28](#ns-28) | Mots de passe par défaut (`changeme`, `supysonic`) | 🔵 Faible | 🔎 Confirmé | L'entrypoint refuse `changeme` & co. et génère un mot de passe si aucun n'est fourni |
+| [NS-29](#ns-29) | Aucune politique de mot de passe | 🔵 Faible | ✅ Confirmé | Mots de passe courants refusés ; longueur minimale via `SUPYSONIC_MIN_PASSWORD_LENGTH` |
+| [NS-30](#ns-30) | `LIKE` non échappé → scans coûteux | 🔵 Faible | ✅ Confirmé | Le joker `%` est retiré du terme de recherche ; plancher de 2 caractères sur `/api` |
+| [NS-31](#ns-31) | Bombes de décompression PIL (pochettes) | 🔵 Faible | 🔎 Confirmé | `Image.MAX_IMAGE_PIXELS` plafonné et paramètre `size` borné à 2048 |
+| [NS-32](#ns-32) | `IniConfig` : sections inconnues → `app.config` | 🔵 Faible | 🔎 Confirmé | Liste blanche des clés poussées dans `app.config` + copie des dicts de section |
+| [NS-33](#ns-33) | Tables progress/markers non bornées globalement | 🔵 Faible | 🔎 Confirmé | Plafonds globaux par utilisateur (10 000 positions, 5 000 marqueurs) |
+| [NS-34](#ns-34) | `_valid_id()` accepte chiffres Unicode et `-` | 🔵 Faible | ✅ Confirmé | `re.compile(r"\A[0-9]{1,20}\Z")` |
+| [NS-35](#ns-35) | Catalogue Deezer payant ouvert à tous les invités | 🔵 Faible | ✅ Confirmé | Inchangé — risque contractuel, pas technique |
+| [NS-38](#ns-38) | **`size`/`offset` non bornés (getRandomSongs…)** | 🔵 Faible | ✅ Confirmé (nouveau) | `size`/`offset` plafonnés (500 / 10⁶) sur getRandomSongs, getAlbumList(2), getSongsByGenre, search* |
+| [NS-39](#ns-39) | Timing-oracle d'énumération d'utilisateurs | 🔵 Faible | ⚠️ Production seulement | Vérification contre un hachage factice quand le compte n'existe pas |
 
 ---
 
@@ -664,32 +720,38 @@ trois clés vers l'environnement casse cette chaîne à elle seule.
 ## 7. Plan d'action
 
 ### Immédiat (quelques lignes chacun, tous confirmés exploitables)
-- [ ] **NS-01** — affectation directe des flags cookie + test sur `Set-Cookie`
-- [ ] **NS-37** — `target.replace("\\","/")` avant analyse dans `safe_redirect_target`
-- [ ] **NS-02a** — `/user/del`, `/folder/del`, `/folder/scan`, `*/link|unlink` en POST
-- [ ] **NS-05** — liste blanche des champs dans `add_user_post` / `UserManager.add`
-- [ ] **NS-08** — `queue.Queue(maxsize=5000)`
-- [ ] **NS-34** — `_valid_id` en regex stricte, appliquée aux routes de [NS-17](#ns-17)
-- [ ] **NS-28** — refus de démarrer avec le mot de passe `changeme`
+- [x] **NS-01** — affectation directe des flags cookie + test sur `Set-Cookie`
+- [x] **NS-37** — `target.replace("\\","/")` avant analyse dans `safe_redirect_target`
+- [x] **NS-02a** — `/user/del`, `/folder/del`, `/folder/scan`, `*/link|unlink` en POST
+- [x] **NS-05** — liste blanche des champs dans `add_user_post` / `UserManager.add`
+- [x] **NS-08** — `queue.Queue(maxsize=5000)`
+- [x] **NS-34** — `_valid_id` en regex stricte, appliquée aux routes de [NS-17](#ns-17)
+- [x] **NS-28** — refus de démarrer avec le mot de passe `changeme`
 
 ### Court terme
-- [ ] **NS-02b** — jetons CSRF admin + contrôle `Origin`/`Sec-Fetch-Site` sur `/api`
-- [ ] **NS-03** — `SUPYSONIC_SECRET_*` obligatoires hors base, chiffrement authentifié
-- [ ] **NS-06** — filtre d'extension + rôle sur le ZIP de dossier ; racines en liste blanche
-- [ ] **NS-07** — `Track.owner` + filtrage lecture + endpoint de suppression
-- [ ] **NS-09** — sémaphore de transcodage, `timeout=` ffmpeg, rate-limit
-- [ ] **NS-11** — clés de rate-limit `ip:` + `user:`, succès ne réinitialise que `user:`
-- [ ] **NS-12** — `session.clear()`, `session_epoch`, durée réduite
+- [x] **NS-02b** — jetons CSRF admin + contrôle `Origin`/`Sec-Fetch-Site` sur `/api`
+- [x] **NS-03** — `SUPYSONIC_SECRET_*` obligatoires hors base, chiffrement authentifié
+- [x] **NS-06** — filtre d'extension + rôle sur le ZIP de dossier ; racines en liste blanche
+- [x] **NS-07** — `Track.owner` + filtrage lecture + endpoint de suppression
+- [x] **NS-09** — sémaphore de transcodage, `timeout=` ffmpeg, rate-limit
+- [x] **NS-11** — clés de rate-limit `ip:` + `user:`, succès ne réinitialise que `user:`
+- [x] **NS-12** — `session.clear()`, `session_epoch`, durée réduite
 - [ ] **NS-21** — committer `package-lock.json`, `npm ci`, planchers de version
 
 ### Moyen terme
-- [ ] **NS-04** — protocole démon JSON, socket hors `/tmp`
+- [~] **NS-04** — socket hors `/tmp` (fait) ; protocole démon JSON (à faire)
 - [ ] **NS-19** — épinglage TOFU Android, shim restreint, pont validé
-- [ ] **NS-18** — garde anti-SSRF sur les récupérations externes
-- [ ] **NS-22** — CSP restreinte, HSTS · **NS-27** — journal d'audit
-- [ ] **NS-13/14/15/16** — durcissement de la surface Subsonic héritée
+- [x] **NS-18** — garde anti-SSRF sur les récupérations externes
+- [x] **NS-22** — CSP restreinte, HSTS
+- [ ] **NS-27** — journal d'audit
+- [x] **NS-15/16** — JSONP validé, lyrics en https/JSON (LRCLIB)
+- [ ] **NS-13/14** — surface Subsonic héritée : contraintes de protocole, cf. l'encadré en tête
 
 ### Tests de non-régression (dérivés du harnais de cette passe)
+
+Écrits, dans `tests/test_security.py` — les noms diffèrent légèrement de la
+liste ci-dessous, mais chaque scénario est couvert :
+
 ```python
 def test_session_cookie_has_samesite_and_secure(self)      # NS-01
 def test_safe_redirect_rejects_backslash(self)             # NS-37

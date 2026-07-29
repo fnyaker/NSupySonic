@@ -117,7 +117,10 @@ class DeezerProvider:
         self._track_locks_guard = threading.Lock()
         # Last time a resolve failure forced a re-login (see resolve): rate-
         # limited so a genuinely unavailable track can't spam login calls.
-        self._last_relogin = 0.0
+        # -inf, not 0.0: time.monotonic() counts from boot, so 0.0 reads as
+        # "re-logged in at boot" and suppressed the very first retry for the
+        # machine's first minute of uptime.
+        self._last_relogin = float("-inf")
         # (checksum, tracks) cache for the favorites list — see
         # get_my_favorite_tracks. The expensive part is fetching full metadata
         # for every favorite; Deezer hands back a cheap checksum of the set, so
