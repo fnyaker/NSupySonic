@@ -156,6 +156,22 @@
     // full-screen player is still up.
     resumeAudio();
     if (get(immersiveOpen) && get(player).playing) requestWakeLock();
+    // A resume refused while we were away (the lock-screen play button, a
+    // headset click) leaves the transport wedged, and a backgrounded page's
+    // timers are throttled to as little as once a minute — so don't make the
+    // user wait out a throttled watchdog tick for it. Arm the wedge as overdue
+    // and the now-unthrottled interval acts on its next pass.
+    if (
+      get(player).playing &&
+      audio &&
+      audio.paused &&
+      !switching &&
+      !recovering &&
+      !loadingTrack &&
+      !chasing &&
+      !stuckSince
+    )
+      stuckSince = Date.now() - STUCK_MS;
   }
   // Keep the screen awake only while the full-screen player is open AND playing.
   $: if ($immersiveOpen && $player.playing) requestWakeLock();
@@ -186,6 +202,11 @@
   const STALL_MS = 6000; // a track that HAS played but froze → real stall
   const COLD_START_MS = 30000; // a track that never started → let the server work
   const RECOVER_DEADLINE_MS = 12000; // give up on a single recovery attempt
+  // How long "the store says playing, the element is paused" has to hold before
+  // we treat it as a refused play() rather than a state that's still settling.
+  const STUCK_MS = 2500;
+  let stuckSince = 0; // when that mismatch was first seen (0 = not stuck)
+  let stuckNudges = 0; // attempts made to get this wedge moving again
 
   function startWatchdog() {
     stopWatchdog();
@@ -193,7 +214,46 @@
     watchdog = setInterval(() => {
       if (!audio || switching || recovering || loadingTrack || chasing) return;
       const s = get(player);
-      if (!s.playing || audio.paused) return; // not trying to play / cleanly paused
+      if (!s.playing) {
+        // Not trying to play: a clean pause, and none of our business.
+        stuckSince = 0;
+        stuckNudges = 0;
+        return;
+      }
+      if (audio.paused) {
+        // The store wants playback but the element is sitting parked. This is
+        // the state a REFUSED play() leaves behind — a resume after a long
+        // pause, once the browser has released the paused element's decoder or
+        // dropped its buffered resource, and the reload it needs fails or the
+        // OS denies audio focus. `play()` returns a rejected promise, which
+        // used to be swallowed, and every check below reads currentTime, which
+        // simply never moves. So nothing saw it: pause icon over silence, and
+        // pressing play again just toggled the store. Frozen until the track
+        // was changed by hand.
+        //
+        // Requiring the state to hold across ticks is what keeps this from
+        // fighting the OS: when another app grabs audio focus the element
+        // pauses and onElPause mirrors that into the store within ~300ms, so
+        // playing=true + paused=true never lasts STUCK_MS unless we're wedged.
+        if (!stuckSince) {
+          stuckSince = Date.now();
+          return;
+        }
+        if (Date.now() - stuckSince < STUCK_MS) return;
+        stuckSince = Date.now();
+        // Nudge once — a single refusal is often transient (a racing load, a
+        // moment of lost focus). A nudge that doesn't take means the source
+        // itself needs rebuilding, which is exactly what recovery does.
+        if (stuckNudges++ < 1) {
+          setPlaybackStatus("loading");
+          startPlayback("watchdog");
+        } else {
+          recoverPlayback();
+        }
+        return;
+      }
+      stuckSince = 0;
+      stuckNudges = 0;
       if (audio.currentTime !== lastPos) {
         lastPos = audio.currentTime;
         lastAdvance = Date.now();
@@ -216,6 +276,63 @@
     clearTimeout(watchdog);
     clearInterval(watchdog);
     watchdog = null;
+  }
+
+  /**
+   * Start the active element, and NOTICE when it refuses.
+   *
+   * `play()` rejects for reasons that are entirely normal on mobile — the
+   * browser reclaimed a long-paused element's resources and the reload it now
+   * needs failed, another app holds audio focus, the source went away. Every
+   * one of those used to be swallowed by `.catch(() => {})`, leaving the store
+   * on "playing" with a parked element and no path back. Surfacing it lets the
+   * watchdog's stuck check act on the next tick instead of never.
+   */
+  function startPlayback(reason) {
+    if (!audio) return;
+    const el = audio;
+    // A resume is a fresh start for the stall clock: `lastAdvance` is otherwise
+    // still sitting at the moment playback stopped, so the very first check
+    // after a long pause would read as a minutes-long freeze and reload a track
+    // that had simply been paused.
+    //
+    // `lastPos` is deliberately NOT reset with it. onTime clears the recovery
+    // budget on `currentTime > lastPos`, so parking it at -1 makes any position
+    // count as progress — which pinned the retry ladder at 1/4 forever and left
+    // a permanently broken stream retrying instead of moving on to the next
+    // track. Resetting the clock is what a resume needs; the budget isn't ours.
+    lastAdvance = Date.now();
+    let p;
+    try {
+      p = el.play();
+    } catch {
+      return; // synchronous throw (very old engines) — the watchdog picks it up
+    }
+    if (!p || typeof p.catch !== "function") return;
+    p.catch((err) => {
+      // Superseded (element swapped) or the user paused meanwhile: not a wedge.
+      if (el !== audio || !get(player).playing) return;
+      logInfo("audio", `play() refused (${reason}): ${err && err.name}`, null, {
+        important: true,
+      });
+      // The browser wants a user gesture (autoplay policy). Retrying can't help
+      // and reloading the source certainly can't — the recovery ladder would
+      // just burn its budget and end up SKIPPING a perfectly good track. Show
+      // the honest state instead: paused, one tap away from playing.
+      if (err && err.name === "NotAllowedError") {
+        player.pause();
+        setPlaybackStatus("idle");
+        return;
+      }
+      setPlaybackStatus("loading");
+      // Hand the retry to the watchdog rather than reloading from here: this
+      // fires on every refusal, including the harmless "a newer load() is
+      // already on its way" one, and reloading on that would fight it. Arm the
+      // wedge as already overdue though, so it acts on its NEXT tick instead of
+      // spending two of them confirming what the rejection just told us — the
+      // difference between a resume that takes ~2s and one that takes ~6s.
+      if (!stuckSince) stuckSince = Date.now() - STUCK_MS;
+    });
   }
 
   function onElError(e) {
@@ -659,6 +776,8 @@
     // when the gain is already known, which is the common case).
     ensureGain(track);
     recoverAttempts = 0; // fresh track, fresh recovery budget
+    stuckSince = 0; // ...and a fresh wedge detector
+    stuckNudges = 0;
     hadProgress = false; // this track hasn't produced audio yet (cold-start grace)
     cancelRecovery(); // a recovery for the OUTGOING track must not touch this one
     cancelPauseMirror(); // drop a deferred pause from the outgoing track
@@ -706,7 +825,7 @@
     if (src.blob) touch(track.deezer_id); // bump LRU recency
 
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
-    if ($player.playing) audio.play().catch(() => {});
+    if ($player.playing) startPlayback("load");
     // Seed duration from metadata right away so the seek bar is correct before
     // the first timeupdate (live transcodes report no duration).
     player.setProgress(resumeAt, track.duration || 0);
@@ -731,7 +850,7 @@
     }
     player.setProgress(0, $current?.duration || get(player).duration || 0);
     recoverAttempts = 0;
-    if (get(player).playing) audio.play().catch(() => {});
+    if (get(player).playing) startPlayback("restart");
   }
 
   // Back online after a network drop: clear the wait, reset the retry budget and
@@ -1030,13 +1149,15 @@
       if (switching) cancelSwitch();
       if (chasing) cancelSeekChase();
       if (!audio.paused) audio.pause();
+      stuckSince = 0; // a deliberate pause is never a wedge
+      stuckNudges = 0;
       setPlaybackStatus("idle"); // paused = not trying to play = no indicator
     } else if (!switching && !recovering && !chasing && audio.paused) {
       // Playback starts: restore eager buffering if the paused-restore load
       // deferred it (play() fetches regardless, but rebuffers stay eager too).
       // Mid-transition states own their own play(), so don't double-drive here.
       if (audio.preload !== "auto") audio.preload = "auto";
-      audio.play().catch(() => {});
+      startPlayback("transport");
     }
   }
   $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
@@ -1163,7 +1284,7 @@
       markEpisodeFinished(cur.deezer_id, cur.duration || 0);
     if (s.repeat === "one") {
       audio.currentTime = 0;
-      audio.play().catch(() => {});
+      startPlayback("repeat-one");
       return;
     }
     if (s.index < s.queue.length - 1) {
