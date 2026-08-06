@@ -88,6 +88,14 @@
   {:else if name === "close"}
     <line x1="18" y1="6" x2="6" y2="18" />
     <line x1="6" y1="6" x2="18" y2="18" />
+  {:else if name === "info"}
+    <circle cx="12" cy="12" r="9" />
+    <line x1="12" y1="11" x2="12" y2="16" />
+    <line x1="12" y1="8" x2="12" y2="8" />
+  {:else if name === "alert"}
+    <path d="M10.3 3.9 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+    <line x1="12" y1="9" x2="12" y2="13" />
+    <line x1="12" y1="17" x2="12" y2="17" />
   {:else if name === "chevronDown"}
     <polyline points="6 9 12 15 18 9" />
   {:else if name === "chevronUp"}

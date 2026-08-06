@@ -10,12 +10,15 @@
   import { initQueueFilter } from "./lib/playfilter.js";
   import { loadFavorites } from "./lib/actions.js";
   import { initPodcastProgress } from "./lib/podcastProgress.js";
+  import { initVersionWatch } from "./lib/appversion.js";
+  import { initDeezerHealth } from "./lib/deezerhealth.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
   import MobileNav from "./components/MobileNav.svelte";
   import Player from "./components/Player.svelte";
   import NowPlaying from "./components/NowPlaying.svelte";
   import Toasts from "./components/Toasts.svelte";
+  import Notices from "./components/Notices.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
   import PlaylistPicker from "./components/PlaylistPicker.svelte";
   import ShareSheet from "./components/ShareSheet.svelte";
@@ -64,6 +67,10 @@
   onMount(async () => {
     initConnectivity();
     initQueueFilter();
+    // Is the server serving a newer build than the one we're running? (And, in
+    // the Android shell, is there a newer APK?) Both are fire-and-forget and
+    // never block the boot.
+    initVersionWatch();
     // The queue filter and library views read these indexes synchronously, so
     // load them BEFORE the UI mounts — otherwise an offline launch briefly sees
     // "nothing downloaded" and filters every track out. Fast: IDB metadata only.
@@ -116,6 +123,15 @@
   $: if ($user) {
     loadFavorites();
     initPodcastProgress();
+    startHealthWatch();
+  }
+  // Watch the Deezer account (an expired ARL is otherwise a silent, total
+  // outage). Once per session, not on every $user tick.
+  let healthWatching = false;
+  function startHealthWatch() {
+    if (healthWatching) return;
+    healthWatching = true;
+    initDeezerHealth();
   }
 
   // Re-validate the session once connectivity returns after an offline boot.
@@ -187,6 +203,7 @@
     <Sidebar />
     <BackButton />
     <main bind:this={mainEl}>
+      <Notices />
       <Router {routes} />
     </main>
     {#if $nowPlayingOpen}

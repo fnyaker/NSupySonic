@@ -25,7 +25,12 @@
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { logInfo } from "../lib/log.js";
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
-  import { isCached, getCachedAudioURL, prefetchTrack } from "../lib/playcache.js";
+  import {
+    isCached,
+    getCachedAudioURL,
+    prefetchTrack,
+    cacheCoverFor,
+  } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, resolveCover, coverKey, baseCover, artistLine } from "../lib/format.js";
   import { registerSource, resumeAudio, setTrackGain } from "../lib/visualizer.js";
@@ -832,6 +837,9 @@
     flushListen(track.deezer_id);
     pushRecent(track);
     updateMediaSession(track);
+    // Keep this track's artwork on the device (best effort, tiny, evictable):
+    // what you have played should still show its real pochette offline.
+    cacheCoverFor(track).catch(() => {});
   }
 
   // Restart the already-loaded track from the top (same deezer id, new queue

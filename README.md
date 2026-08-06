@@ -199,6 +199,8 @@ There are two ways to configure the server; pick one.
 | `DEEZER_QUALITY`           | `FLAC`     | Archive quality (`FLAC` recommended; needs HiFi).                |
 | `DEEZER_SYNC_AT`           | `04:00`    | Daily auto-sync time (HH:MM).                                    |
 | `DEEZER_REPORT_LISTENS`    | *(off)*    | Report plays back to Deezer so recommendations/Flow keep learning. Set `yes` to enable. |
+| `ANDROID_VERSION_NAME`     | *(image release)* | Android app version clients should run; older ones are offered the update at startup. Empty = never claim one. |
+| `ANDROID_DOWNLOAD_URL`     | *(releases page)* | Where that update is downloaded from.                    |
 | `DATABASE_URI`             | *(bundled Postgres)* | Empty = the bundled `db` Postgres service. Set a URI to point at an external database. |
 
 Advanced knobs (web-server concurrency `GUNICORN_THREADS` / `GUNICORN_TIMEOUT`, reverse-proxy
@@ -220,6 +222,12 @@ The ARL is the session cookie that authenticates you with Deezer:
 2. Open the developer tools → **Application** (or **Storage**) → **Cookies** →
    `https://www.deezer.com`.
 3. Copy the value of the cookie named **`arl`** into `DEEZER_ARL`.
+
+An ARL expires every few months. When it does you don't have to edit any file: the web player tells
+you (a banner, and the state is shown in **Réglages → Compte**), and an admin can paste a new one
+right there. It is verified against Deezer before being saved, stored in the database, **overrides
+`DEEZER_ARL` / the config file**, and takes effect immediately — no restart. The value is never
+displayed again, only its last four characters.
 
 > [!WARNING]
 > **Treat the ARL like a password.** It grants full access to your Deezer account. Never commit it
@@ -273,6 +281,21 @@ The APK is built by CI (`android.yaml` workflow) alongside the Docker image: gra
 `nsupysonic-apk` artifact from any run, or the APK attached to releases on `v*` tags. See
 [android/README.md](android/README.md) for details (including stable-signature setup via repo
 secrets).
+
+**Update notice.** At startup — and only then — the web player compares the installed app's version
+with the one the server publishes ([webapp] `android_version`, set automatically from the release tag
+in the official image, or via `ANDROID_VERSION_NAME`) and offers the download when the app is older.
+A server that declares no version never claims an update exists.
+
+### Web app updates
+
+The SPA is a real install: the service worker serves the shell from disk, so a launch is instant
+whether you're online, offline or on a terrible link. Freshness comes from an explicit version check
+instead of a network race — the running app knows its own build id and asks the server
+(`/app/version.json`) which build it serves. When they differ the new build is downloaded **in full,
+in the background**, and only then does the app swap to it: automatically if you've just opened it,
+otherwise with a "Nouvelle version prête" notice so it never yanks the page away mid-song. An
+interrupted download changes nothing — the previous, complete build stays in place.
 
 ## Running without Docker
 

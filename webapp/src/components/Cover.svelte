@@ -25,7 +25,7 @@
 
   let loaded = false;
   let failed = false;
-  let usingBlob = false;
+  let blobFailed = false; // the stored blob itself wouldn't decode
   let usingProxy = false;
   let lowFailed = false;
   let img;
@@ -45,20 +45,27 @@
   let retries = 0;
   let retryTimer = null;
 
-  // Downloaded/cached cover blob for this art (any resolution) — the offline
-  // fallback when the network URL fails or stalls.
+  // Downloaded/cached cover blob for this art (any resolution) — and it is not
+  // a mere fallback: when we hold one it is the BEST source, full stop. It's the
+  // server's archived 1000px art, already on disk, so it paints instantly, costs
+  // no request, and is at least as large as anything we'd have asked the CDN
+  // for. Waiting for a doomed CDN fetch to fail before using it is what left the
+  // full-screen player with no hi-res artwork offline (the error path only
+  // reached the blob after a retry chain, and on a stalled — not failed —
+  // request, only after the 5s watchdog).
   $: blob = src ? $offlineCovers[coverKey(src)] : null;
   // Same-origin, server-cached copy of this track's art (see `fallbackId`).
   $: proxyUrl = fallbackId ? api.coverUrl(fallbackId) : null;
   // What actually renders, best-first: offline blob > server proxy > decoded
   // hi-res > base art. `retries` is passed explicitly so Svelte re-runs this
-  // when a retry fires.
-  $: shown =
-    usingBlob && blob
-      ? blob
-      : usingProxy && proxyUrl
-        ? proxyUrl
-        : hiUrl || bust(baseCover(src), retries);
+  // when a retry fires. `blobFailed` is the escape hatch for the one case where
+  // preferring the blob could hurt: a stored blob that won't decode.
+  $: usingBlob = !!(blob && !blobFailed);
+  $: shown = usingBlob
+    ? blob
+    : usingProxy && proxyUrl
+      ? proxyUrl
+      : hiUrl || bust(baseCover(src), retries);
   // A cache-busted variant of a failed URL, so the retry is a real re-fetch
   // instead of the browser replaying its cached failure. No-op on blob: URLs.
   function bust(u, n) {
@@ -81,7 +88,7 @@
   function onSrcChange(s) {
     loaded = false;
     failed = false;
-    usingBlob = false;
+    blobFailed = false;
     usingProxy = false;
     lowFailed = false;
     hiUrl = null;
@@ -92,15 +99,18 @@
     clearTimeout(stallTimer);
     stallTimer = null;
     if (!s) return;
-    if (baseCover(s) !== s) preloadHi(s);
+    // With a cached blob there is nothing to upgrade to: it already IS the
+    // hi-res art, so skip the CDN preload entirely (one less request, and one
+    // less thing to hang on a bad link).
+    if (!usingBlob && baseCover(s) !== s) preloadHi(s);
     // A dead-network fetch can hang without ever firing load OR error, leaving
     // the art blank forever. Step to the next source in the chain instead.
     stallTimer = setTimeout(() => {
       if (loaded || usingBlob || usingProxy) return;
-      if (blob) usingBlob = true;
-      else if (proxyUrl) usingProxy = true;
-      else return;
-      loaded = false;
+      if (proxyUrl) {
+        usingProxy = true;
+        loaded = false;
+      }
     }, 5000);
   }
 
@@ -183,30 +193,28 @@
     }
   }
 
-  // The image failed to load: step through the fallback chain — drop a failed
-  // hi-res back to the base, retry the base a couple of times (transient CDN
-  // failure), then the downloaded blob (offline), then the server-side cached
-  // proxy, and only then the placeholder — never leave a broken image.
+  // The image failed to load: step through the fallback chain — a bad cached
+  // blob steps aside for the network, a failed hi-res drops back to the base,
+  // the base is retried a couple of times (transient CDN failure), then the
+  // server-side cached proxy, and only then the placeholder. Never a broken
+  // image.
   function onError() {
-    if (hiUrl) {
+    if (usingBlob) {
+      // A stored blob that won't decode (truncated write, corrupted quota
+      // eviction): fall through to the network sources instead of a placeholder.
+      blobFailed = true;
+      loaded = false;
+      if (src && baseCover(src) !== src) preloadHi(src);
+    } else if (hiUrl) {
       hiUrl = null;
-    } else if (
-      !usingBlob &&
-      !usingProxy &&
-      retries < 2 &&
-      navigator.onLine !== false
-    ) {
+    } else if (!usingProxy && retries < 2 && navigator.onLine !== false) {
       clearTimeout(retryTimer);
       retryTimer = setTimeout(() => {
         retries += 1; // bumps `shown` to a cache-busted URL -> new attempt
       }, 500 * (retries + 1));
-    } else if (!usingBlob && blob) {
-      usingBlob = true;
-      loaded = false;
     } else if (!usingProxy && proxyUrl) {
       // Same-origin, server-cached art: works when the Deezer CDN doesn't.
       usingProxy = true;
-      usingBlob = false;
       loaded = false;
     } else {
       failed = true;

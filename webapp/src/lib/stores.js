@@ -202,6 +202,42 @@ function createToasts() {
 }
 export const toasts = createToasts();
 
+// -- notices ----------------------------------------------------------------
+// A toast says "done"; a notice says "something is wrong / something is
+// available" and STAYS until it's resolved or dismissed. Used for the things
+// the user must actually see: an expired Deezer credential, a downloaded app
+// update waiting to be applied, a newer Android build to install.
+//
+// Keyed by id, so re-publishing the same condition updates it in place instead
+// of stacking duplicates (the Deezer status is polled — without this, every
+// poll would add another banner).
+function createNotices() {
+  const { subscribe, update } = writable([]);
+  return {
+    subscribe,
+    // { id, kind: "info"|"warn"|"error", message, actionLabel?, action?,
+    //   dismissible = true }
+    push(notice) {
+      if (!notice || !notice.id) return;
+      logInfo("notice", `[${notice.kind || "info"}] ${notice.message}`, null, {
+        important: notice.kind === "error",
+      });
+      update((list) => {
+        const next = { dismissible: true, kind: "info", ...notice };
+        const i = list.findIndex((n) => n.id === next.id);
+        if (i === -1) return [...list, next];
+        const copy = [...list];
+        copy[i] = next;
+        return copy;
+      });
+    },
+    dismiss(id) {
+      update((list) => list.filter((n) => n.id !== id));
+    },
+  };
+}
+export const notices = createNotices();
+
 // -- playlists (quick-add UX) -------------------------------------------------
 
 // Last playlist a track was added to ({id, title} | null), persisted — powers

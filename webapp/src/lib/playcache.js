@@ -181,6 +181,21 @@ async function cacheCover(coverUrl, deezerId) {
   }
 }
 
+// Cache just the artwork of a track — no audio. Called when a track starts
+// playing: the player fetches that art anyway for the OS notification, and
+// keeping it means the full-screen player still shows the real (1000px,
+// server-archived) pochette in airplane mode, for everything you have listened
+// to, not only for what the prefetcher happened to pull ahead.
+export async function cacheCoverFor(track) {
+  const id = track && track.deezer_id ? String(track.deezer_id) : null;
+  const url = track && track.album && track.album.cover;
+  if (!id || !url) return;
+  if (get(offlineCovers)[coverKey(url)]) return; // already have this art
+  if (!get(online)) return;
+  await cacheCover(url, id);
+  await enforce(get(playCacheLimit));
+}
+
 // Evict least-recently-used entries (audio + covers) until under `limit` bytes.
 export async function enforce(limit) {
   if (!limit || limit <= 0) return;

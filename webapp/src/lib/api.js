@@ -17,6 +17,23 @@ const backoff = (attempt) =>
 // Transient server states worth retrying a GET on (a restart, a cold worker).
 const TRANSIENT = new Set([502, 503, 504]);
 
+// Notified when the server itself fails a call (5xx). The Deezer health watcher
+// hooks in here to find out that the account credential died at the moment it
+// breaks something, rather than at the next scheduled poll. Registered from the
+// outside so this module keeps no dependency on it.
+let serverErrorHook = null;
+export function onServerError(fn) {
+  serverErrorHook = fn;
+}
+function reportServerError(status, path) {
+  if (!serverErrorHook) return;
+  try {
+    serverErrorHook(status, path);
+  } catch {
+    /* a diagnostic hook must never break the request that triggered it */
+  }
+}
+
 // Refresh a cached GET in the background (stale-while-revalidate): if it
 // succeeds we're back online and the cache gets the fresh copy for next time.
 function refreshInBackground(path) {
@@ -96,6 +113,7 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
       await sleep(backoff(attempt));
       return req(path, opts, attempt + 1, true); // the server IS reachable
     }
+    if (res.status >= 500) reportServerError(res.status, path);
     let message = res.statusText;
     try {
       message = (await res.json()).error || message;
@@ -151,6 +169,8 @@ function swr(path, onData) {
 export const api = {
   peek,
   swr,
+  // Raw cached GET, for callers that build their own path (the offline warmer).
+  get: (path) => req(path),
 
   // auth
   login: (username, password) =>
@@ -280,9 +300,16 @@ export const api = {
   // Current user's upload usage + cap (bytes; quota 0 / unlimited => no limit).
   uploadUsage: () => req("/upload/usage"),
 
-  // Admin-only server settings (upload quota, in GB).
+  // Admin-only server settings (upload quota, Deezer ARL).
   getSettings: () => req("/settings"),
   setSettings: (fields) => req("/settings", { method: "POST", body: body(fields) }),
+
+  // Deezer account health — is the ARL still valid? `force` re-tests the login
+  // instead of reading the cached verdict (admin only, server-side).
+  deezerStatus: (force = false) => req("/deezer/status" + (force ? "?force=1" : "")),
+
+  // Build identity of the served app (+ the Android release it expects).
+  version: () => req("/version"),
 
   // telemetry — fire-and-forget; never let it break playback. A no-op server
   // side unless report_listens is enabled in the config. Skipped entirely while
