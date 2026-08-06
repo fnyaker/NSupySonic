@@ -171,6 +171,189 @@ class DeezerTestCase(TestBase):
         self.assertEqual(Track.select().where(Track.deezer_id == "1").count(), 1)
         self.assertEqual(t2.title, "Song (remastered)")
 
+    # -- session health / credential -------------------------------------
+
+    def test_every_deezer_request_has_a_timeout(self):
+        """A request without a timeout can park a server thread forever; enough
+        of those and the app stops answering at all. The session must impose one
+        on any call that doesn't ask for its own."""
+        import requests
+        from deezerpy import DEFAULT_TIMEOUT, Deezer
+
+        seen = {}
+
+        class Recorder(requests.adapters.HTTPAdapter):
+            def send(self, request, **kwargs):
+                seen["timeout"] = kwargs.get("timeout")
+                raise requests.ConnectionError("no network in tests")
+
+        dz = Deezer()
+        dz.session.mount("https://", Recorder())
+        with self.assertRaises(requests.ConnectionError):
+            dz.session.get("https://example.invalid/x")
+        self.assertEqual(seen["timeout"], DEFAULT_TIMEOUT)
+
+        # An explicit timeout still wins.
+        with self.assertRaises(requests.ConnectionError):
+            dz.session.get("https://example.invalid/x", timeout=(1, 2))
+        self.assertEqual(seen["timeout"], (1, 2))
+
+    def test_check_login_separates_a_dead_arl_from_a_dead_network(self):
+        from deezerpy import Deezer
+        from supysonic.deezer.provider import DeezerProvider
+
+        provider = DeezerProvider("dummy", self.archive_dir, "FLAC")
+
+        # Deezer answers and says no: the credential is the problem.
+        original = Deezer.login_via_arl
+        Deezer.login_via_arl = lambda self, arl, child=0: False
+        try:
+            status = provider.check_login(force=True)
+        finally:
+            Deezer.login_via_arl = original
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["reason"], "arl")
+
+        # Deezer doesn't answer at all: says nothing about the credential, so it
+        # must NOT send the admin chasing a perfectly good ARL.
+        def boom(self, arl, child=0):
+            raise OSError("connection reset")
+
+        Deezer.login_via_arl = boom
+        try:
+            status = provider.check_login(force=True)
+        finally:
+            Deezer.login_via_arl = original
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["reason"], "network")
+
+        # A healthy session reports the account and never raises.
+        provider._dz = MockDz()
+        provider._last_check = 0
+        status = provider.check_login()
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["account"], "tester")
+
+    def test_set_arl_drops_everything_derived_from_the_old_one(self):
+        self.provider._fav_cache = ("checksum", [1, 2, 3])
+        self.provider.set_arl("  newarl  ")
+        self.assertEqual(self.provider.arl, "newarl")
+        self.assertIsNone(self.provider._dz)  # forces a fresh login
+        self.assertIsNone(self.provider._fav_cache)  # no data from the old account
+
+    def test_stored_arl_overrides_the_configured_one(self):
+        from supysonic import deezer as dzmod
+
+        cfg = {
+            "enabled": True,
+            "arl": "from-config",
+            "archive_dir": self.archive_dir,
+        }
+        self.assertEqual(dzmod.get_provider({"DEEZER": cfg}).arl, "from-config")
+
+        dzmod.store_arl("z" * 64)
+        try:
+            self.assertEqual(dzmod.get_provider({"DEEZER": cfg}).arl, "z" * 64)
+            # …and it enables the proxy even if the config never did.
+            off = dict(cfg, enabled=False, arl=None)
+            self.assertIsNotNone(dzmod.get_provider({"DEEZER": off}))
+        finally:
+            dzmod.store_arl(None)
+        self.assertEqual(dzmod.get_provider({"DEEZER": cfg}).arl, "from-config")
+
+        # Anything that isn't shaped like an ARL is refused outright: it ends up
+        # in an outgoing Cookie header.
+        self.assertFalse(dzmod.valid_arl("short"))
+        self.assertFalse(dzmod.valid_arl("a" * 40 + "\r\nCookie: x"))
+        self.assertFalse(dzmod.valid_arl("a" * 40 + "; path=/"))
+        self.assertTrue(dzmod.valid_arl("a" * 192))
+        with self.assertRaises(ValueError):
+            dzmod.store_arl("nope")
+
+    # -- concurrent imports ----------------------------------------------
+
+    def test_upsert_survives_a_lost_insert_race(self):
+        """Two plays of the same album at once: both miss the existence check,
+        both insert, and the loser's INSERT violates the unique constraint. That
+        used to escape as a 502 on a perfectly ordinary first play (and poisoned
+        the surrounding transaction on Postgres) — it must read back the winner's
+        row instead.
+
+        The race is reproduced faithfully: the rows really exist, the existence
+        check is forced to miss them once (as it does when the winner commits
+        between our SELECT and our INSERT), and the constraint violation that
+        follows is a real one from the database.
+        """
+        from supysonic.db import Album, Artist, Folder, Track
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        # The "winner": everything for this album/artist now exists.
+        first = library.upsert_track(raw_track(1, "First"), root, "FLAC")
+
+        def blind_once(owner, name, exc):
+            """Make the next lookup miss, as if the winner hadn't committed yet."""
+            original = getattr(owner, name)
+            state = {"used": False}
+
+            def wrapper(*args, **kwargs):
+                if not state["used"]:
+                    state["used"] = True
+                    raise exc
+                return original(*args, **kwargs)
+
+            setattr(owner, name, wrapper)
+            return (owner, name, original)
+
+        patches = [
+            blind_once(Folder, "get", Folder.DoesNotExist()),
+            blind_once(Artist, "get_by_id", Artist.DoesNotExist()),
+            blind_once(Album, "get_by_id", Album.DoesNotExist()),
+            blind_once(Track, "get_by_id", Track.DoesNotExist()),
+        ]
+        try:
+            # Same track id as the winner: every single upsert loses its race.
+            track = library.upsert_track(raw_track(1, "First"), root, "FLAC")
+        finally:
+            for owner, name, original in patches:
+                setattr(owner, name, original)
+
+        self.assertEqual(track.id, first.id)
+        self.assertEqual(Track.select().where(Track.deezer_id == "1").count(), 1)
+        self.assertEqual(Folder.select().where(Folder.name == "Album").count(), 1)
+        self.assertEqual(Artist.select().where(Artist.name == "Artist").count(), 1)
+        self.assertEqual(Album.select().where(Album.name == "Album").count(), 1)
+
+    def test_upsert_track_picks_a_new_path_when_one_is_taken(self):
+        """A path race is NOT the same as a track race: a different track grabbed
+        the filename we picked, so the loser must move to the next free one
+        rather than adopt someone else's row."""
+        from supysonic.db import Track
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        taken = library.upsert_track(raw_track(1, "Same Name"), root, "FLAC")
+
+        real_unique = library._unique_path
+        state = {"used": False}
+
+        def collide(base, tid):
+            # First attempt hands back a path that is already someone else's.
+            if not state["used"]:
+                state["used"] = True
+                return taken.path
+            return real_unique(base, tid)
+
+        library._unique_path = collide
+        try:
+            other = library.upsert_track(raw_track(2, "Same Name"), root, "FLAC")
+        finally:
+            library._unique_path = real_unique
+
+        self.assertNotEqual(other.id, taken.id)
+        self.assertNotEqual(other.path, taken.path)
+        self.assertEqual(Track.select().count(), 2)
+
     # -- multi-artist credits --------------------------------------------
 
     def test_credits_from_gateway_payload(self):

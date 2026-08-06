@@ -58,8 +58,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
+# The release this image was built from (CI passes the git tag). The entrypoint
+# turns it into [webapp] android_version, so the web player can tell a native
+# user their APK is older than the server's release. Empty = nothing claimed.
+ARG APP_VERSION=""
 ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    APP_VERSION="$APP_VERSION"
 
 # Non-root user; all mutable state lives under /data (a volume).
 RUN useradd --system --create-home --uid 1000 supysonic \

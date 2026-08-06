@@ -18,7 +18,10 @@ import os.path
 import re
 from datetime import datetime
 
+from peewee import IntegrityError
+
 from ..db import (
+    db,
     Folder,
     Artist,
     Album,
@@ -51,6 +54,31 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _MAX_COMPONENT_BYTES = 200
 
 
+def create_or_get(create, fetch):
+    """``create()``, falling back to ``fetch()`` when someone else won the race.
+
+    Every upsert here is a check-then-insert, and the check is NOT atomic: two
+    concurrent plays of the same album (or a play racing the background sync)
+    both miss the row and both insert it, so the loser gets a unique-constraint
+    violation. That surfaced as a 502 on a perfectly ordinary first play, and on
+    Postgres it also poisons the surrounding transaction.
+
+    The insert therefore runs inside its own ``atomic()`` block — a real
+    transaction standalone, a SAVEPOINT when we're already inside one (the
+    importer) — so a violation rolls back just this statement and the winner's
+    row is simply read back. `fetch` returns None when the conflict was about
+    something else, in which case the original error is re-raised.
+    """
+    try:
+        with db.atomic():
+            return create()
+    except IntegrityError:
+        row = fetch()
+        if row is None:
+            raise
+        return row
+
+
 class ImportCache:
     """Per-run in-memory cache so a bulk import doesn't re-query shared rows.
 
@@ -81,6 +109,13 @@ def sanitize(name: str) -> str:
     return name or "untitled"
 
 
+def _folder_by_path(path: str) -> Folder | None:
+    try:
+        return Folder.get(path=path)
+    except Folder.DoesNotExist:
+        return None
+
+
 def get_root_folder(archive_dir: str) -> Folder:
     """Return (creating if needed) the root library Folder for the archive."""
     archive_dir = os.path.abspath(os.path.expanduser(archive_dir))
@@ -88,7 +123,10 @@ def get_root_folder(archive_dir: str) -> Folder:
         return Folder.get(path=archive_dir)
     except Folder.DoesNotExist:
         os.makedirs(archive_dir, exist_ok=True)
-        return Folder.create(root=True, name=DEEZER_ROOT_NAME, path=archive_dir)
+        return create_or_get(
+            lambda: Folder.create(root=True, name=DEEZER_ROOT_NAME, path=archive_dir),
+            lambda: _folder_by_path(archive_dir),
+        )
 
 
 def get_album_folder(root: Folder, artist_name: str, album_name: str, cache=None) -> Folder:
@@ -98,8 +136,11 @@ def get_album_folder(root: Folder, artist_name: str, album_name: str, cache=None
     try:
         folder = Folder.get(path=path)
     except Folder.DoesNotExist:
-        folder = Folder.create(
-            root=False, name=sanitize(album_name), path=path, parent=root
+        folder = create_or_get(
+            lambda: Folder.create(
+                root=False, name=sanitize(album_name), path=path, parent=root
+            ),
+            lambda: _folder_by_path(path),
         )
     if cache is not None:
         cache.folders[path] = folder
@@ -238,7 +279,10 @@ def upsert_artist(art_id, name: str, cache=None) -> Artist:
             artist.name = name
             artist.save()
     except Artist.DoesNotExist:
-        artist = Artist.create(id=aid, name=name or "[unknown]", deezer_id=key)
+        artist = create_or_get(
+            lambda: Artist.create(id=aid, name=name or "[unknown]", deezer_id=key),
+            lambda: Artist.get_or_none(Artist.id == aid),
+        )
     if cache is not None:
         cache.artists[key] = artist
     return artist
@@ -255,12 +299,15 @@ def upsert_album(alb_id, name: str, artist: Artist, cover_md5, cache=None) -> Al
             album.cover_md5 = cover_md5
             album.save()
     except Album.DoesNotExist:
-        album = Album.create(
-            id=aid,
-            name=name or "[non-album tracks]",
-            artist=artist,
-            deezer_id=key,
-            cover_md5=cover_md5,
+        album = create_or_get(
+            lambda: Album.create(
+                id=aid,
+                name=name or "[non-album tracks]",
+                artist=artist,
+                deezer_id=key,
+                cover_md5=cover_md5,
+            ),
+            lambda: Album.get_or_none(Album.id == aid),
         )
     if cache is not None:
         cache.albums[key] = album
@@ -314,26 +361,48 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
         return track
     except Track.DoesNotExist:
         ext = EXT_FOR_FORMAT.get(default_quality, ".flac")
-        path = _unique_path(_track_path(root, f["artist"], f["album"], f["number"], f["title"], ext), tid)
-        track = Track.create(
-            id=tid,
-            deezer_id=f["sng_id"],
-            disc=f["disc"],
-            number=f["number"],
-            title=f["title"],
-            year=f["year"],
-            genre=None,
-            duration=f["duration"],
-            has_art=False,
-            album=album,
-            artist=artist,
-            bitrate=NOMINAL_BITRATE.get(default_quality, 320),
-            gain=f["gain"],
-            path=path,
-            last_modification=0,
-            root_folder=root,
-            folder=folder,
+        base_path = _track_path(
+            root, f["artist"], f["album"], f["number"], f["title"], ext
         )
+        track = None
+        last_exc = None
+        # Retried: `_unique_path` picks a free path, but between picking it and
+        # inserting, a concurrent import can take it. Re-running the search then
+        # sees the winner's row and moves on to the next "(n)" suffix.
+        for _attempt in range(4):
+            path = _unique_path(base_path, tid)
+            try:
+                with db.atomic():
+                    track = Track.create(
+                        id=tid,
+                        deezer_id=f["sng_id"],
+                        disc=f["disc"],
+                        number=f["number"],
+                        title=f["title"],
+                        year=f["year"],
+                        genre=None,
+                        duration=f["duration"],
+                        has_art=False,
+                        album=album,
+                        artist=artist,
+                        bitrate=NOMINAL_BITRATE.get(default_quality, 320),
+                        gain=f["gain"],
+                        path=path,
+                        last_modification=0,
+                        root_folder=root,
+                        folder=folder,
+                    )
+                break
+            except IntegrityError as exc:
+                last_exc = exc
+                # Someone else inserted this very track meanwhile: use theirs.
+                track = Track.get_or_none(Track.id == tid)
+                if track is not None:
+                    break
+                # Otherwise it was the *path* that got taken — loop and pick the
+                # next free one.
+        if track is None:
+            raise last_exc
         _sync_credits(track, f["credits"], artist, cache=cache)
         return track
 
@@ -351,7 +420,6 @@ def _sync_credits(track, credits, primary, cache=None):
     """
     if not credits:
         return
-    TrackArtist.delete().where(TrackArtist.track == track.id).execute()
     rows = []
     for position, (art_id, name, role) in enumerate(credits):
         a = upsert_artist(art_id, name, cache=cache)
@@ -363,7 +431,17 @@ def _sync_credits(track, credits, primary, cache=None):
     # would render blank.
     if not any(r["artist"] == primary.id for r in rows):
         rows.insert(0, {"track": track.id, "artist": primary.id, "role": "Main", "position": -1})
-    TrackArtist.insert_many(rows).execute()
+    # Delete + insert as one unit, and shrug off a lost race: two imports of the
+    # same track can interleave their delete and insert, and the loser then
+    # collides on the (track, artist) key. The winner wrote the same rows we
+    # were about to write, so there is nothing to recover — and a credit list is
+    # never worth failing a play over.
+    try:
+        with db.atomic():
+            TrackArtist.delete().where(TrackArtist.track == track.id).execute()
+            TrackArtist.insert_many(rows).execute()
+    except IntegrityError:
+        pass
 
 
 # -- podcasts (shows / episodes) -----------------------------------------
@@ -439,15 +517,18 @@ def upsert_channel(user, show: dict, url=None) -> PodcastChannel:
         channel.last_fetched = now_dt()
         channel.save()
     except PodcastChannel.DoesNotExist:
-        channel = PodcastChannel.create(
-            id=cid,
-            user=user,
-            deezer_id=show["show_id"],
-            url=url,
-            title=show["title"],
-            description=show["description"],
-            cover_art_md5=show["cover_md5"],
-            last_fetched=now_dt(),
+        channel = create_or_get(
+            lambda: PodcastChannel.create(
+                id=cid,
+                user=user,
+                deezer_id=show["show_id"],
+                url=url,
+                title=show["title"],
+                description=show["description"],
+                cover_art_md5=show["cover_md5"],
+                last_fetched=now_dt(),
+            ),
+            lambda: PodcastChannel.get_or_none(PodcastChannel.id == cid),
         )
     return channel
 
@@ -467,17 +548,20 @@ def upsert_episode(channel: PodcastChannel, ep: dict) -> PodcastEpisode:
         episode.save()
         return episode
     except PodcastEpisode.DoesNotExist:
-        return PodcastEpisode.create(
-            id=eid,
-            channel=channel,
-            deezer_id=ep["episode_id"],
-            title=ep["title"],
-            description=ep["description"],
-            duration=ep["duration"],
-            publish_date=ep["publish_date"],
-            stream_url=ep["stream_url"],
-            image_md5=ep["image_md5"],
-            status="new",
+        return create_or_get(
+            lambda: PodcastEpisode.create(
+                id=eid,
+                channel=channel,
+                deezer_id=ep["episode_id"],
+                title=ep["title"],
+                description=ep["description"],
+                duration=ep["duration"],
+                publish_date=ep["publish_date"],
+                stream_url=ep["stream_url"],
+                image_md5=ep["image_md5"],
+                status="new",
+            ),
+            lambda: PodcastEpisode.get_or_none(PodcastEpisode.id == eid),
         )
 
 

@@ -55,6 +55,14 @@ class DefaultConfig:
         "proxy_fix_hops": 0,
         "index_ignored_prefixes": "El La Le Las Les Los The",
         "online_lyrics": False,
+        # Latest published Android app version (e.g. "1.4.0"). The web player
+        # tells a native user to update when the app they run is older than
+        # this. Empty = unknown, and then nothing is ever claimed. The container
+        # fills it in from ANDROID_VERSION_NAME / APP_VERSION.
+        "android_version": None,
+        # Where that update is downloaded from (defaults to the project's
+        # releases page).
+        "android_url": None,
     }
     DAEMON = {
         "socket": (

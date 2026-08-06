@@ -126,6 +126,12 @@ class DeezerProvider:
         # for every favorite; Deezer hands back a cheap checksum of the set, so
         # we only refetch when it actually changed.
         self._fav_cache: tuple[str | None, list] | None = None
+        # Why the last login attempt failed: ("arl", msg) — Deezer rejected the
+        # credential, the admin must paste a new one — or ("network", msg), which
+        # says nothing about the ARL. None once a login has succeeded. Read by
+        # the status endpoint so the UI can tell the two apart.
+        self._login_error: tuple[str, str] | None = None
+        self._last_check = 0.0
 
     @classmethod
     def from_config(cls, cfg: dict) -> "DeezerProvider | None":
@@ -150,9 +156,26 @@ class DeezerProvider:
             with self._login_lock:
                 if self._dz is None:
                     dz = Deezer()
-                    if not dz.login_via_arl(self.arl):
+                    try:
+                        ok = dz.login_via_arl(self.arl)
+                    except Exception as exc:
+                        # Deezer unreachable / gateway hiccup. This says nothing
+                        # about the ARL, so it must NOT be reported as "your
+                        # credential is dead" — that sends the admin chasing a
+                        # perfectly good ARL during a network blip.
+                        self._login_error = ("network", str(exc) or exc.__class__.__name__)
+                        self._last_check = time.monotonic()
+                        raise DeezerError(f"Deezer unreachable: {exc}") from exc
+                    if not ok:
+                        self._login_error = (
+                            "arl",
+                            "Deezer rejected the ARL (expired, revoked or mistyped)",
+                        )
+                        self._last_check = time.monotonic()
                         raise DeezerError("ARL login failed (empty/expired cookie?)")
                     self._dz = dz
+                    self._login_error = None
+                    self._last_check = time.monotonic()
                     logger.info(
                         "Deezer login OK as %s (lossless=%s)",
                         dz.current_user.get("name"),
@@ -164,6 +187,74 @@ class DeezerProvider:
         with self._login_lock:
             self._dz = None
         return self.dz
+
+    # How long a login verdict is trusted before ``check_login`` re-tests it.
+    _CHECK_TTL = 120.0
+
+    def check_login(self, force: bool = False) -> dict:
+        """Cheap, cached health check of the Deezer session.
+
+        Returns ``{"ok", "reason", "detail", "account"}`` where ``reason`` is
+        ``None``, ``"arl"`` (the credential is dead — admin action needed) or
+        ``"network"``. Never raises: this is what the UI polls, and a status
+        endpoint that throws is worse than useless.
+        """
+        fresh = time.monotonic() - self._last_check < self._CHECK_TTL
+        if not force and self._dz is not None and fresh:
+            return {"ok": True, "reason": None, "detail": None,
+                    "account": self._dz.current_user.get("name")}
+        if force:
+            with self._login_lock:
+                self._dz = None
+        elif self._dz is not None and not self._live_session():
+            # We hold a session object, but the account behind it may have been
+            # revoked hours ago — an ARL that expires mid-run breaks everything
+            # while the process happily believes it is logged in. Re-login so the
+            # verdict below is about the credential as it is NOW.
+            with self._login_lock:
+                self._dz = None
+        try:
+            dz = self.dz
+        except DeezerError:
+            reason, detail = self._login_error or ("network", "login failed")
+            return {"ok": False, "reason": reason, "detail": detail, "account": None}
+        except Exception as exc:  # never let the health check itself blow up
+            return {"ok": False, "reason": "network", "detail": str(exc), "account": None}
+        # Verdict cached, so polling this endpoint costs one gateway call every
+        # _CHECK_TTL at most — not one per poll.
+        self._last_check = time.monotonic()
+        return {"ok": True, "reason": None, "detail": None,
+                "account": dz.current_user.get("name")}
+
+    def _live_session(self) -> bool:
+        """Is the current session still authenticated? (one cheap gateway call)
+
+        Returns True when we can't tell — an unknown transport (tests) or a
+        network error must never be reported as a dead credential.
+        """
+        dz = self._dz
+        probe = getattr(getattr(dz, "gw", None), "get_user_data", None)
+        if probe is None:
+            return True
+        try:
+            data = probe() or {}
+        except Exception:
+            return True  # network trouble, not a verdict on the ARL
+        try:
+            return bool(int(data.get("USER", {}).get("USER_ID") or 0))
+        except (AttributeError, TypeError, ValueError):
+            return True
+
+    def set_arl(self, arl: str) -> None:
+        """Swap the account credential and drop everything derived from it."""
+        arl = (arl or "").strip()
+        with self._login_lock:
+            self.arl = arl
+            self._dz = None
+            self._fav_cache = None
+            self._login_error = None
+            self._last_check = 0.0
+            self._last_relogin = float("-inf")
 
     @property
     def user_id(self):
