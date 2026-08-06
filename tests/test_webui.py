@@ -1092,6 +1092,120 @@ class WebUITestCase(unittest.TestCase):
             400,
         )
 
+    # -- Deezer credential (ARL) -----------------------------------------
+
+    def test_settings_never_leaks_the_arl(self):
+        self._login()
+        dz = self.client.get("/api/settings").get_json()["deezer"]
+        self.assertTrue(dz["arl_set"])
+        self.assertEqual(dz["arl_hint"], "…")  # short test ARL, still masked
+        self.assertNotIn("arl", dz)
+        self.assertNotIn("arl", str(dz).replace("arl_set", "").replace("arl_hint", "")
+                         .replace("arl_source", ""))
+
+    def test_set_arl_rejects_malformed(self):
+        from supysonic.db import Meta
+
+        self._login()
+        for bad in ["short", "x" * 40 + "\nCookie: evil", "with space " * 5]:
+            rv = self.client.post("/api/settings", json={"deezer_arl": bad})
+            self.assertEqual(rv.status_code, 400, bad)
+        self.assertIsNone(Meta.get_or_none(Meta.key == "deezer_arl"))
+
+    def test_set_arl_rejects_one_deezer_refuses(self):
+        """A dead credential must never be stored: it would take the proxy out."""
+        import supysonic.deezer as dzmod
+        from supysonic.db import Meta
+
+        class Refusing(dzmod.DeezerProvider):
+            def check_login(self, force=False):
+                return {"ok": False, "reason": "arl", "detail": "nope", "account": None}
+
+        orig = dzmod.DeezerProvider
+        dzmod.DeezerProvider = Refusing
+        try:
+            self._login()
+            rv = self.client.post("/api/settings", json={"deezer_arl": "a" * 64})
+            self.assertEqual(rv.status_code, 400)
+            self.assertEqual(rv.get_json()["reason"], "arl")
+        finally:
+            dzmod.DeezerProvider = orig
+        self.assertIsNone(Meta.get_or_none(Meta.key == "deezer_arl"))
+
+    def test_set_arl_stores_and_overrides_the_config(self):
+        import supysonic.deezer as dzmod
+        from supysonic.db import Meta
+
+        class Accepting(dzmod.DeezerProvider):
+            def check_login(self, force=False):
+                return {"ok": True, "reason": None, "detail": None, "account": "tester"}
+
+        orig = dzmod.DeezerProvider
+        dzmod.DeezerProvider = Accepting
+        try:
+            self._login()
+            rv = self.client.post("/api/settings", json={"deezer_arl": "b" * 64})
+            self.assertEqual(rv.status_code, 200)
+            dz = rv.get_json()["deezer"]
+            self.assertEqual(dz["arl_source"], "database")
+            self.assertEqual(dz["arl_hint"], "…bbbb")
+            self.assertEqual(Meta.get(Meta.key == "deezer_arl").value, "b" * 64)
+            # The stored one wins when a provider is rebuilt.
+            self.assertEqual(dzmod.stored_arl(), "b" * 64)
+            self.app.config["DEEZER"]["enabled"] = True
+            self.assertEqual(dzmod.get_provider(self.app.config).arl, "b" * 64)
+            # …and clearing it falls back to the configured credential.
+            rv = self.client.post("/api/settings", json={"deezer_arl": ""})
+            self.assertEqual(rv.status_code, 200)
+            self.assertIsNone(dzmod.stored_arl())
+        finally:
+            dzmod.DeezerProvider = orig
+
+    def test_deezer_status_reports_a_dead_arl(self):
+        self._login()
+        rv = self.client.get("/api/deezer/status")
+        self.assertEqual(rv.status_code, 200)
+        self.assertTrue(rv.get_json()["ok"])
+
+        provider = self.app.deezer
+        orig = provider.check_login
+        provider.check_login = lambda force=False: {
+            "ok": False, "reason": "arl", "detail": "expired", "account": None
+        }
+        try:
+            body = self.client.get("/api/deezer/status").get_json()
+            self.assertFalse(body["ok"])
+            self.assertEqual(body["reason"], "arl")
+            self.assertTrue(body["admin"])
+            self.assertIn("Réglages", body["message"])
+            # A network failure is NOT reported as a broken credential.
+            provider.check_login = lambda force=False: {
+                "ok": False, "reason": "network", "detail": "boom", "account": None
+            }
+            body = self.client.get("/api/deezer/status").get_json()
+            self.assertEqual(body["reason"], "network")
+            self.assertNotIn("Réglages", body["message"])
+        finally:
+            provider.check_login = orig
+
+    def test_version_endpoint(self):
+        rv = self.client.get("/api/version")  # no login required
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.headers["Cache-Control"], "no-store")
+        body = rv.get_json()
+        self.assertIn("build", body)
+        self.assertIn("android", body)
+        # Nothing is claimed about the Android app unless the server declares it.
+        self.assertIsNone(body["android"]["version"])
+        self.assertTrue(body["android"]["url"].startswith("https://"))
+
+        self.app.config["WEBAPP"]["android_version"] = "1.4.0"
+        self.app.config["WEBAPP"]["android_url"] = "javascript:alert(1)"
+        body = self.client.get("/api/version").get_json()
+        self.assertEqual(body["android"]["version"], "1.4.0")
+        # A non-http(s) link never reaches the client (it lands in an <a>).
+        self.assertTrue(body["android"]["url"].startswith("https://"))
+
     def test_upload_quota_blocks_guest(self):
         # ~250 byte budget for non-admins.
         self._login()
@@ -1667,10 +1781,18 @@ class WebUITestCase(unittest.TestCase):
     # -- SPA serving ----------------------------------------------------
 
     def test_spa_served(self):
-        # No build present in the test env -> friendly 503 notice, not a 404.
+        # Without a build -> friendly 503 notice, not a 404. With one (a
+        # developer who ran `npm run build`, or the Docker image) -> the shell,
+        # uncached so a redeploy is picked up.
+        from supysonic.webui import spa
+
         rv = self.client.get("/app/")
-        self.assertEqual(rv.status_code, 503)
-        self.assertIn(b"not built", rv.data)
+        if spa._has_build():
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(rv.headers["Cache-Control"], "no-cache")
+        else:
+            self.assertEqual(rv.status_code, 503)
+            self.assertIn(b"not built", rv.data)
 
     # -- hardening -------------------------------------------------------
 

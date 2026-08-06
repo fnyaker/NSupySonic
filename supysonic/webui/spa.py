@@ -79,6 +79,11 @@ def serve(path: str = ""):
                 response.headers["Cache-Control"] = (
                     "public, max-age=31536000, immutable"
                 )
+            elif path == "version.json":
+                # The update signal itself. A cached copy of it would pin the app
+                # to whatever build it named — the one file that must always be
+                # answered live, through every proxy in between.
+                response.headers["Cache-Control"] = "no-store"
             return response
         # A missing *file* request (it has an extension, e.g. a stale asset
         # hash) must 404 — never fall through to index.html. Serving HTML for a

@@ -19,13 +19,31 @@ class TrackFormats():
     DEFAULT = 8
     LOCAL   = 0
 
+# (connect, read) seconds applied to every Deezer request that doesn't ask for
+# its own timeout. requests defaults to NO timeout at all, so a single silent
+# TCP black hole (Deezer degraded, a dropped NAT entry) parked a server thread
+# forever — enough of those and the whole app stops answering, which is exactly
+# the "Deezer took the app down" failure mode. Generous enough for a slow
+# gateway call, finite enough that a stuck socket always lets go.
+DEFAULT_TIMEOUT = (10, 30)
+
+
+class _Session(requests.Session):
+    """A requests Session with a mandatory default timeout."""
+
+    def request(self, *args, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = DEFAULT_TIMEOUT
+        return super().request(*args, **kwargs)
+
+
 class Deezer:
     def __init__(self):
         self.http_headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " \
                           "Chrome/79.0.3945.130 Safari/537.36"
         }
-        self.session = requests.Session()
+        self.session = _Session()
 
         self.logged_in = False
         self.current_user = {}
@@ -50,7 +68,7 @@ class Deezer:
         self.current_user = data['current_user']
         self.childs = data['childs']
         self.selected_account = data['selected_account']
-        self.session = requests.Session()
+        self.session = _Session()
         self.session.cookies.update(data['cookies'])
 
     def login(self, email, password, re_captcha_token, child=0):

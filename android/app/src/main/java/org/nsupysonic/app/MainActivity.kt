@@ -509,6 +509,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class Bridge {
+        /**
+         * This app's versionName, read by the web player (lib/appversion.js) at
+         * startup: it compares it against the version the server publishes and,
+         * when this one is older, offers the download. Read from the package
+         * manager rather than BuildConfig so it always matches what is actually
+         * installed.
+         */
+        @JavascriptInterface
+        fun appVersion(): String =
+            try {
+                packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+            } catch (_: Exception) {
+                ""
+            }
+
         @JavascriptInterface
         fun publish(json: String) {
             val state = PlayerService.State.fromJson(json) ?: return

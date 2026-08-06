@@ -76,6 +76,22 @@ def reject_cross_site():
         if urlsplit(origin).netloc != request.host:
             return jsonify({"error": "cross-site request rejected"}), 403
 
+
+# Last-resort safety net. Every route below already handles the failures it can
+# foresee, but Deezer is a third party: it invents new error shapes, hands back
+# half a JSON document, or throws a database race at us mid-import. None of that
+# is worth an HTML stack trace the SPA can't parse — the app must stay up and the
+# one broken call must fail cleanly, with the traceback in the log for us.
+@webapi.errorhandler(Exception)
+def _unhandled_api_error(exc):
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(exc, HTTPException):
+        return jsonify({"error": exc.name}), exc.code
+    logger.error("Unhandled error on %s %s", request.method, request.path, exc_info=True)
+    return jsonify({"error": "server error"}), 500
+
+
 _CDN = "https://e-cdns-images.dzcdn.net/images/{kind}/{md5}/{w}x{w}-000000-80-0-0.jpg"
 
 
@@ -2769,19 +2785,57 @@ def upload_usage():
     )
 
 
+# -- Deezer credential (ARL) ------------------------------------------------
+# The ARL is a full-account credential, so it is NEVER sent back to the client —
+# not even to the admin who set it. The UI gets "is one configured", where it
+# came from and a four-character tail to recognise it by, which is everything it
+# needs to render the card.
+
+
+def _arl_hint(arl) -> "str | None":
+    arl = (arl or "").strip()
+    return f"…{arl[-4:]}" if len(arl) >= 8 else ("…" if arl else None)
+
+
+def _deezer_settings() -> dict:
+    from ..deezer import stored_arl
+
+    provider = _provider()
+    override = stored_arl()
+    # What is actually in force: the stored override, else the configured value,
+    # else whatever the running provider was built with.
+    configured = (
+        override
+        or (current_app.config["DEEZER"].get("arl") or "")
+        or (getattr(provider, "arl", "") or "")
+    )
+    return {
+        "arl_set": bool(configured),
+        # Which one is in force, so the admin knows whether the compose/env value
+        # is being overridden.
+        "arl_source": "database" if override else ("config" if configured else None),
+        "arl_hint": _arl_hint(configured),
+        "enabled": provider is not None,
+        "archive_dir_set": bool(current_app.config["DEEZER"].get("archive_dir")),
+    }
+
+
 @webapi.route("/settings")
 @login_required
 @admin_required
 def get_settings():
-    """Admin-only server settings (currently just the upload quota)."""
-    return jsonify({"upload_quota_gb": _quota_gb()})
+    """Admin-only server settings (upload quota + the Deezer credential state)."""
+    return jsonify({"upload_quota_gb": _quota_gb(), "deezer": _deezer_settings()})
 
 
 @webapi.route("/settings", methods=["POST"])
 @login_required
 @admin_required
 def set_settings():
-    """Persist admin-editable server settings. Only ``upload_quota_gb`` for now."""
+    """Persist admin-editable server settings (upload quota, Deezer ARL)."""
+    from ..deezer import DeezerProvider, store_arl, valid_arl
+    from ..web import setup_deezer
+
     data = request.get_json(silent=True) or {}
     if "upload_quota_gb" in data:
         try:
@@ -2791,7 +2845,120 @@ def set_settings():
         if v < 0:
             return jsonify({"error": "invalid upload_quota_gb"}), 400
         _set_quota_gb(v)
-    return jsonify({"ok": True, "upload_quota_gb": _quota_gb()})
+
+    if "deezer_arl" in data:
+        arl = data.get("deezer_arl")
+        arl = arl.strip() if isinstance(arl, str) else ""
+        if not arl:
+            # Explicitly clearing the override: fall back to the configured one.
+            store_arl(None)
+            configured = current_app.config["DEEZER"].get("arl")
+            provider = _provider()
+            if provider is not None and configured:
+                provider.set_arl(configured)
+            else:
+                setup_deezer(current_app._get_current_object())
+            logger.info("Deezer ARL override cleared by %s", request.webuser.name)
+        else:
+            if not valid_arl(arl):
+                return jsonify({"error": "ARL invalide (format inattendu)"}), 400
+            if not current_app.config["DEEZER"].get("archive_dir"):
+                return (
+                    jsonify({"error": "archive_dir n'est pas configuré sur le serveur"}),
+                    400,
+                )
+            # Try it BEFORE storing it: saving a dead credential would knock the
+            # whole proxy out until someone noticed.
+            probe = DeezerProvider(arl, current_app.config["DEEZER"]["archive_dir"])
+            status = probe.check_login(force=True)
+            if not status["ok"]:
+                message = (
+                    "Deezer a refusé cet ARL (expiré ou incorrect)"
+                    if status["reason"] == "arl"
+                    else "Deezer est injoignable, réessayez plus tard"
+                )
+                return jsonify({"error": message, "reason": status["reason"]}), 400
+            store_arl(arl)
+            provider = _provider()
+            if provider is not None:
+                # Swap the credential in place: the prefetcher and the sync
+                # thread hold this object, and replacing it would strand their
+                # worker threads on the old one.
+                provider.set_arl(arl)
+            else:
+                # Nothing was running (no ARL at boot): build it all now, so the
+                # proxy comes to life without a restart.
+                setup_deezer(current_app._get_current_object())
+            logger.info(
+                "Deezer ARL updated by %s (account %s)",
+                request.webuser.name,
+                status.get("account"),
+            )
+
+    return jsonify(
+        {"ok": True, "upload_quota_gb": _quota_gb(), "deezer": _deezer_settings()}
+    )
+
+
+# -- build identity ---------------------------------------------------------
+# Deliberately open (no login): the SPA checks for a new build before anyone has
+# logged in, and this only says which bundle the server is serving. Never
+# cached, or a stale copy would keep the app pinned to an old build forever.
+@webapi.route("/version")
+def app_version():
+    # Named app_version, not version: a view called `version` would shadow the
+    # sibling module of the same name in this package's namespace.
+    from .version import android_release, spa_build
+
+    spa = spa_build()
+    response = jsonify(
+        {
+            "build": spa["build"],
+            "version": spa["version"],
+            "android": android_release(current_app.config["WEBAPP"]),
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# Deezer health, polled by the SPA. Available to every logged-in user (a guest
+# needs to know why the catalogue went quiet) but only the admin is told to go
+# fix the credential — nobody else can.
+@webapi.route("/deezer/status")
+@login_required
+def deezer_status():
+    provider = _provider()
+    if provider is None:
+        return jsonify(
+            {
+                "ok": False,
+                "reason": "disabled",
+                "admin": _is_admin(),
+                "message": "Le proxy Deezer est désactivé sur ce serveur.",
+            }
+        )
+    force = request.args.get("force") == "1" and _is_admin()
+    status = provider.check_login(force=force)
+    if status["ok"]:
+        return jsonify({"ok": True, "reason": None, "account": status["account"]})
+    if status["reason"] == "arl":
+        message = (
+            "L'identifiant Deezer (ARL) n'est plus valide. Ouvrez Réglages → Compte "
+            "pour en saisir un nouveau."
+            if _is_admin()
+            else "La connexion au compte Deezer a expiré. Prévenez l'administrateur."
+        )
+    else:
+        message = "Deezer est momentanément injoignable."
+    return jsonify(
+        {
+            "ok": False,
+            "reason": status["reason"],
+            "admin": _is_admin(),
+            "message": message,
+        }
+    )
 
 
 # Opus transcode bitrates (kbps) the web player may request: q=OPUS_320 etc.

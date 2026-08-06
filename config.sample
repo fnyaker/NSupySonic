@@ -83,6 +83,14 @@ index_ignored_prefixes = El La Le Las Les Los The
 ; of its own. Default: off
 online_lyrics = off
 
+; Latest published version of the native Android app (android/), e.g. "1.4.0".
+; The web player compares it with the app it is running inside and, when that
+; one is older, offers the update at startup. Leave empty and nothing is ever
+; claimed. The Docker image fills this in from ANDROID_VERSION_NAME/APP_VERSION.
+;android_version =
+; Where that update is downloaded from. Default: the project's releases page.
+;android_url = https://github.com/fnyaker/NSupySonic/releases/latest
+
 [daemon]
 ; Socket file the daemon will listen on for incoming management commands
 ; Default: /tmp/supysonic/supysonic.sock
@@ -147,6 +155,9 @@ enabled = no
 
 ; Deezer ARL cookie of the account to proxy. Required when enabled.
 ; Get it from your browser cookies on deezer.com (cookie named "arl").
+; An admin can also paste a new ARL in the web UI (Settings -> Compte): that one
+; is stored in the database, OVERRIDES this value and takes effect immediately —
+; which is how you replace an expired credential without touching this file.
 ;arl =
 
 ; Folder where fetched FLAC files are permanently archived. Required when

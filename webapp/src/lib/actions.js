@@ -18,6 +18,9 @@ import {
 import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
 import { addMarkerAt } from "./markers.js";
 import { credits } from "./format.js";
+import { reconcileList } from "./reconcile.js";
+import { cacheAge } from "./apicache.js";
+import { online } from "./net.js";
 
 // Quality choices offered in the "download as…" submenu.
 export const DL_QUALITIES = [
@@ -70,6 +73,7 @@ export async function userPlaylists(force = false) {
   try {
     const r = await api.myPlaylists();
     playlistCache = r.playlists || [];
+    warmPlaylists(playlistCache);
     return playlistCache;
   } catch {
     // Don't memoize a failure: caching [] here left the sidebar / picker / the
@@ -82,6 +86,49 @@ export async function userPlaylists(force = false) {
 
 export function invalidatePlaylists() {
   playlistCache = null;
+}
+
+// -- offline warming ---------------------------------------------------------
+// Knowing your playlists exist is useless offline if their track lists aren't
+// on the device. So once the list is loaded, quietly pull each playlist's
+// tracks into the offline cache — ONE at a time, spaced out, skipping anything
+// refreshed recently: this must never compete with what the user is actually
+// doing (or with the audio stream sharing the link).
+
+const WARM_MAX_AGE = 24 * 60 * 60 * 1000; // don't re-warm a fresh entry
+const WARM_GAP = 1500; // ms between two warms
+// Each of these costs the server live Deezer calls, so a session warms a
+// bounded number of lists; the rest are picked up on later runs (and any list
+// you actually open refreshes itself anyway).
+const WARM_MAX = 25;
+// Let the screens the user is actually looking at load first.
+const WARM_START_DELAY = 10000;
+let warming = false;
+
+export async function warmPlaylists(playlists) {
+  if (warming || !Array.isArray(playlists) || !playlists.length) return;
+  if (!get(online)) return;
+  warming = true;
+  try {
+    await new Promise((r) => setTimeout(r, WARM_START_DELAY));
+    // Favourites first: it's the list people open offline most.
+    const paths = [
+      "/me/favorites",
+      ...playlists.slice(0, WARM_MAX).map((p) => "/playlist/" + p.id),
+    ];
+    for (const path of paths) {
+      if (!get(online)) break;
+      if ((await cacheAge(path)) < WARM_MAX_AGE) continue;
+      try {
+        await api.get(path); // caches on success (see api.js)
+      } catch {
+        /* one unreachable playlist must not stop the rest */
+      }
+      await new Promise((r) => setTimeout(r, WARM_GAP));
+    }
+  } finally {
+    warming = false;
+  }
 }
 
 let favoritesLoaded = false;
@@ -130,7 +177,12 @@ function refreshFavTracks() {
   favTracksInFlight = api
     .myFavorites()
     .then((r) => {
-      favTracks.set(r.tracks || []);
+      // Reconcile rather than replace: the favourites are shown from the cached
+      // copy first, and the fresh one is usually the same list plus or minus a
+      // track. Merging in place means the browser re-renders those few rows
+      // instead of all four thousand — no flash, no lost scroll, no re-decoded
+      // artwork.
+      favTracks.set(reconcileList(get(favTracks), r.tracks || []));
       return get(favTracks);
     })
     .catch(() => {

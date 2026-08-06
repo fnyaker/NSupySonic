@@ -143,6 +143,20 @@ Three Deezer code layers, from low to high:
    - `scheduler.py` — auto-sync: full sync on startup (after ~20s) then daily at `sync_at` (04:00)
      or every `sync_interval`, whenever a `sync_user` exists.
 
+**Resilience rules (learned from a production outage — do not regress):**
+- Every upsert in `library.py` is a check-then-insert, which is **not atomic**. Concurrent plays of
+  the same album race and the loser gets a unique-constraint violation (and, on Postgres, a poisoned
+  transaction). All of them go through `library.create_or_get` (insert inside its own
+  `db.atomic()` → savepoint, then read the winner's row back). Keep any new upsert on that path.
+- `deezerpy` requests carry a **default timeout** (`deezerpy.DEFAULT_TIMEOUT`, applied by `_Session`)
+  — `requests` has none, and one black-holed socket parks a server thread until the gunicorn worker
+  is killed. Never build a bare `requests.Session()` for Deezer.
+- The `/api` blueprint has a catch-all error handler: an unforeseen failure becomes a JSON 500 with
+  the traceback in the log, never an HTML page the SPA can't parse.
+- The ARL can die at any moment. `DeezerProvider.check_login()` is the cached health check and
+  distinguishes `"arl"` (credential dead — admin action) from `"network"` (says nothing about it);
+  `/api/deezer/status` surfaces it and the SPA raises a notice (`lib/deezerhealth.js`).
+
 3. **`supysonic/webui/`** — the custom `/api` blueprint (`__init__.py`, all routes `@login_required`,
    numeric-id validation on stream/favorite), `share.py` (waveform peaks + full-file/ffmpeg-clip
    downloads for the SPA's share sheet, all cached) and `spa.py`, which serves the built Svelte SPA at
@@ -177,6 +191,28 @@ plays it unchanged). Sharing goes through `components/ShareSheet.svelte` (global
 `openShare(track)` from stores.js): whole file or an excerpt selected on a zoomable canvas waveform
 (peaks from `/api/share/waveform`), cut server-side by `/api/share/clip` and handed to the Web Share
 API (download fallback). Podcast markers live in `lib/markers.js`.
+
+**Offline & versioning** (the SPA is an *install*, not a page — treat it as one):
+- `public/sw.js` serves the shell **cache-first** (an instant launch on any network) and stages a new
+  build on demand: it fetches the new `index.html` + every asset it references and only then
+  publishes the shell, so an interrupted update leaves the previous *complete* build in place. It
+  never touches `/api` or audio.
+- `lib/appversion.js` is the other half: the bundle's own id (`__APP_BUILD__`, injected by
+  `vite.config.js`, also written to `dist/version.json`) is compared with the server's
+  (`/app/version.json`, never cached). Different → stage in the background → reload (automatically
+  only within the first 90 s of a session, otherwise via a notice; guarded against reload loops).
+  It also does the **startup-only** Android update check (`window.NSNative.appVersion()` vs
+  `/api/version`'s `android.version`).
+- `lib/reconcile.js` merges a refetched list into the one on screen (identity preserved for
+  unchanged rows) — playlists and favourites paint from the offline cache first and the network copy
+  is reconciled in, never swapped wholesale. `lib/actions.js#warmPlaylists` pulls every playlist's
+  tracklist into the offline cache in the background, one at a time.
+- Persistent, actionable messages go through the `notices` store + `components/Notices.svelte`
+  (toasts are for transient confirmations only).
+- Cover art: a cached blob (`offlineCovers`, keyed resolution-independently by `coverKey`) is the
+  **preferred** source in `Cover.svelte`, not a fallback — it's the server's archived 1000px art, so
+  waiting for a CDN request to fail first is pure delay. Anything you play caches its cover
+  (`playcache.cacheCoverFor`), so hi-res art works offline for everything you've listened to.
 
 ## Database / schema
 

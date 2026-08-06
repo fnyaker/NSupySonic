@@ -17,6 +17,7 @@
   import { clearPlayCache, enforce } from "../lib/playcache.js";
   import { bytes as fmtBytes, duration as fmtDuration, artistLine } from "../lib/format.js";
   import { logsEnabled, logCount, clearLog, downloadLog, copyLog } from "../lib/log.js";
+  import { clearDeezerNotice } from "../lib/deezerhealth.js";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
@@ -77,14 +78,74 @@
   // Admin-only: per-user upload quota (GB) applied to non-admin accounts.
   let quotaGb = null;
   let quotaSaving = false;
+  // Admin-only: the Deezer account credential (ARL). The server never sends the
+  // value back — only whether one is set, where it comes from and its last four
+  // characters — so the field always starts empty and only a real paste saves.
+  let dz = null;
+  let arlDraft = "";
+  let arlSaving = false;
+  let dzStatus = null;
+  let dzChecking = false;
   onMount(async () => {
     if (!$user?.admin) return;
     try {
-      quotaGb = (await api.getSettings()).upload_quota_gb;
+      const s = await api.getSettings();
+      quotaGb = s.upload_quota_gb;
+      dz = s.deezer || null;
     } catch {
       /* leave the card hidden if it can't load */
     }
+    refreshDeezerStatus();
   });
+
+  async function refreshDeezerStatus(force = false) {
+    if (!$user?.admin) return;
+    dzChecking = true;
+    try {
+      dzStatus = await api.deezerStatus(force);
+    } catch {
+      dzStatus = null;
+    } finally {
+      dzChecking = false;
+    }
+  }
+
+  async function saveArl() {
+    const value = arlDraft.trim();
+    if (!value) {
+      toasts.push("Collez d'abord un ARL", "error");
+      return;
+    }
+    arlSaving = true;
+    try {
+      const r = await api.setSettings({ deezer_arl: value });
+      dz = r.deezer || dz;
+      arlDraft = "";
+      clearDeezerNotice();
+      toasts.push("ARL Deezer enregistré et vérifié");
+      await refreshDeezerStatus(true);
+    } catch (e) {
+      toasts.push(e?.message || "Échec de l'enregistrement de l'ARL", "error");
+    } finally {
+      arlSaving = false;
+    }
+  }
+
+  async function clearArl() {
+    if (!window.confirm("Revenir à l'ARL défini dans la configuration du serveur ?"))
+      return;
+    arlSaving = true;
+    try {
+      const r = await api.setSettings({ deezer_arl: "" });
+      dz = r.deezer || dz;
+      toasts.push("ARL personnalisé supprimé");
+      await refreshDeezerStatus(true);
+    } catch (e) {
+      toasts.push(e?.message || "Échec de la suppression", "error");
+    } finally {
+      arlSaving = false;
+    }
+  }
   async function saveQuota() {
     const v = Number(quotaGb);
     if (!Number.isFinite(v) || v < 0) {
@@ -259,6 +320,64 @@
   </div>
 </section>
 
+{#if $user?.admin && dz}
+  <section class="card">
+    <h2>Compte Deezer (ARL)</h2>
+    <p class="muted sub">
+      Tout le catalogue passe par ce seul identifiant de session. Il expire
+      régulièrement&nbsp;: collez-en un nouveau ici et il remplacera aussitôt celui
+      défini dans la configuration du serveur (docker&nbsp;compose), sans redémarrage.
+    </p>
+
+    <div class="arl-state">
+      <span class="pill" class:ok={dzStatus?.ok} class:bad={dzStatus && !dzStatus.ok}>
+        <span class="pdot"></span>
+        {#if dzChecking}Vérification…
+        {:else if dzStatus?.ok}Connecté{dzStatus.account ? ` — ${dzStatus.account}` : ""}
+        {:else if dzStatus?.reason === "arl"}ARL invalide ou expiré
+        {:else if dzStatus?.reason === "network"}Deezer injoignable
+        {:else if dzStatus?.reason === "disabled"}Proxy Deezer désactivé
+        {:else}État inconnu{/if}
+      </span>
+      <span class="muted arl-src">
+        {#if dz.arl_set}
+          ARL actif {dz.arl_hint ?? ""} · source&nbsp;:
+          {dz.arl_source === "database" ? "saisi ici" : "configuration serveur"}
+        {:else}
+          Aucun ARL configuré
+        {/if}
+      </span>
+      <button class="ghost" on:click={() => refreshDeezerStatus(true)} disabled={dzChecking}>
+        <Icon name="refresh" size={16} /> Tester
+      </button>
+    </div>
+
+    <div class="arl-row">
+      <input
+        class="arl-input"
+        type="password"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="Coller le nouvel ARL…"
+        bind:value={arlDraft}
+        on:keydown={(e) => e.key === "Enter" && saveArl()}
+      />
+      <button class="save" on:click={saveArl} disabled={arlSaving || !arlDraft.trim()}>
+        {arlSaving ? "Vérification…" : "Enregistrer"}
+      </button>
+    </div>
+    <p class="muted hint">
+      L'ARL est vérifié auprès de Deezer avant d'être enregistré&nbsp;: s'il est
+      refusé, rien n'est modifié. Il n'est jamais réaffiché ensuite.
+    </p>
+    {#if dz.arl_source === "database"}
+      <button class="ghost danger" on:click={clearArl} disabled={arlSaving}>
+        <Icon name="trash" size={16} /> Revenir à l'ARL du serveur
+      </button>
+    {/if}
+  </section>
+{/if}
+
 {#if $user?.admin && quotaGb !== null}
   <section class="card">
     <h2>Quota d'upload (utilisateurs non-admin)</h2>
@@ -412,6 +531,74 @@
   .sub {
     font-size: 0.85rem;
     margin: 4px 0 14px;
+  }
+  /* -- Deezer credential ---------------------------------------------- */
+  .arl-state {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 13px;
+    border-radius: 999px;
+    background: var(--bg);
+    border: 1px solid var(--bg-hover);
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .pdot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+  .pill.ok .pdot {
+    background: #3fbf6a;
+  }
+  .pill.bad {
+    border-color: rgba(255, 0, 146, 0.45);
+  }
+  .pill.bad .pdot {
+    background: var(--accent-2);
+  }
+  .arl-src {
+    font-size: 0.83rem;
+  }
+  .arl-state .ghost {
+    margin-left: auto;
+  }
+  .arl-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .arl-input {
+    flex: 1;
+    min-width: 220px;
+    padding: 9px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.95rem;
+    letter-spacing: 0.04em;
+  }
+  .arl-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .ghost.danger {
+    margin-top: 12px;
+  }
+  .ghost.danger:hover:not(:disabled) {
+    color: var(--accent-2);
+    border-color: var(--accent-2);
   }
   .dbg-toggle {
     display: inline-flex;

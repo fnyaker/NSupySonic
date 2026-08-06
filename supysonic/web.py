@@ -23,6 +23,45 @@ from .utils import get_secret_key
 logger = logging.getLogger(__package__)
 
 
+def setup_deezer(app):
+    """(Re)build the Deezer proxy, its prefetcher and the auto-sync thread.
+
+    Called at startup and again whenever an admin saves a new ARL, so a fresh
+    credential takes effect without restarting the container — including the
+    case where the proxy was off at boot (no ARL configured at all) and the
+    admin has just supplied one.
+    """
+    from .deezer import get_provider
+
+    app.deezer = get_provider(app.config)
+    app.deezer_prefetch = None
+    if app.deezer is not None and app.config["DEEZER"].get("preload"):
+        from .deezer.prefetch import DeezerPrefetcher
+
+        count = int(app.config["DEEZER"].get("preload_count") or 2)
+        # Parallel workers for explicit "download this now" requests (whole
+        # album/playlist pre-archiving). Higher than the play-ahead preloader so
+        # a batch download of a playlist finishes in a fraction of the time.
+        dl_count = int(app.config["DEEZER"].get("download_workers") or 4)
+        app.deezer_prefetch = DeezerPrefetcher(
+            app.deezer,
+            workers=min(max(1, count), 4),
+            dl_workers=min(max(1, dl_count), 8),
+        )
+
+    # The sync thread reads app.deezer on every run, so it survives a swap; it
+    # just must not be started twice.
+    if (
+        app.deezer is not None
+        and not app.testing
+        and not getattr(app, "_deezer_scheduler", None)
+    ):
+        from .deezer.scheduler import maybe_start
+
+        app._deezer_scheduler = maybe_start(app)
+    return app.deezer
+
+
 def create_application(config=None):
     global app
 
@@ -77,28 +116,7 @@ def create_application(config=None):
     app.transcode_cache = Cache(path.join(cache_dir, "transcodes"), max_size_transcodes)
 
     # Initialize the optional Deezer proxy (lazy login on first use)
-    from .deezer import get_provider
-
-    app.deezer = get_provider(app.config)
-    app.deezer_prefetch = None
-    if app.deezer is not None and app.config["DEEZER"].get("preload"):
-        from .deezer.prefetch import DeezerPrefetcher
-
-        count = int(app.config["DEEZER"].get("preload_count") or 2)
-        # Parallel workers for explicit "download this now" requests (whole
-        # album/playlist pre-archiving). Higher than the play-ahead preloader so
-        # a batch download of a playlist finishes in a fraction of the time.
-        dl_count = int(app.config["DEEZER"].get("download_workers") or 4)
-        app.deezer_prefetch = DeezerPrefetcher(
-            app.deezer,
-            workers=min(max(1, count), 4),
-            dl_workers=min(max(1, dl_count), 8),
-        )
-
-    if app.deezer is not None and not app.testing:
-        from .deezer.scheduler import maybe_start
-
-        maybe_start(app)
+    setup_deezer(app)
 
     # Test for the cache directory
     cache_path = app.config["WEBAPP"]["cache_dir"]

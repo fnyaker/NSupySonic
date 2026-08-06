@@ -5,6 +5,7 @@
   import { player, isAdmin, toasts, lastPlaylist, openExport } from "../lib/stores.js";
   import { toggleEntityFavorite, invalidatePlaylists, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration, isLocalId, artistSearch } from "../lib/format.js";
+  import { reconcilePayload } from "../lib/reconcile.js";
   import Cover from "../components/Cover.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -95,10 +96,14 @@
     plDir = 1;
     try {
       // Cached copy first, fresh one right after — a big playlist you've opened
-      // before is on screen immediately instead of after a full round-trip.
+      // before is on screen immediately instead of after a full round-trip. The
+      // fresh copy is then RECONCILED into what's on screen (see reconcile.js)
+      // rather than replacing it: unchanged rows keep their component and their
+      // decoded cover, so the second paint adds and removes exactly what
+      // changed and nothing moves under the reader.
       await api.swr("/playlist/" + plId, (r) => {
         if (mine !== loadSeq) return;
-        data = r;
+        data = reconcilePayload(data, r);
         fav = !!r.playlist?.is_favorite;
         loading = false;
       });

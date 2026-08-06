@@ -17,9 +17,16 @@ mkdir -p /data/db /data/cache /data/archive 2>/dev/null || true
 CONF=/data/supysonic.conf
 
 render_config() {
+    # The Android app version this image expects clients to run. Defaults to the
+    # image's own release (baked as APP_VERSION on tagged builds) since both are
+    # built from the same tag; the web player only mentions an update when this
+    # is set and newer than the installed app.
+    ANDROID_VERSION="${ANDROID_VERSION_NAME:-$APP_VERSION}"
+
     # Only generate when env-driven config is requested.
     [ -n "$DEEZER_ARL" ] || [ -n "$DATABASE_URI" ] \
         || [ -n "$SUPYSONIC_PROXY_HOPS" ] || [ -n "$SUPYSONIC_SESSION_COOKIE_SECURE" ] \
+        || [ -n "$ANDROID_VERSION" ] || [ -n "$ANDROID_DOWNLOAD_URL" ] \
         || return 0
 
     {
@@ -28,10 +35,13 @@ render_config() {
             printf 'database_uri = %s\n\n' "$DATABASE_URI"
         fi
         # Reverse-proxy / TLS hardening (off unless explicitly set).
-        if [ -n "$SUPYSONIC_PROXY_HOPS" ] || [ -n "$SUPYSONIC_SESSION_COOKIE_SECURE" ]; then
+        if [ -n "$SUPYSONIC_PROXY_HOPS" ] || [ -n "$SUPYSONIC_SESSION_COOKIE_SECURE" ] \
+           || [ -n "$ANDROID_VERSION" ] || [ -n "$ANDROID_DOWNLOAD_URL" ]; then
             printf '[webapp]\n'
             [ -n "$SUPYSONIC_PROXY_HOPS" ] && printf 'proxy_fix_hops = %s\n' "$SUPYSONIC_PROXY_HOPS"
             [ -n "$SUPYSONIC_SESSION_COOKIE_SECURE" ] && printf 'session_cookie_secure = %s\n' "$SUPYSONIC_SESSION_COOKIE_SECURE"
+            [ -n "$ANDROID_VERSION" ] && printf 'android_version = %s\n' "$ANDROID_VERSION"
+            [ -n "$ANDROID_DOWNLOAD_URL" ] && printf 'android_url = %s\n' "$ANDROID_DOWNLOAD_URL"
             printf '\n'
         fi
         if [ -n "$DEEZER_ARL" ]; then

@@ -67,6 +67,20 @@ export async function cacheGet(path) {
   }
 }
 
+// Age in ms of a cached entry, or Infinity when there isn't one. Used by the
+// background warmer to skip what it refreshed recently.
+export async function cacheAge(path) {
+  try {
+    const db = await openDB();
+    const rec = await reqp(
+      db.transaction("responses", "readonly").objectStore("responses").get(path)
+    );
+    return rec && rec.ts ? Date.now() - rec.ts : Infinity;
+  } catch {
+    return Infinity;
+  }
+}
+
 export async function cachePut(path, data) {
   try {
     const db = await openDB();
