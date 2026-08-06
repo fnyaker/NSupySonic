@@ -42,6 +42,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # buildx exports its layer cache to the GitHub Actions cache service, and
+      # that service now requires a writable `actions` scope. Declaring any
+      # permissions block sets every unlisted scope to none, so without this the
+      # export fails the whole build ("failed to reserve cache" / "cache write
+      # denied: token has no writable scopes") *after* the image built fine.
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -88,4 +94,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Only the branch/tag builds publish cache. A PR run writes the SAME
+          # key as the push run for the same commit — merge a PR promptly and
+          # the two race, and the loser dies with "failed to reserve cache" even
+          # though it built the image perfectly. PRs still read the cache.
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
