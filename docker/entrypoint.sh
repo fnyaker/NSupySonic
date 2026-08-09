@@ -24,8 +24,13 @@ mkdir -p /data/db /data/cache /data/archive 2>/dev/null || true
 # Both processes then fell back to the password baked into /etc/supysonic and
 # died with "password authentication failed for user supysonic", having changed
 # nothing themselves.
-CONF=/run/supysonic/supysonic.conf
-mkdir -p /run/supysonic 2>/dev/null || true
+#
+# /tmp, not /run: /tmp exists and is writable in every image and under every
+# user the container may be run as. Creating a directory under /run needs root,
+# and when that silently failed the config could not be written at all — which
+# is far worse than the problem it was fixing, because a process with no config
+# falls back to a DIFFERENT, EMPTY database and looks like it lost your data.
+CONF="${SUPYSONIC_CONFIG:-/tmp/supysonic.conf}"
 export SUPYSONIC_CONFIG="$CONF"
 
 render_config() {
@@ -73,7 +78,12 @@ render_config() {
             [ -n "$DEEZER_SYNC_AT" ] && printf 'sync_at = %s\n' "$DEEZER_SYNC_AT"
             printf '\n'
         fi
-    } >"$CONF"
+    } >"$CONF" || {
+        echo "FATAL: cannot write $CONF." >&2
+        echo "       Refusing to start: without it this process would use a" >&2
+        echo "       different database and look like it lost your library." >&2
+        exit 1
+    }
     # The file holds the ARL — a full-account Deezer credential. Default umask
     # 022 left it world-readable on a shared volume.
     chmod 600 "$CONF"
@@ -90,6 +100,29 @@ render_config() {
         echo "Database: DATABASE_URI is unset; falling back to /etc/supysonic." >&2
         echo "          Set it on THIS service if it should talk to your own DB." >&2
     fi
+}
+
+assert_real_database() {
+    # Ask supysonic itself which database it resolved — the truth, not what we
+    # think we wrote. Its built-in fallback is a SQLite file in a TEMP dir: a
+    # brand new, empty database that every user account and playlist is missing
+    # from. Booting onto it is indistinguishable from having lost everything, so
+    # a container must refuse rather than come up looking wiped.
+    uri=$(supysonic-cli db uri 2>/dev/null) || uri=""
+    if [ -z "$uri" ]; then
+        return 0  # older CLI without the subcommand: nothing to check
+    fi
+    case "$uri" in
+        sqlite:///tmp/* | sqlite:////tmp/* | sqlite:///var/tmp/* | sqlite:////var/tmp/*)
+            echo "FATAL: no usable configuration was found." >&2
+            echo "       supysonic resolved a throwaway database ($uri)," >&2
+            echo "       which is EMPTY — your real data is untouched, this" >&2
+            echo "       process simply cannot see it. Check DATABASE_URI on" >&2
+            echo "       this service and that $CONF is writable." >&2
+            exit 1
+            ;;
+    esac
+    echo "Database in use: $(redact_uri "$uri")"
 }
 
 redact_uri() {
@@ -167,6 +200,7 @@ bootstrap_admin() {
 }
 
 render_config
+assert_real_database
 
 # Only touch the database when actually starting the server. Migration must run
 # before bootstrap_admin: creating the admin would make the destination "non
