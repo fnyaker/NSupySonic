@@ -1,11 +1,22 @@
 <script>
   import { onDestroy, onMount } from "svelte";
-  import { player, favTracks, toasts, isAdmin, syncing, downloads, openExport } from "../lib/stores.js";
+  import {
+    player,
+    favTracks,
+    toasts,
+    isAdmin,
+    syncing,
+    downloads,
+    openExport,
+    openReplace,
+    replaceSheet,
+  } from "../lib/stores.js";
   import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
   import { api } from "../lib/api.js";
-  import { bytes as fmtBytes } from "../lib/format.js";
+  import { bytes as fmtBytes, artistLine } from "../lib/format.js";
   import Card from "../components/Card.svelte";
+  import Cover from "../components/Cover.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
@@ -35,6 +46,27 @@
   }
   let local = null;
   let offline = null;
+  // Tracks the server knows can no longer be played. Loaded when the tab is
+  // first opened (and refreshed when a replacement lands), not on every page
+  // view — it's a rare list, and a query nobody asked for is a query wasted.
+  let gone = null;
+  let goneLoaded = false;
+  $: if (tab === "gone" && !goneLoaded) loadGone();
+  async function loadGone() {
+    goneLoaded = true;
+    try {
+      gone = (await api.unavailableTracks()).tracks || [];
+    } catch {
+      gone = [];
+    }
+  }
+  // A replacement removes a track from the list; refresh once the sheet closes.
+  let sheetWasOpen = false;
+  $: {
+    const open = !!$replaceSheet;
+    if (sheetWasOpen && !open && goneLoaded) loadGone();
+    sheetWasOpen = open;
+  }
 
   let fileInput;
   let uploading = false;
@@ -148,6 +180,9 @@
   {/if}
   <button class:active={tab === "downloaded"} on:click={() => (tab = "downloaded")}>Téléchargés</button>
   <button class:active={tab === "local"} on:click={() => (tab = "local")}>Mes fichiers</button>
+  <button class:active={tab === "gone"} on:click={() => (tab = "gone")}>
+    Indisponibles{#if gone?.length}<span class="badge">{gone.length}</span>{/if}
+  </button>
 </div>
 
 {#if tab === "favorites"}
@@ -194,6 +229,43 @@
       <span class="muted">{offline.length} titres · hors-ligne</span>
     </div>
     <TrackBrowser tracks={offline} context={{ kind: "downloads" }} downloadable={false} />
+  {/if}
+{:else if tab === "gone"}
+  {#if gone === null}
+    <Skeleton kind="list" />
+  {:else if !gone.length}
+    <p class="muted hint">
+      Aucun titre indisponible. Quand Deezer retire un titre de son catalogue, il
+      apparaît ici pour que vous puissiez lui trouver un remplaçant. Les titres
+      que vous avez déjà écoutés sont archivés sur le serveur&nbsp;: ceux-là
+      restent lisibles quoi qu'il arrive.
+    </p>
+  {:else}
+    <p class="muted hint gone-hint">
+      Ces titres ne peuvent plus être lus. Choisissez un remplaçant&nbsp;: il
+      prendra leur place dans toutes vos playlists et vos favoris.
+    </p>
+    <ul class="gone-list">
+      {#each gone as t (t.deezer_id)}
+        <li class="gone-row">
+          <div class="gone-thumb">
+            <Cover src={t.album?.cover} alt={t.title} size={44} kind="track" fallbackId={t.deezer_id} />
+          </div>
+          <div class="gone-meta">
+            <div class="gone-t">{t.title}</div>
+            <div class="muted gone-a">
+              {artistLine(t)}
+              {#if t.playlists?.length}
+                · dans {t.playlists.map((p) => p.title).join(", ")}
+              {/if}
+            </div>
+          </div>
+          <button class="pill sm" on:click={() => openReplace(t)}>
+            <Icon name="refresh" size={16} /> Remplacer
+          </button>
+        </li>
+      {/each}
+    </ul>
   {/if}
 {:else if tab === "local"}
   {#if local === null}
@@ -272,12 +344,32 @@
     margin-top: 5px;
     font-size: 0.8rem;
   }
+  /* The tabs scroll on their own rather than wrapping onto a second line: on a
+     phone five pills don't fit, and a wrapped row pushes the content down and
+     makes the page jump every time the set changes. `flex: none` on the buttons
+     is what stops flex from squeezing them into unreadable slivers instead of
+     overflowing, and the negative margin lets them run edge to edge while the
+     page keeps its padding. */
   .tabs {
     display: flex;
     gap: 8px;
     margin: 16px 0 20px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x proximity;
+    padding: 2px 20px 2px 0;
+    margin-left: -20px;
+    padding-left: 20px;
+  }
+  .tabs::-webkit-scrollbar {
+    display: none;
   }
   .tabs button {
+    flex: none;
+    scroll-snap-align: start;
+    white-space: nowrap;
     padding: 8px 16px;
     border-radius: 999px;
     background: var(--bg-card);
@@ -291,6 +383,62 @@
   .fav-head {
     margin-bottom: 14px;
     gap: 16px;
+  }
+  /* -- unavailable tracks ---------------------------------------------- */
+  .badge {
+    display: inline-block;
+    margin-left: 7px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--accent-2);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 800;
+    vertical-align: 1px;
+  }
+  .gone-hint {
+    margin-bottom: 14px;
+  }
+  .gone-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .gone-row {
+    display: grid;
+    grid-template-columns: 44px 1fr auto;
+    align-items: center;
+    gap: 12px;
+    padding: 8px;
+    border-radius: 10px;
+  }
+  .gone-row:hover {
+    background: var(--bg-hover);
+  }
+  .gone-thumb {
+    width: 44px;
+    /* Dimmed, because this one is not music you can play right now. */
+    opacity: 0.65;
+  }
+  .gone-meta {
+    min-width: 0;
+  }
+  .gone-t {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .gone-a {
+    font-size: 0.82rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pill.sm {
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    white-space: nowrap;
   }
   .ghost-btn {
     display: inline-flex;

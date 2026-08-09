@@ -32,7 +32,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260730"
+SCHEMA_VERSION = "20260806"
 
 
 def now():
@@ -368,6 +368,13 @@ class Track(PathMixin, _Model):
 
     play_count = IntegerField(default=0)
     last_play = DateTimeField(null=True)
+
+    # When we last confirmed this track cannot be played at all — Deezer has no
+    # source for it any more (rights pulled, geo-blocked, delisted), or the local
+    # file is gone. NULL means "playable as far as we know". A timestamp rather
+    # than a flag because availability comes BACK: a verdict is re-tested once it
+    # is old enough, so a track isn't condemned by one bad afternoon.
+    unavailable = DateTimeField(null=True)
 
     root_folder = ForeignKeyField(Folder, backref="+")
     folder = ForeignKeyField(Folder, backref="tracks")

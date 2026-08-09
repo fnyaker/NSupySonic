@@ -58,6 +58,16 @@ class DeezerError(Exception):
     """Any failure talking to Deezer."""
 
 
+class TrackUnavailable(DeezerError):
+    """Deezer has no playable source for this track — and said so.
+
+    Distinct from every other DeezerError on purpose: a network failure, an
+    expired token or a gateway hiccup are all "try again later", while this one
+    is a verdict about the track itself (rights pulled, delisted, geo-blocked).
+    Only this one may make the app give up on a track and offer a replacement.
+    """
+
+
 # Podcast audio URLs come from third-party feed metadata, so they are attacker
 # influenced. Only ordinary http(s) to a public address is fetched.
 MAX_EPISODE_REDIRECTS = 5
@@ -536,6 +546,11 @@ class DeezerProvider:
         try:
             return self._resolve_once(sng_id, quality)
         except (DeezerError, DeezerPyError) as exc:
+            # NOTE: TrackUnavailable deliberately does NOT short-circuit here.
+            # An expired media license token makes get_track_url fail for every
+            # quality, which looks *exactly* like "this track has no source" —
+            # so a verdict is only trustworthy once a fresh session has said the
+            # same thing. The re-login below is what tells the two apart.
             if time.monotonic() - self._last_relogin < self._RELOGIN_INTERVAL:
                 raise  # the session is fresh — the track really is unavailable
             self._last_relogin = time.monotonic()
@@ -567,7 +582,10 @@ class DeezerProvider:
             if url:
                 return url, fmt, alt, alt.get("SNG_ID", fallback_id)
 
-        raise DeezerError(f"no playable source for track {sng_id}")
+        # Deezer answered, and the answer is "there is nothing to play here" —
+        # not a transport failure. Callers act on this: it is what condemns a
+        # track and offers the user a replacement.
+        raise TrackUnavailable(f"no playable source for track {sng_id}")
 
     def _url_from_info(self, info: dict, quality: str):
         token = info.get("TRACK_TOKEN")

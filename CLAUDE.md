@@ -180,6 +180,18 @@ Per-user playback state is server-side: `PodcastProgress` (auto-saved position, 
 its localStorage copy newest-wins (`webapp/src/lib/podcastProgress.js`), and the admin's positions are
 mirrored to Deezer (`episode.bookmarkSet`) fail-soft.
 
+**Unavailable tracks** (`supysonic/webui/availability.py`): Deezer drops tracks from its catalogue,
+and `Track.unavailable` (a timestamp, so a verdict expires and is re-tested) records the ones we
+have confirmed dead. The verdict is only ever set from `TrackUnavailable` — the dedicated exception
+`provider._resolve_once` raises when Deezer *answers* that there is no source — never from a network
+error, and never before a re-login has confirmed it (an expired media licence token looks exactly the
+same). **Archiving clears it**: once the FLAC is on disk the track plays forever, whatever Deezer
+does, which is why the probe checks the file before asking anyone. `/api/track/<id>/probe` is what the
+player calls the moment playback errors (the `<audio>` element can't tell a dead track from a dropped
+packet), so a dead track is skipped at once instead of after four reloads. `/api/replace` swaps a
+track for another one — same position in every playlist, plus favourites — in a worker thread, and
+mirrors it to Deezer for the admin's own playlists.
+
 **Web app** (`webapp/`): Svelte 4 + Vite 5 SPA, hash routing (svelte-spa-router), consuming `/api`.
 Builds into `supysonic/webui/dist`. No emoji in the UI — all glyphs go through
 `src/components/Icon.svelte` (Lucide-style SVG). Home is **card-based** (mixes / recommended
@@ -216,7 +228,7 @@ API (download fallback). Podcast markers live in `lib/markers.js`.
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260606`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260806`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported.
 

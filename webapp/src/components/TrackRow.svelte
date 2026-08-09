@@ -1,6 +1,15 @@
 <script>
   import { push } from "svelte-spa-router";
-  import { player, currentId, playing, favorites, openMenu, downloads } from "../lib/stores.js";
+  import {
+    player,
+    currentId,
+    playing,
+    favorites,
+    openMenu,
+    downloads,
+    unavailableIds,
+    openReplace,
+  } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import { playbackIdle } from "../lib/playback.js";
@@ -18,6 +27,12 @@
   $: isPlaying = isCurrent && $playing;
   $: fav = $favorites.has(String(track.deezer_id));
   $: downloaded = $downloads.has(String(track.deezer_id));
+  // Flagged by the API when the list was fetched, or discovered mid-session by
+  // the player's probe. A track you have downloaded plays from the device, so it
+  // is never "unavailable" to YOU whatever Deezer decided.
+  $: unavailable =
+    !downloaded &&
+    (track.unavailable === true || $unavailableIds.has(String(track.deezer_id)));
 
   function play() {
     if (isCurrent) player.toggle();
@@ -58,7 +73,14 @@
       <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} kind="track" fallbackId={track.deezer_id} /></div>
     {/if}
     <div class="meta">
-      <div class="t">
+      <div class="t" class:gone={unavailable}>
+        {#if unavailable}
+          <button
+            class="gonebadge"
+            title="Titre indisponible — cliquez pour le remplacer"
+            aria-label="Titre indisponible, remplacer"
+            on:click|stopPropagation={() => openReplace(track)}><Icon name="alert" size={13} /></button>
+        {/if}
         {#if track.local}<span class="local" title="Fichier local (pas sur Deezer)"><Icon name="cloudOff" size={13} /></span>{/if}
         {#if downloaded}<span class="dlbadge" title="Disponible hors-ligne"><Icon name="downloaded" size={13} /></span>{/if}
         {track.title}
@@ -140,6 +162,21 @@
     vertical-align: -2px;
     color: var(--text-dim);
     margin-right: 3px;
+  }
+  /* A dead track stays readable but visibly demoted, and its badge is the way
+     in to replacing it — the icon IS the button, so there's no hunting. */
+  .t.gone {
+    color: var(--text-dim);
+  }
+  .gonebadge {
+    display: inline-flex;
+    vertical-align: -2px;
+    color: var(--accent-2);
+    margin-right: 4px;
+    padding: 0;
+  }
+  .gonebadge:hover {
+    filter: brightness(1.25);
   }
   .dlbadge {
     display: inline-flex;

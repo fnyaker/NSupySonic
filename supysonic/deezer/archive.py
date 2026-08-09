@@ -125,6 +125,10 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
     if gain is not None:
         track.gain = gain
     track.last_modification = int(time.time())
+    # The audio is now ON DISK, which is the whole point of archiving: from here
+    # on this track plays without Deezer, forever, whatever Deezer does with it
+    # afterwards. So any earlier "unavailable" verdict is void by construction.
+    track.unavailable = None
     track.save()
 
     # Archive lyrics alongside the audio (a .lrc sidecar + embedded plain text).

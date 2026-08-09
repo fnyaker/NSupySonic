@@ -17,6 +17,7 @@
     prefetchEnabled,
     prefetchCount,
     prefetchAhead,
+    markUnavailable,
     offlineCovers,
     setPlaybackStatus,
     normalization,
@@ -397,6 +398,11 @@
       setPlaybackStatus("waiting-network");
       return;
     }
+    // Ask the server what actually happened, in parallel with this attempt. The
+    // element only ever says "it broke"; the server can tell a dead track from a
+    // bad moment, and a dead one must not cost four reloads and twelve seconds
+    // of silence before we move on.
+    probeCurrent(cur, curId);
     if (recoverAttempts >= RECOVER_MAX) {
       failCurrentTrack(); // permanently broken stream — move on
       return;
@@ -876,14 +882,38 @@
 
   // A track we couldn't play at all (no playable source / archiving failed /
   // repeated decode errors). Skip to the next one instead of freezing.
-  function failCurrentTrack() {
+  function failCurrentTrack(message = "Titre indisponible, passage au suivant") {
     cancelRecovery();
     cancelSwitch();
     setPlaybackStatus("error");
     const s = get(player);
-    toasts.push("Titre indisponible, passage au suivant", "error");
+    toasts.push(message, "error");
     if (s.index < s.queue.length - 1) player.next();
     else player.pause();
+  }
+
+  // One probe per track, fired the first time a track misbehaves. A verdict of
+  // "unavailable" ends the track there and then — no retries, no waiting — and
+  // is remembered so every list shows it and the replacement flow can offer to
+  // fix it. Anything else (network, a 502, an inconclusive answer) leaves the
+  // normal recovery running: a bad minute must never condemn a good track.
+  let probedId = null;
+  async function probeCurrent(track, id) {
+    if (!track || probedId === id || curIsBlob || !get(online)) return;
+    probedId = id;
+    let verdict;
+    try {
+      verdict = await api.probeTrack(track.deezer_id);
+    } catch {
+      return; // couldn't ask — recovery carries on as before
+    }
+    if (!verdict || verdict.available) return;
+    if (curId !== id) return; // we already moved on
+    logInfo("audio", `probe: ${track.deezer_id} is unavailable — skipping`, null, {
+      important: true,
+    });
+    markUnavailable(track.deezer_id);
+    failCurrentTrack("Titre indisponible — vous pouvez le remplacer");
   }
 
   // Apply a target time, immediately if the element can already seek, else once

@@ -308,6 +308,15 @@ export const api = {
   // instead of reading the cached verdict (admin only, server-side).
   deezerStatus: (force = false) => req("/deezer/status" + (force ? "?force=1" : "")),
 
+  // Availability & replacement. `probe` answers the question the <audio>
+  // element can't: is this track dead, or was that just a bad moment?
+  probeTrack: (id) => req("/track/" + id + "/probe"),
+  unavailableTracks: () => req("/unavailable"),
+  replacementCandidates: (id) => req("/replace/candidates/" + id),
+  replaceTrack: (from, to) =>
+    req("/replace", { method: "POST", body: body({ from, to }) }),
+  replaceStatus: (job) => req("/replace/status/" + job),
+
   // Build identity of the served app (+ the Android release it expects).
   version: () => req("/version"),
 
