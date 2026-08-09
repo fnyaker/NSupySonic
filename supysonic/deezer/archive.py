@@ -90,12 +90,36 @@ def ensure_archived(provider, track: Track) -> None:
         if os.path.isfile(track.path):
             return
 
-        url, fmt, info, used_id = provider.resolve(track.deezer_id)
+        url, fmt, info, used_id = _resolve_or_flag(provider, track)
         track.path = _fixed_ext_path(track.path, fmt)
 
         logger.info("Archiving Deezer track %s (%s) -> %s", track.deezer_id, fmt, track.path)
         provider.download_to(url, used_id, track.path)
         _finalize_archive(provider, track, fmt, info)
+
+
+def _resolve_or_flag(provider, track: Track):
+    """``provider.resolve`` that records the verdict on the way through.
+
+    EVERY path that fetches audio goes through here — a live stream, the
+    background archiver, the download queue, the CLI — so a track Deezer has
+    dropped is flagged whoever noticed, not only when someone happened to press
+    play on it. Conversely a resolve that succeeds clears a stale verdict.
+
+    Only ``TrackUnavailable`` counts: it is the one error that means "Deezer
+    answered, and the answer is that there is nothing to play". Network and
+    session failures pass through untouched.
+    """
+    from .provider import TrackUnavailable
+
+    try:
+        resolved = provider.resolve(track.deezer_id)
+    except TrackUnavailable:
+        logger.info("Deezer has no source for track %s; flagging it", track.deezer_id)
+        library.mark_unavailable(track)
+        raise
+    library.clear_unavailable(track)
+    return resolved
 
 
 def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
@@ -175,7 +199,7 @@ def ensure_episode_archived(provider, episode: PodcastEpisode) -> None:
             episode.save()
             raise
 
-        _finalize_episode(episode, path)
+        _finalize_episode(episode, path, provider)
 
 
 def open_live_episode_stream(provider, episode: PodcastEpisode, on_abort=None):
@@ -241,12 +265,26 @@ def open_live_episode_stream(provider, episode: PodcastEpisode, on_abort=None):
     return mimetype, generate()
 
 
-def _finalize_episode(episode: PodcastEpisode, path: str) -> None:
+def _finalize_episode(episode: PodcastEpisode, path: str, provider=None) -> None:
     """Publish an episode's archive on the row (shared by both fetch paths)."""
     episode.path = path
     episode.bitrate = _bitrate_for(path, "MP3_128", episode.duration)
     episode.status = "completed"
     episode.save()
+    # Archive the show's art alongside its audio. Once the episodes are local the
+    # picture has to be too, or a show that leaves Deezer keeps its episodes and
+    # loses its face. Best-effort, once per show.
+    if provider is not None:
+        try:
+            channel = episode.channel
+            if not library.show_cover_file(provider.archive_dir, channel):
+                md5 = channel.cover_art_md5 or episode.image_md5
+                if md5:
+                    art = provider.fetch_cover(md5)
+                    if art:
+                        library.save_show_cover(provider.archive_dir, channel, art)
+        except Exception as exc:
+            logger.debug("Could not archive show art: %s", exc)
 
 
 def find_local_episode(episode_id) -> PodcastEpisode | None:
@@ -288,7 +326,7 @@ def open_live_stream(provider, track: Track, on_abort=None):
     finishes, the partial is dropped and ``on_abort`` (if given) is called so the
     track can still be archived in the background.
     """
-    url, fmt, info, used_id = provider.resolve(track.deezer_id)
+    url, fmt, info, used_id = _resolve_or_flag(provider, track)
     track.path = _fixed_ext_path(track.path, fmt)
     dest = Path(track.path)
     mimetype = _mime_for_path(dest)
@@ -419,6 +457,11 @@ def deezer_cover_path(provider, cache, eid: str):
                 except Track.DoesNotExist:
                     try:
                         ch = PodcastChannel[key]
+                        # Archived art first: a show Deezer has dropped keeps its
+                        # face, exactly like an album keeps its cover.jpg.
+                        local = library.show_cover_file(provider.archive_dir, ch)
+                        if local:
+                            return local
                         data = (
                             provider.fetch_cover(ch.cover_art_md5)
                             if ch.cover_art_md5
@@ -427,6 +470,11 @@ def deezer_cover_path(provider, cache, eid: str):
                     except PodcastChannel.DoesNotExist:
                         try:
                             ep = PodcastEpisode[key]
+                            local = library.show_cover_file(
+                                provider.archive_dir, ep.channel
+                            )
+                            if local:
+                                return local
                             md5 = ep.image_md5 or ep.channel.cover_art_md5
                             data = provider.fetch_cover(md5) if md5 else None
                         except PodcastEpisode.DoesNotExist:

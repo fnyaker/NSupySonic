@@ -12,6 +12,7 @@ all with a mock Deezer provider — no network.
 """
 
 import os
+from datetime import timedelta
 import shutil
 import tempfile
 import threading
@@ -397,22 +398,98 @@ class PodcastApiTestCase(ApiTestBase):
         episode = PodcastEpisode[ids.episode_uuid("2")]
         self.assertEqual(episode.status, "completed")
 
-    def test_delete_episode_then_channel(self):
+    def test_deleting_never_destroys_an_archived_episode(self):
+        """An archived episode is the copy that survives the show leaving
+        Deezer, so neither endpoint may delete it. `deletePodcastEpisode`
+        reports success without touching the file, and unsubscribing keeps the
+        channel — flagged unsubscribed — with all its audio."""
         self._create_channel()
         eid = str(ids.episode_uuid("1"))
         self._make_request("downloadPodcastEpisode", {"id": eid})
         path = PodcastEpisode[ids.episode_uuid("1")].path
+        self.assertTrue(os.path.isfile(path))
 
         self._make_request("deletePodcastEpisode", {"id": eid})
         episode = PodcastEpisode[ids.episode_uuid("1")]
-        self.assertEqual(episode.status, "deleted")
-        self.assertIsNone(episode.path)
-        self.assertFalse(os.path.isfile(path))
+        self.assertEqual(episode.path, path)
+        self.assertTrue(os.path.isfile(path))
 
         cid = str(ids.show_uuid("1002156761"))
-        # GET deletes the row; a follow-up POST would 404, so skip it.
         self._make_request("deletePodcastChannel", {"id": cid}, skip_post=True)
+        # The Deezer subscription is dropped…
         self.assertIn("1002156761", self.provider.fav_removed)
+        # …but nothing of ours is.
+        channel = PodcastChannel[ids.show_uuid("1002156761")]
+        self.assertFalse(channel.subscribed)
+        self.assertEqual(PodcastEpisode.select().count(), 3)
+        self.assertTrue(os.path.isfile(path))
+
+    def test_a_show_that_leaves_deezer_becomes_a_local_podcast(self):
+        """The whole show delisted — not one episode. Everything archived must
+        stay listed, playable and complete, served from disk, and the sync must
+        stop pestering Deezer about it."""
+        from supysonic.deezer.importer import DeezerImporter
+        from supysonic.deezer.provider import ShowUnavailable
+
+        self._create_channel()
+        eid = str(ids.episode_uuid("1"))
+        self._make_request("downloadPodcastEpisode", {"id": eid})
+        path = PodcastEpisode[ids.episode_uuid("1")].path
+        self.assertTrue(os.path.isfile(path))
+
+        # Deezer now answers "no such show" for everything about it.
+        def gone(show_id, nb=40, start=0):
+            raise ShowUnavailable("no such show")
+
+        self.provider.get_show_page = gone
+        self.provider.get_show_episodes = gone
+        self.provider.favorite_show_ids = []
+
+        importer = DeezerImporter(self.provider, "alice")
+        importer.sync_podcasts(episode_limit=30)
+
+        channel = PodcastChannel[ids.show_uuid("1002156761")]
+        self.assertIsNotNone(channel.gone)
+        # Nothing was destroyed: the episodes and the audio are all still there.
+        self.assertEqual(PodcastEpisode.select().count(), 3)
+        self.assertTrue(os.path.isfile(path))
+
+        # A second sync leaves it alone rather than asking Deezer again.
+        asked = []
+        self.provider.get_show_page = lambda *a, **k: asked.append(a) or gone(*a, **k)
+        importer.sync_podcasts(episode_limit=30)
+        self.assertEqual(asked, [])
+
+        # And it still plays, straight from the archive.
+        rv = self.client.get(
+            "/rest/stream.view",
+            query_string={
+                "u": "alice", "p": "Alic3", "c": "tests",
+                "v": self.apiVersion, "id": eid,
+            },
+        )
+        self.assertEqual(rv.status_code, 200)
+
+    def test_a_show_that_comes_back_is_no_longer_local(self):
+        from supysonic.deezer.importer import DeezerImporter
+        from supysonic.db import now
+
+        self._create_channel()
+        channel = PodcastChannel[ids.show_uuid("1002156761")]
+        channel.gone = now()
+        channel.save()
+
+        # The verdict is stale, so the sync re-tests it — and Deezer answers.
+        channel.gone = now() - timedelta(days=30)
+        channel.save()
+        DeezerImporter(self.provider, "alice").sync_podcasts(episode_limit=30)
+        self.assertIsNone(PodcastChannel[ids.show_uuid("1002156761")].gone)
+
+    def test_unsubscribing_removes_a_show_with_nothing_archived(self):
+        """Nothing on disk means nothing to protect: the row goes, as before."""
+        self._create_channel()
+        cid = str(ids.show_uuid("1002156761"))
+        self._make_request("deletePodcastChannel", {"id": cid}, skip_post=True)
         self.assertEqual(PodcastChannel.select().count(), 0)
         self.assertEqual(PodcastEpisode.select().count(), 0)
 

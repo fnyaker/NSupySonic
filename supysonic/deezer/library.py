@@ -54,6 +54,42 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _MAX_COMPONENT_BYTES = 200
 
 
+# -- availability -----------------------------------------------------------
+# Whether a track still has a playable source. Lives here, in the DB layer,
+# rather than in the web API: every path that discovers the answer — a live
+# stream, the background archiver, the download queue, the CLI — must record it
+# the same way, and none of them should have to import the web layer to do so.
+
+
+def mark_unavailable(track) -> None:
+    """Record that Deezer has no playable source for this track (fail-soft)."""
+    if track is None:
+        return
+    try:
+        stamp = _now()
+        Track.update(unavailable=stamp).where(Track.id == track.id).execute()
+        track.unavailable = stamp
+    except Exception:  # bookkeeping must never break the caller
+        pass
+
+
+def clear_unavailable(track) -> None:
+    """Undo a verdict: the track is demonstrably playable."""
+    if track is None or getattr(track, "unavailable", None) is None:
+        return
+    try:
+        Track.update(unavailable=None).where(Track.id == track.id).execute()
+        track.unavailable = None
+    except Exception:
+        pass
+
+
+def _now():
+    from ..db import now
+
+    return now()
+
+
 def create_or_get(create, fetch):
     """``create()``, falling back to ``fetch()`` when someone else won the race.
 
@@ -467,6 +503,43 @@ def episode_archive_path(archive_dir, channel_title, publish_date, title) -> str
     return os.path.join(
         podcast_root_path(archive_dir), sanitize(channel_title or "Podcast"), fname
     )
+
+
+def save_show_cover(archive_dir: str, channel, data: bytes) -> "str | None":
+    """Persist a show's art as ``cover.jpg`` inside its episode folder.
+
+    Same reasoning as album art: once the audio is local, the picture must be
+    too, or a show that leaves Deezer keeps its episodes and loses its face.
+    Idempotent; returns the path or None.
+    """
+    if not data or channel is None:
+        return None
+    folder = os.path.join(
+        podcast_root_path(archive_dir), sanitize(channel.title or "Podcast")
+    )
+    path = os.path.join(folder, COVER_FILENAME)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        if not os.path.isfile(path):
+            tmp = f"{path}.part"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+    except OSError:
+        return None
+    return path
+
+
+def show_cover_file(archive_dir: str, channel) -> "str | None":
+    """The archived ``cover.jpg`` for a show, if we have one."""
+    if channel is None or not archive_dir:
+        return None
+    path = os.path.join(
+        podcast_root_path(archive_dir),
+        sanitize(channel.title or "Podcast"),
+        COVER_FILENAME,
+    )
+    return path if os.path.isfile(path) else None
 
 
 def normalize_show(data: dict) -> dict:

@@ -191,7 +191,9 @@ CREATE TABLE IF NOT EXISTS podcast_channel (
     cover_art_md5 VARCHAR(64),
     created DATETIME NOT NULL,
     last_fetched DATETIME,
-    error_message VARCHAR(256)
+    error_message VARCHAR(256),
+    subscribed BOOLEAN NOT NULL DEFAULT true,
+    gone DATETIME
 );
 CREATE INDEX IF NOT EXISTS index_podcast_channel_user_id_fk ON podcast_channel(user_id);
 

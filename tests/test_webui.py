@@ -685,6 +685,92 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(match[0]["deezer_id"], str(t.id))
         self.assertEqual(match[0]["artist"]["name"], "Local Band")
 
+    # -- archive completeness & storage ----------------------------------
+
+    def test_backfill_archives_what_playback_never_touched(self):
+        """Favorites and playlist tracks must not stay hostage to Deezer until
+        someone happens to press play on them."""
+        from supysonic.deezer import backfill
+
+        fav = self._make_deezer_track(sng_id="70", title="Fav", archived=False)
+        inpl = self._make_deezer_track(sng_id="71", title="In playlist", archived=False)
+        already = self._make_deezer_track(sng_id="72", title="Done", archived=True)
+        user = User.get(User.name == "alice")
+        StarredTrack.create(user=user, starred=fav)
+        StarredTrack.create(user=user, starred=already)
+        pl = Playlist.create(user=user, name="Mix")
+        from supysonic.db import PlaylistTrack
+
+        PlaylistTrack.create(playlist=pl, track=inpl, index=0)
+
+        tracks, episodes = backfill.collect(user.id, True, "all")
+        ids = {t.deezer_id for t in tracks}
+        self.assertIn("70", ids)
+        self.assertIn("71", ids)
+        # Already on disk: never re-fetched.
+        self.assertNotIn("72", ids)
+
+        archived = []
+        from supysonic.deezer import archive as archive_mod
+
+        orig = archive_mod.ensure_archived
+        archive_mod.ensure_archived = lambda prov, t: archived.append(t.deezer_id)
+        try:
+            stats = backfill.run(self.app.deezer, tracks, episodes)
+        finally:
+            archive_mod.ensure_archived = orig
+        self.assertEqual(set(archived), ids)
+        self.assertEqual(stats["archived"], len(tracks))
+
+    def test_backfill_counts_dead_tracks_apart_from_failures(self):
+        from supysonic.deezer import archive as archive_mod
+        from supysonic.deezer import backfill
+        from supysonic.deezer.provider import TrackUnavailable
+
+        gone = self._make_deezer_track(sng_id="73", title="Gone", archived=False)
+        orig = archive_mod.ensure_archived
+
+        def boom(prov, t):
+            raise TrackUnavailable("no source")
+
+        archive_mod.ensure_archived = boom
+        try:
+            stats = backfill.run(self.app.deezer, [gone], [])
+        finally:
+            archive_mod.ensure_archived = orig
+        self.assertEqual(stats["unavailable"], 1)
+        self.assertEqual(stats["failed"], 0)
+
+    def test_backfill_is_admin_only(self):
+        self._login()
+        self.assertEqual(
+            self.client.post("/api/archive/backfill", json={"scope": "nope"}).status_code,
+            400,
+        )
+        rv = self.client.post("/api/archive/backfill", json={"scope": "favorites"})
+        self.assertIn(rv.status_code, (200, 503))
+
+    def test_storage_reports_disk_and_caches(self):
+        self._login()
+        body = self.client.get("/api/storage").get_json()
+        self.assertEqual(body["archive_dir"], self.archive)
+        self.assertGreater(body["disk_total"], 0)
+        self.assertIn("cache_bytes", body)
+        self.assertIn("transcode_bytes", body)
+
+    def test_flushing_the_cache_never_touches_the_archive(self):
+        """The one guarantee that matters here: derived files go, archived audio
+        stays. Anything else would silently destroy the library."""
+        track = self._make_deezer_track(sng_id="80", title="Precious", archived=True)
+        self.app.cache.set("some-cover", b"x" * 128)
+        self.assertTrue(self.app.cache.has("some-cover"))
+
+        self._login()
+        rv = self.client.post("/api/cache/flush")
+        self.assertEqual(rv.status_code, 200)
+        self.assertFalse(self.app.cache.has("some-cover"))
+        self.assertTrue(os.path.isfile(track.path))
+
     # -- unavailable tracks & replacement --------------------------------
 
     def test_probe_says_available_for_an_archived_track(self):

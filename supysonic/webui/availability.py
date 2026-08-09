@@ -59,26 +59,14 @@ logger = logging.getLogger(__name__)
 VERDICT_TTL = timedelta(days=7)
 
 
-def mark_unavailable(track) -> None:
-    """Record that this track has no playable source (idempotent, fail-soft)."""
-    if track is None:
-        return
-    try:
-        Track.update(unavailable=now()).where(Track.id == track.id).execute()
-        track.unavailable = now()
-    except Exception:  # a bookkeeping write must never break a request
-        logger.debug("Could not flag track %s unavailable", track.id, exc_info=True)
-
-
-def clear_unavailable(track) -> None:
-    """Undo a verdict — the track played, so it is obviously fine."""
-    if track is None or track.unavailable is None:
-        return
-    try:
-        Track.update(unavailable=None).where(Track.id == track.id).execute()
-        track.unavailable = None
-    except Exception:
-        logger.debug("Could not clear the flag on track %s", track.id, exc_info=True)
+# The primitives live in the DB layer (deezer/library.py), because every path
+# that discovers the answer records it — the live stream, the background
+# archiver, the download queue, the CLI — and none of them may depend on the web
+# layer. Re-exported here so the endpoints below read naturally.
+from ..deezer.library import (  # noqa: E402  isort:skip
+    clear_unavailable,
+    mark_unavailable,
+)
 
 
 def is_stale(track) -> bool:

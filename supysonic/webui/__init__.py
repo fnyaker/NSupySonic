@@ -1924,9 +1924,23 @@ def _channel(c, with_episodes=False):
         "deezer_id": c.deezer_id,
         "title": c.title or "",
         "description": c.description or "",
-        "cover": _image("talk", c.cover_art_md5),
+        # Once the show is gone from Deezer, its picture comes from our own
+        # archive (same-origin) — the CDN URL is not ours to rely on.
+        "cover": (
+            "/api/cover/" + str(c.id)
+            if c.gone is not None
+            else _image("talk", c.cover_art_md5)
+        ),
         "episode_count": c.episodes.count(),
         "status": "error" if c.error_message else "ok",
+        # False for a show you unsubscribed from but whose episodes are
+        # archived: it no longer syncs, and everything downloaded stays yours.
+        "subscribed": bool(c.subscribed),
+        # True once Deezer stopped serving the show entirely. It becomes a LOCAL
+        # podcast: everything archived stays listed and playable, served from
+        # disk, cover included. Nothing about it depends on Deezer any more.
+        "local": c.gone is not None,
+        "archived_count": c.episodes.where(PodcastEpisode.path.is_null(False)).count(),
     }
     if with_episodes:
         info["episodes"] = [
@@ -1946,7 +1960,15 @@ def _episode(e, channel=None):
     it unchanged via ``/api/stream/<uuid>``.
     """
     channel = channel or e.channel
-    cover = _image("talk", e.image_md5 or channel.cover_art_md5)
+    archived = bool(e.path and os.path.isfile(e.path))
+    # A show Deezer has dropped can only serve what we archived; the rest is
+    # gone for good and says so rather than failing on play.
+    gone = channel.gone is not None and not archived
+    cover = (
+        "/api/cover/" + str(channel.id)
+        if channel.gone is not None
+        else _image("talk", e.image_md5 or channel.cover_art_md5)
+    )
     return {
         "deezer_id": str(e.id),
         "podcast": True,
@@ -1955,6 +1977,8 @@ def _episode(e, channel=None):
         "duration": e.duration or 0,
         "published": int(e.publish_date.timestamp()) if e.publish_date else 0,
         "status": e.status,
+        "archived": archived,
+        "unavailable": gone,
         "explicit": False,
         "channel_id": str(channel.id),
         "artist": {"deezer_id": str(channel.id), "name": channel.title or ""},
@@ -1970,6 +1994,9 @@ def _episode(e, channel=None):
 @webapi.route("/podcasts")
 @login_required
 def podcasts():
+    # Unsubscribed-but-archived shows are still listed (flagged `subscribed:
+    # false`): the audio is on the server and must stay reachable — the whole
+    # point of archiving is that leaving Deezer's catalogue changes nothing.
     channels = PodcastChannel.select().order_by(fn.lower(PodcastChannel.title))
     return jsonify({"podcasts": [_channel(c) for c in channels]})
 
@@ -2052,12 +2079,20 @@ def unsubscribe_podcast(pid):
         except Exception:
             logger.debug("show.deleteFavorite failed for %s", c.deezer_id, exc_info=True)
 
-    for e in c.episodes:
-        if e.path and os.path.isfile(e.path):
-            try:
-                os.remove(e.path)
-            except OSError:
-                pass
+    # Unsubscribing stops the subscription — it does NOT destroy what has
+    # already been archived. An episode on disk is yours: it survives Deezer
+    # dropping the show, and it survives this. So a channel with archived audio
+    # is kept and simply marked unsubscribed (it stops syncing and leaves the
+    # subscribed list, while everything downloaded stays playable); only a
+    # channel with nothing on disk is actually removed, since there is nothing
+    # of yours to lose.
+    archived = [
+        e for e in c.episodes if e.path and os.path.isfile(e.path)
+    ]
+    if archived:
+        c.subscribed = False
+        c.save()
+        return jsonify({"ok": True, "kept": len(archived), "archived": True})
     c.delete_instance(recursive=True)
     return ("", 204)
 
@@ -3288,5 +3323,6 @@ def stream(deezer_id):
 # it registers its routes on this blueprint. Must stay at the bottom: it
 # imports helpers defined above.
 from . import availability  # noqa: E402,F401  isort:skip
+from . import storage  # noqa: E402,F401  isort:skip
 from . import share  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip

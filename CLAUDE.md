@@ -192,6 +192,23 @@ packet), so a dead track is skipped at once instead of after four reloads. `/api
 track for another one — same position in every playlist, plus favourites — in a worker thread, and
 mirrors it to Deezer for the admin's own playlists.
 
+**Archive completeness** (`supysonic/deezer/backfill.py`, `supysonic/webui/storage.py`): audio is
+archived on first play, which would leave everything you *haven't* played hostage to Deezer — so the
+nightly sync then sweeps favourites, playlists and subscribed podcasts and archives whatever has no
+file yet (`[deezer] archive_library`, default on), and Réglages → Compte has the same sweep as a
+button with live progress. It **only ever adds**. `/api/storage` reports archive size, free disk and
+the two derived caches; `/api/cache/flush` empties those caches (expiring the protection first, or
+the button would silently do nothing) and cannot touch `archive_dir`.
+
+**Nothing deletes an archive.** Unsubscribing from a podcast keeps every archived episode: the
+channel is flagged `subscribed = False` instead of being deleted (only a show with nothing on disk is
+removed), and Subsonic's `deletePodcastEpisode` reports success without touching the file. Same rule
+for tracks: the importer keeps archived tracks Deezer stopped returning. And when a WHOLE show leaves
+Deezer, `provider.get_show_page` raises `ShowUnavailable` (Deezer answering, never a network error),
+the sync sets `PodcastChannel.gone` and the channel becomes a **local podcast**: episodes, art
+(`library.save_show_cover` archives a `cover.jpg` beside the audio) and playback all come off disk,
+and the sync stops asking about it until the verdict ages out (`importer.GONE_RECHECK`, 7 days).
+
 **Web app** (`webapp/`): Svelte 4 + Vite 5 SPA, hash routing (svelte-spa-router), consuming `/api`.
 Builds into `supysonic/webui/dist`. No emoji in the UI — all glyphs go through
 `src/components/Icon.svelte` (Lucide-style SVG). Home is **card-based** (mixes / recommended
@@ -228,7 +245,7 @@ API (download fallback). Podcast markers live in `lib/markers.js`.
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260806`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260807`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported.
 

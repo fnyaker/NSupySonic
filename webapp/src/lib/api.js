@@ -308,6 +308,15 @@ export const api = {
   // instead of reading the cached verdict (admin only, server-side).
   deezerStatus: (force = false) => req("/deezer/status" + (force ? "?force=1" : "")),
 
+  // Archive everything of mine that isn't on disk yet (favorites, playlists,
+  // podcasts). Adds only — it can never delete an archived file.
+  archiveBackfill: (scope = "all") =>
+    req("/archive/backfill", { method: "POST", body: body({ scope }) }),
+  archiveStatus: () => req("/archive/status"),
+  // Admin: what the archive costs and what's left of the disk.
+  storage: () => req("/storage"),
+  flushCache: () => req("/cache/flush", { method: "POST" }),
+
   // Availability & replacement. `probe` answers the question the <audio>
   // element can't: is this track dead, or was that just a bad moment?
   probeTrack: (id) => req("/track/" + id + "/probe"),

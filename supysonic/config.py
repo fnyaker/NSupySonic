@@ -112,6 +112,12 @@ class DefaultConfig:
         # Auto-sync: on by default once a sync_user is set. Daily at sync_at
         # (default 04:00) unless sync_interval (minutes) is set, plus a run on
         # startup. The web app drives this; no cron/manual step needed.
+        # After each sync, archive anything in the favorites / playlists /
+        # subscribed podcasts that has no file yet, so the library survives
+        # Deezer removing a track (or being unreachable). Adds only — it never
+        # deletes an archived file. Off means audio is fetched on first play
+        # only, as before.
+        "archive_library": True,
         "sync_on_start": True,
         "sync_at": "04:00",  # daily auto-sync time "HH:MM"
         "sync_interval": 0,  # minutes; >0 overrides sync_at
