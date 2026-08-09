@@ -95,9 +95,15 @@ class MockGW:
 
     def get_artist_discography_tabs(self, art_id, limit=100):
         return {
+            # "10" appears twice: gw does that (album + deluxe entry), and the
+            # archiver must not walk it twice.
             "all": [
                 {"id": "10", "title": "Bar", "md5_image": "cp",
-                 "release_date": "2020-01-01", "record_type": "album", "nb_song": 12}
+                 "release_date": "2020-01-01", "record_type": "album", "nb_song": 12},
+                {"id": "11", "title": "Baz", "md5_image": "cp",
+                 "release_date": "2021-01-01", "record_type": "single", "nb_song": 2},
+                {"id": "10", "title": "Bar", "md5_image": "cp",
+                 "release_date": "2020-01-01", "record_type": "album", "nb_song": 12},
             ],
             "album": [
                 {"id": "10", "title": "Bar", "md5_image": "cp",
@@ -1695,14 +1701,66 @@ class WebUITestCase(unittest.TestCase):
         thread.join(timeout=5)
         self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"])
 
-    def test_favoriting_an_artist_archives_nothing(self):
-        """A discography is not a finite set of tracks someone asked to keep."""
+    def test_favoriting_an_artist_archives_the_whole_discography(self):
+        """Every track of every official release — and each one only once, even
+        though gw lists the same record under several tabs/editions."""
         from supysonic.deezer import backfill
 
-        self.assertIsNone(
-            backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
-        )
-        self.assertEqual(self.app.deezer_prefetch.ids, [])
+        thread = backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
+        thread.join(timeout=5)
+        # Albums 10 and 11 (10 listed twice), 5 tracks each, same ids: one pass.
+        self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"])
+
+    def test_an_unreadable_release_does_not_abort_the_discography(self):
+        from supysonic.deezer import backfill
+
+        real = self.app.deezer.get_album_tracks
+
+        def flaky(alb_id):
+            if str(alb_id) == "10":
+                raise RuntimeError("gw hiccup")
+            return real(alb_id)
+
+        self.app.deezer.get_album_tracks = flaky
+        thread = backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
+        thread.join(timeout=5)
+        # Album 11 still got archived.
+        self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"])
+
+    def test_a_full_queue_is_waited_out_not_dropped(self):
+        """The queue holds a few thousand entries and a discography can be
+        larger. The overflow must wait for room, never vanish."""
+        from supysonic.deezer import backfill
+
+        accepted = []
+        room = [2]  # the queue takes 2 ids, then 2 more, …
+
+        def picky(ids):
+            ids = list(ids)[: room[0]]
+            accepted.extend(ids)
+            return len(ids)
+
+        self.app.deezer_prefetch.download_ids = picky
+        original_delay = backfill.QUEUE_RETRY_DELAY
+        backfill.QUEUE_RETRY_DELAY = 0
+        try:
+            n = backfill._queue_all(self.app, ["1", "2", "3", "4", "5"], "test")
+        finally:
+            backfill.QUEUE_RETRY_DELAY = original_delay
+        self.assertEqual(n, 5)
+        self.assertEqual(accepted, ["1", "2", "3", "4", "5"])
+
+    def test_a_full_queue_stops_waiting_when_archiving_is_turned_off(self):
+        """Otherwise the feeder thread would spin forever on a switch its owner
+        has already flipped."""
+        from supysonic.deezer import backfill
+
+        self.app.deezer_prefetch.download_ids = lambda ids: 0
+        self.app.config["DEEZER"]["archive_library"] = False
+        try:
+            self.assertEqual(backfill._queue_all(self.app, ["1", "2"], "test"), 0)
+        finally:
+            self.app.config["DEEZER"]["archive_library"] = True
 
     def test_the_favorite_endpoint_triggers_the_entity_archive(self):
         from supysonic.deezer import backfill
@@ -1714,11 +1772,14 @@ class WebUITestCase(unittest.TestCase):
             self._login()
             self.client.post("/api/favorite/album", json={"deezer_id": "10", "on": True})
             self.client.post("/api/favorite/playlist", json={"deezer_id": "7", "on": True})
+            self.client.post("/api/favorite/artist", json={"deezer_id": "9", "on": True})
             # …and unfavoriting must not queue a download.
             self.client.post("/api/favorite/album", json={"deezer_id": "10", "on": False})
         finally:
             backfill.archive_entity = original
-        self.assertEqual(calls, [("album", "10"), ("playlist", "7")])
+        self.assertEqual(
+            calls, [("album", "10"), ("playlist", "7"), ("artist", "9")]
+        )
 
     def test_archiving_can_be_turned_off_entirely(self):
         """`archive_library = no` must silence the events too, not just the

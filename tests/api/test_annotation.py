@@ -74,6 +74,28 @@ class AnnotationTestCase(ApiTestBase):
         self._make_request("unstar", {"id": str(self.trackid)}, skip_post=True)
         self.assertEqual(queued, [])
 
+    def test_starring_an_artist_archives_its_discography(self):
+        """Same promise as the web app: a favourited artist means the whole
+        catalogue lands on disk, listed through the Deezer provider."""
+        from supysonic.deezer import backfill
+
+        calls = []
+        original = backfill.archive_entity
+        backfill.archive_entity = lambda app, prov, kind, did: calls.append((kind, did))
+        try:
+            artist = Artist[self.artistid]
+            artist.deezer_id = "27"
+            artist.save()
+            self._make_request(
+                "star", {"artistId": str(self.artistid)}, skip_post=True
+            )
+            self._make_request(
+                "unstar", {"artistId": str(self.artistid)}, skip_post=True
+            )
+        finally:
+            backfill.archive_entity = original
+        self.assertEqual(calls, [("artist", "27")])
+
     def test_star(self):
         self._make_request("star", error=10)
         self._make_request("star", {"id": "unknown"}, error=0)

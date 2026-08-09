@@ -9,8 +9,8 @@ Two halves, and the order matters.
 
 **Events** (``archive_now`` / ``archive_tracks`` / ``archive_entity`` /
 ``archive_show``) are the normal path: the moment something becomes yours — you
-star a track, you favorite an album or a playlist, you add tracks to a playlist,
-you subscribe to a show — its audio is queued for archiving right then. Playing
+star a track, you favorite an album, a playlist or an artist, you add tracks to a
+playlist, you subscribe to a show — its audio is queued for archiving. Playing
 something already archives it (the stream is teed to disk), so between the two,
 the archive keeps itself current with no clock involved. There is deliberately
 NO polling loop: the app knows the instant it happens, so asking again on a
@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os.path
 import threading
+import time
 
 from ..db import (
     Playlist,
@@ -168,10 +169,10 @@ def is_sweeping() -> bool:
 
 # -- event-driven archiving -------------------------------------------------
 # The sweep is the safety net; THIS is the normal path. Whenever something
-# enters your library — you star a track, you favourite a playlist or an album,
-# you add tracks to a playlist, you subscribe to a show — its audio is queued for
-# archiving right then. No polling: the app already knows the moment it happens,
-# so asking again later would be work for nothing.
+# enters your library — you star a track, you favourite a playlist, an album or
+# an artist, you add tracks to a playlist, you subscribe to a show — its audio is
+# queued for archiving right then. No polling: the app already knows the moment
+# it happens, so asking again later would be work for nothing.
 #
 # Everything goes through the existing background download queue (bounded, with
 # its own worker pool), and every call is fail-soft: archiving is a consequence
@@ -226,31 +227,123 @@ def archive_tracks(app, tracks) -> int:
     return archive_now(app, deezer_ids=ids)
 
 
-def archive_entity(app, provider, kind: str, deezer_id):
-    """Archive everything a favourited album / playlist contains.
+ENTITY_KINDS = ("album", "playlist", "artist")
 
-    Runs in a worker thread: listing an album or a playlist is a Deezer call, and
-    starring something must stay instant. An ARTIST is deliberately not covered —
-    favouriting one doesn't add a finite set of tracks to your library, it would
-    mean downloading a discography nobody asked for.
+# How long a feeder thread waits before offering the overflow again.
+QUEUE_RETRY_DELAY = 30
+
+
+def _song_ids(raw) -> list:
+    """Deduplicated ``SNG_ID``s out of a gw tracklist."""
+    out, seen = [], set()
+    for t in raw or ():
+        sid = str((t or {}).get("SNG_ID") or "")
+        if sid and sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
+
+
+def _queue_all(app, deezer_ids, label: str) -> int:
+    """Feed ids into the download queue, waiting for room instead of dropping.
+
+    The queue is bounded — every entry is a full FLAC — and a discography can be
+    several thousand tracks, far more than it holds. Silently dropping the
+    overflow would leave the archive incomplete with nothing to notice it, so
+    this feeder simply waits for the workers to drain some and offers the rest.
+
+    It runs in a daemon thread, so a restart just abandons the tail; the nightly
+    sweep is what catches up on anything still missing.
+    """
+    pending = list(deezer_ids)
+    queued = 0
+    while pending:
+        if getattr(app, "deezer_prefetch", None) is None or not archiving_enabled(app):
+            break
+        n = archive_now(app, deezer_ids=pending)
+        queued += n
+        pending = pending[n:]
+        if pending:
+            logger.info(
+                "Archive queue full; %d track(s) of %s still waiting",
+                len(pending),
+                label,
+            )
+            time.sleep(QUEUE_RETRY_DELAY)
+    return queued
+
+
+def _archive_discography(app, provider, artist_id) -> int:
+    """Every track of every official release of an artist.
+
+    Deezer's ``all`` tab is albums + singles + EPs + "more", already deduplicated
+    and without the guest appearances that belong to somebody else's record. The
+    releases are fed album by album so the first one starts downloading while the
+    rest of the discography is still being listed.
+    """
+    tabs = provider.get_artist_discography(artist_id) or {}
+    album_ids, seen = [], set()
+    for release in tabs.get("all") or []:
+        aid = str((release or {}).get("id") or "")
+        if aid and aid not in seen:
+            seen.add(aid)
+            album_ids.append(aid)
+
+    total = 0
+    queued_tracks = set()
+    for aid in album_ids:
+        try:
+            ids = _song_ids(provider.get_album_tracks(aid))
+        except Exception as exc:  # one unreadable release must not stop the rest
+            logger.info("Discography %s: album %s unreadable (%s)", artist_id, aid, exc)
+            continue
+        # The same recording turns up on the album, the single and the deluxe
+        # edition. Queueing it three times would cost three queue slots for one
+        # file (ensure_archived would then no-op twice).
+        ids = [i for i in ids if i not in queued_tracks]
+        queued_tracks.update(ids)
+        total += _queue_all(app, ids, f"artist {artist_id}")
+    logger.info(
+        "Archiving %d track(s) from %d release(s) of favourited artist %s",
+        total,
+        len(album_ids),
+        artist_id,
+    )
+    return total
+
+
+def archive_entity(app, provider, kind: str, deezer_id):
+    """Archive everything a favourited album / playlist / artist contains.
+
+    Runs in a worker thread: listing any of them is one or more Deezer calls, and
+    favouriting something must stay instant. An artist means the whole
+    discography — that is the point of favouriting one — so it is fed release by
+    release rather than in one burst.
 
     Returns the thread (or ``None`` when there is nothing to do).
     """
-    if kind not in ("album", "playlist") or not deezer_id:
+    if kind not in ENTITY_KINDS or not deezer_id:
         return None
     if provider is None or not archiving_enabled(app):
+        return None
+    if getattr(app, "deezer_prefetch", None) is None:
         return None
 
     def work():
         try:
+            if kind == "artist":
+                _archive_discography(app, provider, deezer_id)
+                return
             if kind == "album":
                 raw = provider.get_album_tracks(deezer_id)
             else:
                 raw = provider.get_playlist_tracks(deezer_id)
-            ids = [str(t.get("SNG_ID")) for t in (raw or []) if t.get("SNG_ID")]
+            ids = _song_ids(raw)
             if ids:
-                n = archive_now(app, deezer_ids=ids)
-                logger.info("Archiving %d track(s) from favourited %s %s", n, kind, deezer_id)
+                n = _queue_all(app, ids, f"{kind} {deezer_id}")
+                logger.info(
+                    "Archiving %d track(s) from favourited %s %s", n, kind, deezer_id
+                )
         except Exception as exc:
             logger.info("Could not archive %s %s: %s", kind, deezer_id, exc)
 

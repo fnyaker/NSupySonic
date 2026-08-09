@@ -2440,9 +2440,9 @@ def favorite_entity(kind):
         logger.warning("Deezer %s favorite toggle failed: %s", kind, exc)
         return jsonify({"error": "deezer rejected the request"}), 502
     if on:
-        # A favourited album or playlist is now yours: archive everything it
-        # holds, in the background. An ARTIST is left out on purpose — it isn't a
-        # finite set of tracks, it's a discography.
+        # A favourited album, playlist or artist is now yours: archive everything
+        # it holds, in the background. For an artist that means the FULL
+        # discography, fed release by release (see backfill.archive_entity).
         from ..deezer import backfill
 
         backfill.archive_entity(

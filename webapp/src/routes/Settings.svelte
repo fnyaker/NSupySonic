@@ -168,9 +168,9 @@
   }
   // -- keeping the archive complete -----------------------------------------
   // Archiving is event-driven server-side: playing, starring, favoriting an
-  // album/playlist or subscribing to a show queues the audio right then. This
-  // button is the safety net that sweeps up whatever those events missed. It
-  // only ever adds.
+  // album/playlist/artist or subscribing to a show queues the audio right then.
+  // This button is the safety net that sweeps up whatever those events missed.
+  // It only ever adds.
   let job = null;
   let jobPolling = false;
   $: jobPct = job?.total ? Math.min(100, (job.done / job.total) * 100) : 0;
@@ -465,9 +465,10 @@
     son catalogue, ou si Deezer est injoignable. L'archivage est
     <strong>automatique</strong>&nbsp;: dès que quelque chose entre dans votre
     bibliothèque — vous écoutez un titre, vous l'ajoutez aux favoris, vous mettez
-    un album ou une playlist en favori, vous vous abonnez à un podcast — l'audio
-    part en téléchargement. Ce bouton est le filet de sécurité, pour rattraper
-    d'un coup ce qui manquerait encore.
+    un album, une playlist ou un artiste en favori (un artiste&nbsp;: toute sa
+    discographie), vous vous abonnez à un podcast — l'audio part en
+    téléchargement. Ce bouton est le filet de sécurité, pour rattraper d'un coup
+    ce qui manquerait encore.
     <strong>Rien n'est jamais supprimé de l'archive</strong>, et relancer ne
     re-télécharge pas ce qui est déjà là.
   </p>

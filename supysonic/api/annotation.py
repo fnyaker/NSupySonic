@@ -36,9 +36,9 @@ def _deezer_favorite(cls, entity, add):
 def _archive_starred(cls, entity):
     """Starring from a Subsonic client archives the same thing the web app does.
 
-    The rows are already local here, so an album costs one query instead of a
-    Deezer call. An Artist is deliberately not covered — that's a discography,
-    not a finite set of tracks someone asked to keep.
+    A Track and an Album are already local rows, so they cost one query instead
+    of a Deezer call. An Artist means the whole discography, which only Deezer
+    can list — that goes to the same worker the web app uses.
     """
     from ..deezer import backfill
 
@@ -48,6 +48,10 @@ def _archive_starred(cls, entity):
             backfill.archive_tracks(app, [entity])
         elif cls is Album:
             backfill.archive_tracks(app, entity.tracks)
+        elif cls is Artist and getattr(entity, "deezer_id", None):
+            backfill.archive_entity(
+                app, getattr(current_app, "deezer", None), "artist", entity.deezer_id
+            )
     except Exception:  # archiving is a consequence of starring, never a condition
         pass
 

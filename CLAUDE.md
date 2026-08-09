@@ -199,9 +199,11 @@ mirrors it to Deezer for the admin's own playlists.
   it if the client disconnects; the Opus path and `api/media.py::_ensure_deezer_archived` call
   `ensure_archived` outright; podcast episodes archive on first play too);
 - *starring a track* (`/api/favorite`, and Subsonic's `star` via `annotation._archive_starred`);
-- *favouriting an album or a playlist* (`/api/favorite/<kind>` → `backfill.archive_entity`, which
-  fetches the FULL tracklist in a worker thread). An **artist is deliberately excluded** — that's a
-  discography, not a finite set;
+- *favouriting an album, a playlist or an artist* (`/api/favorite/<kind>` and Subsonic's `star` →
+  `backfill.archive_entity`, in a worker thread, always the FULL tracklist — never the ~10-track
+  page). An **artist means the whole discography**: `_archive_discography` walks Deezer's `all` tab
+  (official releases + "more", not the guest appearances), fed release by release so the first album
+  downloads while the rest is still being listed, and deduplicated across editions;
 - *adding tracks to a playlist* or creating one (`/api/playlists`, `/api/playlist/<id>/tracks`, and
   Subsonic's `createPlaylist`/`updatePlaylist`);
 - *subscribing to a show* (`/api/podcasts` POST → `backfill.archive_show`, every episode).
@@ -209,8 +211,10 @@ mirrors it to Deezer for the admin's own playlists.
 Everything goes through the bounded background download queue (`prefetch.download_ids` /
 `download_episode_ids`) and is fail-soft: archiving is a *consequence* of the action, never a
 condition for it. Rows already on disk are filtered out first, so re-starring a big library costs
-nothing. **Do not add a periodic archive loop** — the app knows the instant it happens, so re-asking
-on a timer is work for nothing.
+nothing. A discography is bigger than the queue, so `backfill._queue_all` waits for room
+(`QUEUE_RETRY_DELAY`) instead of dropping the overflow — it gives up only if `archive_library` is
+switched off under it. **Do not add a periodic archive loop** — the app knows the instant it
+happens, so re-asking on a timer is work for nothing.
 
 The nightly sync then runs `sweep_for` as the *safety net* for what events can't see (a Deezer-side
 change we only learn about at sync time, a download that failed while the server was down), and
