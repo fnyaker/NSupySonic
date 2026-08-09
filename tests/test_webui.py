@@ -916,6 +916,87 @@ class WebUITestCase(unittest.TestCase):
         self.assertIsNone(StarredTrack.get_or_none(StarredTrack.starred == dead.id))
         self.assertIsNotNone(StarredTrack.get_or_none(StarredTrack.starred == alive.id))
 
+    def test_a_replaced_dead_track_leaves_the_unavailable_list(self):
+        """The bug: replacing fixed the playlists but left the corpse in the
+        database, still flagged — so it sat in "Titres indisponibles" for ever,
+        with nothing left to replace. The user did the work and the app kept
+        asking."""
+        from supysonic.db import Playlist, PlaylistTrack, Track
+
+        dead = self._make_deezer_track(sng_id="52", title="Dead Two", archived=False)
+        alive = self._make_deezer_track(sng_id="53", title="Live Two", archived=True)
+        Track.update(unavailable=now()).where(Track.id == dead.id).execute()
+        user = User.get(User.name == "alice")
+        pl = Playlist.create(user=user, name="Mix")
+        PlaylistTrack.create(playlist=pl, track=dead, index=0)
+
+        self._login()
+        self.assertIn("Dead Two", [
+            t["title"] for t in self.client.get("/api/unavailable").get_json()["tracks"]
+        ])
+
+        job = self.client.post(
+            "/api/replace", json={"from": "52", "to": "53"}
+        ).get_json()["job"]
+        self.assertTrue(self._await_job(job)["ok"])
+
+        self.assertNotIn("Dead Two", [
+            t["title"] for t in self.client.get("/api/unavailable").get_json()["tracks"]
+        ])
+        self.assertIsNone(Track.get_or_none(Track.id == dead.id))
+        self.assertIsNotNone(Track.get_or_none(Track.id == alive.id))
+
+    def test_replacing_a_live_track_keeps_it(self):
+        """/api/replace takes ANY source, not only dead ones. Swapping a track
+        you simply prefer differently must not delete the original."""
+        from supysonic.db import Playlist, PlaylistTrack, Track
+
+        old = self._make_deezer_track(sng_id="54", title="Fine One", archived=True)
+        new = self._make_deezer_track(sng_id="55", title="Other One", archived=True)
+        user = User.get(User.name == "alice")
+        pl = Playlist.create(user=user, name="Mix")
+        PlaylistTrack.create(playlist=pl, track=old, index=0)
+
+        self._login()
+        job = self.client.post(
+            "/api/replace", json={"from": "54", "to": "55"}
+        ).get_json()["job"]
+        self.assertTrue(self._await_job(job)["ok"])
+        self.assertIsNotNone(Track.get_or_none(Track.id == old.id))
+
+    def test_a_dead_track_someone_else_still_uses_is_kept(self):
+        """A guest's replacement only rewrites their own lists. Dropping the row
+        would empty a playlist belonging to somebody who never asked."""
+        from supysonic.db import Playlist, PlaylistTrack, Track
+
+        dead = self._make_deezer_track(sng_id="56", title="Shared Dead", archived=False)
+        alive = self._make_deezer_track(sng_id="57", title="Stand In", archived=True)
+        Track.update(unavailable=now()).where(Track.id == dead.id).execute()
+        alice = User.get(User.name == "alice")
+        UserManager.add("bob", "B0b")
+        bob = User.get(User.name == "bob")
+        mine = Playlist.create(user=bob, name="Bob's")
+        theirs = Playlist.create(user=alice, name="Alice's")
+        PlaylistTrack.create(playlist=mine, track=dead, index=0)
+        PlaylistTrack.create(playlist=theirs, track=dead, index=0)
+
+        self.client.post("/api/login", json={"username": "bob", "password": "B0b"})
+        job = self.client.post(
+            "/api/replace", json={"from": "56", "to": "57"}
+        ).get_json()["job"]
+        self.assertTrue(self._await_job(job)["ok"])
+
+        self.assertIsNotNone(Track.get_or_none(Track.id == dead.id))
+        # Bob's list was fixed; Alice's was left alone.
+        self.assertEqual(
+            [r.track_id for r in PlaylistTrack.select().where(PlaylistTrack.playlist == mine.id)],
+            [alive.id],
+        )
+        self.assertEqual(
+            [r.track_id for r in PlaylistTrack.select().where(PlaylistTrack.playlist == theirs.id)],
+            [dead.id],
+        )
+
     # -- deleting an unavailable track ------------------------------------
     # "Unavailable" means neither Deezer nor the disk has it. Every one of these
     # is about the server REFUSING to delete something that still exists

@@ -14,6 +14,7 @@
     closeReplace,
     toasts,
     clearUnavailable,
+    unavailableChanged,
     quality,
     normalization,
   } from "../lib/stores.js";
@@ -142,6 +143,9 @@
       }
       if (s.running) continue;
       if (s.ok) {
+        // Only NOW is the database actually in its new state — the swap runs in
+        // a worker thread. Anything showing the unavailable list re-reads it.
+        unavailableChanged();
         const bits = [];
         if (s.playlists) bits.push(`${s.playlists} playlist${s.playlists > 1 ? "s" : ""}`);
         if (s.favorites) bits.push("favoris");

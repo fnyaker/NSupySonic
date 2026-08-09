@@ -418,6 +418,7 @@ def _run_replace(app, job_id, source_id, target_id, user_id, admin):
                     favorites += 1
 
             _mirror_to_deezer(app, source, target, touched, admin)
+            _retire_replaced(source)
             _finish_job(job_id, ok=True, playlists=playlists, favorites=favorites)
     except Exception as exc:
         logger.warning("Replacing %s failed", source_id, exc_info=True)
@@ -606,6 +607,41 @@ def _purge_on_deezer(app, deezer_id, playlist_deezer_ids, admin):
         provider.invalidate_favorites_cache()
     except Exception:
         logger.info("Deezer unstar of %s failed", deezer_id, exc_info=True)
+
+
+def _retire_replaced(source) -> bool:
+    """Drop a dead track once nothing points at it any more.
+
+    Without this, replacing a track fixed the playlists but left the corpse in
+    the database — still flagged, so still listed under "Titres indisponibles"
+    for ever, with nothing left to replace. The user did the work and the app
+    kept asking.
+
+    Deliberately narrow, because ``/api/replace`` accepts ANY source, not only
+    dead ones: the row goes only when it is flagged unavailable, has no file on
+    disk, and is referenced by no playlist and no favourite — anyone's. A
+    non-admin's replacement rewrites only their own lists, so a track someone
+    else still uses fails the reference check and stays, which is the point.
+    """
+    import os.path
+
+    if source.unavailable is None:
+        return False
+    if source.path and os.path.isfile(source.path):
+        # Archived after all: it plays, so it is not dead and not ours to drop.
+        clear_unavailable(source)
+        return False
+    if PlaylistTrack.select().where(PlaylistTrack.track == source.id).exists():
+        return False
+    if StarredTrack.select().where(StarredTrack.starred == source.id).exists():
+        return False
+    try:
+        source.delete_instance(recursive=True)
+    except Exception:
+        logger.info("Could not retire the replaced track %s", source.id, exc_info=True)
+        return False
+    logger.info("Retired replaced track %s (nothing referenced it)", source.deezer_id)
+    return True
 
 
 def _mirror_to_deezer(app, source, target, playlist_ids, admin):
