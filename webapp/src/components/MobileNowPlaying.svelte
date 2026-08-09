@@ -63,12 +63,25 @@
   }
   function onVisibility() {
     document.hidden ? stopViz() : startViz();
+    if (document.hidden) {
+      // Belt and braces for the same class of bug as onTouchCancel: not every
+      // WebView build delivers a touchcancel when the app is sent to the
+      // background mid-gesture. Drop the gesture here too, so coming back can
+      // never show a sheet frozen where the finger left it.
+      if (dragging || dragArmed) resetDrag();
+      if (covActive || covDragging) {
+        covActive = false;
+        covAxis = null;
+        covDragging = false;
+        recentering = false;
+        setSnap(true);
+      }
+      return;
+    }
     // Returning to the foreground re-runs layout; put the strip back on the
     // current cover ourselves rather than letting a drifted scroll be measured.
-    if (!document.hidden) {
-      gestured = false;
-      tick().then(centerCurrent);
-    }
+    gestured = false;
+    tick().then(centerCurrent);
   }
   onMount(() => {
     startViz();
@@ -155,6 +168,23 @@
     dragY = 0; // snap back
     return false;
   }
+  // A touch does NOT always end with `touchend`. Android cancels the whole
+  // stream when its own navigation gesture wins (swipe up for home/recents),
+  // when the notification shade is pulled, on an incoming call, and when the app
+  // is sent to the background mid-gesture. Without handling that, the sheet
+  // stayed exactly where the finger left it: translated down, `.dragging`
+  // holding `transition: none`, and — because a later touch that lands on the
+  // carousel or a slider disarms without ever ending the drag — nothing ever put
+  // it back. You come back to the app and the player is stuck offset and
+  // unresponsive. That is the "l'app est comme plantée" report.
+  //
+  // A cancel is never a decision: it snaps back, it never dismisses.
+  function resetDrag() {
+    dragArmed = false;
+    dragAxis = null;
+    dragging = false;
+    dragY = 0;
+  }
 
   function onTouchStart(e) {
     if (e.touches.length !== 1 || showQueue) {
@@ -188,6 +218,9 @@
     dragArmed = false;
     dragAxis = null;
     dismissEnd();
+  }
+  function onTouchCancel() {
+    resetDrag();
   }
 
   function go(p) {
@@ -417,6 +450,24 @@
     }
     glideTo(elCenterLeft(el));
   }
+  // Same story on the carousel, which DID listen for touchcancel — but routed it
+  // to onCoverEnd, i.e. it let a cancelled gesture decide. Reaching for the home
+  // gesture while half-way to the next cover could jump a track, and a cancelled
+  // vertical drag past the threshold dismissed the player outright. A cancel
+  // commits to nothing: put the strip back on the current cover and the sheet
+  // back where it was.
+  function onCoverCancel() {
+    if (!covActive) {
+      // Still clear a vertical drag the carousel may have started before the
+      // gesture was taken away from us.
+      if (dragging) resetDrag();
+      return;
+    }
+    covActive = false;
+    covAxis = null;
+    resetDrag();
+    settleCover();
+  }
   function onCoverEnd() {
     if (!covActive) return;
     covActive = false;
@@ -618,6 +669,7 @@
   on:touchstart|passive={onTouchStart}
   on:touchmove={onTouchMove}
   on:touchend={onTouchEnd}
+  on:touchcancel={onTouchCancel}
   transition:fade={{ duration: 140 }}
 >
   {#each $bg as layer (layer.id)}
@@ -648,7 +700,7 @@
       on:touchstart|passive={onCoverStart}
       on:touchmove|passive={onCoverMove}
       on:touchend={onCoverEnd}
-      on:touchcancel={onCoverEnd}
+      on:touchcancel={onCoverCancel}
     >
       {#each slots as s (s.key)}
         <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} kind={s.track.podcast ? "podcast" : "album"} fallbackId={s.track.deezer_id} eager /></div>

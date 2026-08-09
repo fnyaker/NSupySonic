@@ -153,9 +153,23 @@ export const offlineCovers = writable({});
 // managed — evicted oldest-first once over the cap.
 export const playCacheLimit = persisted("cache.limit", 1024 * 1024 * 1024); // 1 GB
 export const playCacheSize = writable(0);
-// Whether to prefetch the next track into the cache during playback. On by
+// Whether to prefetch upcoming tracks into the cache during playback. On by
 // default (resilience); can be turned off to save mobile data.
 export const prefetchEnabled = persisted("cache.prefetch", true);
+// How many upcoming tracks to keep ahead in that cache (1..10). One is enough to
+// ride out a network drop; a bigger buffer is what carries you through a tunnel,
+// a plane, or a dead cell — at the cost of data and disk. Clamped on read so a
+// hand-edited localStorage value can't ask for a thousand.
+export const PREFETCH_MAX = 10;
+export const prefetchCount = persisted("cache.prefetchCount", 1);
+export function setPrefetchCount(n) {
+  const v = Math.round(Number(n));
+  prefetchCount.set(Number.isFinite(v) ? Math.max(1, Math.min(PREFETCH_MAX, v)) : 1);
+}
+export function prefetchAhead() {
+  const v = Math.round(Number(get(prefetchCount)));
+  return Number.isFinite(v) ? Math.max(1, Math.min(PREFETCH_MAX, v)) : 1;
+}
 
 // When offline, only queue tracks that are actually available on the device
 // (downloaded / local) instead of trying — and skipping through — unplayable

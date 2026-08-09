@@ -9,6 +9,9 @@
     playCacheLimit,
     playCacheSize,
     prefetchEnabled,
+    prefetchCount,
+    setPrefetchCount,
+    PREFETCH_MAX,
     offlineOnlyDownloaded,
     toasts,
   } from "../lib/stores.js";
@@ -30,6 +33,10 @@
     { id: "OPUS_128", label: "Opus 128", hint: "Standard, léger" },
     { id: "OPUS_64", label: "Opus 64", hint: "Données réduites" },
   ];
+  // How many upcoming tracks to keep buffered ahead. Discrete steps rather than
+  // a slider: it's a small integer people pick once, and 1..10 taps are easier
+  // to hit accurately than a 10-stop slider on a phone.
+  const AHEAD_STEPS = Array.from({ length: PREFETCH_MAX }, (_, i) => i + 1);
   // Size caps for the playback cache (the prefetch buffer, not downloads).
   const CACHE_LIMITS = [
     { v: 256 * 1024 ** 2, label: "256 Mo" },
@@ -254,15 +261,39 @@
       <button class="wipe" on:click={wipeCache}><Icon name="trash" size={16} /> Vider</button>
     {/if}
   </div>
-  <p class="muted sub">Pendant la lecture, le titre suivant est préchargé ici (audio + pochette). La lecture est vérifiée d'abord en local, donc une coupure réseau ne l'interrompt pas. C'est un cache : les plus anciens sont supprimés automatiquement au-delà de la limite.</p>
+  <p class="muted sub">Pendant la lecture, les titres à venir sont préchargés ici (audio + pochette). La lecture est vérifiée d'abord en local, donc une coupure réseau ne l'interrompt pas. C'est un cache : les plus anciens sont supprimés automatiquement au-delà de la limite.</p>
 
   <button class="toggle" role="switch" aria-checked={$prefetchEnabled} on:click={() => prefetchEnabled.set(!$prefetchEnabled)}>
     <span class="tg-txt">
-      <span class="tg-title">Précharger le titre suivant</span>
+      <span class="tg-title">Précharger les titres suivants</span>
       <span class="tg-hint muted">Désactivez pour économiser les données mobiles.</span>
     </span>
     <span class="sw" class:on={$prefetchEnabled}><span class="knob"></span></span>
   </button>
+
+  {#if $prefetchEnabled}
+    <div class="ahead">
+      <div class="ahead-head">
+        <span class="tg-title">Titres préchargés d'avance</span>
+        <span class="ahead-val">{$prefetchCount}</span>
+      </div>
+      <p class="tg-hint muted">
+        Ils sont téléchargés un par un, du plus proche au plus lointain, sans jamais
+        prendre la bande passante du titre en cours. Plus la réserve est grande, plus
+        vous traversez un tunnel ou une zone morte sans coupure — au prix de données
+        et d'espace ({fmtBytes($playCacheLimit)} au maximum, éviction automatique).
+      </p>
+      <div class="steps" role="group" aria-label="Nombre de titres préchargés">
+        {#each AHEAD_STEPS as n}
+          <button
+            class="step"
+            class:sel={$prefetchCount === n}
+            aria-pressed={$prefetchCount === n}
+            on:click={() => setPrefetchCount(n)}>{n}</button>
+        {/each}
+      </div>
+    </div>
+  {/if}
 
   <div class="gauge">
     <div class="bar"><span style={`width:${cachePct}%`} class:warn={cachePct > 90}></span></div>
@@ -532,6 +563,56 @@
     font-size: 0.85rem;
     margin: 4px 0 14px;
   }
+  /* -- prefetch depth --------------------------------------------------- */
+  .ahead {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--bg-hover);
+  }
+  .ahead-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .ahead-val {
+    font-size: 1.4rem;
+    font-weight: 800;
+    line-height: 1;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .ahead .tg-hint {
+    display: block;
+    margin: 6px 0 12px;
+  }
+  .steps {
+    display: grid;
+    /* Ten targets that stay comfortably tappable: they wrap to two rows on a
+       narrow phone rather than shrinking into a row of slivers. */
+    grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
+    gap: 8px;
+  }
+  .step {
+    padding: 11px 0;
+    border-radius: 10px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg);
+    font-weight: 700;
+    font-size: 0.95rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+  }
+  .step:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .step.sel {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+    color: var(--text);
+  }
+
   /* -- Deezer credential ---------------------------------------------- */
   .arl-state {
     display: flex;
