@@ -418,6 +418,7 @@ def _run_replace(app, job_id, source_id, target_id, user_id, admin):
                     favorites += 1
 
             _mirror_to_deezer(app, source, target, touched, admin)
+            _retire_replaced(source)
             _finish_job(job_id, ok=True, playlists=playlists, favorites=favorites)
     except Exception as exc:
         logger.warning("Replacing %s failed", source_id, exc_info=True)
@@ -428,6 +429,219 @@ def _run_replace(app, job_id, source_id, target_id, user_id, admin):
             close_connection()
         except Exception:
             pass
+
+
+# -- deletion ---------------------------------------------------------------
+# The third answer, next to "replace it" and "give it a file of mine": drop it.
+#
+# What makes this safe is the DEFINITION of unavailable. It does not mean "Deezer
+# no longer has it" — an archived track plays forever whatever Deezer does. It
+# means neither source is left: no file on disk AND no Deezer source. Both are
+# re-checked here, at the moment of deletion, because the stored verdict is a
+# cache and this is not an operation you get to take back.
+
+
+def verify_gone(track, track_id):
+    """``(gone, reason)`` — is this track really beyond reach, right now?
+
+    Returns ``gone=False`` for anything we cannot prove: an inconclusive network
+    answer must never authorise a deletion, exactly as it never authorises an
+    "unavailable" verdict.
+    """
+    import os.path
+
+    if track is not None and track.path and os.path.isfile(track.path):
+        # Archived. This is the whole point of archiving — it plays forever.
+        clear_unavailable(track)
+        return False, "archived"
+
+    if track is not None and not track.deezer_id:
+        # A local upload with no file left. Nothing can bring it back, and
+        # nothing else in the world has a copy: it is genuinely gone.
+        return True, "missing file"
+
+    if not _valid_id(track_id):
+        return False, "unknown track"
+
+    provider, err = _need_provider()
+    if err:
+        # Deezer is off. It may well still have the track — refusing here is the
+        # difference between a cleanup and a data loss.
+        return False, "no provider"
+    try:
+        provider.resolve(track_id)
+    except TrackUnavailable:
+        return True, "unavailable"
+    except Exception:
+        logger.info("Delete check for %s was inconclusive", track_id, exc_info=True)
+        return False, "inconclusive"
+    clear_unavailable(track)
+    return False, "playable"
+
+
+@webapi.route("/track/<track_id>", methods=["DELETE"])
+@login_required
+def delete_track(track_id):
+    """Remove a track that no longer exists anywhere.
+
+    Scoped like a replacement: anyone clears it out of their own playlists and
+    favourites; an admin, who owns the shared library, also drops the row — and
+    the row is what makes it show up in searches and in everyone else's lists.
+
+    Refuses unless the track is verifiably gone from BOTH sources.
+    """
+    track = _resolve_local(track_id)
+    if track is None:
+        return jsonify({"error": "not found"}), 404
+    if not _may_access_track(track):
+        return jsonify({"error": "not found"}), 404
+
+    gone, reason = verify_gone(track, track_id)
+    if not gone:
+        # 409, not 400: the request was fine, the world disagreed with it.
+        return jsonify({"error": "track is available", "reason": reason}), 409
+
+    job_id = _new_job("delete")
+    app = current_app._get_current_object()
+    threading.Thread(
+        target=_run_delete,
+        args=(app, job_id, track.id, request.webuser.id, _is_admin()),
+        name="track-delete",
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True, "job": job_id, "reason": reason})
+
+
+def _run_delete(app, job_id, track_id, user_id, admin):
+    """Worker: unpick the track from everything, then drop the row (admin)."""
+    from ..db import close_connection, open_connection
+
+    playlists = favorites = 0
+    try:
+        with app.app_context():
+            open_connection(reuse=True)
+            track = Track.get_or_none(Track.id == track_id)
+            if track is None:
+                _finish_job(job_id, ok=True)  # someone got there first
+                return
+            deezer_id = track.deezer_id
+
+            rows = (
+                PlaylistTrack.select(PlaylistTrack, Playlist)
+                .join(Playlist, on=(PlaylistTrack.playlist == Playlist.id))
+                .where(PlaylistTrack.track == track.id)
+            )
+            if not admin:
+                rows = rows.where(Playlist.user == user_id)
+            touched = {row.playlist_id for row in rows}
+            # Collected BEFORE the row goes: once the track is deleted the
+            # PlaylistTrack links are gone and there is nothing left to mirror.
+            mirrored = [
+                pl.deezer_id
+                for pl in Playlist.select().where(Playlist.id.in_(list(touched)))
+                if pl.deezer_id
+            ] if touched else []
+
+            with db.atomic():
+                for pid in touched:
+                    pl = Playlist.get_or_none(Playlist.id == pid)
+                    if pl is None:
+                        continue
+                    # Through the model, not a raw delete: the playlist keeps a
+                    # contiguous index, which every ordering read depends on.
+                    indexes = [
+                        i for i, t in enumerate(pl.get_tracks()) if t.id == track.id
+                    ]
+                    if indexes:
+                        pl.remove_at_indexes(indexes)
+                playlists = len(touched)
+
+                starred = StarredTrack.select().where(StarredTrack.starred == track.id)
+                if not admin:
+                    starred = starred.where(StarredTrack.user == user_id)
+                favorites = starred.count()
+                for star in starred:
+                    star.delete_instance()
+
+                if admin:
+                    # recursive: the ArtistCredit rows, ratings and any
+                    # remaining starred/playlist links go with it.
+                    track.delete_instance(recursive=True)
+
+            _purge_on_deezer(app, deezer_id, mirrored, admin)
+            _finish_job(job_id, ok=True, playlists=playlists, favorites=favorites)
+    except Exception as exc:
+        logger.warning("Deleting %s failed", track_id, exc_info=True)
+        _finish_job(
+            job_id, ok=False, error=str(exc), playlists=playlists, favorites=favorites
+        )
+    finally:
+        try:
+            close_connection()
+        except Exception:
+            pass
+
+
+def _purge_on_deezer(app, deezer_id, playlist_deezer_ids, admin):
+    """Carry the removal over to the Deezer account too (best effort).
+
+    Only the admin owns that account, and a Deezer failure must never undo the
+    local removal that already succeeded.
+    """
+    if not admin or not deezer_id:
+        return
+    if not app.config["DEEZER"].get("push_to_deezer"):
+        return
+    provider = getattr(app, "deezer", None)
+    if provider is None:
+        return
+    for dz_playlist in playlist_deezer_ids:
+        try:
+            provider.remove_songs_from_playlist(dz_playlist, [deezer_id])
+        except Exception:
+            logger.info(
+                "Deezer removal from playlist %s failed", dz_playlist, exc_info=True
+            )
+    try:
+        provider.dz.gw.remove_song_from_favorites(deezer_id)
+        provider.invalidate_favorites_cache()
+    except Exception:
+        logger.info("Deezer unstar of %s failed", deezer_id, exc_info=True)
+
+
+def _retire_replaced(source) -> bool:
+    """Drop a dead track once nothing points at it any more.
+
+    Without this, replacing a track fixed the playlists but left the corpse in
+    the database — still flagged, so still listed under "Titres indisponibles"
+    for ever, with nothing left to replace. The user did the work and the app
+    kept asking.
+
+    Deliberately narrow, because ``/api/replace`` accepts ANY source, not only
+    dead ones: the row goes only when it is flagged unavailable, has no file on
+    disk, and is referenced by no playlist and no favourite — anyone's. A
+    non-admin's replacement rewrites only their own lists, so a track someone
+    else still uses fails the reference check and stays, which is the point.
+    """
+    import os.path
+
+    if source.unavailable is None:
+        return False
+    if source.path and os.path.isfile(source.path):
+        # Archived after all: it plays, so it is not dead and not ours to drop.
+        clear_unavailable(source)
+        return False
+    if PlaylistTrack.select().where(PlaylistTrack.track == source.id).exists():
+        return False
+    if StarredTrack.select().where(StarredTrack.starred == source.id).exists():
+        return False
+    try:
+        source.delete_instance(recursive=True)
+    except Exception:
+        logger.info("Could not retire the replaced track %s", source.id, exc_info=True)
+        return False
+    logger.info("Retired replaced track %s (nothing referenced it)", source.deezer_id)
+    return True
 
 
 def _mirror_to_deezer(app, source, target, playlist_ids, admin):

@@ -123,7 +123,18 @@ def _resolve_or_flag(provider, track: Track):
 
 
 def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
-    """Tag the freshly-archived file and update the Track row (bitrate / art)."""
+    """Tag the freshly-archived file, and archive everything ELSE about it.
+
+    Archiving the audio is only half the promise. A track is "unavailable" when
+    neither Deezer nor the disk has it — so once the audio is on disk, nothing
+    about that track may still depend on Deezer being reachable: the tags, the
+    cover, the lyrics, the loudness, and the database row all get filled in here,
+    from the authoritative ``song.getData`` payload.
+
+    That payload is richer than whatever dict the row was first created from (a
+    playlist or album listing carries a subset), so the row is REFRESHED from it
+    rather than only having its bitrate stamped.
+    """
     meta = meta_from_gw(info)
     cover = provider.fetch_cover(meta.get("md5_image"))
     try:
@@ -139,21 +150,28 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
         except Exception as exc:
             logger.warning("Saving cover sidecar failed for %s: %s", track.path, exc)
 
+    # Refresh the row from the authoritative payload: title/version, credited
+    # artists, disc & track number, year, duration and gain. The row may have
+    # been created from a playlist listing, which carries a thinner subset — and
+    # once Deezer drops the track, whatever is in the row IS the metadata.
+    library.refresh_track_metadata(track, info)
+
     track.bitrate = _bitrate_for(track.path, fmt, track.duration)
     track.has_art = bool(cover)
-    # Archive the track's loudness gain alongside the audio: the resolve `info`
-    # is the authoritative song.getData response, so this fills in (or refreshes)
-    # the ReplayGain used for volume normalization even if the original import
-    # dict lacked it — persisted on the row exactly like bitrate/art.
-    gain = library._parse_gain(info.get("GAIN"))
-    if gain is not None:
-        track.gain = gain
     track.last_modification = int(time.time())
     # The audio is now ON DISK, which is the whole point of archiving: from here
     # on this track plays without Deezer, forever, whatever Deezer does with it
     # afterwards. So any earlier "unavailable" verdict is void by construction.
     track.unavailable = None
     track.save()
+
+    # And a metadata sidecar, so the archive describes itself: the tags cannot
+    # hold Deezer ids or contributor roles, and a database restored from an old
+    # backup would otherwise have no way back to them.
+    try:
+        library.save_track_metadata(track, info)
+    except Exception as exc:
+        logger.debug("Saving the metadata sidecar failed for %s: %s", track.path, exc)
 
     # Archive lyrics alongside the audio (a .lrc sidecar + embedded plain text).
     # On the archive hot path we only consult Deezer (already logged in for the

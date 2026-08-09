@@ -205,8 +205,24 @@ export function markUnavailable(id) {
     return next;
   });
 }
+// The last track that stopped being a problem — replaced, deleted, or simply
+// playable again. The library's "Indisponibles" list is fetched once and kept in
+// component state; without this signal it kept showing a track the user had
+// already dealt with, which reads as "it didn't work".
+export const resolvedUnavailable = writable(null);
+
+// Bumped once the SERVER has finished acting on it. The replace/delete work
+// happens in a worker thread, so a list refetched at the moment the sheet closes
+// still sees the old state — the row would vanish and then come back, which
+// looks exactly like a failure.
+export const unavailableVersion = writable(0);
+export function unavailableChanged() {
+  unavailableVersion.update((n) => n + 1);
+}
+
 export function clearUnavailable(id) {
   if (!id) return;
+  resolvedUnavailable.set(String(id));
   unavailableIds.update((s) => {
     const key = String(id);
     if (!s.has(key)) return s;

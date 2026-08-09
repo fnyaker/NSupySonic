@@ -753,6 +753,83 @@ class DeezerTestCase(TestBase):
         # The loudness gain is archived on the row alongside bitrate/art.
         self.assertAlmostEqual(reloaded.gain, -6.2)
 
+    def test_archiving_takes_the_full_metadata_not_just_the_audio(self):
+        """A row often starts life from a playlist listing, which carries a
+        subset of the fields. Once the audio is archived, that row IS the
+        metadata — Deezer may never answer about this track again — so the
+        richer song.getData payload has to land on it."""
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        # A thin import: no track/disc number, no release date, no credits.
+        thin = raw_track(9, "Thin")
+        for key in ("TRACK_NUMBER", "DISK_NUMBER", "PHYSICAL_RELEASE_DATE", "ARTISTS"):
+            thin.pop(key, None)
+        track = library.upsert_track(thin, root, "FLAC")
+        self.assertFalse(track.year)
+
+        # …and the authoritative payload that comes back when we fetch the audio.
+        full = raw_track(9, "Thin")
+        full.update(
+            {
+                "TRACK_NUMBER": "4",
+                "DISK_NUMBER": "2",
+                "PHYSICAL_RELEASE_DATE": "2021-05-03",
+                "GAIN": "-8.5",
+                "ISRC": "FRX123456789",
+                "ARTISTS": [
+                    {"ART_ID": "1", "ART_NAME": "Artist", "ARTISTS_SONGS_ORDER": "0"},
+                    {"ART_ID": "77", "ART_NAME": "Guest", "ARTISTS_SONGS_ORDER": "1"},
+                ],
+            }
+        )
+        self.provider.resolve = lambda sng_id, quality=None: (
+            "http://x/stream", "FLAC", full, sng_id
+        )
+
+        def fake_download(url, track_id, dest):
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as fh:
+                fh.write(b"\x00" * 4096)
+
+        self.provider.download_to = fake_download
+        self.provider.fetch_cover = lambda md5, size=1000: None
+
+        archive.ensure_archived(self.provider, track)
+
+        row = Track[ids.track_uuid("9")]
+        self.assertEqual(row.number, 4)
+        self.assertEqual(row.disc, 2)
+        self.assertEqual(row.year, 2021)
+        self.assertAlmostEqual(row.gain, -8.5)
+        self.assertIn("Guest", [a.name for a, _role in row.credited_artists()])
+
+        # And the sidecar, so the archive describes itself even if the database
+        # is lost: ids and roles that no audio tag can hold.
+        meta = library.read_track_metadata(row)
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta["deezer_id"], "9")
+        self.assertEqual(meta["gw"]["ISRC"], "FRX123456789")
+        self.assertIn("Guest", [c["name"] for c in meta["credits"]])
+
+    def test_the_metadata_sidecar_never_stores_a_credential(self):
+        """The gateway payload also carries stream tokens. Those are secrets
+        with no business in a file that outlives the session."""
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        track = library.upsert_track(raw_track(11, "Tokens"), root, "FLAC")
+        info = raw_track(11, "Tokens")
+        info.update(
+            {"TRACK_TOKEN": "secret-token", "MEDIA": [{"HREF": "https://signed/url"}]}
+        )
+        library.save_track_metadata(track, info)
+
+        with open(library.metadata_path(track), encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertNotIn("secret-token", raw)
+        self.assertNotIn("signed/url", raw)
+
     def test_ensure_archived_writes_cover_sidecar(self):
         # The album art is archived on disk (cover.jpg next to the audio) and
         # then served locally with no Deezer call — like the sound itself.

@@ -333,6 +333,10 @@ export const api = {
   replaceTrack: (from, to) =>
     req("/replace", { method: "POST", body: body({ from, to }) }),
   replaceStatus: (job) => req("/replace/status/" + job),
+  // Drop a track that exists neither on Deezer nor on disk. The server
+  // re-checks both before it removes anything, and answers 409 if either one
+  // still has it — "gone from Deezer" is not "gone".
+  deleteTrack: (id) => req("/track/" + id, { method: "DELETE" }),
 
   // Build identity of the served app (+ the Android release it expects).
   version: () => req("/version"),

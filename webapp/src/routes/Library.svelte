@@ -9,7 +9,8 @@
     downloads,
     openExport,
     openReplace,
-    replaceSheet,
+    resolvedUnavailable,
+    unavailableVersion,
   } from "../lib/stores.js";
   import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
@@ -60,12 +61,17 @@
       gone = [];
     }
   }
-  // A replacement removes a track from the list; refresh once the sheet closes.
-  let sheetWasOpen = false;
-  $: {
-    const open = !!$replaceSheet;
-    if (sheetWasOpen && !open && goneLoaded) loadGone();
-    sheetWasOpen = open;
+  // Dealing with a track (replaced, deleted, playable again) drops it from the
+  // list at once — the server work runs in a worker thread, so refetching here
+  // would just re-read the old state and the row would flicker back.
+  $: if ($resolvedUnavailable && gone) {
+    gone = gone.filter((t) => String(t.deezer_id) !== $resolvedUnavailable);
+  }
+  // …then the truth, once the server says it's done.
+  let seenVersion = 0;
+  $: if ($unavailableVersion !== seenVersion) {
+    seenVersion = $unavailableVersion;
+    if (goneLoaded) loadGone();
   }
 
   let fileInput;

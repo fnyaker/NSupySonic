@@ -13,6 +13,8 @@ upserted with deterministic ids so re-syncing never duplicates anything.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import os.path
 import re
@@ -32,6 +34,8 @@ from ..db import (
 )
 from . import ids
 from .provider import EXT_FOR_FORMAT, NOMINAL_BITRATE
+
+logger = logging.getLogger(__name__)
 
 DEEZER_ROOT_NAME = "Deezer"
 PODCAST_DIR_NAME = "Podcasts"
@@ -181,6 +185,133 @@ def get_album_folder(root: Folder, artist_name: str, album_name: str, cache=None
     if cache is not None:
         cache.folders[path] = folder
     return folder
+
+
+METADATA_SUFFIX = ".json"
+
+
+def metadata_path(track) -> str:
+    """Where a track's metadata sidecar lives: next to its audio file."""
+    return os.path.splitext(track.path)[0] + METADATA_SUFFIX
+
+
+def refresh_track_metadata(track, info: dict) -> None:
+    """Fill the Track row in from an authoritative ``song.getData`` payload.
+
+    Rows are often created from a playlist or album listing, which carries a
+    subset of the fields. Once the audio is archived the row IS the metadata —
+    Deezer may never answer about this track again — so archiving is the moment
+    to take everything the richer payload has.
+
+    Only ever upgrades: a field Deezer omitted keeps whatever the row already
+    had, so re-archiving through a thin payload cannot erase good data.
+    """
+    f = normalize_track(info)
+    if f["title"] and f["title"] != "[unknown]":
+        track.title = f["title"]
+    if f["duration"]:
+        track.duration = f["duration"]
+    if f["number"]:
+        track.number = f["number"]
+    if f["disc"]:
+        track.disc = f["disc"]
+    if f["year"]:
+        track.year = f["year"]
+    if f["gain"] is not None:
+        track.gain = f["gain"]
+    if f["cover_md5"] and track.album is not None and not track.album.cover_md5:
+        track.album.cover_md5 = f["cover_md5"]
+        track.album.save()
+    # `_sync_credits` is a no-op on an empty list, which is exactly right here:
+    # a payload without ARTISTS must not wipe a known "A feat. B".
+    try:
+        _sync_credits(track, f["credits"], track.artist)
+    except Exception:  # a credit list is never worth failing an archive over
+        logger.debug("Could not refresh credits for %s", track.deezer_id, exc_info=True)
+
+
+# The fields worth keeping on disk. Deliberately a whitelist rather than the
+# whole gateway response: that payload also carries stream tokens and per-session
+# URLs, which are credentials with no business being written to a file that
+# outlives them.
+_KEEP_FIELDS = (
+    "SNG_ID",
+    "SNG_TITLE",
+    "VERSION",
+    "ART_ID",
+    "ART_NAME",
+    "ARTISTS",
+    "ALB_ID",
+    "ALB_TITLE",
+    "ALB_PICTURE",
+    "ART_PICTURE",
+    "DURATION",
+    "TRACK_NUMBER",
+    "DISK_NUMBER",
+    "PHYSICAL_RELEASE_DATE",
+    "DIGITAL_RELEASE_DATE",
+    "ISRC",
+    "GAIN",
+    "EXPLICIT_LYRICS",
+    "COPYRIGHT",
+    "LYRICS_ID",
+    "PROVIDER_ID",
+    "RANK_SNG",
+)
+
+
+def save_track_metadata(track, info: dict) -> str | None:
+    """Write a ``<track>.json`` sidecar describing the archived track.
+
+    The audio carries tags, and tags carry most of this — but not Deezer ids,
+    not contributor roles, not the album picture hash. Without them a database
+    restored from an old backup could never map the files back to what they are.
+    So the archive describes itself: audio, cover.jpg, .lrc lyrics, and this.
+
+    Overwritten on each archive (the newest payload is the best one we have),
+    and written atomically so a crash cannot leave half a file behind.
+    """
+    if not track.path:
+        return None
+    payload = {
+        "deezer_id": track.deezer_id,
+        "title": track.title,
+        "artist": track.artist.name if track.artist else None,
+        "artist_deezer_id": track.artist.deezer_id if track.artist else None,
+        "album": track.album.name if track.album else None,
+        "album_deezer_id": track.album.deezer_id if track.album else None,
+        "cover_md5": track.album.cover_md5 if track.album else None,
+        "disc": track.disc,
+        "number": track.number,
+        "year": track.year,
+        "duration": track.duration,
+        "gain": track.gain,
+        "credits": [
+            {"deezer_id": aid, "name": name, "role": role}
+            for aid, name, role in _credits(info)
+        ],
+        "gw": {k: info[k] for k in _KEEP_FIELDS if k in info},
+    }
+    path = metadata_path(track)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.part"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=1, default=str)
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError):
+        return None
+    return path
+
+
+def read_track_metadata(track) -> dict | None:
+    """The sidecar back, or None when there isn't one (or it is unreadable)."""
+    try:
+        with open(metadata_path(track), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def save_album_cover(folder: Folder, data: bytes) -> str | None:
