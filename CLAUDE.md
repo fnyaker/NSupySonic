@@ -192,6 +192,22 @@ packet), so a dead track is skipped at once instead of after four reloads. `/api
 track for another one — same position in every playlist, plus favourites — in a worker thread, and
 mirrors it to Deezer for the admin's own playlists.
 
+**Unavailable means BOTH sources are gone** — not "Deezer dropped it". `DELETE /api/track/<id>` is
+the third answer next to replace-and-upload, and `availability.verify_gone` re-checks *at the moment
+of deletion*: a file on disk → refuse (and clear the verdict); Deezer still resolves → refuse; an
+inconclusive network answer → refuse. Only `TrackUnavailable` with no file, or a local upload whose
+file is gone, authorises it. Scoped like a replacement (own playlists/favourites; an admin also drops
+the row, `recursive=True`) and mirrored to Deezer for the admin, fail-soft.
+
+**An archived track carries its whole identity on disk**, which is what makes the above safe:
+`_finalize_archive` writes the audio, `cover.jpg`, the `.lrc` lyrics, the file tags, **refreshes the
+DB row from the authoritative `song.getData` payload** (`library.refresh_track_metadata` — rows are
+often created from a thinner playlist listing, and it only ever upgrades fields), and writes a
+`<track>.json` sidecar (`library.save_track_metadata` / `read_track_metadata`) with the Deezer ids,
+contributor roles and ISRC that no audio tag can hold. That sidecar is a **whitelist** of gw fields —
+the raw payload also carries stream tokens and signed URLs, which must never be written to a file
+that outlives the session.
+
 **Archive completeness** (`supysonic/deezer/backfill.py`, `supysonic/webui/storage.py`) is
 **event-driven, never polled**. Archiving happens the moment something becomes yours:
 

@@ -131,7 +131,7 @@
   }
 
   // The rewrite runs server-side; poll just long enough to report the outcome.
-  async function watch(job) {
+  async function watch(job, failure = "Le remplacement a échoué côté serveur") {
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 1000));
       let s;
@@ -148,7 +148,7 @@
         if (bits.length) toasts.push("Mis à jour dans " + bits.join(" et "));
         invalidatePlaylists();
       } else {
-        toasts.push("Le remplacement a échoué côté serveur", "error");
+        toasts.push(failure, "error");
       }
       return;
     }
@@ -173,6 +173,42 @@
       toasts.push(e?.message || "Import impossible", "error");
     } finally {
       uploading = false;
+    }
+  }
+
+  // -- or simply drop it -----------------------------------------------------
+  // The third answer. "Unavailable" here means neither Deezer nor the disk has
+  // it — an archived track plays forever whatever Deezer does — so this really
+  // is a title with nothing behind it. The server re-checks BOTH sources before
+  // removing anything and refuses (409) if either one still has the audio.
+  let confirming = false;
+
+  async function removeTrack() {
+    if (busy || !target) return;
+    if (!confirming) {
+      confirming = true;
+      return;
+    }
+    busy = true;
+    stopPreview();
+    try {
+      const r = await api.deleteTrack(target.deezer_id);
+      clearUnavailable(target.deezer_id);
+      invalidatePlaylists();
+      loadFavorites(true);
+      toasts.push(`« ${target.title} » retiré de la bibliothèque`);
+      closeReplace();
+      if (r?.job) watch(r.job, "La suppression a échoué côté serveur");
+    } catch (e) {
+      // The one error worth spelling out: the track turned out to be playable.
+      toasts.push(
+        e?.status === 409
+          ? "Ce titre est en fait disponible — rien n'a été supprimé"
+          : e?.message || "Suppression impossible",
+        "error"
+      );
+      busy = false;
+      confirming = false;
     }
   }
 
@@ -253,6 +289,26 @@
           Votre fichier devient un titre local — il ne dépend plus de Deezer et ne
           pourra plus disparaître.
         </p>
+
+        <div class="drop">
+          <button
+            class="danger"
+            disabled={busy}
+            on:click={removeTrack}
+            on:blur={() => (confirming = false)}>
+            <Icon name="trash" size={16} />
+            {confirming ? "Confirmer la suppression" : "Supprimer ce titre"}
+          </button>
+          <p class="muted hint">
+            {#if confirming}
+              Le titre disparaîtra de vos playlists et de vos favoris. Le serveur
+              vérifie d'abord qu'il est bien introuvable des deux côtés.
+            {:else}
+              Ce titre n'existe plus ni sur Deezer ni sur le disque. Si vous ne
+              voulez pas le remplacer, retirez-le de la bibliothèque.
+            {/if}
+          </p>
+        </div>
       </footer>
     </div>
   </div>
@@ -412,6 +468,32 @@
   }
   .upload:hover:not(:disabled) {
     border-color: var(--text-dim);
+  }
+  /* Set apart by a rule, not by shouting: it is a legitimate third option,
+     just the one you cannot undo. */
+  .drop {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--bg-hover);
+  }
+  .danger {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 16px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, #e5484d 45%, transparent);
+    color: #e5484d;
+    font-weight: 600;
+    font-size: 0.88rem;
+  }
+  .danger:hover:not(:disabled) {
+    background: color-mix(in srgb, #e5484d 12%, transparent);
+    border-color: #e5484d;
+  }
+  .danger:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
   .upload:disabled {
     opacity: 0.55;
