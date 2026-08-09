@@ -168,21 +168,26 @@ def delete_podcast_channel():
                 "show.deleteFavorite failed for %s", channel.deezer_id, exc_info=True
             )
 
-    for episode in channel.episodes:
-        _delete_episode_file(episode)
+    # Never destroy archived audio: an episode already on disk is yours and
+    # outlives both the subscription and the show. A channel with archived
+    # episodes is kept and flagged unsubscribed; one with nothing on disk has
+    # nothing to lose and is removed.
+    if any(e.path and os.path.isfile(e.path) for e in channel.episodes):
+        channel.subscribed = False
+        channel.save()
+        return request.formatter.empty
     channel.delete_instance(recursive=True)
     return request.formatter.empty
 
 
 @api_routing("/deletePodcastEpisode")
 def delete_podcast_episode():
+    """Subsonic clients call this to free space. We don't: an archived episode
+    is the only copy that survives the show leaving Deezer, so the file stays.
+    Reported as done — the client's intent (stop showing it as downloaded) is
+    not worth losing the audio over."""
     _require_admin()
-    episode = get_entity(PodcastEpisode)
-    _delete_episode_file(episode)
-    episode.path = None
-    episode.bitrate = None
-    episode.status = "deleted"
-    episode.save()
+    get_entity(PodcastEpisode)  # 404s on an unknown id, as before
     return request.formatter.empty
 
 

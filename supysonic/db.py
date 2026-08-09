@@ -835,6 +835,11 @@ class PodcastChannel(_Model):
     created = DateTimeField(default=now)
     last_fetched = DateTimeField(null=True)
     error_message = CharField(null=True)
+    # False once you unsubscribe from a show you have archived episodes of. The
+    # subscription stops (no more syncing, gone from the subscribed list) but
+    # everything already downloaded stays yours and stays playable — an archive
+    # is never destroyed on our side, whatever Deezer does with the show.
+    subscribed = BooleanField(default=True)
 
     def as_subsonic_channel(self, user, prefs=None, include_episodes=True):
         info = {

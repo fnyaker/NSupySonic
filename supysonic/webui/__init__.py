@@ -1927,6 +1927,9 @@ def _channel(c, with_episodes=False):
         "cover": _image("talk", c.cover_art_md5),
         "episode_count": c.episodes.count(),
         "status": "error" if c.error_message else "ok",
+        # False for a show you unsubscribed from but whose episodes are
+        # archived: it no longer syncs, and everything downloaded stays yours.
+        "subscribed": bool(c.subscribed),
     }
     if with_episodes:
         info["episodes"] = [
@@ -1970,6 +1973,9 @@ def _episode(e, channel=None):
 @webapi.route("/podcasts")
 @login_required
 def podcasts():
+    # Unsubscribed-but-archived shows are still listed (flagged `subscribed:
+    # false`): the audio is on the server and must stay reachable — the whole
+    # point of archiving is that leaving Deezer's catalogue changes nothing.
     channels = PodcastChannel.select().order_by(fn.lower(PodcastChannel.title))
     return jsonify({"podcasts": [_channel(c) for c in channels]})
 
@@ -2052,12 +2058,20 @@ def unsubscribe_podcast(pid):
         except Exception:
             logger.debug("show.deleteFavorite failed for %s", c.deezer_id, exc_info=True)
 
-    for e in c.episodes:
-        if e.path and os.path.isfile(e.path):
-            try:
-                os.remove(e.path)
-            except OSError:
-                pass
+    # Unsubscribing stops the subscription — it does NOT destroy what has
+    # already been archived. An episode on disk is yours: it survives Deezer
+    # dropping the show, and it survives this. So a channel with archived audio
+    # is kept and simply marked unsubscribed (it stops syncing and leaves the
+    # subscribed list, while everything downloaded stays playable); only a
+    # channel with nothing on disk is actually removed, since there is nothing
+    # of yours to lose.
+    archived = [
+        e for e in c.episodes if e.path and os.path.isfile(e.path)
+    ]
+    if archived:
+        c.subscribed = False
+        c.save()
+        return jsonify({"ok": True, "kept": len(archived), "archived": True})
     c.delete_instance(recursive=True)
     return ("", 204)
 
@@ -3288,5 +3302,6 @@ def stream(deezer_id):
 # it registers its routes on this blueprint. Must stay at the bottom: it
 # imports helpers defined above.
 from . import availability  # noqa: E402,F401  isort:skip
+from . import storage  # noqa: E402,F401  isort:skip
 from . import share  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip

@@ -110,6 +110,22 @@ def _run_sync(app):
         importer = DeezerImporter(app.deezer, cfg["sync_user"])
         out = importer.sync(cfg)
         logger.info("Deezer sync done: %s", out)
+        # Then make the archive match what the sync just imported. A sync that
+        # only writes database rows leaves your favorites, playlists and
+        # podcasts hostage to Deezer until you happen to press play on them —
+        # which may be after Deezer has removed them. Adds only; never deletes.
+        if cfg.get("archive_library", True):
+            try:
+                from ..db import User
+                from . import backfill
+
+                user = User.get_or_none(User.name == cfg["sync_user"])
+                if user is not None:
+                    stats = backfill.sweep_for(app.deezer, user)
+                    if stats.get("total"):
+                        logger.info("Archive sweep: %s", stats)
+            except Exception as exc:
+                logger.warning("Archive sweep failed: %s", exc)
     except Exception as exc:
         logger.warning("Deezer sync failed: %s", exc)
     finally:

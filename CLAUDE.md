@@ -192,6 +192,19 @@ packet), so a dead track is skipped at once instead of after four reloads. `/api
 track for another one — same position in every playlist, plus favourites — in a worker thread, and
 mirrors it to Deezer for the admin's own playlists.
 
+**Archive completeness** (`supysonic/deezer/backfill.py`, `supysonic/webui/storage.py`): audio is
+archived on first play, which would leave everything you *haven't* played hostage to Deezer — so the
+nightly sync then sweeps favourites, playlists and subscribed podcasts and archives whatever has no
+file yet (`[deezer] archive_library`, default on), and Réglages → Compte has the same sweep as a
+button with live progress. It **only ever adds**. `/api/storage` reports archive size, free disk and
+the two derived caches; `/api/cache/flush` empties those caches (expiring the protection first, or
+the button would silently do nothing) and cannot touch `archive_dir`.
+
+**Nothing deletes an archive.** Unsubscribing from a podcast keeps every archived episode: the
+channel is flagged `subscribed = False` instead of being deleted (only a show with nothing on disk is
+removed), and Subsonic's `deletePodcastEpisode` reports success without touching the file. Same rule
+for tracks: the importer keeps archived tracks Deezer stopped returning.
+
 **Web app** (`webapp/`): Svelte 4 + Vite 5 SPA, hash routing (svelte-spa-router), consuming `/api`.
 Builds into `supysonic/webui/dist`. No emoji in the UI — all glyphs go through
 `src/components/Icon.svelte` (Lucide-style SVG). Home is **card-based** (mixes / recommended

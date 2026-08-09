@@ -54,6 +54,42 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _MAX_COMPONENT_BYTES = 200
 
 
+# -- availability -----------------------------------------------------------
+# Whether a track still has a playable source. Lives here, in the DB layer,
+# rather than in the web API: every path that discovers the answer — a live
+# stream, the background archiver, the download queue, the CLI — must record it
+# the same way, and none of them should have to import the web layer to do so.
+
+
+def mark_unavailable(track) -> None:
+    """Record that Deezer has no playable source for this track (fail-soft)."""
+    if track is None:
+        return
+    try:
+        stamp = _now()
+        Track.update(unavailable=stamp).where(Track.id == track.id).execute()
+        track.unavailable = stamp
+    except Exception:  # bookkeeping must never break the caller
+        pass
+
+
+def clear_unavailable(track) -> None:
+    """Undo a verdict: the track is demonstrably playable."""
+    if track is None or getattr(track, "unavailable", None) is None:
+        return
+    try:
+        Track.update(unavailable=None).where(Track.id == track.id).execute()
+        track.unavailable = None
+    except Exception:
+        pass
+
+
+def _now():
+    from ..db import now
+
+    return now()
+
+
 def create_or_get(create, fetch):
     """``create()``, falling back to ``fetch()`` when someone else won the race.
 

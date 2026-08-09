@@ -160,6 +160,11 @@ enabled = no
 ; which is how you replace an expired credential without touching this file.
 ;arl =
 
+; After each sync, archive anything in your favorites / playlists / subscribed
+; podcasts that has no file yet, so nothing is lost the day Deezer removes it.
+; Adds only — it never deletes an archived file. Default: yes
+;archive_library = yes
+
 ; Folder where fetched FLAC files are permanently archived. Required when
 ; enabled. Registered as an additional "Deezer" root library folder.
 ;archive_dir = /var/supysonic/deezer-archive

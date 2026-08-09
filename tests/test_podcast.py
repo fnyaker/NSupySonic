@@ -397,22 +397,37 @@ class PodcastApiTestCase(ApiTestBase):
         episode = PodcastEpisode[ids.episode_uuid("2")]
         self.assertEqual(episode.status, "completed")
 
-    def test_delete_episode_then_channel(self):
+    def test_deleting_never_destroys_an_archived_episode(self):
+        """An archived episode is the copy that survives the show leaving
+        Deezer, so neither endpoint may delete it. `deletePodcastEpisode`
+        reports success without touching the file, and unsubscribing keeps the
+        channel — flagged unsubscribed — with all its audio."""
         self._create_channel()
         eid = str(ids.episode_uuid("1"))
         self._make_request("downloadPodcastEpisode", {"id": eid})
         path = PodcastEpisode[ids.episode_uuid("1")].path
+        self.assertTrue(os.path.isfile(path))
 
         self._make_request("deletePodcastEpisode", {"id": eid})
         episode = PodcastEpisode[ids.episode_uuid("1")]
-        self.assertEqual(episode.status, "deleted")
-        self.assertIsNone(episode.path)
-        self.assertFalse(os.path.isfile(path))
+        self.assertEqual(episode.path, path)
+        self.assertTrue(os.path.isfile(path))
 
         cid = str(ids.show_uuid("1002156761"))
-        # GET deletes the row; a follow-up POST would 404, so skip it.
         self._make_request("deletePodcastChannel", {"id": cid}, skip_post=True)
+        # The Deezer subscription is dropped…
         self.assertIn("1002156761", self.provider.fav_removed)
+        # …but nothing of ours is.
+        channel = PodcastChannel[ids.show_uuid("1002156761")]
+        self.assertFalse(channel.subscribed)
+        self.assertEqual(PodcastEpisode.select().count(), 3)
+        self.assertTrue(os.path.isfile(path))
+
+    def test_unsubscribing_removes_a_show_with_nothing_archived(self):
+        """Nothing on disk means nothing to protect: the row goes, as before."""
+        self._create_channel()
+        cid = str(ids.show_uuid("1002156761"))
+        self._make_request("deletePodcastChannel", {"id": cid}, skip_post=True)
         self.assertEqual(PodcastChannel.select().count(), 0)
         self.assertEqual(PodcastEpisode.select().count(), 0)
 

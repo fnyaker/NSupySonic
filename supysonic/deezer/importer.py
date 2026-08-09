@@ -320,7 +320,9 @@ class DeezerImporter:
                 seen.add(sid)
                 show_ids.append(sid)
 
-        for channel in PodcastChannel.select().where(PodcastChannel.user == self.user):
+        for channel in PodcastChannel.select().where(
+            (PodcastChannel.user == self.user) & (PodcastChannel.subscribed == True)  # noqa: E712
+        ):
             _add(channel.deezer_id)
         try:
             for s in self.provider.get_user_shows():

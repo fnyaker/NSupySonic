@@ -107,6 +107,15 @@
       /* leave the card hidden if it can't load */
     }
     refreshDeezerStatus();
+    loadStorage();
+    // A sweep started before a reload is still running server-side: pick the
+    // progress back up instead of pretending nothing is happening.
+    try {
+      job = await api.archiveStatus();
+      if (job?.running) pollJob();
+    } catch {
+      /* ignore */
+    }
   });
 
   async function refreshDeezerStatus(force = false) {
@@ -157,6 +166,75 @@
       arlSaving = false;
     }
   }
+  // -- keeping the archive complete -----------------------------------------
+  // Audio is normally fetched on first play, which leaves everything you have
+  // NOT played hostage to Deezer. This sweeps your favorites, playlists and
+  // podcasts and archives whatever has no file yet. It only ever adds.
+  let job = null;
+  let jobPolling = false;
+  $: jobPct = job?.total ? Math.min(100, (job.done / job.total) * 100) : 0;
+
+  async function startBackfill(scope = "all") {
+    try {
+      await api.archiveBackfill(scope);
+      toasts.push("Archivage lancé — il continue même si vous fermez l'app");
+      pollJob();
+    } catch (e) {
+      toasts.push(e?.message || "Impossible de lancer l'archivage", "error");
+    }
+  }
+
+  async function pollJob() {
+    if (jobPolling) return;
+    jobPolling = true;
+    try {
+      for (;;) {
+        job = await api.archiveStatus();
+        if (!job.running) break;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      if (job && job.total) {
+        const bits = [`${job.archived} archivé(s)`];
+        if (job.unavailable) bits.push(`${job.unavailable} indisponible(s)`);
+        if (job.failed) bits.push(`${job.failed} échec(s)`);
+        toasts.push("Archivage terminé : " + bits.join(", "));
+      }
+      loadStorage();
+    } catch {
+      /* the job keeps running server-side regardless */
+    } finally {
+      jobPolling = false;
+    }
+  }
+
+  // -- storage (admin) -------------------------------------------------------
+  let store = null;
+  let flushing = false;
+  async function loadStorage() {
+    if (!$user?.admin) return;
+    try {
+      store = await api.storage();
+    } catch {
+      store = null;
+    }
+  }
+  $: diskPct =
+    store?.disk_total ? Math.min(100, ((store.disk_total - store.disk_free) / store.disk_total) * 100) : 0;
+
+  async function flushCaches() {
+    if (flushing) return;
+    flushing = true;
+    try {
+      const r = await api.flushCache();
+      toasts.push(`Cache serveur vidé (${fmtBytes(r.freed || 0)} libérés)`);
+      await loadStorage();
+    } catch (e) {
+      toasts.push(e?.message || "Impossible de vider le cache", "error");
+    } finally {
+      flushing = false;
+    }
+  }
+
   async function saveQuota() {
     const v = Number(quotaGb);
     if (!Number.isFinite(v) || v < 0) {
@@ -377,6 +455,95 @@
     <button class="logout" on:click={logout}><Icon name="user" size={16} /> Déconnexion</button>
   </div>
 </section>
+
+{#if $user?.admin}
+<section class="card">
+  <h2>Archive du serveur</h2>
+  <p class="muted sub">
+    Un titre archivé est à vous&nbsp;: il reste lisible même si Deezer le retire de
+    son catalogue, ou si Deezer est injoignable. Normalement l'audio est récupéré
+    à la première écoute — ce bouton va chercher tout ce que vous n'avez pas
+    encore écouté&nbsp;: favoris, playlists et podcasts abonnés.
+    <strong>Rien n'est jamais supprimé de l'archive</strong>, et relancer ne
+    re-télécharge pas ce qui est déjà là.
+  </p>
+
+  {#if job?.running}
+    <div class="gauge">
+      <div class="bar"><span style={`width:${jobPct}%`}></span></div>
+      <div class="gauge-txt">
+        <span>Archivage en cours… {job.done} / {job.total}</span>
+        <span class="muted">
+          {job.archived} archivé(s){job.unavailable ? ` · ${job.unavailable} indisponible(s)` : ""}
+        </span>
+      </div>
+    </div>
+    <p class="muted hint">Vous pouvez fermer l'application, le serveur continue.</p>
+  {:else}
+    <div class="arch-btns">
+      <button class="save" on:click={() => startBackfill("all")}>
+        <Icon name="archive" size={16} /> Tout archiver maintenant
+      </button>
+      <button class="ghost" on:click={() => startBackfill("favorites")}>Favoris</button>
+      <button class="ghost" on:click={() => startBackfill("playlists")}>Playlists</button>
+      <button class="ghost" on:click={() => startBackfill("podcasts")}>Podcasts</button>
+    </div>
+    {#if job && job.total}
+      <p class="muted hint">
+        Dernier passage&nbsp;: {job.archived} archivé(s){job.unavailable
+          ? `, ${job.unavailable} indisponible(s)`
+          : ""}{job.failed ? `, ${job.failed} échec(s)` : ""}.
+      </p>
+    {/if}
+  {/if}
+</section>
+{/if}
+
+{#if $user?.admin && store}
+  <section class="card">
+    <div class="dl-head">
+      <h2>Stockage serveur</h2>
+      <button class="wipe" on:click={flushCaches} disabled={flushing}>
+        <Icon name="trash" size={16} /> {flushing ? "Vidage…" : "Vider le cache"}
+      </button>
+    </div>
+    <p class="muted sub">
+      Le cache (transcodages Opus, pochettes proxifiées) se reconstruit tout seul&nbsp;:
+      le vider ne coûte que du CPU. L'archive, elle, n'est pas un cache — aucun
+      bouton ici ne peut y toucher.
+    </p>
+
+    <div class="gauge">
+      <div class="bar"><span style={`width:${diskPct}%`} class:warn={diskPct > 90}></span></div>
+      <div class="gauge-txt">
+        <span><strong>{fmtBytes(store.disk_free)}</strong> libres sur le disque d'archives</span>
+        <span class="muted">{fmtBytes(store.disk_total)} au total</span>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <span class="sv">{fmtBytes(store.archive_bytes)}</span>
+        <span class="sl muted">Archive</span>
+      </div>
+      <div class="stat">
+        <span class="sv">{store.tracks_archived} / {store.tracks_total}</span>
+        <span class="sl muted">Titres archivés</span>
+      </div>
+      <div class="stat">
+        <span class="sv">{fmtBytes(store.transcode_bytes)}</span>
+        <span class="sl muted">Cache transcodage</span>
+      </div>
+      <div class="stat">
+        <span class="sv">{fmtBytes(store.cache_bytes)}</span>
+        <span class="sl muted">Cache images</span>
+      </div>
+    </div>
+    {#if store.archive_dir}
+      <p class="muted hint path">{store.archive_dir}</p>
+    {/if}
+  </section>
+{/if}
 
 {#if $user?.admin && dz}
   <section class="card">
@@ -641,6 +808,48 @@
     font-size: 0.85rem;
     margin: 4px 0 14px;
   }
+  /* -- archive & storage -------------------------------------------------- */
+  .arch-btns {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .arch-btns .save {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: var(--bg);
+    border: 1px solid var(--bg-hover);
+  }
+  .sv {
+    font-weight: 800;
+    font-size: 1.05rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .sl {
+    font-size: 0.78rem;
+  }
+  .path {
+    margin-top: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.76rem;
+    word-break: break-all;
+  }
+
   /* -- prefetch depth --------------------------------------------------- */
   .ahead {
     margin-top: 14px;
