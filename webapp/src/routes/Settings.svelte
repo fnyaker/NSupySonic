@@ -55,6 +55,10 @@
     { id: "account", label: "Compte" },
   ];
   let tab = "fx";
+  // A settings tab that opens onto a full LIST needs to be a page of its own —
+  // otherwise the list buries the settings under it. `sub` is that page; the
+  // header turns into a back button while it's up.
+  let sub = null;
 
   // -- diagnostic log ---------------------------------------------------------
   // The count is re-read whenever the panel could have changed, rather than
@@ -207,6 +211,44 @@
   }
 </script>
 
+{#if sub === "downloads"}
+  <div class="head sub-head">
+    <button class="back" on:click={() => (sub = null)} aria-label="Retour aux réglages">
+      <Icon name="chevronLeft" size={22} />
+    </button>
+    <h1>Titres téléchargés</h1>
+  </div>
+
+  <section class="card">
+    <div class="dl-head">
+      <h2>
+        Sur cet appareil <span class="count muted">({items.length} · {fmtBytes($downloadsSize)})</span>
+      </h2>
+      {#if items.length}
+        <button class="wipe" on:click={wipe}><Icon name="trash" size={16} /> Tout effacer</button>
+      {/if}
+    </div>
+
+    {#if !items.length}
+      <p class="muted hint">Aucun titre téléchargé. Utilisez le bouton de téléchargement sur un titre, un album ou une playlist pour les rendre disponibles hors-ligne.</p>
+    {:else}
+      <div class="list">
+        {#each items as m (m.id)}
+          <div class="row">
+            <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} kind="track" fallbackId={m.track?.deezer_id} /></div>
+            <div class="meta">
+              <div class="t">{m.track?.title}</div>
+              <div class="a muted">{artistLine(m.track)}</div>
+            </div>
+            <span class="q-badge">{qualityLabel(m.quality)}</span>
+            <span class="sz muted">{fmtBytes(m.size)}</span>
+            <button class="rm" on:click={() => remove(m.id, m.track?.title)} aria-label="Retirer" title="Retirer du cache"><Icon name="trash" size={17} /></button>
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </section>
+{:else}
 <div class="head">
   <h1>Réglages</h1>
 </div>
@@ -310,33 +352,18 @@
   </div>
 </section>
 
-<section class="card">
-  <div class="dl-head">
-    <h2>Titres téléchargés <span class="count muted">({items.length})</span></h2>
-    {#if items.length}
-      <button class="wipe" on:click={wipe}><Icon name="trash" size={16} /> Tout effacer</button>
-    {/if}
-  </div>
-
-  {#if !items.length}
-    <p class="muted hint">Aucun titre téléchargé. Utilisez le bouton de téléchargement sur un titre, un album ou une playlist pour les rendre disponibles hors-ligne.</p>
-  {:else}
-    <div class="list">
-      {#each items as m (m.id)}
-        <div class="row">
-          <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} kind="track" fallbackId={m.track?.deezer_id} /></div>
-          <div class="meta">
-            <div class="t">{m.track?.title}</div>
-            <div class="a muted">{artistLine(m.track)}</div>
-          </div>
-          <span class="q-badge">{qualityLabel(m.quality)}</span>
-          <span class="sz muted">{fmtBytes(m.size)}</span>
-          <button class="rm" on:click={() => remove(m.id, m.track?.title)} aria-label="Retirer" title="Retirer du cache"><Icon name="trash" size={17} /></button>
-        </div>
-      {/each}
-    </div>
-  {/if}
-</section>
+<!-- The downloaded titles are a LIST, potentially thousands of rows: it has no
+     business sitting between two settings cards. It gets its own page, reached
+     from a row that says what's in it. -->
+<button class="subnav" on:click={() => (sub = "downloads")}>
+  <span class="sub-txt">
+    <span class="sub-title">Titres téléchargés</span>
+    <span class="sub-hint muted">
+      {items.length} titre{items.length > 1 ? "s" : ""} · {fmtBytes($downloadsSize)} sur cet appareil
+    </span>
+  </span>
+  <Icon name="chevronRight" size={20} />
+</button>
 {/if}
 
 {#if tab === "account"}
@@ -455,10 +482,61 @@
   {/if}
 </section>
 {/if}
+{/if}
 
 <style>
   .head h1 {
     margin-bottom: 18px;
+  }
+  /* -- sub-page ---------------------------------------------------------- */
+  .sub-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .back {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    margin-bottom: 18px;
+    border-radius: 50%;
+    color: var(--text-dim);
+  }
+  .back:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+  .subnav {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    text-align: left;
+    padding: 15px 18px;
+    margin-bottom: 18px;
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    color: var(--text-dim);
+  }
+  .subnav:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+  .sub-txt {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+  }
+  .sub-title {
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--text);
+  }
+  .sub-hint {
+    font-size: 0.83rem;
   }
   .tabs {
     display: flex;

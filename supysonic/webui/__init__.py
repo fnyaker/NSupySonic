@@ -43,6 +43,7 @@ from ..db import (
     db,
     now,
 )
+from ..deezer.provider import TrackUnavailable
 from ..managers.user import UserManager
 from ..ratelimit import auth_limiter
 from ..utils import like_term
@@ -232,7 +233,37 @@ def _artist(ar):
 
 
 def _tracks(items):
-    return [x for x in (_track(t) for t in (items or [])) if x]
+    return flag_unavailable([x for x in (_track(t) for t in (items or [])) if x])
+
+
+# Tracks we already know can't be played are flagged in every list we serve, so
+# the UI can mark them and offer a replacement instead of letting you find out
+# by pressing play. One batched query per list — never one per track.
+_FLAG_CHUNK = 400
+
+
+def flag_unavailable(items):
+    ids = [str(t["deezer_id"]) for t in items if t and t.get("deezer_id")]
+    if not ids:
+        return items
+    dead = set()
+    try:
+        for start in range(0, len(ids), _FLAG_CHUNK):
+            chunk = ids[start : start + _FLAG_CHUNK]
+            dead.update(
+                str(row.deezer_id)
+                for row in Track.select(Track.deezer_id).where(
+                    Track.deezer_id.in_(chunk) & Track.unavailable.is_null(False)
+                )
+            )
+    except Exception:  # a badge is never worth failing the response over
+        logger.debug("Unavailability lookup failed", exc_info=True)
+        return items
+    if dead:
+        for t in items:
+            if t and str(t.get("deezer_id")) in dead:
+                t["unavailable"] = True
+    return items
 
 
 def _playlist(p):
@@ -567,6 +598,7 @@ def _local_track(t: Track) -> dict:
         "title": t.title,
         "duration": t.duration or 0,
         "explicit": False,
+        "unavailable": t.unavailable is not None,
         "gain": t.gain,
         "artist": {"deezer_id": str(t.artist.id), "name": t.artist.name},
         # An uploaded file has a single tagged artist; keep the shape uniform so
@@ -736,6 +768,9 @@ def _db_track(t: Track, credits: list | None = None) -> dict:
         "title": t.title,
         "duration": t.duration or 0,
         "explicit": False,
+        # Straight off the row — no extra query for the lists that come from the
+        # database (your playlists, the offline browse pages).
+        "unavailable": t.unavailable is not None,
         "gain": t.gain,
         "artist": {"deezer_id": str(t.artist.deezer_id or ""), "name": t.artist.name},
         "artists": artists,
@@ -2961,6 +2996,19 @@ def deezer_status():
     )
 
 
+# Deezer told us, in so many words, that this track has no source. That is a
+# verdict about the track, not a transport failure: record it, and answer 410
+# Gone rather than 502 so the caller knows not to retry. The player asks
+# /track/<id>/probe on a playback error and moves straight on.
+def _gone(track, deezer_id):
+    from .availability import mark_unavailable
+
+    if track is not None:
+        mark_unavailable(track)
+    logger.info("Track %s has no playable source; marked unavailable", deezer_id)
+    return jsonify({"error": "track unavailable", "unavailable": True}), 410
+
+
 # Opus transcode bitrates (kbps) the web player may request: q=OPUS_320 etc.
 _OPUS_BITRATES = {320, 256, 192, 128, 64}
 
@@ -3190,6 +3238,8 @@ def stream(deezer_id):
             if track is None:
                 # Metadata only (the DB row) — no audio download yet.
                 track = archive.import_track(provider, deezer_id)
+        except TrackUnavailable:
+            return _gone(track, deezer_id)
         except Exception:
             logger.warning("Stream metadata fetch failed for %s", deezer_id, exc_info=True)
             return jsonify({"error": "track unavailable"}), 502
@@ -3204,6 +3254,8 @@ def stream(deezer_id):
                 on_abort = (lambda did=deezer_id: pf.download_ids([did])) if pf else None
                 try:
                     mimetype, gen = archive.open_live_stream(provider, track, on_abort)
+                except TrackUnavailable:
+                    return _gone(track, deezer_id)
                 except Exception:
                     logger.warning("Live stream failed for %s", deezer_id, exc_info=True)
                     return jsonify({"error": "track unavailable"}), 502
@@ -3212,6 +3264,8 @@ def stream(deezer_id):
             # Opus on a cold track needs the full FLAC master first.
             try:
                 archive.ensure_archived(provider, track)
+            except TrackUnavailable:
+                return _gone(track, deezer_id)
             except Exception:
                 logger.warning("Stream fetch failed for %s", deezer_id, exc_info=True)
                 return jsonify({"error": "track unavailable"}), 502
@@ -3233,5 +3287,6 @@ def stream(deezer_id):
 # Share endpoints (waveform / file / clip) live in their own module; importing
 # it registers its routes on this blueprint. Must stay at the bottom: it
 # imports helpers defined above.
+from . import availability  # noqa: E402,F401  isort:skip
 from . import share  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip

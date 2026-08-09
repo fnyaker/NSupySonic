@@ -6,10 +6,12 @@
 import os
 import shutil
 import tempfile
+import time
 import unittest
 
+from supysonic import webui as _webui
 from supysonic.config import DefaultConfig
-from supysonic.db import Playlist, StarredTrack, Track, User, release_database
+from supysonic.db import Playlist, StarredTrack, Track, User, now, release_database
 from supysonic.managers.user import UserManager
 from supysonic.web import create_application
 
@@ -682,6 +684,145 @@ class WebUITestCase(unittest.TestCase):
         self.assertTrue(match[0]["local"])
         self.assertEqual(match[0]["deezer_id"], str(t.id))
         self.assertEqual(match[0]["artist"]["name"], "Local Band")
+
+    # -- unavailable tracks & replacement --------------------------------
+
+    def test_probe_says_available_for_an_archived_track(self):
+        """The whole point of archiving: once the audio is on disk, the track is
+        ours. Deezer can delist it and it still plays — so the probe must never
+        even ask, and must clear any earlier verdict."""
+        from supysonic.db import Track
+
+        t = self._make_deezer_track(sng_id="42", title="Kept", archived=True)
+        Track.update(unavailable=now()).where(Track.id == t.id).execute()
+
+        self._login()
+        body = self.client.get("/api/track/42/probe").get_json()
+        self.assertTrue(body["available"])
+        self.assertIsNone(Track.get(Track.id == t.id).unavailable)
+
+    def test_probe_marks_a_dead_track_and_lists_it(self):
+        from supysonic.db import Track
+        from supysonic.deezer.provider import TrackUnavailable
+
+        t = self._make_deezer_track(sng_id="43", title="Gone", archived=False)
+        provider = self.app.deezer
+        orig = provider.resolve
+        provider.resolve = lambda *a, **k: (_ for _ in ()).throw(
+            TrackUnavailable("no playable source")
+        )
+        try:
+            self._login()
+            body = self.client.get("/api/track/43/probe").get_json()
+        finally:
+            provider.resolve = orig
+        self.assertFalse(body["available"])
+        self.assertEqual(body["reason"], "unavailable")
+        self.assertIsNotNone(Track.get(Track.id == t.id).unavailable)
+
+        # …and it shows up in the list the library's "indisponibles" tab reads.
+        listing = self.client.get("/api/unavailable").get_json()["tracks"]
+        self.assertIn("Gone", [x["title"] for x in listing])
+        self.assertTrue(listing[0]["unavailable"])
+
+    def test_probe_stays_neutral_when_deezer_is_merely_unreachable(self):
+        """A network failure says nothing about the track. Reporting it as dead
+        would condemn a whole library during one bad minute."""
+        from supysonic.db import Track
+        from supysonic.deezer.provider import DeezerError
+
+        t = self._make_deezer_track(sng_id="44", title="Fine", archived=False)
+        provider = self.app.deezer
+        orig = provider.resolve
+        provider.resolve = lambda *a, **k: (_ for _ in ()).throw(
+            DeezerError("Deezer unreachable")
+        )
+        try:
+            self._login()
+            body = self.client.get("/api/track/44/probe").get_json()
+        finally:
+            provider.resolve = orig
+        self.assertTrue(body["available"])
+        self.assertIsNone(Track.get(Track.id == t.id).unavailable)
+
+    def test_track_lists_carry_the_unavailable_flag(self):
+        from supysonic.db import Track
+
+        t = self._make_deezer_track(sng_id="45", title="Dead", archived=False)
+        Track.update(unavailable=now()).where(Track.id == t.id).execute()
+
+        self._login()
+        # A gateway-sourced list (favorites) gets the flag from a batched lookup.
+        flagged = _webui.flag_unavailable(
+            [{"deezer_id": "45", "title": "Dead"}, {"deezer_id": "999", "title": "Ok"}]
+        )
+        self.assertTrue(flagged[0].get("unavailable"))
+        self.assertIsNone(flagged[1].get("unavailable"))
+
+    def test_replace_rewrites_playlists_and_favorites(self):
+        from supysonic.db import Playlist, PlaylistTrack, StarredTrack, Track
+
+        dead = self._make_deezer_track(sng_id="50", title="Dead One", archived=False)
+        alive = self._make_deezer_track(sng_id="51", title="Live One", archived=True)
+        user = User.get(User.name == "alice")
+        pl = Playlist.create(user=user, name="Mix")
+        PlaylistTrack.create(playlist=pl, track=dead, index=0)
+        StarredTrack.create(user=user, starred=dead)
+
+        self._login()
+        rv = self.client.post("/api/replace", json={"from": "50", "to": "51"})
+        self.assertEqual(rv.status_code, 200)
+        job = rv.get_json()["job"]
+
+        # The worker is a thread: wait for it, then check what it did.
+        deadline = time.time() + 5
+        status = None
+        while time.time() < deadline:
+            status = self.client.get("/api/replace/status/" + job).get_json()
+            if not status["running"]:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(status)
+        self.assertFalse(status["running"])
+        self.assertTrue(status["ok"], status)
+
+        rows = list(PlaylistTrack.select().where(PlaylistTrack.playlist == pl.id))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].track_id, alive.id)
+        self.assertEqual(rows[0].index, 0)  # same position, not appended
+        self.assertIsNone(StarredTrack.get_or_none(StarredTrack.starred == dead.id))
+        self.assertIsNotNone(StarredTrack.get_or_none(StarredTrack.starred == alive.id))
+
+    def test_replace_rejects_nonsense(self):
+        self._login()
+        self.assertEqual(
+            self.client.post("/api/replace", json={"from": "1", "to": "1"}).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post("/api/replace", json={"from": "", "to": "2"}).status_code,
+            400,
+        )
+        # A source we've never heard of isn't replaceable.
+        self.assertEqual(
+            self.client.post(
+                "/api/replace", json={"from": "987654321", "to": "2"}
+            ).status_code,
+            404,
+        )
+
+    def test_replacement_candidates_exclude_the_dead_ones(self):
+        from supysonic.db import Track
+
+        dead = self._make_deezer_track(sng_id="60", title="Song", archived=False)
+        other = self._make_deezer_track(sng_id="61", title="Song", archived=True)
+        Track.update(unavailable=now()).where(Track.id == dead.id).execute()
+
+        self._login()
+        body = self.client.get("/api/replace/candidates/60").get_json()
+        ids = [c["deezer_id"] for c in body["candidates"]]
+        self.assertNotIn("60", ids)  # never itself
+        self.assertIn("Archived Artist Song", body["query"])
 
     def _make_deezer_track(self, sng_id="1", title="Archived Song", archived=True):
         """Create a DB row for a Deezer track (deezer_id set). When `archived`,

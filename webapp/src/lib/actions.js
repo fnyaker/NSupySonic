@@ -14,6 +14,7 @@ import {
   lastPlaylist,
   openPlaylistPicker,
   openShare,
+  openReplace,
 } from "./stores.js";
 import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
 import { addMarkerAt } from "./markers.js";
@@ -473,6 +474,14 @@ export function buildTrackMenu(track, nav) {
       label: "Ajouter à une playlist…",
       icon: "music",
       action: () => openPlaylistPicker(track),
+    });
+    // Swap this track for another one everywhere it appears. Always offered —
+    // a track can also be simply *wrong* (bad master, wrong version), not only
+    // dead — but it leads the list when we already know it's unplayable.
+    items.push({
+      label: "Remplacer le titre…",
+      icon: "refresh",
+      action: () => openReplace(track),
     });
   }
   // Offline download — device-local, so available to everyone. A plain

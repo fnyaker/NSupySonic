@@ -190,6 +190,32 @@ export function filterQueue(tracks) {
 // synchronous lookups on the play path).
 export const cachedIds = writable(new Set());
 
+// Tracks the server has confirmed unplayable during THIS session. Lists already
+// receive an `unavailable` flag from the API, but a track that dies mid-session
+// (or was never listed) has to show up as such immediately, everywhere it
+// appears, without refetching every page.
+export const unavailableIds = writable(new Set());
+export function markUnavailable(id) {
+  if (!id) return;
+  unavailableIds.update((s) => {
+    const key = String(id);
+    if (s.has(key)) return s;
+    const next = new Set(s);
+    next.add(key);
+    return next;
+  });
+}
+export function clearUnavailable(id) {
+  if (!id) return;
+  unavailableIds.update((s) => {
+    const key = String(id);
+    if (!s.has(key)) return s;
+    const next = new Set(s);
+    next.delete(key);
+    return next;
+  });
+}
+
 // True while a manual Deezer sync is running (shared so every entry point — the
 // sidebar button and the mobile library button — reflects/guards the same job).
 export const syncing = writable(false);
@@ -278,6 +304,19 @@ export function openShare(track) {
 }
 export function closeShare() {
   shareSheet.set(null);
+}
+
+// -- replacement sheet -------------------------------------------------------
+// { track } | null — a track that can no longer be played, and the sheet that
+// finds it a stand-in (a close match, or a file of your own) and swaps it
+// everywhere it appears. Mounted once in App.svelte, opened from the track menu,
+// from the badge on a dead row, and from the library's "indisponibles" section.
+export const replaceSheet = writable(null);
+export function openReplace(track) {
+  if (track && track.deezer_id) replaceSheet.set({ track });
+}
+export function closeReplace() {
+  replaceSheet.set(null);
 }
 
 // -- export sheet ------------------------------------------------------------

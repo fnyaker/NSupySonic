@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS track (
     last_modification INTEGER NOT NULL,
     play_count INTEGER NOT NULL,
     last_play DATETIME,
+    unavailable DATETIME,
     root_folder_id INTEGER NOT NULL REFERENCES folder,
     folder_id INTEGER NOT NULL REFERENCES folder,
     owner_id CHAR(36) REFERENCES user
