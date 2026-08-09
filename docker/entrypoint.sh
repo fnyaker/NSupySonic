@@ -14,7 +14,19 @@ umask 077
 
 mkdir -p /data/db /data/cache /data/archive 2>/dev/null || true
 
-CONF=/data/supysonic.conf
+# Rendered per CONTAINER, not on the shared /data volume, and pointed at with
+# SUPYSONIC_CONFIG (read last, so it wins over every discovered file).
+#
+# It used to live at /data/supysonic.conf. The app and the optional daemon mount
+# the same volume, so they raced to write that one file from two different
+# environments — and since the [base] section is only emitted when DATABASE_URI
+# is set, a daemon started without it rewrote the file WITHOUT the database URI.
+# Both processes then fell back to the password baked into /etc/supysonic and
+# died with "password authentication failed for user supysonic", having changed
+# nothing themselves.
+CONF=/run/supysonic/supysonic.conf
+mkdir -p /run/supysonic 2>/dev/null || true
+export SUPYSONIC_CONFIG="$CONF"
 
 render_config() {
     # The Android app version this image expects clients to run. Defaults to the
@@ -66,6 +78,23 @@ render_config() {
     # 022 left it world-readable on a shared volume.
     chmod 600 "$CONF"
     echo "Rendered $CONF from environment."
+
+    # Say which database this process will use, with the password redacted. A
+    # container whose DATABASE_URI is unset silently inherits the one baked into
+    # /etc/supysonic — which carries a placeholder password — and the only sign
+    # of it used to be a psycopg2 traceback that named neither the config file
+    # nor the reason.
+    if [ -n "$DATABASE_URI" ]; then
+        echo "Database: $(redact_uri "$DATABASE_URI")"
+    else
+        echo "Database: DATABASE_URI is unset; falling back to /etc/supysonic." >&2
+        echo "          Set it on THIS service if it should talk to your own DB." >&2
+    fi
+}
+
+redact_uri() {
+    # scheme://user:secret@host/db -> scheme://user:***@host/db
+    echo "$1" | sed -E 's#(://[^:/@]+):[^@]*@#\1:***@#'
 }
 
 LEGACY_SQLITE=/data/db/supysonic.db

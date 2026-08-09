@@ -200,4 +200,14 @@ class IniConfig(DefaultConfig):
 
     @classmethod
     def from_common_locations(cls):
-        return IniConfig(cls.common_paths)
+        # SUPYSONIC_CONFIG is read LAST, so it overrides every discovered file.
+        # The container uses it to point each process at a config rendered from
+        # ITS OWN environment: the app and the daemon share the /data volume, so
+        # a single rendered path meant whichever booted last overwrote the
+        # other's — and a container with a partial environment silently dropped
+        # sections (the database URI above all) for both of them.
+        override = os.environ.get("SUPYSONIC_CONFIG")
+        paths = list(cls.common_paths)
+        if override:
+            paths.append(override)
+        return IniConfig(paths)
