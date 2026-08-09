@@ -45,9 +45,9 @@ def _archive_starred(cls, entity):
     app = current_app._get_current_object()
     try:
         if cls is Track:
-            backfill.archive_tracks(app, [entity])
+            backfill.archive_tracks(app, [entity], event="on_fav_track")
         elif cls is Album:
-            backfill.archive_tracks(app, entity.tracks)
+            backfill.archive_tracks(app, entity.tracks, event="on_fav_album")
         elif cls is Artist and getattr(entity, "deezer_id", None):
             backfill.archive_entity(
                 app, getattr(current_app, "deezer", None), "artist", entity.deezer_id

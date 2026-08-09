@@ -225,7 +225,32 @@ running twice at once. All of it is gated by `[deezer] archive_library` (default
 those caches (expiring the protection first, or the button would silently do nothing) and cannot
 touch `archive_dir`.
 
-**Nothing deletes an archive.** Unsubscribing from a podcast keeps every archived episode: the
+**Archive rules** (`supysonic/deezer/rules.py`, `/api/archive/rules`, Réglages → Archive) make all of
+the above configurable at runtime: one boolean per event (`rules.EVENTS`), the artist scope
+(`all` / `releases` / `top` + `artist_limit`), and the cleanup policy. Values live one-per-row in
+`Meta` under the `dz.` prefix (`Meta.key` is `CharField(32)` — keep names short) and override the
+config file, exactly like the ARL; `rules.load` caches for a second because it is read on every star
+and every play. `archive_library` stays the master switch above all of them. There is deliberately no
+`on_play` switch — playing a Deezer track *must* archive it, since the Opus transcode reads the
+archived FLAC; what is optional is `on_play_context` (playing one track pulls its whole album or
+playlist, opt-in, deduplicated per container per hour by `backfill._first_time_seen`).
+
+**Local play counts.** `/api/listen` writes `Track.play_count` / `last_play` (≥20 s counts, a skip
+doesn't). Before that only Subsonic's `scrobble` did, so a library played entirely through the web
+app looked untouched — and the cleanup decides what to drop from exactly this data.
+
+**Cleanup** (`supysonic/deezer/cleanup.py`) is the **only** code in the project that deletes archived
+audio. It is off by default, needs a free-space floor (`clean_min_free_gb`) to do anything, and is
+event-driven like the rest — `prefetch._check_space` looks right after a download, the one moment the
+archive can have crossed the floor. Guarantees that are **not** configurable: only rows with a
+`deezer_id` are eligible (an upload exists nowhere else — deleting it destroys the only copy), and
+the Track row survives, so the title keeps its place in every playlist and re-archives on the next
+play (`last_modification = 0` is what marks it "not archived" everywhere). Configurable: what is
+protected (favourites / playlist tracks / podcasts, all on), the staleness window, and the deletion
+priority (`CLEANUP_ORDERS`). `/api/archive/cleanup/preview` shows exactly what would go, in order,
+before anything does.
+
+**Nothing else deletes an archive.** Unsubscribing from a podcast keeps every archived episode: the
 channel is flagged `subscribed = False` instead of being deleted (only a show with nothing on disk is
 removed), and Subsonic's `deletePodcastEpisode` reports success without touching the file. Same rule
 for tracks: the importer keeps archived tracks Deezer stopped returning. And when a WHOLE show leaves

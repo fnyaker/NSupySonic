@@ -253,6 +253,85 @@ def _empty(cache):
             continue  # in use, or already gone: leave it alone
 
 
+# -- archive rules ----------------------------------------------------------
+
+
+@webapi.route("/archive/rules")
+@login_required
+@admin_required
+def archive_rules():
+    """The rules in force, plus the vocabulary the UI needs to render them."""
+    from ..deezer import rules
+
+    return jsonify(
+        {
+            "rules": rules.load(current_app._get_current_object()),
+            "defaults": rules.DEFAULTS,
+            "events": list(rules.EVENTS),
+            "artist_scopes": list(rules.ARTIST_SCOPES),
+            "cleanup_orders": list(rules.CLEANUP_ORDERS),
+            # The master switch lives in the config file, not in these rules;
+            # the UI greys everything out when it is off rather than pretending
+            # the per-event switches still mean something.
+            "archive_library": bool(
+                current_app.config["DEEZER"].get("archive_library", True)
+            ),
+        }
+    )
+
+
+@webapi.route("/archive/rules", methods=["POST"])
+@login_required
+@admin_required
+def set_archive_rules():
+    from ..deezer import rules
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "invalid payload"}), 400
+    written = rules.save(data)
+    logger.info("Archive rules updated by %s: %s", request.webuser.name, written)
+    return jsonify({"ok": True, "rules": rules.load(current_app._get_current_object())})
+
+
+# -- cleanup ----------------------------------------------------------------
+# The only thing in this project that deletes archived audio. Admin-only, off
+# unless configured, and previewable before it runs.
+
+
+@webapi.route("/archive/cleanup/preview")
+@login_required
+@admin_required
+def cleanup_preview():
+    from ..deezer import cleanup
+
+    return jsonify(cleanup.preview(current_app._get_current_object()))
+
+
+@webapi.route("/archive/cleanup", methods=["POST"])
+@login_required
+@admin_required
+def cleanup_run():
+    """Free space now, under the configured rules.
+
+    Refuses when the rules are off — this is not a "delete my archive" button,
+    it is the manual trigger for a policy the admin has already written down.
+    """
+    from ..deezer import cleanup
+
+    app = current_app._get_current_object()
+    stats = cleanup.run(app, force=True)
+    if stats.get("skipped"):
+        return jsonify({"ok": False, "error": "cleanup disabled or already running", **stats}), 409
+    logger.info(
+        "Archive cleanup run by %s: %d file(s), %d bytes",
+        request.webuser.name,
+        stats["deleted"],
+        stats["freed"],
+    )
+    return jsonify({"ok": True, **stats})
+
+
 @webapi.route("/cache/flush", methods=["POST"])
 @login_required
 @admin_required

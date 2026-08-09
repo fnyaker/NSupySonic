@@ -210,13 +210,20 @@ def archive_now(app, deezer_ids=(), episode_ids=()) -> int:
     return queued
 
 
-def archive_tracks(app, tracks) -> int:
+def archive_tracks(app, tracks, event: str | None = None) -> int:
     """Queue the Track rows that have no file on disk yet.
 
     The cheap path: the rows are already in hand (a playlist you just built, an
     album you just starred through Subsonic), so nothing has to ask Deezer what
     they contain.
+
+    ``event`` names the rule that authorises this (see ``rules.EVENTS``); when
+    the admin has turned that event off, nothing is queued.
     """
+    from . import rules
+
+    if event and not rules.enabled(app, event):
+        return 0
     ids = []
     for t in tracks or ():
         try:
@@ -228,6 +235,13 @@ def archive_tracks(app, tracks) -> int:
 
 
 ENTITY_KINDS = ("album", "playlist", "artist")
+
+# Which admin rule authorises each favourite.
+ENTITY_EVENTS = {
+    "album": "on_fav_album",
+    "playlist": "on_fav_playlist",
+    "artist": "on_fav_artist",
+}
 
 # How long a feeder thread waits before offering the overflow again.
 QUEUE_RETRY_DELAY = 30
@@ -273,21 +287,64 @@ def _queue_all(app, deezer_ids, label: str) -> int:
     return queued
 
 
-def _archive_discography(app, provider, artist_id) -> int:
-    """Every track of every official release of an artist.
+def _releases(provider, artist_id, scope: str, limit: int) -> list:
+    """The album ids to take from an artist, per the configured scope.
 
-    Deezer's ``all`` tab is albums + singles + EPs + "more", already deduplicated
-    and without the guest appearances that belong to somebody else's record. The
-    releases are fed album by album so the first one starts downloading while the
-    rest of the discography is still being listed.
+    ``all`` is Deezer's own ``all`` tab: albums + singles + EPs + "more",
+    deduplicated, without the guest appearances that belong to somebody else's
+    record. ``releases`` is the same list cut to the ``limit`` most recent — the
+    setting for a server that cannot hold every discography.
     """
     tabs = provider.get_artist_discography(artist_id) or {}
-    album_ids, seen = [], set()
-    for release in tabs.get("all") or []:
-        aid = str((release or {}).get("id") or "")
+    releases = [r for r in (tabs.get("all") or []) if (r or {}).get("id")]
+    if scope == "releases":
+        # Most recent first. gw's order is not reliable, so sort explicitly; a
+        # missing date sorts last rather than winning by accident.
+        releases.sort(key=lambda r: str(r.get("release_date") or ""), reverse=True)
+        releases = releases[: max(1, limit)]
+
+    out, seen = [], set()
+    for release in releases:
+        aid = str(release.get("id") or "")
         if aid and aid not in seen:
             seen.add(aid)
-            album_ids.append(aid)
+            out.append(aid)
+    return out
+
+
+def _top_track_ids(provider, artist_id, limit: int) -> list:
+    """The artist's most-played tracks, for the ``top`` scope."""
+    raw = provider.get_artist_top(artist_id, limit=max(1, limit)) or []
+    out, seen = [], set()
+    for t in raw:
+        tid = str((t or {}).get("id") or (t or {}).get("SNG_ID") or "")
+        if tid and tid not in seen:
+            seen.add(tid)
+            out.append(tid)
+    return out[: max(1, limit)]
+
+
+def _archive_discography(app, provider, artist_id) -> int:
+    """What a favourited artist brings in, per the admin's artist rules.
+
+    Releases are fed album by album so the first one starts downloading while
+    the rest is still being listed.
+    """
+    from . import rules
+
+    settings = rules.load(app)
+    scope = settings.get("artist_scope") or "all"
+    limit = int(settings.get("artist_limit") or 5)
+
+    if scope == "top":
+        ids = _top_track_ids(provider, artist_id, limit)
+        total = _queue_all(app, ids, f"artist {artist_id}")
+        logger.info(
+            "Archiving %d top track(s) of favourited artist %s", total, artist_id
+        )
+        return total
+
+    album_ids = _releases(provider, artist_id, scope, limit)
 
     total = 0
     queued_tracks = set()
@@ -304,10 +361,11 @@ def _archive_discography(app, provider, artist_id) -> int:
         queued_tracks.update(ids)
         total += _queue_all(app, ids, f"artist {artist_id}")
     logger.info(
-        "Archiving %d track(s) from %d release(s) of favourited artist %s",
+        "Archiving %d track(s) from %d release(s) of favourited artist %s (%s)",
         total,
         len(album_ids),
         artist_id,
+        scope,
     )
     return total
 
@@ -322,11 +380,15 @@ def archive_entity(app, provider, kind: str, deezer_id):
 
     Returns the thread (or ``None`` when there is nothing to do).
     """
+    from . import rules
+
     if kind not in ENTITY_KINDS or not deezer_id:
         return None
     if provider is None or not archiving_enabled(app):
         return None
     if getattr(app, "deezer_prefetch", None) is None:
+        return None
+    if not rules.enabled(app, ENTITY_EVENTS[kind]):
         return None
 
     def work():
@@ -354,13 +416,90 @@ def archive_entity(app, provider, kind: str, deezer_id):
 
 def archive_show(app, channel) -> int:
     """Queue every episode of a show that isn't on disk yet."""
-    if channel is None:
+    from . import rules
+
+    if channel is None or not rules.enabled(app, "on_podcast"):
         return 0
     try:
         missing = [str(e.id) for e in channel.episodes if _needs_file(e)]
     except Exception:
         return 0
     return archive_now(app, episode_ids=missing)
+
+
+# Playing an album fires one /api/listen per track, all carrying the SAME
+# context. Without this, a 30-track album would mean 30 identical tracklist
+# fetches and 30 worker threads racing to queue the same ids. One pass per
+# container per hour is plenty: the queue skips what is already on disk anyway.
+_CONTEXT_TTL = 3600
+_recent_contexts = {}
+_context_lock = threading.Lock()
+
+
+def _first_time_seen(key: str) -> bool:
+    now_ = time.monotonic()
+    cutoff = now_ - _CONTEXT_TTL
+    with _context_lock:
+        for old in [k for k, at in _recent_contexts.items() if at < cutoff]:
+            del _recent_contexts[old]
+        # `is None`, not a 0 default: monotonic() counts from boot, so for the
+        # first hour of uptime `0 > cutoff` is true and every context would look
+        # like one we had just handled.
+        seen = _recent_contexts.get(key)
+        if seen is not None and seen > cutoff:
+            return False
+        _recent_contexts[key] = now_
+        return True
+
+
+def archive_play_context(app, provider, context):
+    """Playing a track archives the album / playlist it came from.
+
+    Opt-in (``on_play_context``): it turns "I pressed play on one song" into a
+    whole-release download, which is exactly what some libraries want and
+    exactly what a small disk cannot afford. The track itself is archived by the
+    act of playing it, with or without this.
+
+    ``context`` is the player's ``{"kind": ..., "id": ...}`` — the same shape
+    the SPA already sends to /api/listen.
+    """
+    from . import rules
+
+    if not rules.enabled(app, "on_play_context"):
+        return None
+    kind = str((context or {}).get("kind") or "")
+    cid = str((context or {}).get("id") or "")
+    if kind not in ENTITY_KINDS or kind == "artist" or not cid.isdigit():
+        # Only a finite, named container. A radio/flow/search queue has no
+        # tracklist to archive, and an artist context here would mean pulling a
+        # discography because someone pressed play — never implicit.
+        return None
+    # Reuses the favourite path, but gated on its own rule: the entity events
+    # must not be able to authorise a play.
+    if getattr(app, "deezer_prefetch", None) is None or provider is None:
+        return None
+    if not archiving_enabled(app):
+        return None
+    if not _first_time_seen(f"{kind}:{cid}"):
+        return None
+
+    def work():
+        try:
+            raw = (
+                provider.get_album_tracks(cid)
+                if kind == "album"
+                else provider.get_playlist_tracks(cid)
+            )
+            ids = _song_ids(raw)
+            if ids:
+                n = _queue_all(app, ids, f"played {kind} {cid}")
+                logger.info("Archiving %d track(s) from played %s %s", n, kind, cid)
+        except Exception as exc:
+            logger.info("Could not archive played %s %s: %s", kind, cid, exc)
+
+    thread = threading.Thread(target=work, name="archive-play-context", daemon=True)
+    thread.start()
+    return thread
 
 
 def sweep_for(

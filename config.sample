@@ -169,6 +169,43 @@ enabled = no
 ; Default: yes
 ;archive_library = yes
 
+; Everything below is the DEFAULT for the matching setting in Réglages ->
+; Archive; once an admin touches a control there, the stored value wins (same
+; rule as `arl`). Listed here so a fresh container can start from your policy
+; instead of ours.
+;
+; Which events archive. All yes by default, except on_play_context.
+; NOTE there is no "on_play": playing a Deezer track always archives it, because
+; that is how playback works here (the Opus transcode reads the archived FLAC).
+;on_play_context = no     ; playing a track also archives its album / playlist
+;on_fav_track = yes
+;on_fav_album = yes
+;on_fav_playlist = yes
+;on_fav_artist = yes
+;on_playlist_add = yes
+;on_podcast = yes
+
+; How much of a favorited artist to take.
+;   all      - the whole discography (default)
+;   releases - the `artist_limit` most recent releases
+;   top      - the artist's `artist_limit` most-played tracks
+;artist_scope = all
+;artist_limit = 5
+
+; Cleanup. The ONLY thing in this project that deletes archived audio, and it is
+; off unless you turn it on. It only ever considers tracks that can be fetched
+; again from Deezer — a file you uploaded yourself exists nowhere else and is
+; never a candidate, whatever these say. The Track row survives a delete, so the
+; title keeps its place in your playlists and re-archives on the next play.
+;clean_on = no
+;clean_min_free_gb = 0        ; run only below this much free space (0 = never)
+;clean_stale_days = 180       ; and only for tracks not played for this long
+;clean_keep_fav = yes
+;clean_keep_playlist = yes
+;clean_keep_podcast = yes
+; What goes first: oldest_play | least_played | largest | oldest
+;clean_order = oldest_play
+
 ; Folder where fetched FLAC files are permanently archived. Required when
 ; enabled. Registered as an additional "Deezer" root library folder.
 ;archive_dir = /var/supysonic/deezer-archive

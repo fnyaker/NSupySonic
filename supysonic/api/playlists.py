@@ -34,7 +34,9 @@ def _archive_added(tracks):
     from ..deezer import backfill
 
     try:
-        backfill.archive_tracks(current_app._get_current_object(), tracks)
+        backfill.archive_tracks(
+            current_app._get_current_object(), tracks, event="on_playlist_add"
+        )
     except Exception:
         pass
 

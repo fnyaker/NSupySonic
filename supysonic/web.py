@@ -47,6 +47,7 @@ def setup_deezer(app):
             app.deezer,
             workers=min(max(1, count), 4),
             dl_workers=min(max(1, dl_count), 8),
+            app=app,
         )
 
     # The sync thread reads app.deezer on every run, so it survives a swap; it

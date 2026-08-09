@@ -46,6 +46,9 @@ class MockGW:
         self.songs_removed = []
         self.listens = []
         self.fav_calls = 0
+        # Which albums the archiver actually walked — how the artist-scope
+        # tests tell "one release" from "the whole discography".
+        self.taken_albums = []
         self.fav_checksum = "cs1"
 
     def log_listen(self, sng_id, **kw):
@@ -211,6 +214,7 @@ class MockGW:
 
     def get_album_tracks(self, alb_id):
         # full tracklist (more than the page batch)
+        self.taken_albums.append(str(alb_id))
         return [raw_track(i, f"T{i}") for i in range(1, 6)]
 
     def get_playlist_tracks(self, playlist_id):
@@ -273,7 +277,7 @@ class MockApi:
                 "name": "Foo", "picture_medium": "https://img/ar.jpg", "nb_fan": 1000}
 
     def get_artist_top(self, artist_id, limit=15, **kw):
-        return {"data": [api_track(1)]}
+        return {"data": [api_track(i) for i in range(1, min(limit, 15) + 1)]}
 
     def get_artist_albums(self, artist_id, limit=50, **kw):
         return {"data": [{"id": 10, "title": "Bar", "cover_medium": "https://img/a.jpg",

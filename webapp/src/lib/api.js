@@ -313,6 +313,14 @@ export const api = {
   archiveBackfill: (scope = "all") =>
     req("/archive/backfill", { method: "POST", body: body({ scope }) }),
   archiveStatus: () => req("/archive/status"),
+  // Admin: which events archive, how much of an artist to take, and the
+  // cleanup policy (the only thing that can delete archived audio).
+  archiveRules: () => req("/archive/rules"),
+  setArchiveRules: (fields) =>
+    req("/archive/rules", { method: "POST", body: body(fields) }),
+  // What a cleanup would delete right now. Deletes nothing.
+  cleanupPreview: () => req("/archive/cleanup/preview"),
+  runCleanup: () => req("/archive/cleanup", { method: "POST" }),
   // Admin: what the archive costs and what's left of the disk.
   storage: () => req("/storage"),
   flushCache: () => req("/cache/flush", { method: "POST" }),

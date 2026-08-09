@@ -108,6 +108,8 @@
     }
     refreshDeezerStatus();
     loadStorage();
+    loadRules();
+    loadCleanup();
     // A sweep started before a reload is still running server-side: pick the
     // progress back up instead of pretending nothing is happening.
     try {
@@ -205,6 +207,96 @@
       /* the job keeps running server-side regardless */
     } finally {
       jobPolling = false;
+    }
+  }
+
+  // -- archive rules (admin) -------------------------------------------------
+  // Which events archive, how much of a favourited artist to take, and the
+  // cleanup policy. Saved one field at a time (each control is its own
+  // decision) with an optimistic local update so nothing feels laggy.
+  let rules = null;
+  let rulesMeta = null;
+  let rulesSaving = false;
+
+  const EVENT_LABELS = {
+    on_play_context: "Lire un titre archive tout son album / sa playlist",
+    on_fav_track: "Titre mis en favori",
+    on_fav_album: "Album mis en favori",
+    on_fav_playlist: "Playlist mise en favori",
+    on_fav_artist: "Artiste mis en favori",
+    on_playlist_add: "Titre ajouté à une playlist",
+    on_podcast: "Abonnement à un podcast",
+  };
+  const SCOPE_LABELS = {
+    all: "Toute la discographie",
+    releases: "Les N sorties les plus récentes",
+    top: "Les N titres les plus écoutés",
+  };
+  const ORDER_LABELS = {
+    oldest_play: "Le plus anciennement écouté",
+    least_played: "Le moins écouté",
+    largest: "Le plus volumineux",
+    oldest: "Le plus anciennement archivé",
+  };
+
+  async function loadRules() {
+    if (!$user?.admin) return;
+    try {
+      rulesMeta = await api.archiveRules();
+      rules = { ...rulesMeta.rules };
+    } catch {
+      rules = null;
+    }
+  }
+
+  async function saveRule(key, value) {
+    if (!rules) return;
+    const previous = rules[key];
+    rules = { ...rules, [key]: value }; // optimistic
+    rulesSaving = true;
+    try {
+      const r = await api.setArchiveRules({ [key]: value });
+      rules = { ...r.rules };
+      if (key.startsWith("clean")) loadCleanup();
+    } catch (e) {
+      rules = { ...rules, [key]: previous }; // put it back, say why
+      toasts.push(e?.message || "Réglage non enregistré", "error");
+    } finally {
+      rulesSaving = false;
+    }
+  }
+
+  // -- cleanup (admin) -------------------------------------------------------
+  // The one destructive feature in the app: always show what would go before
+  // anything goes.
+  let cleanup = null;
+  let cleaning = false;
+  let cleanupOpen = false;
+
+  async function loadCleanup() {
+    if (!$user?.admin) return;
+    try {
+      cleanup = await api.cleanupPreview();
+    } catch {
+      cleanup = null;
+    }
+  }
+
+  async function runCleanup() {
+    if (cleaning) return;
+    cleaning = true;
+    try {
+      const r = await api.runCleanup();
+      toasts.push(
+        r.deleted
+          ? `${r.deleted} fichier(s) supprimé(s), ${fmtBytes(r.freed || 0)} libérés`
+          : "Rien à libérer : le disque est au-dessus du seuil"
+      );
+      await Promise.all([loadCleanup(), loadStorage()]);
+    } catch (e) {
+      toasts.push(e?.message || "Nettoyage impossible", "error");
+    } finally {
+      cleaning = false;
     }
   }
 
@@ -499,6 +591,202 @@
           ? `, ${job.unavailable} indisponible(s)`
           : ""}{job.failed ? `, ${job.failed} échec(s)` : ""}.
       </p>
+    {/if}
+  {/if}
+</section>
+{/if}
+
+{#if $user?.admin && rules}
+<section class="card">
+  <h2>Règles d'archivage</h2>
+  <p class="muted sub">
+    Ce qui déclenche un archivage. La lecture n'est pas dans la liste&nbsp;: un
+    titre lu est toujours archivé, c'est ainsi que fonctionne le transcodage.
+  </p>
+
+  {#if rulesMeta && !rulesMeta.archive_library}
+    <p class="muted hint warn">
+      <Icon name="alert" size={14} /> L'archivage est désactivé côté serveur
+      (<code>archive_library</code>)&nbsp;: ces règles sont sans effet.
+    </p>
+  {/if}
+
+  <div class="rules">
+    {#each rulesMeta?.events || [] as ev}
+      <label class="rule">
+        <input
+          type="checkbox"
+          checked={rules[ev]}
+          disabled={rulesSaving}
+          on:change={(e) => saveRule(ev, e.currentTarget.checked)}
+        />
+        <span>{EVENT_LABELS[ev] || ev}</span>
+      </label>
+    {/each}
+  </div>
+
+  <h3>Artiste mis en favori</h3>
+  <p class="muted hint">
+    Une discographie complète peut représenter des dizaines de Go. Limitez-la si
+    le disque est petit.
+  </p>
+  <div class="row">
+    <select
+      value={rules.artist_scope}
+      disabled={rulesSaving || !rules.on_fav_artist}
+      on:change={(e) => saveRule("artist_scope", e.currentTarget.value)}
+    >
+      {#each rulesMeta?.artist_scopes || [] as scope}
+        <option value={scope}>{SCOPE_LABELS[scope] || scope}</option>
+      {/each}
+    </select>
+    {#if rules.artist_scope !== "all"}
+      <label class="num">
+        N&nbsp;=
+        <input
+          type="number"
+          min="1"
+          max="1000"
+          value={rules.artist_limit}
+          disabled={rulesSaving || !rules.on_fav_artist}
+          on:change={(e) => saveRule("artist_limit", e.currentTarget.value)}
+        />
+      </label>
+    {/if}
+  </div>
+</section>
+
+<section class="card danger">
+  <h2>Nettoyage automatique</h2>
+  <p class="muted sub">
+    La <strong>seule</strong> fonction qui supprime de l'audio archivé. Elle ne
+    touche que des titres re-téléchargeables depuis Deezer&nbsp;— un fichier que
+    vous avez importé vous-même n'existe nulle part ailleurs et n'est jamais
+    concerné. Le titre reste dans vos playlists et se réarchive à la prochaine
+    lecture&nbsp;; seuls les octets partent.
+  </p>
+
+  <label class="rule">
+    <input
+      type="checkbox"
+      checked={rules.clean_on}
+      disabled={rulesSaving}
+      on:change={(e) => saveRule("clean_on", e.currentTarget.checked)}
+    />
+    <span>Activer le nettoyage quand le disque se remplit</span>
+  </label>
+
+  {#if rules.clean_on}
+    <div class="row">
+      <label class="num">
+        Déclencher sous
+        <input
+          type="number"
+          min="0"
+          step="1"
+          value={rules.clean_min_free_gb}
+          disabled={rulesSaving}
+          on:change={(e) => saveRule("clean_min_free_gb", e.currentTarget.value)}
+        />
+        Go libres
+      </label>
+      <label class="num">
+        Pas écouté depuis
+        <input
+          type="number"
+          min="7"
+          max="3650"
+          value={rules.clean_stale_days}
+          disabled={rulesSaving}
+          on:change={(e) => saveRule("clean_stale_days", e.currentTarget.value)}
+        />
+        jours
+      </label>
+    </div>
+    {#if !rules.clean_min_free_gb}
+      <p class="muted hint warn">
+        <Icon name="alert" size={14} /> Seuil à 0&nbsp;Go&nbsp;: rien ne sera
+        jamais supprimé.
+      </p>
+    {/if}
+
+    <h3>Ce qui est protégé</h3>
+    <div class="rules">
+      <label class="rule">
+        <input
+          type="checkbox"
+          checked={rules.clean_keep_fav}
+          disabled={rulesSaving}
+          on:change={(e) => saveRule("clean_keep_fav", e.currentTarget.checked)}
+        />
+        <span>Mes favoris</span>
+      </label>
+      <label class="rule">
+        <input
+          type="checkbox"
+          checked={rules.clean_keep_playlist}
+          disabled={rulesSaving}
+          on:change={(e) => saveRule("clean_keep_playlist", e.currentTarget.checked)}
+        />
+        <span>Les titres présents dans une playlist</span>
+      </label>
+      <label class="rule">
+        <input
+          type="checkbox"
+          checked={rules.clean_keep_podcast}
+          disabled={rulesSaving}
+          on:change={(e) => saveRule("clean_keep_podcast", e.currentTarget.checked)}
+        />
+        <span>
+          Les épisodes de podcast
+          <em class="note">— un podcast disparu de Deezer reste protégé quoi qu'il arrive</em>
+        </span>
+      </label>
+    </div>
+
+    <h3>Priorité de suppression</h3>
+    <p class="muted hint">Ce qui part en premier quand il faut faire de la place.</p>
+    <select
+      value={rules.clean_order}
+      disabled={rulesSaving}
+      on:change={(e) => saveRule("clean_order", e.currentTarget.value)}
+    >
+      {#each rulesMeta?.cleanup_orders || [] as order}
+        <option value={order}>{ORDER_LABELS[order] || order}</option>
+      {/each}
+    </select>
+
+    <div class="clean-foot">
+      <button class="ghost" on:click={loadCleanup}>
+        <Icon name="refresh" size={16} /> Prévisualiser
+      </button>
+      <button class="wipe" on:click={runCleanup} disabled={cleaning || !cleanup?.needed_bytes}>
+        <Icon name="trash" size={16} /> {cleaning ? "Nettoyage…" : "Libérer maintenant"}
+      </button>
+    </div>
+
+    {#if cleanup}
+      <p class="muted hint">
+        {#if cleanup.needed_bytes}
+          Il manque <strong>{fmtBytes(cleanup.needed_bytes)}</strong> pour
+          revenir au seuil&nbsp;; {cleanup.tracks.length} titre(s) partiraient,
+          soit {fmtBytes(cleanup.would_free)}.
+        {:else}
+          Le disque est au-dessus du seuil&nbsp;: rien ne sera supprimé.
+          {cleanup.eligible} titre(s) seraient éligibles si nécessaire.
+        {/if}
+      </p>
+      {#if cleanup.tracks.length}
+        <ul class="cand">
+          {#each cleanup.tracks.slice(0, 12) as t}
+            <li>
+              <span class="ct">{t.title}</span>
+              <span class="ca muted">{t.artist}</span>
+              <span class="cb muted">{fmtBytes(t.bytes)}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/if}
   {/if}
 </section>
@@ -813,6 +1101,142 @@
     font-size: 0.85rem;
     margin: 4px 0 14px;
   }
+  /* -- archive rules & cleanup -------------------------------------------- */
+  .card h3 {
+    font-size: 0.9rem;
+    font-weight: 700;
+    margin: 20px 0 6px;
+    color: var(--text);
+  }
+  .card h3:first-of-type {
+    margin-top: 22px;
+  }
+  .rules {
+    display: grid;
+    gap: 2px;
+    margin: 4px 0;
+  }
+  .rule {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 9px 10px;
+    margin: 0 -10px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    line-height: 1.35;
+  }
+  .rule:hover {
+    background: var(--bg);
+  }
+  .rule input[type="checkbox"] {
+    flex: none;
+    width: 17px;
+    height: 17px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .rule input:disabled {
+    cursor: default;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+  }
+  .row select,
+  .card > select {
+    padding: 9px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg);
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.9rem;
+    max-width: 100%;
+  }
+  .num {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.88rem;
+    color: var(--text-dim);
+  }
+  .num input {
+    width: 82px;
+    padding: 9px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg);
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .note {
+    color: var(--text-dim);
+    font-style: normal;
+    font-size: 0.82rem;
+  }
+  .warn {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--accent-2, #e8a33d);
+  }
+  .card.danger {
+    border: 1px solid color-mix(in srgb, var(--accent-2, #e8a33d) 30%, transparent);
+  }
+  .clean-foot {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 18px;
+  }
+  .clean-foot .ghost,
+  .clean-foot .wipe {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .clean-foot .wipe:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .cand {
+    list-style: none;
+    margin: 10px 0 0;
+    padding: 0;
+    display: grid;
+    gap: 1px;
+    font-size: 0.85rem;
+  }
+  .cand li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) auto;
+    gap: 12px;
+    align-items: baseline;
+    padding: 7px 10px;
+    margin: 0 -10px;
+    border-radius: 8px;
+  }
+  .cand li:nth-child(odd) {
+    background: var(--bg);
+  }
+  .ct,
+  .ca {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cb {
+    font-variant-numeric: tabular-nums;
+  }
+
   /* -- archive & storage -------------------------------------------------- */
   .arch-btns {
     display: flex;
