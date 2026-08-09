@@ -197,9 +197,15 @@ def storage():
         out["transcode_limit"] = transcode.max_size
 
     out["tracks_total"] = Track.select().where(Track.deezer_id.is_null(False)).count()
+    # NOTE the parentheses. Python binds `&` TIGHTER than `>`, so the obvious
+    # spelling builds `(deezer_id IS NOT NULL AND last_modification) > 0` —
+    # which SQLite happily evaluates and Postgres rejects outright ("argument of
+    # AND must be type boolean"). That is a 500 that only ever shows up in
+    # production. `last_modification` is 0 until _finalize_archive stamps it, so
+    # this counts what is actually on disk without a stat() per row.
     out["tracks_archived"] = (
         Track.select()
-        .where(Track.deezer_id.is_null(False) & Track.last_modification > 0)
+        .where(Track.deezer_id.is_null(False) & (Track.last_modification > 0))
         .count()
     )
     return jsonify(out)
