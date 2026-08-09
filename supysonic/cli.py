@@ -571,6 +571,20 @@ def db_group():
     pass
 
 
+@db_group.command("uri")
+@click.pass_obj
+def db_uri(config):
+    """Print the database URI actually in force, and exit.
+
+    Which config file won is not obvious — there are four discovery paths plus
+    SUPYSONIC_CONFIG — and getting it wrong points the server at a DIFFERENT,
+    empty database, which looks exactly like data loss. This answers the
+    question directly, with no connection attempt, so a container can check
+    before it boots.
+    """
+    click.echo(config.BASE["database_uri"])
+
+
 @db_group.command("migrate-to")
 @click.argument("dest_uri")
 @click.option(
@@ -621,8 +635,23 @@ def db_migrate_to(config, dest_uri, source_uri, skip_if_populated):
         click.echo(f"Done. Copied {total} rows across {len(copied)} tables.")
 
 
+# Commands that must answer WITHOUT touching the database. `db uri` exists
+# precisely to be run when the database is unreachable or misconfigured — a
+# pre-flight check that opened a connection would fail for the very reason you
+# are running it.
+_NO_DATABASE = {("db", "uri")}
+
+
+def _needs_database(argv) -> bool:
+    words = tuple(a for a in argv if not a.startswith("-"))
+    return words[:2] not in _NO_DATABASE
+
+
 def main():
     config = IniConfig.from_common_locations()
+    if not _needs_database(sys.argv[1:]):
+        cli.main(obj=config)
+        return
     init_database(config.BASE["database_uri"])
     try:
         cli.main(obj=config)
