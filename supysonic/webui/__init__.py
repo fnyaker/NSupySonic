@@ -2308,24 +2308,64 @@ def delete_episode_marker(mid):
 # -- favorites & playback ---------------------------------------------------
 
 
+_LISTEN_MIN_SECONDS = 20
+
+
+def _record_play(deezer_id, listened):
+    """Count a play locally: ``play_count`` / ``last_play`` on the Track row.
+
+    Subsonic's ``scrobble`` was the only thing writing these, so a library
+    played entirely through the web app looked untouched — which matters now
+    that the archive cleanup decides what to drop from exactly this data. A skip
+    is not a play (hence the floor), and this never touches Deezer.
+    """
+    from ..deezer.archive import find_local_track
+
+    if listened < _LISTEN_MIN_SECONDS:
+        return
+    track = find_local_track(deezer_id)
+    if track is None:
+        return
+    try:
+        Track.update(play_count=Track.play_count + 1, last_play=now()).where(
+            Track.id == track.id
+        ).execute()
+    except Exception:  # a stats write must never break playback
+        logger.debug("Could not record a play for %s", deezer_id, exc_info=True)
+
+
 @webapi.route("/listen", methods=["POST"])
 @login_required
 def report_listen():
-    """Tell Deezer a track was played (feeds recommendations/Flow).
+    """A track finished playing: count it locally, and tell Deezer if asked to.
 
-    Opt-in: a no-op unless ``report_listens`` is enabled in the config. The web
-    player calls this on every track change, so the disabled path stays cheap.
-    Guests never feed telemetry — only the account owner's plays do.
+    The local count always happens (it is what "not played for six months"
+    means everywhere else in the app). The Deezer half is opt-in via
+    ``report_listens`` and only for the account owner — guests never feed
+    somebody else's recommendations.
+
+    The web player calls this on every track change, so both halves stay cheap.
     """
+    data = request.get_json(silent=True) or {}
+    deezer_id = str(data.get("deezer_id") or "")
+    if not _valid_id(deezer_id):
+        return jsonify({"error": "invalid deezer_id"}), 400
+    listened = int(data.get("listened") or 0)
+    _record_play(deezer_id, listened)
+
+    # Playing from an album or a playlist can archive the whole thing — off by
+    # default; see rules.on_play_context.
+    from ..deezer import backfill
+
+    backfill.archive_play_context(
+        current_app._get_current_object(), _provider(), data.get("context") or {}
+    )
+
     if not _is_admin():
         return ("", 204)
     provider = _provider()
     if provider is None or not current_app.config["DEEZER"].get("report_listens"):
         return ("", 204)
-    data = request.get_json(silent=True) or {}
-    deezer_id = str(data.get("deezer_id") or "")
-    if not _valid_id(deezer_id):
-        return jsonify({"error": "invalid deezer_id"}), 400
     next_id = data.get("next_id")
     next_id = str(next_id) if _valid_id(next_id) else None
     ctx = data.get("context") or {}
@@ -2333,7 +2373,7 @@ def report_listen():
     try:
         provider.report_listen(
             deezer_id,
-            listened=int(data.get("listened") or 0),
+            listened=listened,
             next_id=next_id,
             context=context,
             is_shuffle=bool(data.get("shuffle")),
@@ -2409,7 +2449,9 @@ def favorite():
         # nothing and, as always, deletes nothing.
         from ..deezer import backfill
 
-        backfill.archive_tracks(current_app._get_current_object(), [track])
+        backfill.archive_tracks(
+            current_app._get_current_object(), [track], event="on_fav_track"
+        )
     return jsonify({"ok": True, "favorite": on})
 
 
@@ -2505,7 +2547,9 @@ def create_playlist():
         _mirror_playlist(provider, pl)  # offline fallback: push when reachable
     from ..deezer import backfill
 
-    backfill.archive_tracks(current_app._get_current_object(), track_rows)
+    backfill.archive_tracks(
+        current_app._get_current_object(), track_rows, event="on_playlist_add"
+    )
     return jsonify({"ok": True, "id": str(pl.id), "deezer_id": pl.deezer_id})
 
 
@@ -2575,7 +2619,9 @@ def add_playlist_tracks(playlist_id):
     _mirror_playlist(provider, pl)
     from ..deezer import backfill
 
-    backfill.archive_tracks(current_app._get_current_object(), tracks)
+    backfill.archive_tracks(
+        current_app._get_current_object(), tracks, event="on_playlist_add"
+    )
     return jsonify({"ok": True, "added": len(tracks)})
 
 

@@ -328,6 +328,10 @@ class DeezerProvider:
     def get_artist_discography(self, art_id) -> dict:
         return self.dz.gw.get_artist_discography_tabs(art_id)
 
+    def get_artist_top(self, art_id, limit: int = 15) -> list[dict]:
+        """The artist's most-played tracks, public API (typed, with `id`)."""
+        return (self.dz.api.get_artist_top(art_id, limit=limit) or {}).get("data") or []
+
     def get_lyrics(self, sng_id) -> dict:
         return self.dz.gw.get_track_lyrics(sng_id)
 

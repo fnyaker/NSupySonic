@@ -30,8 +30,13 @@ class DeezerPrefetcher:
         max_queue: int = 256,
         dl_workers: int = 4,
         max_download_queue: int = 5000,
+        app=None,
     ):
         self.provider = provider
+        # Only used to check the free-space floor after a download: the archive
+        # can only cross it right after we have grown it, so that is the one
+        # moment worth looking (no timer anywhere).
+        self.app = app
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
         self._seen: set = set()
         self._lock = threading.Lock()
@@ -167,7 +172,22 @@ class DeezerPrefetcher:
             except Exception as exc:
                 logger.info("Background download failed for %s: %s", item, exc)
             finally:
+                self._check_space()
                 self._dl_queue.task_done()
+
+    def _check_space(self) -> None:
+        """The archive just grew — is it now over the admin's free-space floor?
+
+        A no-op (one dict read) unless a cleanup rule is configured.
+        """
+        if self.app is None:
+            return
+        try:
+            from . import cleanup
+
+            cleanup.maybe_run(self.app)
+        except Exception:  # pragma: no cover - never break the worker loop
+            logger.debug("Cleanup check failed", exc_info=True)
 
     def _worker(self) -> None:
         from ..db import Track, db
@@ -185,6 +205,7 @@ class DeezerPrefetcher:
                     return
                 track = Track[tid]
                 ensure_archived(self.provider, track)
+                self._check_space()
             except Exception as exc:
                 logger.info("Prefetch failed for track %s: %s", tid, exc)
             finally:
