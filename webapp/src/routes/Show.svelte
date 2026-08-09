@@ -159,11 +159,21 @@
     <GradientHeader cover={data.cover}>
       <div class="art"><Cover src={data.cover} alt={data.title} kind="podcast" fallbackId={data.id} eager /></div>
       <div class="meta">
-        <span class="kind">Podcast</span>
+        <span class="kind">Podcast{#if data.local} · Local{/if}</span>
         <h1>{data.title}</h1>
         <div class="sub muted">
           {episodes.length} épisode{episodes.length > 1 ? "s" : ""}
+          {#if data.local}
+            · {data.archived_count} archivé{data.archived_count > 1 ? "s" : ""} sur le serveur
+          {/if}
         </div>
+        {#if data.local}
+          <p class="localnote">
+            Ce podcast n'existe plus sur Deezer. Tout ce qui a été archivé reste
+            ici, jouable et téléchargeable comme avant — c'est désormais un
+            podcast local.
+          </p>
+        {/if}
         {#if data.description}<p class="desc">{data.description}</p>{/if}
       </div>
     </GradientHeader>
@@ -229,6 +239,9 @@
                   {fmtDuration(ep.duration)}
                 {/if}
                 {#if ep.status === "completed"}· <Icon name="downloaded" size={14} />{/if}
+                {#if ep.unavailable}
+                  · <span class="gone"><Icon name="alert" size={13} /> non archivé</span>
+                {/if}
               </div>
               {#if resume && !resume.done}
                 <div class="ebar"><span style={`width:${resume.pct * 100}%`}></span></div>
@@ -262,6 +275,19 @@
 {/if}
 
 <style>
+  .localnote {
+    margin: 10px 0 0;
+    max-width: 60ch;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: var(--text-dim);
+  }
+  .gone {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--accent-2);
+  }
   .art {
     width: 200px;
     flex: none;

@@ -192,7 +192,8 @@ CREATE TABLE IF NOT EXISTS podcast_channel (
     created TIMESTAMP NOT NULL,
     last_fetched TIMESTAMP,
     error_message VARCHAR(256),
-    subscribed BOOLEAN NOT NULL DEFAULT true
+    subscribed BOOLEAN NOT NULL DEFAULT true,
+    gone TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS index_podcast_channel_user_id_fk ON podcast_channel(user_id);
 

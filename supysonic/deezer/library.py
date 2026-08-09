@@ -505,6 +505,43 @@ def episode_archive_path(archive_dir, channel_title, publish_date, title) -> str
     )
 
 
+def save_show_cover(archive_dir: str, channel, data: bytes) -> "str | None":
+    """Persist a show's art as ``cover.jpg`` inside its episode folder.
+
+    Same reasoning as album art: once the audio is local, the picture must be
+    too, or a show that leaves Deezer keeps its episodes and loses its face.
+    Idempotent; returns the path or None.
+    """
+    if not data or channel is None:
+        return None
+    folder = os.path.join(
+        podcast_root_path(archive_dir), sanitize(channel.title or "Podcast")
+    )
+    path = os.path.join(folder, COVER_FILENAME)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        if not os.path.isfile(path):
+            tmp = f"{path}.part"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+    except OSError:
+        return None
+    return path
+
+
+def show_cover_file(archive_dir: str, channel) -> "str | None":
+    """The archived ``cover.jpg`` for a show, if we have one."""
+    if channel is None or not archive_dir:
+        return None
+    path = os.path.join(
+        podcast_root_path(archive_dir),
+        sanitize(channel.title or "Podcast"),
+        COVER_FILENAME,
+    )
+    return path if os.path.isfile(path) else None
+
+
 def normalize_show(data: dict) -> dict:
     """Flatten a gateway ``deezer.pageShow`` ``DATA`` (show) object."""
     return {

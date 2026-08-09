@@ -58,6 +58,15 @@ class DeezerError(Exception):
     """Any failure talking to Deezer."""
 
 
+class ShowUnavailable(DeezerError):
+    """Deezer no longer serves this podcast at all — the whole show, delisted.
+
+    Same distinction as TrackUnavailable: this is Deezer *answering*, not a
+    network failure. It is what turns a subscribed show into a local one, so it
+    must never be raised on a timeout or a gateway hiccup.
+    """
+
+
 class TrackUnavailable(DeezerError):
     """Deezer has no playable source for this track — and said so.
 
@@ -336,7 +345,20 @@ class DeezerProvider:
     # -- podcasts (shows / episodes) -------------------------------------
 
     def get_show_page(self, show_id, nb=40, start=0) -> dict:
-        return self.dz.gw.get_show_page(show_id, nb=nb, start=start)
+        """The show page, or ``ShowUnavailable`` if Deezer no longer has it.
+
+        A delisted show comes back either as a gateway error (a structured
+        answer) or as a page whose DATA carries no SHOW_ID. Both mean "Deezer
+        answered, and this show is gone"; anything else — a timeout, a reset —
+        propagates untouched, because it says nothing about the show.
+        """
+        try:
+            page = self.dz.gw.get_show_page(show_id, nb=nb, start=start)
+        except DeezerPyError as exc:
+            raise ShowUnavailable(f"Deezer has no show {show_id}: {exc}") from exc
+        if not (page or {}).get("DATA", {}).get("SHOW_ID"):
+            raise ShowUnavailable(f"Deezer returned no data for show {show_id}")
+        return page
 
     def get_show_episodes(self, show_id) -> list[dict]:
         return self.dz.gw.get_show_episodes(show_id)

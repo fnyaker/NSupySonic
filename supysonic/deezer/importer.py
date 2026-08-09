@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os.path
 import re
+from datetime import timedelta
 from uuid import uuid4
 
 from ..db import (
@@ -38,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 # How many track ids to resolve per gateway call when fetching favorites.
 _FAV_CHUNK = 200
+
+# How long a "this show is gone from Deezer" verdict stands before the sync
+# re-tests it. Shows come back (a licensing gap, a feed migration), so the
+# channel is kept local in the meantime rather than condemned.
+GONE_RECHECK = timedelta(days=7)
 
 # Stable local id for the synthetic Flow playlist.
 RECO_FLOW = "reco:flow"
@@ -310,6 +316,7 @@ class DeezerImporter:
         Audio is still fetched on demand.
         """
         from .archive import import_show
+        from .provider import ShowUnavailable
 
         show_ids = []
         seen = set()
@@ -323,6 +330,10 @@ class DeezerImporter:
         for channel in PodcastChannel.select().where(
             (PodcastChannel.user == self.user) & (PodcastChannel.subscribed == True)  # noqa: E712
         ):
+            # A show Deezer has dropped is left alone until the verdict ages out
+            # — no point asking every night for something we keep locally anyway.
+            if channel.gone is not None and (now() - channel.gone) < GONE_RECHECK:
+                continue
             _add(channel.deezer_id)
         try:
             for s in self.provider.get_user_shows():
@@ -338,8 +349,25 @@ class DeezerImporter:
                 channel = import_show(
                     self.provider, self.user, sid, episode_limit=episode_limit
                 )
+                # It answered: whatever we thought before, this show is alive.
+                if channel.gone is not None:
+                    channel.gone = None
+                    channel.save()
                 self._progress(f"  • {channel.title}")
                 count += 1
+            except ShowUnavailable as exc:
+                # Deezer no longer has the show AT ALL. Everything archived stays
+                # exactly where it is and keeps working — the channel simply
+                # becomes local, and we stop asking Deezer about it.
+                channel = PodcastChannel.get_or_none(
+                    (PodcastChannel.deezer_id == str(sid))
+                    & (PodcastChannel.user == self.user)
+                )
+                if channel is not None and channel.gone is None:
+                    channel.gone = now()
+                    channel.save()
+                    logger.info("Podcast %s is gone from Deezer; kept locally", sid)
+                self._progress(f"  • podcast {sid} is gone from Deezer (kept locally)")
             except Exception as exc:  # one bad show shouldn't abort the sync
                 logger.warning("Failed to refresh podcast %s: %s", sid, exc)
                 self._progress(f"  ! podcast {sid} failed: {exc}")

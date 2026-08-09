@@ -203,7 +203,11 @@ the button would silently do nothing) and cannot touch `archive_dir`.
 **Nothing deletes an archive.** Unsubscribing from a podcast keeps every archived episode: the
 channel is flagged `subscribed = False` instead of being deleted (only a show with nothing on disk is
 removed), and Subsonic's `deletePodcastEpisode` reports success without touching the file. Same rule
-for tracks: the importer keeps archived tracks Deezer stopped returning.
+for tracks: the importer keeps archived tracks Deezer stopped returning. And when a WHOLE show leaves
+Deezer, `provider.get_show_page` raises `ShowUnavailable` (Deezer answering, never a network error),
+the sync sets `PodcastChannel.gone` and the channel becomes a **local podcast**: episodes, art
+(`library.save_show_cover` archives a `cover.jpg` beside the audio) and playback all come off disk,
+and the sync stops asking about it until the verdict ages out (`importer.GONE_RECHECK`, 7 days).
 
 **Web app** (`webapp/`): Svelte 4 + Vite 5 SPA, hash routing (svelte-spa-router), consuming `/api`.
 Builds into `supysonic/webui/dist`. No emoji in the UI — all glyphs go through
@@ -241,7 +245,7 @@ API (download fallback). Podcast markers live in `lib/markers.js`.
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260806`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260807`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported.
 

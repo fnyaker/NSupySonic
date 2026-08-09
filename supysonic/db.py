@@ -32,7 +32,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260806"
+SCHEMA_VERSION = "20260807"
 
 
 def now():
@@ -840,6 +840,12 @@ class PodcastChannel(_Model):
     # everything already downloaded stays yours and stays playable — an archive
     # is never destroyed on our side, whatever Deezer does with the show.
     subscribed = BooleanField(default=True)
+    # When Deezer stopped serving this show at all (the whole thing delisted,
+    # not one episode). The channel becomes LOCAL: everything archived stays
+    # listed, playable and editable, served entirely from disk, and the sync
+    # stops asking Deezer about it. A timestamp, not a flag, for the same reason
+    # as Track.unavailable — a show can come back, so the verdict expires.
+    gone = DateTimeField(null=True)
 
     def as_subsonic_channel(self, user, prefs=None, include_episodes=True):
         info = {
