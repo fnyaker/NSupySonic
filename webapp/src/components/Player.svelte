@@ -15,6 +15,8 @@
     openMenu,
     toasts,
     prefetchEnabled,
+    prefetchCount,
+    prefetchAhead,
     offlineCovers,
     setPlaybackStatus,
     normalization,
@@ -28,7 +30,7 @@
   import {
     isCached,
     getCachedAudioURL,
-    prefetchTrack,
+    prefetchUpcoming,
     cacheCoverFor,
   } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
@@ -1373,10 +1375,13 @@
   // Re-check the buffer each time the playing track changes.
   $: if ($current) ensureUpcoming();
 
-  // Pre-archive ONLY the next track (n+1) so it starts instantly, and re-fire
-  // whenever that upcoming track changes — a skip, a queue extension, or a Flow
-  // re-tune. Keeping it to a single track avoids hammering the archiver.
+  // Ask the SERVER to pre-archive only the next track (n+1) so it starts
+  // instantly, and re-fire whenever that upcoming track changes — a skip, a
+  // queue extension, or a Flow re-tune. Keeping that to a single track avoids
+  // hammering the archiver; the on-device prefetch below covers the rest, and
+  // pulling a track through /api/stream archives it server-side anyway.
   let prefetchedId = null;
+  let lastAhead = 0;
   let prefetchTimer = null;
   let archiveTimer = null;
   // Debounce before asking the server to pre-archive the next track. Without
@@ -1394,10 +1399,24 @@
     const s = get(player);
     return s.index >= 0 && s.queue[s.index + 1]?.deezer_id === id;
   }
+  // Is `track` still inside the window we're supposed to be buffering?
+  function stillUpcoming(track) {
+    const s = get(player);
+    if (s.index < 0) return false;
+    const upcoming = s.queue.slice(s.index + 1, s.index + 1 + prefetchAhead());
+    return upcoming.some((t) => t && t.deezer_id === track.deezer_id);
+  }
   $: {
+    const ahead = $prefetchCount; // re-arm when the setting changes
     const nextTrack =
       $player.index >= 0 ? $player.queue[$player.index + 1] : null;
     const nextId = nextTrack?.deezer_id;
+    // Raising the buffer depth mid-play should take effect now, not at the next
+    // track change — so a changed setting re-arms even on the same "next".
+    if (ahead !== lastAhead) {
+      lastAhead = ahead;
+      prefetchedId = null;
+    }
     // Skip when offline or when the next track is already on the device (it'll
     // play from its local blob anyway).
     if (nextId && nextId !== prefetchedId && $online && !isDownloaded(nextId)) {
@@ -1409,8 +1428,15 @@
       }, ARCHIVE_DELAY);
       clearTimeout(prefetchTimer);
       prefetchTimer = setTimeout(() => {
-        if (stillNext(nextId) && get(online) && get(prefetchEnabled))
-          prefetchTrack(nextTrack, get(quality)).catch(() => {});
+        if (!stillNext(nextId) || !get(online) || !get(prefetchEnabled)) return;
+        const s = get(player);
+        // The whole configured run, nearest first — prefetchUpcoming walks it
+        // one track at a time and gives up as soon as the queue moves on.
+        prefetchUpcoming(
+          s.queue.slice(s.index + 1, s.index + 1 + prefetchAhead()),
+          get(quality),
+          stillUpcoming
+        ).catch(() => {});
       }, PREFETCH_DELAY);
     }
   }

@@ -149,6 +149,37 @@ export async function prefetchTrack(track, quality) {
   }
 }
 
+// Prefetch a RUN of upcoming tracks, nearest first. Sequential on purpose: the
+// track you're listening to gets the bandwidth it needs, and the next one lands
+// before the one after it — a parallel fan-out would deliver the least useful
+// track just as often as the most useful one.
+//
+// `stillWanted(track)` is re-asked before every download so a skip or a queue
+// edit abandons the rest of the batch immediately, and a newer batch supersedes
+// an older one outright.
+let batchSeq = 0;
+export async function prefetchUpcoming(tracks, quality, stillWanted = () => true) {
+  const mine = ++batchSeq;
+  const limit = get(playCacheLimit) || 0;
+  // One batch may never fill the whole cache. Eviction is oldest-first, which
+  // is exactly the order we fetch in — so a batch that overflows the cap evicts
+  // the track that is about to PLAY to make room for one ten tracks away. Three
+  // quarters leaves room for what's already there and for cover art.
+  const budget = limit > 0 ? limit * 0.75 : Infinity;
+  let spent = 0;
+  for (const track of tracks) {
+    if (mine !== batchSeq || !get(online)) return;
+    const id = track && track.deezer_id ? String(track.deezer_id) : null;
+    if (!id || !/^\d+$/.test(id)) continue;
+    if (isDownloaded(id) || isCached(id)) continue;
+    if (!stillWanted(track)) return;
+    const before = get(playCacheSize);
+    await prefetchTrack(track, quality);
+    spent += Math.max(0, get(playCacheSize) - before);
+    if (spent >= budget) return;
+  }
+}
+
 async function putAudio(id, blob, quality, type) {
   const db = await openDB();
   const t = tx(db, "audio", "readwrite");
