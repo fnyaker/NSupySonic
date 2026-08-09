@@ -23,6 +23,22 @@ def _deezer_provider():
     return provider
 
 
+def _archive_added(tracks):
+    """Adding a track to a playlist archives it, exactly as in the web app.
+
+    Independent of push-to-Deezer: keeping your own copy is not a mirroring
+    concern. Fail-soft — the playlist edit has already succeeded.
+    """
+    if not tracks:
+        return
+    from ..deezer import backfill
+
+    try:
+        backfill.archive_tracks(current_app._get_current_object(), tracks)
+    except Exception:
+        pass
+
+
 @api_routing("/getPlaylists")
 def list_playlists():
     query = (
@@ -89,10 +105,12 @@ def create_playlist():
     else:
         raise MissingParameter("playlistId or name")
 
+    added = []
     for sid in songs:
         sid = uuid.UUID(sid)
         track = Track[sid]
         playlist.add(track)
+        added.append(track)
     playlist.save()
 
     provider = _deezer_provider()
@@ -101,6 +119,7 @@ def create_playlist():
 
         push.reconcile_playlist(provider, playlist)
 
+    _archive_added(added)
     return request.formatter.empty
 
 
@@ -145,9 +164,11 @@ def update_playlist():
     to_add = map(uuid.UUID, to_add)
     to_remove = map(int, to_remove)
 
+    added = []
     for sid in to_add:
         track = Track[sid]
         playlist.add(track)
+        added.append(track)
 
     playlist.remove_at_indexes(to_remove)
     playlist.save()
@@ -158,4 +179,5 @@ def update_playlist():
 
         push.reconcile_playlist(provider, playlist)
 
+    _archive_added(added)
     return request.formatter.empty

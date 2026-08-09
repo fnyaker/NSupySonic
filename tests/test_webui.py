@@ -307,10 +307,16 @@ class MockPrefetch:
 
     def __init__(self):
         self.ids = []
+        self.episode_ids = []
 
     def download_ids(self, ids):
         ids = list(ids)
         self.ids += ids
+        return len(ids)
+
+    def download_episode_ids(self, ids):
+        ids = list(ids)
+        self.episode_ids += ids
         return len(ids)
 
     def enqueue(self, track):
@@ -740,6 +746,27 @@ class WebUITestCase(unittest.TestCase):
             archive_mod.ensure_archived = orig
         self.assertEqual(stats["unavailable"], 1)
         self.assertEqual(stats["failed"], 0)
+
+    def test_only_one_sweep_runs_at_a_time(self):
+        """The nightly sync and the button share one lock. Two sweeps would
+        fetch the same missing tracks twice and fight over one Deezer session."""
+        from supysonic.deezer import backfill
+
+        user = User.get(User.name == "alice")
+        self.assertFalse(backfill.is_sweeping())
+        self.assertTrue(backfill._sweep_lock.acquire(blocking=False))
+        try:
+            self.assertTrue(backfill.is_sweeping())
+            self.assertTrue(backfill.sweep_for(self.app.deezer, user).get("skipped"))
+            # And the endpoint says so instead of starting a doomed thread.
+            self._login()
+            body = self.client.post(
+                "/api/archive/backfill", json={"scope": "all"}
+            ).get_json()
+            self.assertTrue(body.get("busy"))
+        finally:
+            backfill._sweep_lock.release()
+        self.assertFalse(backfill.is_sweeping())
 
     def test_backfill_is_admin_only(self):
         self._login()
@@ -1600,6 +1627,110 @@ class WebUITestCase(unittest.TestCase):
         self.client.delete(f"/api/playlist/{pid}/tracks", json={"tracks": ["1"]})
         data = self.client.get(f"/api/playlist/{pid}").get_json()
         self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["2"])
+
+    # -- archiving is event-driven ---------------------------------------
+    # "Something became mine" is the trigger; there is deliberately no timer
+    # anywhere. These pin the events down one by one, because a silently
+    # unhooked one only shows up the day Deezer removes the track.
+
+    def test_starring_a_track_archives_it(self):
+        self._login()
+        self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        self.assertEqual(self.app.deezer_prefetch.ids, ["1"])
+
+    def test_unstarring_archives_nothing(self):
+        self._login()
+        self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        self.app.deezer_prefetch.ids.clear()
+        self.client.post("/api/favorite", json={"deezer_id": "1", "on": False})
+        self.assertEqual(self.app.deezer_prefetch.ids, [])
+
+    def test_an_already_archived_track_is_not_queued_again(self):
+        """Otherwise every star would cost a pointless trip through the download
+        queue, and re-starring a 4000-track library would flood it."""
+        self._login()
+        self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        track = Track.get(Track.deezer_id == "1")
+        os.makedirs(os.path.dirname(track.path), exist_ok=True)
+        with open(track.path, "wb") as fh:
+            fh.write(b"flac")
+
+        self.app.deezer_prefetch.ids.clear()
+        self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        self.assertEqual(self.app.deezer_prefetch.ids, [])
+
+    def test_creating_a_playlist_archives_its_tracks(self):
+        self._login()
+        self._create_playlist("PL", ["1", "2"])
+        self.assertEqual(sorted(self.app.deezer_prefetch.ids), ["1", "2"])
+
+    def test_adding_tracks_to_a_playlist_archives_them(self):
+        self._login()
+        pid = self._create_playlist("PL")["id"]
+        self.app.deezer_prefetch.ids.clear()
+        self.client.post(f"/api/playlist/{pid}/tracks", json={"tracks": ["1", "2"]})
+        self.assertEqual(sorted(self.app.deezer_prefetch.ids), ["1", "2"])
+
+    def test_removing_tracks_from_a_playlist_archives_nothing(self):
+        self._login()
+        pid = self._create_playlist("PL", ["1", "2"])["id"]
+        self.app.deezer_prefetch.ids.clear()
+        self.client.delete(f"/api/playlist/{pid}/tracks", json={"indexes": [0]})
+        self.assertEqual(self.app.deezer_prefetch.ids, [])
+
+    def test_favoriting_an_album_archives_the_whole_album(self):
+        from supysonic.deezer import backfill
+
+        thread = backfill.archive_entity(self.app, self.app.deezer, "album", "10")
+        thread.join(timeout=5)
+        # MockGW's full tracklist, not the 1-track album *page*.
+        self.assertEqual(
+            self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"]
+        )
+
+    def test_favoriting_a_playlist_archives_the_whole_playlist(self):
+        from supysonic.deezer import backfill
+
+        thread = backfill.archive_entity(self.app, self.app.deezer, "playlist", "77")
+        thread.join(timeout=5)
+        self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"])
+
+    def test_favoriting_an_artist_archives_nothing(self):
+        """A discography is not a finite set of tracks someone asked to keep."""
+        from supysonic.deezer import backfill
+
+        self.assertIsNone(
+            backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
+        )
+        self.assertEqual(self.app.deezer_prefetch.ids, [])
+
+    def test_the_favorite_endpoint_triggers_the_entity_archive(self):
+        from supysonic.deezer import backfill
+
+        calls = []
+        original = backfill.archive_entity
+        backfill.archive_entity = lambda app, prov, kind, did: calls.append((kind, did))
+        try:
+            self._login()
+            self.client.post("/api/favorite/album", json={"deezer_id": "10", "on": True})
+            self.client.post("/api/favorite/playlist", json={"deezer_id": "7", "on": True})
+            # …and unfavoriting must not queue a download.
+            self.client.post("/api/favorite/album", json={"deezer_id": "10", "on": False})
+        finally:
+            backfill.archive_entity = original
+        self.assertEqual(calls, [("album", "10"), ("playlist", "7")])
+
+    def test_archiving_can_be_turned_off_entirely(self):
+        """`archive_library = no` must silence the events too, not just the
+        nightly sweep — otherwise the setting is a lie."""
+        self._login()
+        self.app.config["DEEZER"]["archive_library"] = False
+        try:
+            self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+            self._create_playlist("PL", ["2"])
+        finally:
+            self.app.config["DEEZER"]["archive_library"] = True
+        self.assertEqual(self.app.deezer_prefetch.ids, [])
 
     def test_remove_playlist_track_by_index(self):
         self._login()

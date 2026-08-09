@@ -576,6 +576,25 @@ class PodcastWebUITestCase(unittest.TestCase):
         self.assertTrue(ep["podcast"])
         self.assertEqual(ep["deezer_id"], str(ids.episode_uuid("3")))
 
+    def test_subscribing_archives_every_episode(self):
+        """Subscribing is the event. Waiting for someone to press play on each
+        episode would mean the back catalogue is only ever as safe as Deezer."""
+
+        class Prefetch:
+            def __init__(self):
+                self.episode_ids = []
+
+            def download_episode_ids(self, ids):
+                ids = list(ids)
+                self.episode_ids += ids
+                return len(ids)
+
+        pf = Prefetch()
+        self.app.deezer_prefetch = pf
+        self._login()
+        self._subscribe()
+        self.assertEqual(len(pf.episode_ids), 3)
+
     def test_stream_archives_episode(self):
         self._login()
         self._subscribe()
