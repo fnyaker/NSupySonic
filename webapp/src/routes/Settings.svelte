@@ -167,9 +167,10 @@
     }
   }
   // -- keeping the archive complete -----------------------------------------
-  // Audio is normally fetched on first play, which leaves everything you have
-  // NOT played hostage to Deezer. This sweeps your favorites, playlists and
-  // podcasts and archives whatever has no file yet. It only ever adds.
+  // Archiving is event-driven server-side: playing, starring, favoriting an
+  // album/playlist/artist or subscribing to a show queues the audio right then.
+  // This button is the safety net that sweeps up whatever those events missed.
+  // It only ever adds.
   let job = null;
   let jobPolling = false;
   $: jobPct = job?.total ? Math.min(100, (job.done / job.total) * 100) : 0;
@@ -461,9 +462,13 @@
   <h2>Archive du serveur</h2>
   <p class="muted sub">
     Un titre archivé est à vous&nbsp;: il reste lisible même si Deezer le retire de
-    son catalogue, ou si Deezer est injoignable. Normalement l'audio est récupéré
-    à la première écoute — ce bouton va chercher tout ce que vous n'avez pas
-    encore écouté&nbsp;: favoris, playlists et podcasts abonnés.
+    son catalogue, ou si Deezer est injoignable. L'archivage est
+    <strong>automatique</strong>&nbsp;: dès que quelque chose entre dans votre
+    bibliothèque — vous écoutez un titre, vous l'ajoutez aux favoris, vous mettez
+    un album, une playlist ou un artiste en favori (un artiste&nbsp;: toute sa
+    discographie), vous vous abonnez à un podcast — l'audio part en
+    téléchargement. Ce bouton est le filet de sécurité, pour rattraper d'un coup
+    ce qui manquerait encore.
     <strong>Rien n'est jamais supprimé de l'archive</strong>, et relancer ne
     re-télécharge pas ce qui est déjà là.
   </p>

@@ -10,9 +10,10 @@ Two jobs live here.
 **The archive is the point.** Everything in your favorites, your playlists and
 your subscribed podcasts should exist as a file on the server, so that the day
 Deezer removes it — or the day Deezer is simply down — nothing of yours is lost.
-Audio is normally fetched on first play, which leaves everything you have not
-played yet hostage to a third party. ``backfill`` closes that gap: it walks what
-you own, and archives what isn't on disk yet.
+Archiving is event-driven (see ``deezer/backfill.py``): playing, starring,
+favoriting or subscribing queues the audio right then. This is the button that
+sweeps up whatever those events could not see — and the one place that reports
+what the archive costs.
 
 **Nothing here ever deletes archived audio.** The backfill only adds. The cache
 flush empties the *derived* caches (transcodes, cover thumbnails) — files that
@@ -88,6 +89,11 @@ def archive_backfill():
     if provider is None:
         return jsonify({"error": "Deezer proxy disabled"}), 503
 
+    if backfill.is_sweeping():
+        # The nightly sync is already sweeping. Say so now instead of starting a
+        # thread whose only job would be to find the lock taken.
+        return jsonify({"ok": True, "running": True, "busy": True, **_snapshot()})
+
     with _job_lock:
         if _job["running"]:
             return jsonify({"ok": True, "running": True, **_job})
@@ -100,14 +106,14 @@ def archive_backfill():
     user = request.webuser
     threading.Thread(
         target=_run_backfill,
-        args=(app, scope, user.id, bool(user.admin)),
+        args=(app, scope, user.id),
         name="archive-backfill",
         daemon=True,
     ).start()
     return jsonify({"ok": True, "running": True})
 
 
-def _run_backfill(app, scope, user_id, admin):
+def _run_backfill(app, scope, user_id):
     from ..db import User, close_connection, open_connection
 
     try:
@@ -118,10 +124,20 @@ def _run_backfill(app, scope, user_id, admin):
                 with _job_lock:
                     _job["error"] = "unknown user"
                 return
-            tracks, episodes = backfill.collect(user_id, admin, scope)
-            with _job_lock:
-                _job["total"] = len(tracks) + len(episodes)
-            stats = backfill.run(app.deezer, tracks, episodes, on_event=_bump)
+            # Through sweep_for, not collect+run directly: that is what holds the
+            # single-sweep lock, so pressing the button while the nightly sync is
+            # already sweeping reports "busy" instead of running a second pass
+            # over the same missing tracks.
+            stats = backfill.sweep_for(
+                app.deezer,
+                user,
+                scope,
+                on_event=_bump,
+                on_total=lambda n: _set("total", n),
+            )
+            if stats.get("skipped"):
+                with _job_lock:
+                    _job["error"] = "busy"
             logger.info("Archive backfill finished: %s", stats)
     except Exception as exc:
         logger.warning("Archive backfill crashed", exc_info=True)
@@ -139,6 +155,11 @@ def _run_backfill(app, scope, user_id, admin):
 def _bump(field, by=1):
     with _job_lock:
         _job[field] = _job.get(field, 0) + by
+
+
+def _set(field, value):
+    with _job_lock:
+        _job[field] = value
 
 
 # -- storage ----------------------------------------------------------------

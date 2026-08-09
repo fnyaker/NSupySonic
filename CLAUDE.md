@@ -192,13 +192,38 @@ packet), so a dead track is skipped at once instead of after four reloads. `/api
 track for another one — same position in every playlist, plus favourites — in a worker thread, and
 mirrors it to Deezer for the admin's own playlists.
 
-**Archive completeness** (`supysonic/deezer/backfill.py`, `supysonic/webui/storage.py`): audio is
-archived on first play, which would leave everything you *haven't* played hostage to Deezer — so the
-nightly sync then sweeps favourites, playlists and subscribed podcasts and archives whatever has no
-file yet (`[deezer] archive_library`, default on), and Réglages → Compte has the same sweep as a
-button with live progress. It **only ever adds**. `/api/storage` reports archive size, free disk and
-the two derived caches; `/api/cache/flush` empties those caches (expiring the protection first, or
-the button would silently do nothing) and cannot touch `archive_dir`.
+**Archive completeness** (`supysonic/deezer/backfill.py`, `supysonic/webui/storage.py`) is
+**event-driven, never polled**. Archiving happens the moment something becomes yours:
+
+- *playing* it (the FLAC stream is teed to disk by `archive.open_live_stream`, `on_abort` re-queues
+  it if the client disconnects; the Opus path and `api/media.py::_ensure_deezer_archived` call
+  `ensure_archived` outright; podcast episodes archive on first play too);
+- *starring a track* (`/api/favorite`, and Subsonic's `star` via `annotation._archive_starred`);
+- *favouriting an album, a playlist or an artist* (`/api/favorite/<kind>` and Subsonic's `star` →
+  `backfill.archive_entity`, in a worker thread, always the FULL tracklist — never the ~10-track
+  page). An **artist means the whole discography**: `_archive_discography` walks Deezer's `all` tab
+  (official releases + "more", not the guest appearances), fed release by release so the first album
+  downloads while the rest is still being listed, and deduplicated across editions;
+- *adding tracks to a playlist* or creating one (`/api/playlists`, `/api/playlist/<id>/tracks`, and
+  Subsonic's `createPlaylist`/`updatePlaylist`);
+- *subscribing to a show* (`/api/podcasts` POST → `backfill.archive_show`, every episode).
+
+Everything goes through the bounded background download queue (`prefetch.download_ids` /
+`download_episode_ids`) and is fail-soft: archiving is a *consequence* of the action, never a
+condition for it. Rows already on disk are filtered out first, so re-starring a big library costs
+nothing. A discography is bigger than the queue, so `backfill._queue_all` waits for room
+(`QUEUE_RETRY_DELAY`) instead of dropping the overflow — it gives up only if `archive_library` is
+switched off under it. **Do not add a periodic archive loop** — the app knows the instant it
+happens, so re-asking on a timer is work for nothing.
+
+The nightly sync then runs `sweep_for` as the *safety net* for what events can't see (a Deezer-side
+change we only learn about at sync time, a download that failed while the server was down), and
+Réglages → Compte has the same sweep as a button with live progress; `_sweep_lock` keeps them from
+running twice at once. All of it is gated by `[deezer] archive_library` (default on, checked in
+`backfill.archiving_enabled` so the switch silences the events too) and **only ever adds**.
+`/api/storage` reports archive size, free disk and the two derived caches; `/api/cache/flush` empties
+those caches (expiring the protection first, or the button would silently do nothing) and cannot
+touch `archive_dir`.
 
 **Nothing deletes an archive.** Unsubscribing from a podcast keeps every archived episode: the
 channel is flagged `subscribed = False` instead of being deleted (only a show with nothing on disk is

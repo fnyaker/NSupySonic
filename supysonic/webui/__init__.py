@@ -2058,6 +2058,11 @@ def subscribe_podcast():
     except Exception:
         logger.warning("Podcast import failed for %s", show_id, exc_info=True)
         return jsonify({"error": "import failed"}), 502
+    # Subscribing is the event: every episode we just imported gets archived,
+    # so the show survives leaving Deezer without anyone pressing play first.
+    from ..deezer import backfill
+
+    backfill.archive_show(current_app._get_current_object(), c)
     return jsonify(_channel(c, with_episodes=True))
 
 
@@ -2398,6 +2403,13 @@ def favorite():
             logger.warning("Deezer favorite toggle failed: %s", exc)
         provider.invalidate_favorites_cache()  # next /me/favorites refetches
     _set_star(track, on)
+    if on:
+        # Starring it puts it in your library, so archive it now rather than
+        # hoping you press play before Deezer drops it. Unstarring archives
+        # nothing and, as always, deletes nothing.
+        from ..deezer import backfill
+
+        backfill.archive_tracks(current_app._get_current_object(), [track])
     return jsonify({"ok": True, "favorite": on})
 
 
@@ -2427,6 +2439,15 @@ def favorite_entity(kind):
     except Exception as exc:
         logger.warning("Deezer %s favorite toggle failed: %s", kind, exc)
         return jsonify({"error": "deezer rejected the request"}), 502
+    if on:
+        # A favourited album, playlist or artist is now yours: archive everything
+        # it holds, in the background. For an artist that means the FULL
+        # discography, fed release by release (see backfill.archive_entity).
+        from ..deezer import backfill
+
+        backfill.archive_entity(
+            current_app._get_current_object(), provider, kind, deezer_id
+        )
     return jsonify({"ok": True, "favorite": on})
 
 
@@ -2482,6 +2503,9 @@ def create_playlist():
         pl.add(track)
     if not dz_id:
         _mirror_playlist(provider, pl)  # offline fallback: push when reachable
+    from ..deezer import backfill
+
+    backfill.archive_tracks(current_app._get_current_object(), track_rows)
     return jsonify({"ok": True, "id": str(pl.id), "deezer_id": pl.deezer_id})
 
 
@@ -2549,6 +2573,9 @@ def add_playlist_tracks(playlist_id):
     for track in tracks:
         pl.add(track)
     _mirror_playlist(provider, pl)
+    from ..deezer import backfill
+
+    backfill.archive_tracks(current_app._get_current_object(), tracks)
     return jsonify({"ok": True, "added": len(tracks)})
 
 

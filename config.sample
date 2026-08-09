@@ -160,9 +160,13 @@ enabled = no
 ; which is how you replace an expired credential without touching this file.
 ;arl =
 
-; After each sync, archive anything in your favorites / playlists / subscribed
-; podcasts that has no file yet, so nothing is lost the day Deezer removes it.
-; Adds only — it never deletes an archived file. Default: yes
+; Keep a permanent copy of everything you own, so nothing is lost the day Deezer
+; removes it. Archiving happens as it becomes yours — you play a track, you star
+; one, you favorite an album, a playlist or an artist (a favorited artist means
+; their whole discography), you subscribe to a show — and the nightly sync then
+; sweeps whatever those events missed. There is no polling loop: an event is
+; enough. Adds only, it never deletes an archived file.
+; Default: yes
 ;archive_library = yes
 
 ; Folder where fetched FLAC files are permanently archived. Required when

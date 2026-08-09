@@ -127,6 +127,50 @@ class PlaylistTestCase(ApiTestBase):
             child[1].get("title") in ("Two", "Three")
         )  # depending on 'getPlaylists' result ordering
 
+    def test_adding_a_track_to_a_playlist_archives_it(self):
+        """Putting a track in a playlist puts it in your library, whichever
+        client did it — so it gets archived there and then, not on the day you
+        happen to play it."""
+        queued = []
+
+        class Prefetch:
+            def download_ids(self, ids):
+                ids = list(ids)
+                queued.extend(ids)
+                return len(ids)
+
+        self.app_context().app.deezer_prefetch = Prefetch()
+        track = Track.get(title="One")
+        track.deezer_id = "424242"
+        track.path = "tests/assets/not-archived-yet"  # no file: needs fetching
+        track.save()
+
+        self._make_request(
+            "createPlaylist",
+            {"name": "Archiving", "songId": str(track.id)},
+            skip_post=True,
+        )
+        self.assertEqual(queued, ["424242"])
+
+        # …and so does adding it to an existing one.
+        queued.clear()
+        pid = str(Playlist.get(name="Archiving").id)
+        self._make_request(
+            "updatePlaylist",
+            {"playlistId": pid, "songIdToAdd": str(track.id)},
+            skip_post=True,
+        )
+        self.assertEqual(queued, ["424242"])
+
+        # Removing one archives nothing (and never deletes the file).
+        queued.clear()
+        self._make_request(
+            "updatePlaylist",
+            {"playlistId": pid, "songIndexToRemove": "0"},
+            skip_post=True,
+        )
+        self.assertEqual(queued, [])
+
     def test_create_playlist(self):
         self._make_request("createPlaylist", error=10)
         self._make_request(

@@ -21,6 +21,8 @@ from .exceptions import AggregateException, GenericError, MissingParameter, NotF
 
 def _deezer_favorite(cls, entity, add):
     """Mirror a star/unstar to the user's Deezer favorites (best-effort)."""
+    if add:
+        _archive_starred(cls, entity)
     provider = getattr(current_app, "deezer", None)
     if provider is None or not current_app.config["DEEZER"].get("push_to_deezer"):
         return
@@ -29,6 +31,29 @@ def _deezer_favorite(cls, entity, add):
     from ..deezer import push
 
     push.push_favorite(provider, cls.__name__, entity.deezer_id, add)
+
+
+def _archive_starred(cls, entity):
+    """Starring from a Subsonic client archives the same thing the web app does.
+
+    A Track and an Album are already local rows, so they cost one query instead
+    of a Deezer call. An Artist means the whole discography, which only Deezer
+    can list — that goes to the same worker the web app uses.
+    """
+    from ..deezer import backfill
+
+    app = current_app._get_current_object()
+    try:
+        if cls is Track:
+            backfill.archive_tracks(app, [entity])
+        elif cls is Album:
+            backfill.archive_tracks(app, entity.tracks)
+        elif cls is Artist and getattr(entity, "deezer_id", None):
+            backfill.archive_entity(
+                app, getattr(current_app, "deezer", None), "artist", entity.deezer_id
+            )
+    except Exception:  # archiving is a consequence of starring, never a condition
+        pass
 
 
 def star_single(cls, starcls, eid):

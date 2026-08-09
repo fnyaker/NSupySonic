@@ -49,6 +49,53 @@ class AnnotationTestCase(ApiTestBase):
         self.user = User.get(name="alice")
         self.prefs = ClientPrefs.create(user=self.user, client_name="tests")
 
+    def test_starring_from_a_subsonic_client_archives_too(self):
+        """The web app and a Subsonic client must behave identically here: a
+        starred track is yours, so it gets a copy on disk. Unstarring queues
+        nothing (and, as always, deletes nothing)."""
+        queued = []
+
+        class Prefetch:
+            def download_ids(self, ids):
+                ids = list(ids)
+                queued.extend(ids)
+                return len(ids)
+
+        self.app_context().app.deezer_prefetch = Prefetch()
+        track = Track[self.trackid]
+        track.deezer_id = "424242"
+        track.path = "tests/assets/not-archived-yet"  # no file: needs fetching
+        track.save()
+
+        self._make_request("star", {"id": str(self.trackid)}, skip_post=True)
+        self.assertEqual(queued, ["424242"])
+
+        queued.clear()
+        self._make_request("unstar", {"id": str(self.trackid)}, skip_post=True)
+        self.assertEqual(queued, [])
+
+    def test_starring_an_artist_archives_its_discography(self):
+        """Same promise as the web app: a favourited artist means the whole
+        catalogue lands on disk, listed through the Deezer provider."""
+        from supysonic.deezer import backfill
+
+        calls = []
+        original = backfill.archive_entity
+        backfill.archive_entity = lambda app, prov, kind, did: calls.append((kind, did))
+        try:
+            artist = Artist[self.artistid]
+            artist.deezer_id = "27"
+            artist.save()
+            self._make_request(
+                "star", {"artistId": str(self.artistid)}, skip_post=True
+            )
+            self._make_request(
+                "unstar", {"artistId": str(self.artistid)}, skip_post=True
+            )
+        finally:
+            backfill.archive_entity = original
+        self.assertEqual(calls, [("artist", "27")])
+
     def test_star(self):
         self._make_request("star", error=10)
         self._make_request("star", {"id": "unknown"}, error=0)
