@@ -21,6 +21,10 @@
   import { bytes as fmtBytes, duration as fmtDuration, artistLine } from "../lib/format.js";
   import { logsEnabled, logCount, clearLog, downloadLog, copyLog } from "../lib/log.js";
   import { clearDeezerNotice } from "../lib/deezerhealth.js";
+  import {
+    nativeDeezerLogin,
+    nativeDeezerLoginAvailable,
+  } from "../lib/nativeDeezer.js";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
@@ -97,6 +101,11 @@
   let arlSaving = false;
   let dzStatus = null;
   let dzChecking = false;
+  // The Android app can sign in on Deezer's own page and hand back the ARL, so
+  // there is nothing to paste there. Constant for the life of the page: the
+  // bridge is injected before any of it runs.
+  const canLinkDeezer = nativeDeezerLoginAvailable();
+  let arlLinking = false;
   onMount(async () => {
     if (!$user?.admin) return;
     try {
@@ -132,6 +141,17 @@
     }
   }
 
+  // The server checks the ARL against Deezer before storing it, so a refusal
+  // leaves the previous one in place — pasted or captured, same path.
+  async function applyArl(value, okMessage) {
+    const r = await api.setSettings({ deezer_arl: value });
+    dz = r.deezer || dz;
+    arlDraft = "";
+    clearDeezerNotice();
+    toasts.push(okMessage);
+    await refreshDeezerStatus(true);
+  }
+
   async function saveArl() {
     const value = arlDraft.trim();
     if (!value) {
@@ -140,16 +160,28 @@
     }
     arlSaving = true;
     try {
-      const r = await api.setSettings({ deezer_arl: value });
-      dz = r.deezer || dz;
-      arlDraft = "";
-      clearDeezerNotice();
-      toasts.push("ARL Deezer enregistré et vérifié");
-      await refreshDeezerStatus(true);
+      await applyArl(value, "ARL Deezer enregistré et vérifié");
     } catch (e) {
       toasts.push(e?.message || "Échec de l'enregistrement de l'ARL", "error");
     } finally {
       arlSaving = false;
+    }
+  }
+
+  // Android only: opens Deezer's own login page in a separate WebView and saves
+  // the session key it hands back. The password is typed at Deezer and never
+  // reaches this app or the server — see lib/nativeDeezer.js.
+  async function linkDeezerAccount() {
+    arlLinking = true;
+    try {
+      const arl = await nativeDeezerLogin();
+      await applyArl(arl, "Compte Deezer connecté");
+    } catch (e) {
+      // Backing out of the login screen is not an error worth shouting about.
+      if (!e?.cancelled)
+        toasts.push(e?.message || "Échec de la connexion à Deezer", "error");
+    } finally {
+      arlLinking = false;
     }
   }
 
@@ -843,8 +875,14 @@
     <h2>Compte Deezer (ARL)</h2>
     <p class="muted sub">
       Tout le catalogue passe par ce seul identifiant de session. Il expire
-      régulièrement&nbsp;: collez-en un nouveau ici et il remplacera aussitôt celui
-      défini dans la configuration du serveur (docker&nbsp;compose), sans redémarrage.
+      régulièrement&nbsp;:
+      {#if canLinkDeezer}
+        reconnectez-vous ci-dessous
+      {:else}
+        collez-en un nouveau ici
+      {/if}
+      et il remplacera aussitôt celui défini dans la configuration du serveur
+      (docker&nbsp;compose), sans redémarrage.
     </p>
 
     <div class="arl-state">
@@ -869,6 +907,21 @@
         <Icon name="refresh" size={16} /> Tester
       </button>
     </div>
+
+    {#if canLinkDeezer}
+      <button class="save link-dz" on:click={linkDeezerAccount} disabled={arlLinking}>
+        <Icon name="user" size={16} />
+        {arlLinking ? "Connexion en cours…" : "Se connecter avec mon compte Deezer"}
+      </button>
+      <p class="muted hint link-hint">
+        Ouvre la page de connexion officielle de Deezer. Vos identifiants sont
+        saisis chez Deezer&nbsp;: ni l'application ni le serveur ne les voient, et
+        seule la clé de session obtenue est enregistrée ici. Utilisez l'e-mail et
+        le mot de passe du compte&nbsp;— les connexions via Google ou Apple sont
+        refusées à l'intérieur d'une application.
+      </p>
+      <div class="or"><span>ou coller un ARL</span></div>
+    {/if}
 
     <div class="arl-row">
       <input
@@ -1368,6 +1421,33 @@
   }
   .arl-state .ghost {
     margin-left: auto;
+  }
+  .link-dz {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    padding: 11px 20px;
+  }
+  .link-hint {
+    margin: 10px 0 0;
+  }
+  /* Separator between the one-tap flow and the manual paste below it. */
+  .or {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 18px 0 14px;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .or::before,
+  .or::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--bg-hover);
   }
   .arl-row {
     display: flex;

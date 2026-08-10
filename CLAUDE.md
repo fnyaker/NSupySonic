@@ -106,6 +106,22 @@ commands back via `window.__nsNativeCmd()`. No webapp-side code is involved, so 
 against any deployed SPA version. Build: `gradle -p android assembleRelease` (JDK 17, SDK 34 —
 CI does this; no wrapper is committed).
 
+**Linking the Deezer account from the app** (`DeezerLoginActivity`): there is no email/password
+endpoint left that a server could call — Deezer's web one (`ajax/action.php` + reCAPTCHA) answers
+403 since 2024, and the mobile gateway (`mobile_userAuth`, which *does* return an ARL) needs keys
+extracted from Deezer's own binaries. So the only remaining path to an ARL is a real browser
+session, and the app provides one: a throwaway WebView loads **Deezer's own login page**, the user
+signs in there, and the `arl` cookie Deezer sets is read out of the jar and handed back through
+`window.__nsDeezerArl` to `Réglages → Compte Deezer`, which saves it via `/api/settings` (already
+validating + probing it). **The password never reaches the app or the server**; only the ARL
+crosses back, and only to a page served by the configured server (`MainActivity.deliverArl` checks
+the origin). That WebView gets **no `NSNative` bridge**. The Deezer jar is wiped on entry (so the
+ARL is always the account just typed) and again on success (no second copy left on the device) —
+scoped to `deezer.com`, never `removeAllCookies()`, which would log the user out of their own
+server. Cookie arrival is polled (~600 ms, only while the screen is up): Deezer's login is an XHR,
+so no navigation fires and there is no cookie-change callback to hook. Google/Apple SSO is refused
+inside any WebView — email + password is the supported route. SPA side: `lib/nativeDeezer.js`.
+
 ## Architecture
 
 Three Deezer code layers, from low to high:
