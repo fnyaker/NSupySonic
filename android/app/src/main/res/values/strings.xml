@@ -38,6 +38,11 @@
     <string name="error_retry">Réessayer</string>
     <string name="error_settings">Paramètres du serveur</string>
 
+    <string name="deezer_login_title">Connexion à Deezer</string>
+    <string name="deezer_login_hint">Identifie-toi avec ton e-mail et ton mot de passe Deezer. Tes identifiants restent chez Deezer : seule la clé de session obtenue est envoyée à ton serveur.</string>
+    <string name="deezer_login_cancel">Annuler</string>
+    <string name="deezer_login_ssl">Certificat invalide sur deezer.com. Connexion interrompue.</string>
+
     <string name="shortcut_server">Serveur</string>
     <string name="shortcut_server_long">Paramètres du serveur</string>
 </resources>

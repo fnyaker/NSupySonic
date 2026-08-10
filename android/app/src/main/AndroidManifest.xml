@@ -39,6 +39,16 @@
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode" />
 
+        <!-- Deezer's own login page in a throwaway WebView, opened from the
+             player's settings to capture the ARL. No JS bridge is attached to
+             it, and it is never exported. -->
+        <activity
+            android:name=".DeezerLoginActivity"
+            android:exported="false"
+            android:label="@string/deezer_login_title"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+            android:windowSoftInputMode="adjustResize" />
+
         <service
             android:name=".PlayerService"
             android:exported="false"

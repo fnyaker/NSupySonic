@@ -96,6 +96,17 @@ class MainActivity : AppCompatActivity() {
             if (!granted) toastNotificationsHint()
         }
 
+    // Réglages → "Se connecter avec mon compte Deezer": DeezerLoginActivity
+    // hosts Deezer's own login page and hands back nothing but the resulting
+    // ARL, which the SPA then saves through /api/settings.
+    private var deezerLoginPending = false
+    private val deezerLoginLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            deezerLoginPending = false
+            val arl = result.data?.getStringExtra(DeezerLoginActivity.EXTRA_ARL)
+            deliverArl(if (result.resultCode == RESULT_OK) arl else null)
+        }
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -248,6 +259,23 @@ class MainActivity : AppCompatActivity() {
             mainFrameFailed = false
             errorView.visibility = View.GONE
             webView.loadUrl(prefs.appUrl())
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The login screen can go away without ever delivering a result — the
+        // launcher icon re-entering this singleTask activity clears it off the
+        // top, and so does a low-memory kill. Answer the SPA anyway, or its
+        // promise stays pending and the button stays stuck on "Connexion en
+        // cours…". Posted so a real result still in flight wins the race
+        // (onActivityResult runs before onResume, but not before this post).
+        if (deezerLoginPending && ::webView.isInitialized && !webViewDead) {
+            webView.post {
+                if (!deezerLoginPending) return@post
+                deezerLoginPending = false
+                deliverArl(null)
+            }
         }
     }
 
@@ -462,6 +490,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Hand the captured ARL (or null, when the user backed out) to the SPA's
+     * pending `window.__nsDeezerArl` callback.
+     *
+     * The ARL is a full-account credential, so it is only ever delivered to a
+     * page served by the CONFIGURED server — never to whatever else the WebView
+     * may be showing at the moment the login screen closes.
+     */
+    private fun deliverArl(arl: String?) {
+        if (webViewDead || !::webView.isInitialized) return
+        if (!isServerUrl(webView.url)) return
+        val payload =
+            if (arl.isNullOrEmpty()) "null"
+            else org.json.JSONObject().put("arl", arl).toString()
+        try {
+            webView.evaluateJavascript(
+                "window.__nsDeezerArl && window.__nsDeezerArl($payload)", null
+            )
+        } catch (_: Exception) {
+            /* WebView torn down under us */
+        }
+    }
+
     private fun runJsCommand(cmd: String, value: Double?) {
         // A media-button command is posted to the main looper, so it can land
         // AFTER the activity tore its WebView down (or after the renderer died).
@@ -533,6 +584,33 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun openServerSettings() {
             runOnUiThread { openSettings() }
+        }
+
+        /**
+         * Open Deezer's login page and report the captured ARL back through
+         * `window.__nsDeezerArl({arl})` — or `null` if the user gave up.
+         *
+         * Detected by the SPA (lib/nativeDeezer.js) to offer "se connecter avec
+         * mon compte Deezer" instead of pasting an ARL by hand. There is no
+         * email/password endpoint left at Deezer that a server could call, so
+         * signing in on Deezer's own page is both the only thing that works and
+         * the only design where the password never reaches us.
+         */
+        @JavascriptInterface
+        fun deezerLogin() {
+            runOnUiThread {
+                try {
+                    deezerLoginPending = true
+                    deezerLoginLauncher.launch(
+                        Intent(this@MainActivity, DeezerLoginActivity::class.java)
+                    )
+                } catch (_: Exception) {
+                    // Activity missing / launch refused: unblock the caller
+                    // rather than leaving its promise pending for ever.
+                    deezerLoginPending = false
+                    deliverArl(null)
+                }
+            }
         }
 
         // Detected by ShareSheet.svelte (window.NSNative.shareFile) in preference
