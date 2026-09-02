@@ -12,7 +12,10 @@ declared gone) and never the app itself.
 """
 
 import json
+import socket
 import tempfile
+import threading
+import time
 import unittest
 
 import requests
@@ -388,6 +391,129 @@ class VerdictTestCase(unittest.TestCase):
         self._dz(FakeAdapter(raises=requests.ConnectTimeout("nope")))
         self.assertIsNone(self.provider.fetch_cover("somemd5"))
         self.assertIsNone(self.provider.fetch_image("artist", "27"))
+
+
+class PodcastDnsTestCase(unittest.TestCase):
+    """``check_public_url`` resolves a name before requests is involved.
+
+    ``socket.getaddrinfo`` has no timeout of its own, so this is the one DNS
+    lookup in the app that isn't already covered by a connect timeout — and it
+    runs once per redirect hop, on a hostname a third-party feed chose.
+    """
+
+    def setUp(self):
+        from supysonic.deezer import provider as provider_mod
+
+        self.mod = provider_mod
+        provider_mod._resolve_cache.clear()
+        self.addCleanup(provider_mod._resolve_cache.clear)
+        # A fifth of a second proves the deadline exists as well as five would.
+        original = provider_mod.RESOLVE_TIMEOUT
+        provider_mod.RESOLVE_TIMEOUT = 0.2
+        self.addCleanup(setattr, provider_mod, "RESOLVE_TIMEOUT", original)
+        self.gate = threading.Event()
+        self.addCleanup(self.gate.set)  # never leave a worker blocked
+        self.lookups = []
+
+    def stall(self, forever=True):
+        """Make every lookup block until the test lets it through."""
+
+        def getaddrinfo(host, port, *a, **kw):
+            self.lookups.append(host)
+            self.gate.wait(10 if forever else 0)
+            return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+        original = socket.getaddrinfo
+        socket.getaddrinfo = getaddrinfo
+        self.addCleanup(setattr, socket, "getaddrinfo", original)
+
+    def test_a_stalled_resolver_does_not_park_the_caller(self):
+        self.stall()
+        started = time.monotonic()
+        with self.assertRaises(DeezerError):
+            self.mod.check_public_url("https://stalled.example/ep.mp3")
+        # Bounded by RESOLVE_TIMEOUT, not by the system resolver's 20s+.
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_the_next_caller_does_not_pay_the_same_timeout_again(self):
+        self.stall()
+        with self.assertRaises(DeezerError):
+            self.mod.check_public_url("https://stalled.example/ep.mp3")
+        started = time.monotonic()
+        for _ in range(5):
+            with self.assertRaises(DeezerError):
+                self.mod.check_public_url("https://stalled.example/other.mp3")
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(len(self.lookups), 1)  # remembered, not re-asked
+
+    def test_a_redirect_chain_resolves_each_host_once(self):
+        self.gate.set()  # answer immediately
+        self.stall()
+        for _ in range(6):  # MAX_EPISODE_REDIRECTS + 1 hops on the same host
+            self.mod.check_public_url("https://cdn.example/ep.mp3")
+        self.assertEqual(self.lookups, ["cdn.example"])
+
+    def test_a_timeout_reads_as_a_transport_failure_not_a_verdict(self):
+        self.stall()
+        try:
+            self.mod.check_public_url("https://stalled.example/ep.mp3")
+        except DeezerError as exc:
+            self.assertTrue(is_transport_failure(exc))
+        else:
+            self.fail("expected a DeezerError")
+
+    def test_stuck_lookups_free_their_slots_when_they_end(self):
+        # Fill every resolver slot with a lookup that never answers...
+        self.stall()
+        workers = [
+            threading.Thread(
+                target=lambda i=i: self._swallow(f"stuck{i}.example"), daemon=True
+            )
+            for i in range(self.mod._RESOLVE_WORKERS)
+        ]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(5)
+
+        # ...and a further caller is refused rather than joining the pile-up.
+        started = time.monotonic()
+        with self.assertRaises(DeezerError):
+            self.mod.resolve_addresses("waiting.example", 443)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+        # Once the stuck lookups finally end, their slots come back: no leak.
+        self.gate.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                self.assertEqual(
+                    self.mod.resolve_addresses("free.example", 443), ["93.184.216.34"]
+                )
+                return
+            except DeezerError:
+                time.sleep(0.05)
+                self.mod._resolve_cache.clear()
+        self.fail("resolver slots were never released")
+
+    def _swallow(self, host):
+        try:
+            self.mod.resolve_addresses(host, 443)
+        except DeezerError:
+            pass
+
+    def test_a_private_address_is_still_refused(self):
+        # The deadline is a speed fix; it must not have loosened the SSRF guard.
+        self.gate.set()
+
+        def getaddrinfo(host, port, *a, **kw):
+            return [(2, 1, 6, "", ("127.0.0.1", port))]
+
+        original = socket.getaddrinfo
+        socket.getaddrinfo = getaddrinfo
+        self.addCleanup(setattr, socket, "getaddrinfo", original)
+        with self.assertRaises(DeezerError):
+            self.mod.check_public_url("https://sneaky.example/ep.mp3")
 
 
 class AvailabilityTestCase(unittest.TestCase):

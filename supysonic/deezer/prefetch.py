@@ -25,6 +25,20 @@ from deezerpy.errors import is_transport_failure
 
 logger = logging.getLogger(__name__)
 
+# The Deezer hosts whose circuit being open means "wait, it will come back".
+_OUTAGE_HOSTS = ("www.deezer.com", "api.deezer.com")
+
+
+def _outage_wait() -> float:
+    """Seconds until Deezer is worth asking again, or 0 if it already is.
+
+    Retrying is only ever worth it while a circuit is open — that is the one
+    case where we know the failure is temporary AND know when it ends. Without
+    the wait the worker would spin (an open circuit fails instantly); without
+    the zero case it would sleep on failures that a retry cannot fix.
+    """
+    return max(breaker.retry_after(h) for h in _OUTAGE_HOSTS)
+
 # When Deezer stops answering, the download queue would otherwise drain in
 # seconds — every entry failing instantly against the open circuit — and the
 # whole backlog of "archive this because you just starred it" would be lost to a
@@ -188,30 +202,25 @@ class DeezerPrefetcher:
                             ensure_archived(self.provider, track)
                         break
                     except Exception as exc:
-                        if not is_transport_failure(exc):
-                            raise  # a real failure for this item: reported below
+                        wait = _outage_wait() if is_transport_failure(exc) else 0.0
+                        if wait <= 0.0:
+                            # Either a real failure for this item, or a transport
+                            # failure with no Deezer outage behind it (a podcast
+                            # host that won't resolve, say). Nothing suggests a
+                            # retry in a second would land differently.
+                            raise  # reported on one line below
                         if attempt >= _MAX_OUTAGE_RETRIES:
                             logger.info(
                                 "Giving up on %s while Deezer is down (%s); the "
                                 "nightly sweep will pick it up", item, exc,
                             )
                             break
-                        self._wait_out_outage()
+                        time.sleep(min(wait, _MAX_OUTAGE_WAIT))
             except Exception as exc:
                 logger.info("Background download failed for %s: %s", item, exc)
             finally:
                 self._check_space()
                 self._dl_queue.task_done()
-
-    @staticmethod
-    def _wait_out_outage() -> None:
-        """Sleep until the breaker is willing to try Deezer again (bounded).
-
-        Without this the worker would spin: an open circuit fails instantly, so
-        the loop would retry thousands of times a second for nothing.
-        """
-        wait = max(breaker.retry_after(h) for h in ("www.deezer.com", "api.deezer.com"))
-        time.sleep(min(max(wait, 1.0), _MAX_OUTAGE_WAIT))
 
     def _check_space(self) -> None:
         """The archive just grew — is it now over the admin's free-space floor?

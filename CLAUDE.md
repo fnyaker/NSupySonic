@@ -196,8 +196,16 @@ unreachable, and the parts that do need Deezer must fail *fast* and *without a v
   verdict to a plain `DeezerError`, and `_url_from_info` raises rather than reporting "no source"
   when it could not ask.
 - Background work backs off instead of burning through itself: the download queue waits out the
-  breaker's cooldown (`prefetch._wait_out_outage`) rather than failing every queued id in seconds,
-  and the scheduler postpones a sync while Deezer is unreachable (the local scan still runs).
+  breaker's cooldown (`prefetch._outage_wait`, and *only* while a circuit is actually open) rather
+  than failing every queued id in seconds, and the scheduler postpones a sync while Deezer is
+  unreachable (the local scan still runs).
+- `socket.getaddrinfo` takes no timeout, and glibc's defaults make one stalled lookup 20s+.
+  `requests` folds DNS into its connect timeout, so the session is covered — but the podcast SSRF
+  pre-flight (`check_public_url`) resolves *before* requests is involved, once per redirect hop, on
+  a host a third-party feed chose. It goes through `provider.resolve_addresses`: a deadline, a
+  short-lived cache (positive *and* negative, so the next caller never re-pays a timeout), and a
+  bounded set of **daemon** lookup threads — a `ThreadPoolExecutor` would be joined at interpreter
+  exit and one wedged name would hang the shutdown of the worker being recycled because of it.
 - The `/api` blueprint has a catch-all error handler: an unforeseen failure becomes a JSON 500 with
   the traceback in the log, never an HTML page the SPA can't parse.
 - The ARL can die at any moment. `DeezerProvider.check_login()` is the cached health check and

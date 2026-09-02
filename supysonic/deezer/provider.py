@@ -83,6 +83,128 @@ class TrackUnavailable(DeezerError):
 # influenced. Only ordinary http(s) to a public address is fetched.
 MAX_EPISODE_REDIRECTS = 5
 
+# -- name resolution, with the deadline the system resolver doesn't offer -----
+#
+# ``socket.getaddrinfo`` takes no timeout. It blocks on the system resolver, and
+# glibc's defaults (5s per attempt, 2 attempts, per nameserver in resolv.conf)
+# make ONE stalled lookup take 20s or more. ``requests`` folds DNS into its
+# connect timeout, so everything going through the session is already covered —
+# but the SSRF pre-flight below runs *before* requests is involved, once per
+# redirect hop, on a hostname a third-party podcast feed chose. A resolver that
+# stops answering therefore parked a worker thread for minutes with nothing to
+# show for it: the same failure mode as an unbounded HTTP call, one layer down.
+RESOLVE_TIMEOUT = 5.0
+# All of a show's episodes come from the same host and a redirect chain usually
+# stays within two or three, so re-resolving every hop of every episode is pure
+# latency. Short enough that a host which moves is picked up quickly.
+RESOLVE_CACHE_TTL = 300.0
+# A failure is remembered too, and for much less time: the point is only that
+# the next caller doesn't pay the same timeout over again.
+RESOLVE_FAILURE_TTL = 30.0
+# A lookup runs on its own thread, so a hung resolver parks THAT and not the
+# request thread serving somebody. The semaphore caps how many may be in flight
+# and is held for as long as the lookup actually runs — not just until we stop
+# waiting for it — so wedged lookups genuinely occupy their slot instead of
+# piling up behind each other.
+_RESOLVE_WORKERS = 4
+# How long to wait for one of those slots. Deliberately separate from — and much
+# shorter than — the lookup's own budget: a busy pool is a fact about US, and
+# spending the lookup's whole deadline queueing would end in "this host timed
+# out" being remembered about a host we never actually asked about.
+_SLOT_WAIT = 1.0
+
+_resolver_slots = threading.BoundedSemaphore(_RESOLVE_WORKERS)
+_resolve_cache: dict[tuple[str, int], tuple[float, "list[str] | None"]] = {}
+_resolve_cache_lock = threading.Lock()
+
+
+def _lookup_async(host: str, port: int):
+    """Start ``getaddrinfo`` on a daemon thread; returns ``(done_event, result)``.
+
+    A bare daemon thread rather than a ThreadPoolExecutor, deliberately: a
+    lookup wedged inside the system resolver cannot be cancelled, and the
+    executor's atexit hook JOINS its workers — so one stuck name would hang the
+    shutdown of the very worker being recycled because something is stuck. A
+    daemon thread is abandoned at exit, which is the correct outcome here. The
+    caller's semaphore slot is released in here, once the lookup really ends —
+    not when the caller stops waiting for it.
+    """
+    done = threading.Event()
+    result: dict = {}
+
+    def run():
+        try:
+            result["addresses"] = [
+                info[4][0] for info in socket.getaddrinfo(host, port)
+            ]
+        except BaseException as exc:
+            # Everything, so the slot below is always released and the caller
+            # always gets an answer — a resolver can raise more than gaierror.
+            result["error"] = exc
+        finally:
+            done.set()
+            _resolver_slots.release()
+
+    try:
+        threading.Thread(target=run, name="dns-check", daemon=True).start()
+    except Exception:
+        _resolver_slots.release()
+        raise
+    return done, result
+
+
+def _cache_resolution(key, addresses, ttl) -> None:
+    with _resolve_cache_lock:
+        if len(_resolve_cache) > 512:  # bounded: the keys come from feed URLs
+            _resolve_cache.clear()
+        _resolve_cache[key] = (time.monotonic() + ttl, addresses)
+
+
+def resolve_addresses(host: str, port: int) -> "list[str]":
+    """Every IP ``host`` resolves to, within ``RESOLVE_TIMEOUT``.
+
+    Raises ``DeezerError`` when the name doesn't resolve, or when the resolver
+    doesn't answer in time — which is a transport failure like any other, and
+    says nothing about the podcast being asked for.
+    """
+    key = (host, port)
+    with _resolve_cache_lock:
+        hit = _resolve_cache.get(key)
+        if hit is not None and time.monotonic() < hit[0]:
+            if hit[1] is None:
+                raise DeezerError(f"cannot resolve {host} (cached failure)")
+            return hit[1]
+
+    if not _resolver_slots.acquire(timeout=min(_SLOT_WAIT, RESOLVE_TIMEOUT)):
+        # Every resolver thread is stuck on some other name. Refusing here is
+        # the whole point: the wait stays inside this pool instead of spreading.
+        # Nothing is cached — this says nothing about `host`.
+        raise DeezerError(
+            f"DNS is not answering; refusing {host}"
+        ) from DeezerUnavailable("the resolver is not answering")
+
+    done, result = _lookup_async(host, port)
+    if not done.wait(RESOLVE_TIMEOUT):
+        _cache_resolution(key, None, RESOLVE_FAILURE_TTL)
+        # Chained from DeezerUnavailable so is_transport_failure() reads it for
+        # what it is: we could not reach the host, and nothing whatsoever about
+        # the podcast has been established.
+        raise DeezerError(f"timed out resolving {host}") from DeezerUnavailable(
+            f"the resolver did not answer for {host}"
+        )
+
+    error = result.get("error")
+    if error is not None:
+        # A name that does not resolve is an ANSWER (NXDOMAIN and friends), so
+        # this one is not dressed up as a transport failure: retrying it in a
+        # few seconds would be pointless.
+        _cache_resolution(key, None, RESOLVE_FAILURE_TTL)
+        raise DeezerError(f"cannot resolve {host}: {error}") from error
+
+    addresses = result["addresses"]
+    _cache_resolution(key, addresses, RESOLVE_CACHE_TTL)
+    return addresses
+
 
 def check_public_url(url: str) -> None:
     """Raise unless ``url`` is http(s) pointing at a public IP address.
@@ -97,12 +219,9 @@ def check_public_url(url: str) -> None:
     host = parts.hostname
     if not host:
         raise DeezerError("refusing episode URL without a host")
-    try:
-        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80))
-    except socket.gaierror as exc:
-        raise DeezerError(f"cannot resolve {host}") from exc
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    for address in resolve_addresses(host, port):
+        ip = ipaddress.ip_address(address)
         if (
             ip.is_private
             or ip.is_loopback
