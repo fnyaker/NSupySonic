@@ -1,10 +1,17 @@
 import re
 import requests
 import json
+from urllib.parse import urlsplit
 from deezerpy.gw import GW
 from deezerpy.api import API
 from deezerpy.graphql import GraphQL
-from deezerpy.errors import DeezerError, WrongLicense, WrongGeolocation
+from deezerpy._circuit import breaker
+from deezerpy.errors import (
+    DeezerError,
+    DeezerUnavailable,
+    WrongLicense,
+    WrongGeolocation,
+)
 
 __version__ = "1.3.7"
 
@@ -23,18 +30,78 @@ class TrackFormats():
 # its own timeout. requests defaults to NO timeout at all, so a single silent
 # TCP black hole (Deezer degraded, a dropped NAT entry) parked a server thread
 # forever — enough of those and the whole app stops answering, which is exactly
-# the "Deezer took the app down" failure mode. Generous enough for a slow
-# gateway call, finite enough that a stuck socket always lets go.
-DEFAULT_TIMEOUT = (10, 30)
+# the "Deezer took the app down" failure mode.
+#
+# Both halves are deliberately tight. The connect half is what a real outage
+# burns: Deezer's edge is a CDN, so it either accepts a TCP connection in a
+# couple of seconds or it is not there — waiting 30 for that answer bought
+# nothing and cost a worker thread. The read half is the gap BETWEEN bytes (not
+# the total transfer), so 20s is generous even for a 4000-track playlist page.
+# Long transfers (audio, episodes) pass their own timeout and are unaffected.
+DEFAULT_TIMEOUT = (5, 20)
+
+# Deezer talks to us over a handful of hosts, from up to a couple of dozen
+# threads (web workers + prefetch + download + sync). Sized so the pool is not
+# constantly opening and discarding sockets under that load.
+_POOL_CONNECTIONS = 16
+_POOL_MAXSIZE = 32
+
+
+def request_host(url) -> str:
+    """The hostname a request is aimed at, lowercased ("" if unparseable)."""
+    try:
+        return (urlsplit(str(url)).hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 class _Session(requests.Session):
-    """A requests Session with a mandatory default timeout."""
+    """A requests Session with a mandatory timeout and a per-host circuit breaker.
+
+    Two guarantees, both about the app rather than about Deezer:
+
+    - **no call blocks forever** — every request carries a timeout, even the
+      ones that forgot to ask for one;
+    - **no call blocks at all once a host is known to be down** — the breaker
+      short-circuits it (``DeezerUnavailable``) instead of paying the timeout
+      again, so an outage costs a handful of slow calls in total rather than one
+      per request for as long as it lasts.
+    """
+
+    def __init__(self):
+        super().__init__()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=_POOL_CONNECTIONS,
+            pool_maxsize=_POOL_MAXSIZE,
+            max_retries=0,  # retries are the callers' business, with a budget
+        )
+        self.mount("https://", adapter)
+        self.mount("http://", adapter)
 
     def request(self, *args, **kwargs):
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = DEFAULT_TIMEOUT
-        return super().request(*args, **kwargs)
+        url = kwargs.get("url") or (args[1] if len(args) > 1 else None)
+        host = request_host(url)
+        probe = breaker.before_request(host)  # raises while the host is down
+        try:
+            response = super().request(*args, **kwargs)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            breaker.on_failure(host, exc, probe)
+            raise
+        except Exception:
+            # It answered; whatever went wrong afterwards is not reachability.
+            breaker.on_success(host, probe)
+            raise
+        breaker.on_success(host, probe)
+        return response
+
+
+def _close_quietly(session) -> None:
+    try:
+        session.close()
+    except Exception:
+        pass
 
 
 class Deezer:
@@ -54,6 +121,12 @@ class Deezer:
         self.gw = GW(self.session, self.http_headers)
         self.gql = GraphQL(self.session, self.http_headers)
 
+    def close(self):
+        """Release this client's sockets. A re-login builds a whole new client,
+        and the old one's pooled connections are file descriptors: leaving them
+        to the garbage collector is how a long-running server runs out."""
+        _close_quietly(self.session)
+
     def get_session(self):
         return {
             'logged_in': self.logged_in,
@@ -68,8 +141,10 @@ class Deezer:
         self.current_user = data['current_user']
         self.childs = data['childs']
         self.selected_account = data['selected_account']
-        self.session = _Session()
+        old, self.session = self.session, _Session()
+        _close_quietly(old)
         self.session.cookies.update(data['cookies'])
+        self.api.session = self.gw.session = self.gql.session = self.session
 
     def login(self, email, password, re_captcha_token, child=0):
         if child: child = int(child)
@@ -205,10 +280,20 @@ class Deezer:
                 },
                 headers = self.http_headers
             )
+            if request.status_code == 429 or request.status_code >= 500:
+                # media.deezer.com is unwell, not answering about the track.
+                # Returning [] here made every quality resolve to "no URL",
+                # which is what the caller reads as "this track has no source"
+                # — an outage must never condemn a track.
+                raise DeezerUnavailable(
+                    f"media.deezer.com answered {request.status_code}"
+                )
             request.raise_for_status()
             response = request.json()
         except requests.exceptions.HTTPError:
             return []
+        except ValueError as exc:
+            raise DeezerUnavailable("media.deezer.com returned a non-JSON body") from exc
 
         if len(response.get('data', [])):
             for data in response['data']:

@@ -1292,6 +1292,83 @@ class WebUITestCase(unittest.TestCase):
 
         self.app.deezer._dz = Boom()
 
+    def _deezer_login_fails(self, reason="network"):
+        """Simulate the harder outage: not "a call failed" but "we cannot even
+        log in". Reading ``provider.dz`` then RAISES, which is what several
+        routes used to do outside their try block — turning a Deezer outage into
+        a 500 and skipping the local fallback sitting two lines below."""
+        from deezerpy._circuit import breaker
+
+        provider = self.app.deezer
+        provider._dz = None
+        breaker.reset()
+        self.addCleanup(breaker.reset)
+        if reason == "network":
+            provider._login_error = ("network", "connection reset")
+        else:
+            provider._login_error = ("arl", "Deezer rejected the ARL")
+        provider._login_retry_at = float("inf")  # in backoff: no login attempted
+
+    def test_search_still_answers_when_deezer_cannot_be_reached(self):
+        # The local hits are on disk and owe Deezer nothing; they must come back
+        # whatever Deezer is doing.
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self._deezer_login_fails()
+        rv = self.client.get("/api/search?q=Archived")
+        self.assertEqual(rv.status_code, 200)
+        data = rv.get_json()
+        self.assertIn("1", [t["deezer_id"] for t in data["tracks"]])
+        self.assertEqual(data["albums"], [])
+
+    def test_artist_pages_fall_back_to_the_library_when_login_fails(self):
+        self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self._deezer_login_fails()
+        rv = self.client.get("/api/artist/500")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_json()["artist"]["name"], "Archived Artist")
+        rv = self.client.get("/api/artist/500/tracks")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual([t["deezer_id"] for t in rv.get_json()["tracks"]], ["1"])
+
+    def test_discovery_rows_go_quiet_instead_of_failing(self):
+        self._login()
+        self._deezer_login_fails()
+        for path in ("/api/recommendations", "/api/radio/artist/500",
+                     "/api/search/podcasts?q=x", "/api/home"):
+            rv = self.client.get(path)
+            self.assertEqual(rv.status_code, 200, path)
+
+    def test_the_status_endpoint_says_unreachable_not_bad_credential(self):
+        self._login()
+        self._deezer_login_fails()
+        body = self.client.get("/api/deezer/status").get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["reason"], "network")
+        self.assertGreater(body["retry_in"], 0)
+
+    def test_a_rejected_arl_is_still_reported_as_a_rejected_arl(self):
+        # The other half: an outage must not mask a credential that really died,
+        # or the admin never learns they have to paste a new ARL.
+        self._login()
+        self._deezer_login_fails(reason="arl")
+        body = self.client.get("/api/deezer/status").get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["reason"], "arl")
+
+    def test_a_manual_sync_says_so_instead_of_pretending_to_run(self):
+        self._login()
+        cfg = self.app.config["DEEZER"]
+        previous = cfg.get("sync_user")
+        cfg["sync_user"] = "alice"
+        # The DEEZER config dict outlives this app instance, so put it back.
+        self.addCleanup(cfg.__setitem__, "sync_user", previous)
+        self._deezer_login_fails()
+        rv = self.client.post("/api/sync")
+        self.assertEqual(rv.status_code, 503)
+        self.assertEqual(rv.get_json()["reason"], "network")
+
     def test_album_offline_from_db(self):
         self._login()
         self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
