@@ -1,10 +1,20 @@
 import requests
-from time import sleep
+from time import monotonic, sleep
 
 import json
 from deezerpy.utils import map_artist_album, map_user_track, map_user_artist, map_user_album, map_user_playlist
-from deezerpy.errors import GWAPIError
+from deezerpy.errors import GWAPIError, DeezerUnavailable
 from deezerpy._throttle import limiter
+
+# Wall-clock budget for ONE logical gateway call, retries included — see the
+# same constant in deezerpy.api for why a retry count alone was not enough.
+NET_BUDGET = 20.0
+NET_RETRY_DELAY = 1.5
+# How many times a single call may be replayed for a *non-network* reason (a
+# refreshed CSRF token, a gateway FALLBACK). Bounded: these used to recurse with
+# a fresh retry budget each time, so a gateway stuck on "invalid api token"
+# looped until the stack (or the worker) gave out.
+MAX_REPLAYS = 3
 
 class PlaylistStatus():
     PUBLIC = 0
@@ -30,41 +40,65 @@ class GW:
         self.session = session
         self.api_token = None
 
-    def api_call(self, method, args=None, params=None, _net_retries=2):
+    def api_call(self, method, args=None, params=None, _net_retries=2, _replays=MAX_REPLAYS):
         if args is None: args = {}
         if params is None: params = {}
         if not self.api_token and method != 'deezer.getUserData': self.api_token = self._get_token()
-        p = {'api_version': "1.0",
-             'api_token': 'null' if method == 'deezer.getUserData' else self.api_token,
-             'input': '3',
-             'method': method}
-        p.update(params)
-        limiter.acquire()
-        try:
-            result_json = self.session.post(
-                "https://www.deezer.com/ajax/gw-light.php",
-                params=p,
-                timeout=30,
-                json=args,
-                headers=self.http_headers
-            ).json()
-        except (requests.ConnectionError, requests.Timeout):
-            # Bounded retry so a network outage surfaces instead of hanging forever.
-            if _net_retries <= 0:
-                raise
-            sleep(2)
-            return self.api_call(method, args, params, _net_retries=_net_retries - 1)
-        if len(result_json['error']):
-            if (
+        deadline = monotonic() + NET_BUDGET
+        while True:
+            p = {'api_version': "1.0",
+                 'api_token': 'null' if method == 'deezer.getUserData' else self.api_token,
+                 'input': '3',
+                 'method': method}
+            p.update(params)
+            limiter.acquire()
+            try:
+                # No explicit timeout: the session's default applies, so this
+                # call can never outlive it (see deezerpy.DEFAULT_TIMEOUT).
+                result_json = self.session.post(
+                    "https://www.deezer.com/ajax/gw-light.php",
+                    params=p,
+                    json=args,
+                    headers=self.http_headers
+                ).json()
+                if not isinstance(result_json, dict) or 'error' not in result_json:
+                    raise ValueError("not a gateway response")
+            except DeezerUnavailable:
+                raise  # host known down: retrying is pure waiting
+            except (requests.ConnectionError, requests.Timeout):
+                # Bounded retry so a network outage surfaces instead of hanging forever.
+                if _net_retries <= 0 or monotonic() + NET_RETRY_DELAY >= deadline:
+                    raise
+                _net_retries -= 1
+                sleep(NET_RETRY_DELAY)
+                continue
+            except ValueError as exc:
+                # An HTML error page, a captcha wall or a truncated body: the
+                # gateway did not answer us. Unreachable, not a data verdict —
+                # nothing may be declared missing on the strength of this.
+                raise DeezerUnavailable(
+                    f"gw-light.php returned an unusable body for {method}"
+                ) from exc
+            if not len(result_json['error']):
+                break
+            if _replays <= 0:
+                raise GWAPIError(json.dumps(result_json['error']))
+            if method != 'deezer.getUserData' and (
                 result_json['error'] == {"GATEWAY_ERROR": "invalid api token"} or
                 result_json['error'] == {"VALID_TOKEN_REQUIRED": "Invalid CSRF token"}
             ):
+                # Excluding getUserData is what makes this terminate: refreshing
+                # the token IS a getUserData call, so a gateway stuck on
+                # "invalid api token" would otherwise refresh to fetch the token
+                # to refresh the token, for ever.
+                _replays -= 1
                 self.api_token = self._get_token()
-                return self.api_call(method, args, params)
+                continue
             if result_json.get('payload', {}) and result_json['payload'].get('FALLBACK', {}):
+                _replays -= 1
                 for key in result_json['payload']['FALLBACK'].keys():
                     args[key] = result_json['payload']['FALLBACK'][key]
-                return self.api_call(method, args, params)
+                continue
             raise GWAPIError(json.dumps(result_json['error']))
         if not self.api_token and method == 'deezer.getUserData': self.api_token = result_json['results']['checkForm']
         return result_json['results']

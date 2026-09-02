@@ -41,7 +41,10 @@ logger = logging.getLogger(__name__)
 LRCLIB_BASE = "https://lrclib.net/api"
 USER_AGENT = "NSupySonic (https://github.com/fnyaker/nsupysonic)"
 _HEADERS = {"User-Agent": USER_AGENT}
-_TIMEOUT = 12
+# (connect, read). A scalar would apply 12s to the CONNECT phase too, and
+# LRCLIB is a best-effort third party: if it is not accepting connections we
+# want to know in seconds, not to hold a request thread for it.
+_TIMEOUT = (5, 12)
 
 # `[mm:ss.xx]` / `[mm:ss.xxx]` (fraction optional) LRC timestamp.
 _LRC_TS = re.compile(r"\[(\d{1,3}):([0-5]?\d)(?:[.:](\d{1,3}))?\]")

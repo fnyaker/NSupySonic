@@ -33,6 +33,8 @@ except ImportError:  # pycryptodomex
 
 from deezerpy import Deezer
 from deezerpy.errors import DeezerError as DeezerPyError
+from deezerpy.errors import DeezerUnavailable, is_transport_failure
+from deezerpy._circuit import breaker
 from deezerpy._throttle import limiter
 
 logger = logging.getLogger(__name__)
@@ -151,6 +153,12 @@ class DeezerProvider:
         # the status endpoint so the UI can tell the two apart.
         self._login_error: tuple[str, str] | None = None
         self._last_check = 0.0
+        # Until when a failed login is not worth re-attempting. Logging in costs
+        # a gateway round-trip, and ``dz`` is touched by nearly every request:
+        # without this, an outage made every single request pay a fresh login
+        # attempt. The circuit breaker covers the socket, this covers the rest
+        # (and gives the UI an instant answer).
+        self._login_retry_at = 0.0
 
     @classmethod
     def from_config(cls, cfg: dict) -> "DeezerProvider | None":
@@ -169,11 +177,28 @@ class DeezerProvider:
 
     # -- session ---------------------------------------------------------
 
+    # How long a failed login is remembered before another attempt is made.
+    # Short for a network blip (it may already be over), longer for a rejected
+    # credential (only the admin pasting a new ARL can fix that, and doing so
+    # calls ``set_arl``, which clears the backoff immediately).
+    _LOGIN_RETRY_NETWORK = 20.0
+    _LOGIN_RETRY_ARL = 120.0
+
     @property
     def dz(self) -> Deezer:
         if self._dz is None:
             with self._login_lock:
                 if self._dz is None:
+                    if time.monotonic() < self._login_retry_at:
+                        reason, detail = self._login_error or ("network", "login failed")
+                        failure = DeezerError(f"Deezer login unavailable ({reason}): {detail}")
+                        if reason != "network":
+                            raise failure
+                        # Chained so callers can tell this apart with
+                        # is_transport_failure(): it is Deezer not answering,
+                        # remembered, and it must read as such everywhere —
+                        # never as a verdict, never as a stack trace per request.
+                        raise failure from DeezerUnavailable(detail)
                     dz = Deezer()
                     try:
                         ok = dz.login_via_arl(self.arl)
@@ -182,18 +207,23 @@ class DeezerProvider:
                         # about the ARL, so it must NOT be reported as "your
                         # credential is dead" — that sends the admin chasing a
                         # perfectly good ARL during a network blip.
+                        dz.close()
                         self._login_error = ("network", str(exc) or exc.__class__.__name__)
                         self._last_check = time.monotonic()
+                        self._login_retry_at = time.monotonic() + self._LOGIN_RETRY_NETWORK
                         raise DeezerError(f"Deezer unreachable: {exc}") from exc
                     if not ok:
+                        dz.close()
                         self._login_error = (
                             "arl",
                             "Deezer rejected the ARL (expired, revoked or mistyped)",
                         )
                         self._last_check = time.monotonic()
+                        self._login_retry_at = time.monotonic() + self._LOGIN_RETRY_ARL
                         raise DeezerError("ARL login failed (empty/expired cookie?)")
                     self._dz = dz
                     self._login_error = None
+                    self._login_retry_at = 0.0
                     self._last_check = time.monotonic()
                     logger.info(
                         "Deezer login OK as %s (lossless=%s)",
@@ -202,10 +232,63 @@ class DeezerProvider:
                     )
         return self._dz
 
+    def _drop_session(self) -> None:
+        """Forget the current client and release its sockets.
+
+        Always under ``_login_lock``. Closing matters: a re-login builds a whole
+        new ``Deezer`` (and a whole new connection pool), and during an outage
+        that happens often — leaving the old pools to the garbage collector is
+        how a server ends up with "Too many open files".
+        """
+        old, self._dz = self._dz, None
+        closer = getattr(old, "close", None)
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
     def relogin(self) -> Deezer:
         with self._login_lock:
-            self._dz = None
+            self._drop_session()
+            # An explicit re-login is a deliberate "try again now": don't let a
+            # backoff from the previous failure veto it.
+            self._login_retry_at = 0.0
         return self.dz
+
+    # Hosts whose reachability decides whether Deezer is usable at all: the
+    # private gateway (metadata, library, tokens) and the public API (search,
+    # charts). The CDNs are deliberately excluded — a stalled image host says
+    # nothing about the catalogue.
+    _CORE_HOSTS = ("www.deezer.com", "api.deezer.com")
+
+    def available(self) -> bool:
+        """Is it worth talking to Deezer at all right now? (instant, never raises)
+
+        A pure state read — no network, no lock. Callers use it to skip straight
+        to the local library instead of queueing behind a call that is already
+        known to fail, which is what keeps a Deezer outage from being felt as
+        app-wide slowness.
+        """
+        # The backoff is about LOGGING IN, so it only counts when there is no
+        # session to use: a client we already hold stays usable while an old
+        # failed login attempt is still cooling down.
+        if self._dz is None and time.monotonic() < self._login_retry_at:
+            return False
+        return not breaker.any_open(self._CORE_HOSTS)
+
+    def outage(self) -> dict | None:
+        """Details of the current outage, or None. For the status endpoint."""
+        if self.available():
+            return None
+        hosts = {h: breaker.retry_after(h) for h in self._CORE_HOSTS if breaker.is_open(h)}
+        backoff = self._login_retry_at - time.monotonic() if self._dz is None else 0.0
+        retry_in = max([backoff, *hosts.values()] or [0.0])
+        return {
+            "hosts": sorted(hosts),
+            "retry_in": round(max(0.0, retry_in), 1),
+            "detail": (self._login_error or (None, None))[1],
+        }
 
     # How long a login verdict is trusted before ``check_login`` re-tests it.
     _CHECK_TTL = 120.0
@@ -223,15 +306,39 @@ class DeezerProvider:
             return {"ok": True, "reason": None, "detail": None,
                     "account": self._dz.current_user.get("name")}
         if force:
+            # An explicit "check now" from the admin: wipe every reason we might
+            # have to answer from memory — the backoff, and the breaker's verdict
+            # on the hosts — so the button really does re-test the connection.
             with self._login_lock:
-                self._dz = None
+                self._drop_session()
+                self._login_retry_at = 0.0
+            for host in self._CORE_HOSTS:
+                breaker.reset(host)
+        elif not self.available():
+            # Known-down: answer instantly from what we already learned instead
+            # of queueing behind a call that is going to fail anyway. The UI
+            # polls this, and an outage must never make polling it slow.
+            #
+            # Which verdict: a live login backoff carries the reason the login
+            # actually failed (a rejected ARL is a rejected ARL). An open circuit
+            # is by construction a transport failure, and must never be reported
+            # as a dead credential — that sends the admin chasing a good ARL.
+            if (
+                self._dz is None
+                and time.monotonic() < self._login_retry_at
+                and self._login_error
+            ):
+                reason, detail = self._login_error
+            else:
+                reason, detail = "network", "Deezer is not answering"
+            return {"ok": False, "reason": reason, "detail": detail, "account": None}
         elif self._dz is not None and not self._live_session():
             # We hold a session object, but the account behind it may have been
             # revoked hours ago — an ARL that expires mid-run breaks everything
             # while the process happily believes it is logged in. Re-login so the
             # verdict below is about the credential as it is NOW.
             with self._login_lock:
-                self._dz = None
+                self._drop_session()
         try:
             dz = self.dz
         except DeezerError:
@@ -269,11 +376,13 @@ class DeezerProvider:
         arl = (arl or "").strip()
         with self._login_lock:
             self.arl = arl
-            self._dz = None
+            self._drop_session()
             self._fav_cache = None
             self._login_error = None
             self._last_check = 0.0
             self._last_relogin = float("-inf")
+            # A new credential deserves a real attempt, whatever the old one did.
+            self._login_retry_at = 0.0
 
     @property
     def user_id(self):
@@ -358,6 +467,11 @@ class DeezerProvider:
         """
         try:
             page = self.dz.gw.get_show_page(show_id, nb=nb, start=start)
+        except DeezerUnavailable:
+            # Deezer is not answering. That is not Deezer saying the show is
+            # gone, and ShowUnavailable is what retires a subscription — so it
+            # propagates untouched, exactly like a timeout.
+            raise
         except DeezerPyError as exc:
             raise ShowUnavailable(f"Deezer has no show {show_id}: {exc}") from exc
         if not (page or {}).get("DATA", {}).get("SHOW_ID"):
@@ -571,23 +685,45 @@ class DeezerProvider:
         quality = quality or self.default_quality
         try:
             return self._resolve_once(sng_id, quality)
-        except (DeezerError, DeezerPyError) as exc:
+        except Exception as exc:
+            if is_transport_failure(exc):
+                # Deezer did not answer. Uniform, never-a-verdict failure: every
+                # caller of resolve() reads TrackUnavailable as "condemn this
+                # track", so nothing that merely failed to reach Deezer may
+                # arrive as one — nor as a raw socket error each caller would
+                # have to recognise for itself.
+                raise DeezerError(
+                    f"cannot reach Deezer to resolve track {sng_id}: {exc}"
+                ) from exc
+            if not isinstance(exc, (DeezerError, DeezerPyError)):
+                raise
             # NOTE: TrackUnavailable deliberately does NOT short-circuit here.
             # An expired media license token makes get_track_url fail for every
             # quality, which looks *exactly* like "this track has no source" —
             # so a verdict is only trustworthy once a fresh session has said the
             # same thing. The re-login below is what tells the two apart.
+            verdict = isinstance(exc, TrackUnavailable)
             if time.monotonic() - self._last_relogin < self._RELOGIN_INTERVAL:
-                raise  # the session is fresh — the track really is unavailable
-            self._last_relogin = time.monotonic()
+                raise  # a fresh session already said so — the track really is gone
             logger.info(
                 "Resolve failed for %s (%s) — re-logging into Deezer and retrying",
                 sng_id, exc,
             )
             try:
                 self.relogin()
-            except Exception:
+            except Exception as login_exc:
+                # We could not even ASK a fresh session. An unconfirmed verdict
+                # is not a verdict: downgraded to an ordinary failure, or an
+                # outage would condemn every cold track anyone pressed play on
+                # — and a condemned track is offered for replacement/deletion.
+                if verdict:
+                    raise DeezerError(
+                        f"cannot confirm that track {sng_id} is unavailable: "
+                        f"Deezer is unreachable ({login_exc})"
+                    ) from exc
                 raise exc  # ARL dead / network down: surface the original error
+            # Only a login that actually succeeded starts the trust window above.
+            self._last_relogin = time.monotonic()
             return self._resolve_once(sng_id, quality)
 
     def _resolve_once(self, sng_id, quality: str):
@@ -614,13 +750,25 @@ class DeezerProvider:
         raise TrackUnavailable(f"no playable source for track {sng_id}")
 
     def _url_from_info(self, info: dict, quality: str):
+        """The first playable URL among the quality fallbacks, or (None, None).
+
+        (None, None) means Deezer ANSWERED and had nothing — the caller turns
+        that into ``TrackUnavailable``, which condemns the track and offers the
+        user a replacement. So a failure to *reach* Deezer must never end up
+        here: it is raised as a plain ``DeezerError`` instead. Degrading to the
+        next quality would only ask the same unreachable host again anyway.
+        """
         token = info.get("TRACK_TOKEN")
         if not token:
             return None, None
         for fmt in QUALITY_FALLBACKS.get(quality, ["MP3_128"]):
             try:
                 url = self.dz.get_track_url(token, fmt)
-            except Exception:  # WrongLicense / WrongGeolocation / network
+            except (DeezerUnavailable, requests.RequestException) as exc:
+                raise DeezerError(f"cannot reach Deezer to resolve a stream: {exc}") from exc
+            except DeezerPyError:
+                url = None  # WrongLicense / WrongGeolocation / a per-track error
+            except Exception:
                 url = None
             if url:
                 return url, fmt
@@ -658,11 +806,12 @@ class DeezerProvider:
             resp = self.dz.session.get(
                 COVER_URL.format(md5=md5_image, w=size),
                 headers=self.dz.http_headers,
-                timeout=30,
             )
             resp.raise_for_status()
             return resp.content
-        except requests.RequestException:
+        except (requests.RequestException, DeezerError):
+            # Art is decoration: a stalled CDN, an open circuit or a failed
+            # login must cost a missing cover, never the caller's request.
             return None
 
     def fetch_image(self, kind: str, deezer_id, size: str = "xl") -> bytes | None:
@@ -678,11 +827,10 @@ class DeezerProvider:
                 f"https://api.deezer.com/{kind}/{deezer_id}/image",
                 params={"size": size},
                 headers=self.dz.http_headers,
-                timeout=30,
             )
             resp.raise_for_status()
             if "image" in resp.headers.get("content-type", ""):
                 return resp.content
             return None
-        except requests.RequestException:
+        except (requests.RequestException, DeezerError):
             return None

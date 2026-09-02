@@ -1,11 +1,22 @@
 import requests
-from time import sleep
+from time import monotonic, sleep
 
 import json
 from deezerpy.errors import ItemsLimitExceededException, PermissionException, InvalidTokenException, \
 WrongParameterException, MissingParameterException, InvalidQueryException, DataException, \
-IndividualAccountChangedNotAllowedException, APIError
+IndividualAccountChangedNotAllowedException, APIError, DeezerUnavailable
 from deezerpy._throttle import limiter
+
+# Wall-clock budget for ONE logical call, retries and back-offs included. The
+# old code retried a fixed number of times with no notion of elapsed time, so a
+# single call could sit on a server thread for minutes (3 connect timeouts of
+# 30s plus the sleeps between them) — and /recommendations makes three of them
+# back to back. A caller that can't be answered inside the budget gets its
+# failure and falls back to the local library; the circuit breaker then spares
+# the next caller even that.
+NET_BUDGET = 20.0
+NET_RETRY_DELAY = 1.5
+QUOTA_RETRY_DELAY = 5.0
 
 class SearchOrder():
     """Possible values for order parameter in search"""
@@ -31,28 +42,45 @@ class API:
         if args is None:
             args = {}
         if self.access_token: args['access_token'] = self.access_token
-        limiter.acquire()
-        try:
-            result_json = self.session.get(
-                "https://api.deezer.com/" + method,
-                params=args,
-                headers=self.http_headers,
-                timeout=30
-            ).json()
-        except (requests.ConnectionError, requests.Timeout):
-            # Bounded retry so a network outage surfaces instead of hanging.
-            if _net_retries <= 0:
-                raise
-            sleep(2)
-            return self.api_call(method, args, _net_retries=_net_retries - 1, _quota_retries=_quota_retries)
+        deadline = monotonic() + NET_BUDGET
+        while True:
+            limiter.acquire()
+            try:
+                # No explicit timeout: the session's default applies, so this
+                # call can never outlive it (see deezerpy.DEFAULT_TIMEOUT).
+                result_json = self.session.get(
+                    "https://api.deezer.com/" + method,
+                    params=args,
+                    headers=self.http_headers,
+                ).json()
+                if not isinstance(result_json, dict):
+                    raise ValueError("expected a JSON object")
+            except DeezerUnavailable:
+                raise  # host known down: retrying is pure waiting
+            except (requests.ConnectionError, requests.Timeout):
+                # Bounded retry so a network outage surfaces instead of hanging.
+                if _net_retries <= 0 or monotonic() + NET_RETRY_DELAY >= deadline:
+                    raise
+                _net_retries -= 1
+                sleep(NET_RETRY_DELAY)
+                continue
+            except ValueError as exc:
+                # Not JSON: a proxy error page or a truncated body. Deezer did
+                # not answer *us*, so treat it as unreachable, not as data.
+                raise DeezerUnavailable(
+                    f"api.deezer.com returned a non-JSON body for {method}"
+                ) from exc
+            if 'error' in result_json.keys() and 'code' in result_json['error'] \
+                    and result_json['error']['code'] in [4, 700]:
+                # Quota limit exceeded: back off and retry, but bounded.
+                if _quota_retries <= 0 or monotonic() + QUOTA_RETRY_DELAY >= deadline:
+                    raise APIError(json.dumps(result_json['error']))
+                _quota_retries -= 1
+                sleep(QUOTA_RETRY_DELAY)
+                continue
+            break
         if 'error' in result_json.keys():
             if 'code' in result_json['error']:
-                if result_json['error']['code'] in [4, 700]:
-                    # Quota limit exceeded: back off and retry, but bounded.
-                    if _quota_retries <= 0:
-                        raise APIError(json.dumps(result_json['error']))
-                    sleep(5)
-                    return self.api_call(method, args, _net_retries=_net_retries, _quota_retries=_quota_retries - 1)
                 if result_json['error']['code'] == 100: raise ItemsLimitExceededException(f"ItemsLimitExceededException: {method} {result_json['error']['message'] if 'message' in result_json['error'] else ''}")
                 if result_json['error']['code'] == 200: raise PermissionException(f"PermissionException: {method} {result_json['error']['message'] if 'message' in result_json['error'] else ''}")
                 if result_json['error']['code'] == 300: raise InvalidTokenException(f"InvalidTokenException: {method} {result_json['error']['message'] if 'message' in result_json['error'] else ''}")

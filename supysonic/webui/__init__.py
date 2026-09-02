@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os.path
 import re
+import sys
 import threading
 import time
 import uuid
@@ -43,6 +44,8 @@ from ..db import (
     db,
     now,
 )
+from deezerpy.errors import is_transport_failure
+
 from ..deezer.provider import TrackUnavailable
 from ..managers.user import UserManager
 from ..ratelimit import auth_limiter
@@ -466,6 +469,62 @@ def _need_provider():
     if provider is None:
         return None, (jsonify({"error": "Deezer proxy disabled"}), 503)
     return provider, None
+
+
+def _log_deezer_failure(message, *args):
+    """Log the Deezer call that just failed, from inside its ``except``.
+
+    With a traceback for a real error — and WITHOUT one when Deezer is simply
+    not answering. During an outage every request of every user walks this path,
+    and a stack trace apiece turns somebody else's downtime into gigabytes of
+    our logs (and, on a small server, a full disk). One line each is plenty:
+    the interesting fact is that Deezer is down, and it is the same fact 10 000
+    times over.
+    """
+    exc = sys.exc_info()[1]
+    if is_transport_failure(exc):
+        logger.warning("%s (Deezer unreachable: %s)", message % args if args else message, exc)
+    else:
+        logger.warning(message, *args, exc_info=True)
+
+
+def _dz_api():
+    """The Deezer public-API client, or None when it can't be reached — never raises.
+
+    Reading ``provider.dz`` LOGS IN on first use, so merely touching it throws
+    while Deezer is down; several routes read it outside their try block, which
+    turned a Deezer outage into a 500 and skipped the local fallback they
+    already had two lines below. It also answers instantly (no network) for as
+    long as a known outage lasts, so a route degrades to the library at once
+    instead of queueing behind a call that is going to fail.
+    """
+    provider = _dz_live()
+    if provider is None:
+        return None
+    try:
+        return provider.dz.api
+    except Exception:
+        logger.debug("Deezer client unavailable", exc_info=True)
+        return None
+
+
+def _dz_live():
+    """The provider, but only while Deezer is worth calling. Never raises.
+
+    Same idea as ``_dz_api`` for the routes that go through the provider's own
+    methods: it lets a route drop to its local-database answer without first
+    making (and waiting on) a call already known to fail.
+    """
+    provider = _provider()
+    if provider is None:
+        return None
+    # A provider that can't tell us (an alternative backend, a test double) is
+    # treated as reachable — the same rule the health check itself follows:
+    # never report an outage we have not actually observed.
+    probe = getattr(provider, "available", None)
+    if probe is not None and not probe():
+        return None
+    return provider
 
 
 # A Deezer id is a plain positive integer. `str.isdigit()` was far too loose:
@@ -1094,7 +1153,7 @@ def _push_async(label, fn, *args):
         try:
             fn(*args)
         except Exception:
-            logger.warning("Deezer %s failed", label, exc_info=True)
+            _log_deezer_failure("Deezer %s failed", label)
 
     if current_app.testing:
         run()
@@ -1171,7 +1230,10 @@ def home():
     """Card-based home: personalized mixes (smart tracklists), no track dump."""
     if not _is_admin():
         return jsonify({"mixes": []})  # guests get no personalized Deezer mixes
-    provider = _provider()
+    # One call per mix, so this is the page that suffers most from an outage:
+    # ask once whether Deezer is reachable and, if not, build every card from
+    # the last synced copy in the database instead.
+    provider = _dz_live()
     from ..deezer.importer import smart_ids_from_config
 
     mixes = []
@@ -1231,9 +1293,10 @@ def smarttracklist(sid):
     if not _valid_slug(sid):
         return jsonify({"error": "invalid id"}), 400
     provider = _provider()
-    if provider is not None:
+    live = _dz_live()
+    if live is not None:
         try:
-            res = provider.get_smart_tracklist(sid)
+            res = live.get_smart_tracklist(sid)
             data = (res or {}).get("DATA") or {}
             songs = (res or {}).get("SONGS") or {}
             return jsonify(
@@ -1249,7 +1312,7 @@ def smarttracklist(sid):
                 }
             )
         except Exception:
-            logger.warning("smart tracklist %s failed; trying local DB", sid, exc_info=True)
+            _log_deezer_failure("smart tracklist %s failed; trying local DB", sid)
     # Deezer down/disabled: serve the last synced copy of this mix from the DB.
     pl = _db_mix_for(sid)
     if pl is not None:
@@ -1277,7 +1340,7 @@ def _data(fn):
     try:
         return (fn() or {}).get("data", []) or []
     except Exception:
-        logger.warning("Deezer public API call failed", exc_info=True)
+        _log_deezer_failure("Deezer public API call failed")
         return []
 
 
@@ -1317,12 +1380,11 @@ def search():
         logger.warning("Local search failed", exc_info=True)
         local_tracks = []
 
-    provider = _provider()
-    if provider is None:
-        return jsonify({**empty, "tracks": local_tracks})
-
     # Public API (api.deezer.com): stable, typed, returns playlists + image URLs.
-    dzapi = provider.dz.api
+    # None when Deezer is off or unreachable — the local hits still go out.
+    dzapi = _dz_api()
+    if dzapi is None:
+        return jsonify({**empty, "tracks": local_tracks})
     tracks = [_track_api(t) for t in _data(lambda: dzapi.search(query, limit=limit))]
     albums = [_album_api(a) for a in _data(lambda: dzapi.search_album(query, limit=limit))]
     artists = [_artist_api(a) for a in _data(lambda: dzapi.search_artist(query, limit=limit))]
@@ -1350,8 +1412,8 @@ def search():
 @login_required
 def search_podcasts():
     query = request.args.get("q", "").strip()
-    provider = _provider()
-    if not query or provider is None:
+    dzapi = _dz_api()
+    if not query or dzapi is None:
         return jsonify({"podcasts": []})
     try:
         limit = max(1, min(int(request.args.get("limit", 25)), 50))
@@ -1359,7 +1421,7 @@ def search_podcasts():
         limit = 25
     res = [
         _podcast_card(p)
-        for p in _data(lambda: provider.dz.api.search_podcast(query, limit=limit))
+        for p in _data(lambda: dzapi.search_podcast(query, limit=limit))
     ]
     return jsonify({"podcasts": [x for x in res if x]})
 
@@ -1371,12 +1433,12 @@ def artist(artist_id):
     provider = _provider()
     # The id is concatenated into the outgoing api.deezer.com URL: validate it
     # here rather than letting "%3F..." smuggle query parameters into the call.
-    if provider is not None and _valid_id(artist_id):
-        dzapi = provider.dz.api
+    dzapi = _dz_api() if _valid_id(artist_id) else None
+    if dzapi is not None:
         try:
             info = dzapi.get_artist(artist_id)
         except Exception:
-            logger.warning("artist %s lookup failed; trying local DB", artist_id, exc_info=True)
+            _log_deezer_failure("artist %s lookup failed; trying local DB", artist_id)
             info = None
         if info and info.get("id"):
             top = [_track_api(t) for t in _data(lambda: dzapi.get_artist_top(artist_id, limit=15))]
@@ -1415,8 +1477,8 @@ def artist_tracks(artist_id):
     PAGE = 100
     MAX = 300
     provider = _provider()
-    if provider is not None and _valid_id(artist_id):
-        dzapi = provider.dz.api
+    dzapi = _dz_api() if _valid_id(artist_id) else None
+    if dzapi is not None:
         tracks = []
         seen = set()
         index = 0
@@ -1477,7 +1539,7 @@ def album(album_id):
                     songs = (page.get("SONGS") or {}).get("data", [])
                 return jsonify({"album": _album(data), "tracks": _tracks(songs)})
         except Exception:
-            logger.warning("album %s page failed; trying local DB", album_id, exc_info=True)
+            _log_deezer_failure("album %s page failed; trying local DB", album_id)
     # Deezer disabled/unreachable (or the album isn't on Deezer): serve the
     # imported/archived copy from the DB so downloaded albums browse offline.
     alb = _db_album_by_id(album_id)
@@ -1519,7 +1581,7 @@ def playlist(playlist_id):
     try:
         page = provider.get_playlist_page(playlist_id) or {}
     except Exception:
-        logger.warning("playlist %s page failed", playlist_id, exc_info=True)
+        _log_deezer_failure("playlist %s page failed", playlist_id)
         return jsonify({"error": "not found"}), 404
     data = page.get("DATA") or {}
     if not data.get("PLAYLIST_ID"):
@@ -1543,7 +1605,7 @@ def discography(artist_id):
         try:
             tabs = provider.get_artist_discography(artist_id)
         except Exception:
-            logger.warning("discography %s failed; trying local DB", artist_id, exc_info=True)
+            _log_deezer_failure("discography %s failed; trying local DB", artist_id)
             tabs = {}
     # Deezer gave nothing (down/disabled): list the artist's archived albums.
     if not tabs and _valid_id(artist_id):
@@ -1656,7 +1718,7 @@ def flow():
     except Exception:
         # A Deezer outage must not 500 the endless-radio endpoint (the player
         # polls it for autoplay continuation) — degrade to "no more tracks".
-        logger.warning("Flow fetch failed", exc_info=True)
+        _log_deezer_failure("Flow fetch failed")
         return jsonify({"tracks": []})
     return jsonify({"tracks": _tracks((res or {}).get("data", []))})
 
@@ -1681,7 +1743,7 @@ def flow_clusters():
     try:
         nodes = provider.flow_clusters()
     except Exception:
-        logger.warning("Flow clusters lookup failed", exc_info=True)
+        _log_deezer_failure("Flow clusters lookup failed")
         return jsonify({"available": False, "clusters": []})
     clusters = []
     for n in nodes:
@@ -1748,7 +1810,7 @@ def track_radio(track_id):
         res = provider.get_track_mix(track_id)
     except Exception:
         # Seeds autoplay after a track ends — a Deezer hiccup shouldn't 500 it.
-        logger.warning("Track radio failed for %s", track_id, exc_info=True)
+        _log_deezer_failure("Track radio failed for %s", track_id)
         return jsonify({"tracks": []})
     return jsonify({"tracks": _tracks((res or {}).get("data", []))})
 
@@ -1762,9 +1824,12 @@ def artist_radio(artist_id):
         return err
     if not _valid_id(artist_id):
         return jsonify({"tracks": []})
+    dzapi = _dz_api()
+    if dzapi is None:
+        return jsonify({"tracks": []})
     tracks = [
         _track_api(t)
-        for t in _data(lambda: provider.dz.api.get_artist_radio(artist_id, limit=40))
+        for t in _data(lambda: dzapi.get_artist_radio(artist_id, limit=40))
     ]
     return jsonify({"tracks": [x for x in tracks if x]})
 
@@ -1778,7 +1843,11 @@ def recommendations():
     provider, err = _need_provider()
     if err:
         return err
-    dzapi = provider.dz.api
+    dzapi = _dz_api()
+    if dzapi is None:
+        # Discovery is the one thing with no offline equivalent: empty rows are
+        # the honest answer, and the home keeps rendering everything else.
+        return jsonify({"albums": [], "artists": [], "playlists": []})
     albums = [_album_api(a) for a in _data(lambda: dzapi.get_editorial_releases(limit=25))]
     artists = [_artist_api(a) for a in _data(lambda: dzapi.get_chart_artists(limit=25))]
     playlists = [_playlist_api(p) for p in _data(lambda: dzapi.get_chart_playlists(limit=25))]
@@ -1876,8 +1945,10 @@ def my_favorites():
         return jsonify({"tracks": _db_tracks(_user_starred())})
     # Prefer the live Deezer favorites (they carry the "added" date and any
     # brand-new stars not yet synced), but never let a Deezer outage 500 the
-    # route — fall back to the favorites already mirrored into the DB.
-    provider = _provider()
+    # route — fall back to the favorites already mirrored into the DB. While an
+    # outage is known, go straight there: the answer is the same and this is
+    # polled, so it would otherwise be a failed call (and a log line) per view.
+    provider = _dz_live()
     if provider is not None:
         try:
             tracks = [_local_track(t) for t in _local_starred()]
@@ -1898,7 +1969,7 @@ def my_favorites():
             tracks.extend(_db_tracks(extra))
             return jsonify({"tracks": tracks})
         except Exception:
-            logger.warning("Deezer favorites fetch failed; serving from DB", exc_info=True)
+            _log_deezer_failure("Deezer favorites fetch failed; serving from DB")
     # Deezer disabled or unreachable: every star from the DB (local + synced).
     return jsonify({"tracks": _db_tracks(_user_starred())})
 
@@ -2767,6 +2838,10 @@ def trigger_sync():
         return err
     if not current_app.config["DEEZER"].get("sync_user"):
         return jsonify({"error": "no sync user configured"}), 503
+    if _dz_live() is None:
+        # The sync would postpone itself and the thread would exit, leaving the
+        # UI to report a run that never happened. Say what is actually wrong.
+        return jsonify({"error": "Deezer est injoignable", "reason": "network"}), 503
 
     from ..deezer import scheduler
 
@@ -3094,12 +3169,17 @@ def deezer_status():
         )
     else:
         message = "Deezer est momentanément injoignable."
+    # How long until the app will try Deezer again. The server already knows —
+    # saying so beats a UI that looks broken with no explanation, and it keeps
+    # the SPA from re-asking every few seconds during an outage.
+    outage = (getattr(provider, "outage", lambda: None)() or {})
     return jsonify(
         {
             "ok": False,
             "reason": status["reason"],
             "admin": _is_admin(),
             "message": message,
+            "retry_in": outage.get("retry_in", 0),
         }
     )
 
@@ -3169,14 +3249,14 @@ def _stream_episode(episode, bitrate):
                     provider, episode, on_abort
                 )
             except Exception:
-                logger.warning("Episode live stream failed for %s", episode.id, exc_info=True)
+                _log_deezer_failure("Episode live stream failed for %s", episode.id)
                 return jsonify({"error": "episode unavailable"}), 502
             return current_app.response_class(gen, mimetype=mimetype)
         # An Opus transcode needs the whole source on disk first.
         try:
             archive.ensure_episode_archived(provider, episode)
         except Exception:
-            logger.warning("Episode fetch failed for %s", episode.id, exc_info=True)
+            _log_deezer_failure("Episode fetch failed for %s", episode.id)
             return jsonify({"error": "episode unavailable"}), 502
 
     if bitrate:
@@ -3349,7 +3429,7 @@ def stream(deezer_id):
         except TrackUnavailable:
             return _gone(track, deezer_id)
         except Exception:
-            logger.warning("Stream metadata fetch failed for %s", deezer_id, exc_info=True)
+            _log_deezer_failure("Stream metadata fetch failed for %s", deezer_id)
             return jsonify({"error": "track unavailable"}), 502
 
         if not os.path.isfile(track.path):
@@ -3365,7 +3445,7 @@ def stream(deezer_id):
                 except TrackUnavailable:
                     return _gone(track, deezer_id)
                 except Exception:
-                    logger.warning("Live stream failed for %s", deezer_id, exc_info=True)
+                    _log_deezer_failure("Live stream failed for %s", deezer_id)
                     return jsonify({"error": "track unavailable"}), 502
                 return current_app.response_class(gen, mimetype=mimetype)
 
@@ -3375,7 +3455,7 @@ def stream(deezer_id):
             except TrackUnavailable:
                 return _gone(track, deezer_id)
             except Exception:
-                logger.warning("Stream fetch failed for %s", deezer_id, exc_info=True)
+                _log_deezer_failure("Stream fetch failed for %s", deezer_id)
                 return jsonify({"error": "track unavailable"}), 502
 
     if bitrate:

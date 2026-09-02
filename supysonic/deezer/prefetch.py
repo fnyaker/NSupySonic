@@ -18,8 +18,20 @@ import logging
 import os.path
 import queue
 import threading
+import time
+
+from deezerpy._circuit import breaker
+from deezerpy.errors import is_transport_failure
 
 logger = logging.getLogger(__name__)
+
+# When Deezer stops answering, the download queue would otherwise drain in
+# seconds — every entry failing instantly against the open circuit — and the
+# whole backlog of "archive this because you just starred it" would be lost to a
+# blip. So an item whose failure was "Deezer is not answering" is retried after
+# the breaker's own cooldown instead of being thrown away.
+_MAX_OUTAGE_RETRIES = 3
+_MAX_OUTAGE_WAIT = 60.0
 
 
 class DeezerPrefetcher:
@@ -159,21 +171,47 @@ class DeezerPrefetcher:
             try:
                 if item is None:
                     return
-                if isinstance(item, tuple):  # ("episode", uuid)
-                    _, eid = item
-                    ensure_episode_archived(self.provider, PodcastEpisode[eid])
-                    continue
-                # Cheap DB lookup first (no network): if we already imported this
-                # track, reuse the row and let ensure_archived skip the audio when
-                # the file is on disk — so an already-archived track costs nothing.
-                # Only hit Deezer for metadata when the track is genuinely new.
-                track = find_local_track(item) or import_track(self.provider, item)
-                ensure_archived(self.provider, track)
+                for attempt in range(_MAX_OUTAGE_RETRIES + 1):
+                    try:
+                        if isinstance(item, tuple):  # ("episode", uuid)
+                            _, eid = item
+                            ensure_episode_archived(self.provider, PodcastEpisode[eid])
+                        else:
+                            # Cheap DB lookup first (no network): if we already
+                            # imported this track, reuse the row and let
+                            # ensure_archived skip the audio when the file is on
+                            # disk — so an already-archived track costs nothing.
+                            # Only hit Deezer for metadata when it is genuinely new.
+                            track = find_local_track(item) or import_track(
+                                self.provider, item
+                            )
+                            ensure_archived(self.provider, track)
+                        break
+                    except Exception as exc:
+                        if not is_transport_failure(exc):
+                            raise  # a real failure for this item: reported below
+                        if attempt >= _MAX_OUTAGE_RETRIES:
+                            logger.info(
+                                "Giving up on %s while Deezer is down (%s); the "
+                                "nightly sweep will pick it up", item, exc,
+                            )
+                            break
+                        self._wait_out_outage()
             except Exception as exc:
                 logger.info("Background download failed for %s: %s", item, exc)
             finally:
                 self._check_space()
                 self._dl_queue.task_done()
+
+    @staticmethod
+    def _wait_out_outage() -> None:
+        """Sleep until the breaker is willing to try Deezer again (bounded).
+
+        Without this the worker would spin: an open circuit fails instantly, so
+        the loop would retry thousands of times a second for nothing.
+        """
+        wait = max(breaker.retry_after(h) for h in ("www.deezer.com", "api.deezer.com"))
+        time.sleep(min(max(wait, 1.0), _MAX_OUTAGE_WAIT))
 
     def _check_space(self) -> None:
         """The archive just grew — is it now over the admin's free-space floor?
