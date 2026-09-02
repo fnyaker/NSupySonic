@@ -199,6 +199,16 @@ unreachable, and the parts that do need Deezer must fail *fast* and *without a v
   breaker's cooldown (`prefetch._outage_wait`, and *only* while a circuit is actually open) rather
   than failing every queued id in seconds, and the scheduler postpones a sync while Deezer is
   unreachable (the local scan still runs).
+- **Podcast episode URLs come from third-party feeds**, so `check_public_url` refuses anything but
+  http(s) to a public address — and then the fetch **connects to the address it just validated**
+  (`_PinnedAddressAdapter`, via requests' `build_connection_pool_key_attributes`). Checking the
+  *name* alone can never be enough: the guard resolves it and the HTTP client resolves it again, so
+  a resolver that answers differently the second time (DNS rebinding) walks straight past a
+  name-based check and its answer gets archived and served by `/api/stream`. The pin moves the TCP
+  connection only — SNI, certificate validation and the `Host` header still carry the real hostname
+  — and it walks the host's addresses itself, since pinning gives up the fail-over
+  `create_connection` does for free. It steps aside when a proxy is configured (the proxy does the
+  resolving, and it is the operator's boundary).
 - `socket.getaddrinfo` takes no timeout, and glibc's defaults make one stalled lookup 20s+.
   `requests` folds DNS into its connect timeout, so the session is covered — but the podcast SSRF
   pre-flight (`check_public_url`) resolves *before* requests is involved, once per redirect hop, on
