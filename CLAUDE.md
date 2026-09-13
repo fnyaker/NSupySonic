@@ -106,6 +106,23 @@ commands back via `window.__nsNativeCmd()`. No webapp-side code is involved, so 
 against any deployed SPA version. Build: `gradle -p android assembleRelease` (JDK 17, SDK 34 —
 CI does this; no wrapper is committed).
 
+**Surviving a long background stay.** Everything the app *is* — the audio, the queue, the UI —
+lives in the WebView's renderer process, which Android may kill whenever nobody is looking at it;
+the app process itself is only safe while the foreground service is up (it isn't, once playback
+wound down or the paused notification was swiped away). A killed renderer leaves a WebView that
+can only ever show a blank page again, which is why "paused in the background too long" used to
+mean "restart the app". So MainActivity **rebuilds** the WebView (`rebuildWebView`, on the screen
+`doUpdateVisitedHistory` last saw) instead of restarting the activity, and does it **when the user
+comes back**, never in the background — a background reload can fail (off the home LAN) and park
+the app on an error screen, and the renderer it builds is just as killable. `onRenderProcessGone`
+therefore only flags `pendingRebuild` (and drops the now-dead media notification); `onResume`
+rebuilds it, retries a load that failed while we were away, and — after a long absence, and only
+while nothing is playing — pings the page and rebuilds it if it doesn't answer, which is the one
+thing that catches a renderer wedged rather than killed. The SPA persists its session, so a
+rebuilt page comes back on the same track at the same position. Having actually caught Android
+doing it is also the only moment the app offers the battery-optimization exemption
+(`offerBatteryExemptionOnce`, once ever) — the setup screen keeps the same button.
+
 **Linking the Deezer account from the app** (`DeezerLoginActivity`): there is no email/password
 endpoint left that a server could call — Deezer's web one (`ajax/action.php` + reCAPTCHA) answers
 403 since 2024, and the mobile gateway (`mobile_userAuth`, which *does* return an ARL) needs keys
@@ -349,6 +366,20 @@ plays it unchanged). Sharing goes through `components/ShareSheet.svelte` (global
 `openShare(track)` from stores.js): whole file or an excerpt selected on a zoomable canvas waveform
 (peaks from `/api/share/waveform`), cut server-side by `/api/share/clip` and handed to the Web Share
 API (download fallback). Podcast markers live in `lib/markers.js`.
+
+**Back goes to the SCREEN, not the route** (`lib/nav.js`): hash routing gives real history, but the
+router destroys a page's component state on the way out and rebuilds it empty on the way in — so
+coming back from an album landed you at the top of a blank search page. Every history entry gets an
+id stamped into `history.state`, and against it nav.js keeps the scroll offset plus a scratch object
+the screen fills in (`rememberScreen` / `recallScreen`: the search query + results + tab, the
+Library tab and playlist filter, the Artist tab). Only a *traversal* gets that state back — a fresh
+push onto the same route starts clean, so tapping "Rechercher" in the nav still gives an empty box.
+Two traps are already paid for: the router's own hashchange listener is registered at import time
+and builds the new screen synchronously inside it, so nav.js resolves the current entry **lazily**
+(`syncEntry` on every entry point) rather than racing listeners; and a scroll restore must **settle**
+(the offset holding on a page whose height stopped moving) instead of stopping at the first frame it
+fits, because popstate lands one task before hashchange and those first frames can still be
+measuring the page being left.
 
 **Offline & versioning** (the SPA is an *install*, not a page — treat it as one):
 - `public/sw.js` serves the shell **cache-first** (an instant launch on any network) and stages a new

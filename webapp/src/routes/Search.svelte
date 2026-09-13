@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
   import { api } from "../lib/api.js";
   import { isAdmin } from "../lib/stores.js";
+  import { rememberScreen, recallScreen } from "../lib/nav.js";
   import Card from "../components/Card.svelte";
   import PodcastCard from "../components/PodcastCard.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -9,12 +10,26 @@
 
   export let params = {};
 
-  let q = "";
-  let results = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [] };
+  const EMPTY = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [] };
+
+  // Coming BACK here (from an album you opened out of the results, say) must
+  // land you on the screen you left — query, tab, results and all — not on an
+  // empty search page. lib/nav.js keys that on the history entry, so a fresh
+  // tap on "Rechercher" in the nav still starts clean.
+  const saved = recallScreen();
+
+  let q = saved?.q ?? "";
+  let results = saved?.results ?? EMPTY;
   let loading = false;
-  let tab = "all"; // all | tracks | albums | artists | playlists | podcasts
+  let tab = saved?.tab ?? "all"; // all | tracks | albums | artists | playlists | podcasts
   let timer;
   let seq = 0;
+  // Don't pop the soft keyboard over a restored screen: you came back to read
+  // the results, not to retype the query.
+  const autofocusBox = !q;
+
+  // Whatever the screen is showing, ready for the next time we come back to it.
+  $: rememberScreen({ q, tab, results });
 
   // Deep link support (/search/:q from the sidebar).
   //
@@ -23,7 +38,10 @@
   // comparing against `q` meant every keystroke re-ran the block, found the
   // typed text different from the URL term and reset the box back to it. The
   // search field was effectively frozen on the deep-linked query.
-  let appliedParam = null;
+  //
+  // A restored screen has already applied its query: treat the URL term as
+  // consumed, or the restore would be overwritten by a redundant refetch.
+  let appliedParam = saved ? (params.q ?? null) : null;
   $: applyParam(params.q);
   function applyParam(raw) {
     if (raw === undefined || raw === appliedParam) return;
@@ -49,7 +67,7 @@
   async function run(term) {
     const mine = ++seq;
     if (!term) {
-      results = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [] };
+      results = EMPTY;
       loading = false;
       return;
     }
@@ -57,10 +75,9 @@
     try {
       const r = await api.search(term);
       if (mine !== seq) return; // a newer query already started
-      results = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [], ...r };
+      results = { ...EMPTY, ...r };
     } catch {
-      if (mine === seq)
-        results = { artists: [], albums: [], tracks: [], playlists: [], podcasts: [] };
+      if (mine === seq) results = EMPTY;
     } finally {
       if (mine === seq) loading = false;
     }
@@ -82,7 +99,7 @@
     placeholder="Artistes, titres, albums, playlists…"
     bind:value={q}
     on:input={onInput}
-    autofocus
+    autofocus={autofocusBox}
   />
 </div>
 

@@ -15,6 +15,7 @@
   import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
   import { api } from "../lib/api.js";
+  import { rememberScreen, recallScreen } from "../lib/nav.js";
   import { bytes as fmtBytes, artistLine } from "../lib/format.js";
   import Card from "../components/Card.svelte";
   import Cover from "../components/Cover.svelte";
@@ -22,7 +23,10 @@
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
 
-  let tab = "favorites";
+  // Back from an album you opened out of "Téléchargés" belongs on "Téléchargés"
+  // — restore the tab (and the playlist filter) the screen was left on.
+  const saved = recallScreen();
+  let tab = saved?.tab ?? "favorites";
   // Upload usage/cap for the current user (guests get a per-user quota; admins
   // are unlimited). Null until loaded.
   let usage = null;
@@ -37,7 +41,8 @@
   // favTracks is a shared cache: instant on revisit, refreshed in background.
   $: favorites = $favTracks;
   let playlists = null;
-  let plQuery = "";
+  let plQuery = saved?.plQuery ?? "";
+  $: rememberScreen({ tab, plQuery });
   $: shownPlaylists = filterPlaylists(playlists, plQuery);
   function filterPlaylists(list, term) {
     if (!list) return null;

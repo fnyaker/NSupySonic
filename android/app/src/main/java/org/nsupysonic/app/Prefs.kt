@@ -23,6 +23,15 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putBoolean("configured", v).apply()
 
     /**
+     * Whether we've already offered the battery-optimization exemption after
+     * catching Android killing the player in the background. Asked at most once:
+     * the offer is worth making, nagging isn't.
+     */
+    var batteryOffered: Boolean
+        get() = sp.getBoolean("batteryOffered", false)
+        set(v) = sp.edit().putBoolean("batteryOffered", v).apply()
+
+    /**
      * Normalized origin: scheme defaults to https, the optional port field is
      * inserted into the AUTHORITY (host) only when the host doesn't already
      * carry one — never after a path (the old code produced ".../musique:5722"

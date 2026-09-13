@@ -2,7 +2,6 @@
   import Router from "svelte-spa-router";
   import { onMount } from "svelte";
   import { user, authChecked, nowPlayingOpen, player } from "./lib/stores.js";
-  import { location } from "./lib/router.js";
   import { api } from "./lib/api.js";
   import { initConnectivity, online } from "./lib/net.js";
   import { loadOfflineIndex, loadCoverCache } from "./lib/offline.js";
@@ -11,6 +10,7 @@
   import { loadFavorites } from "./lib/actions.js";
   import { initPodcastProgress } from "./lib/podcastProgress.js";
   import { initVersionWatch } from "./lib/appversion.js";
+  import { initNav } from "./lib/nav.js";
   import { initDeezerHealth } from "./lib/deezerhealth.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
@@ -68,6 +68,7 @@
   onMount(async () => {
     initConnectivity();
     initQueueFilter();
+    initNav(() => mainEl);
     // Is the server serving a newer build than the one we're running? (And, in
     // the Android shell, is there a newer APK?) Both are fire-and-forget and
     // never block the boot.
@@ -151,18 +152,10 @@
   // The router swaps the page INSIDE <main>, which keeps its own scrollTop — so
   // opening an album from halfway down a long library used to drop you halfway
   // down (or at the very bottom, once the browser clamped the offset to the new,
-  // shorter page). Reset it on every navigation.
-  //
-  // `behavior: "instant"` matters twice over: <main> is `scroll-behavior:
-  // smooth`, so a plain assignment would ANIMATE the jump — and an explicit
-  // instant scroll also cancels any smooth scroll still in flight (a
-  // follow-the-playing-track scroll, a fast flick), which would otherwise keep
-  // running and drag the fresh page off the top.
+  // shorter page). lib/nav.js owns that now: a fresh navigation starts at the
+  // top, and going BACK restores the offset the screen was left at, together
+  // with whatever else it remembered (a search query, a selected tab).
   let mainEl;
-  $: $location, resetScroll();
-  function resetScroll() {
-    mainEl?.scrollTo({ top: 0, left: 0, behavior: "instant" });
-  }
 
   function onKey(e) {
     const tag = (e.target.tagName || "").toLowerCase();
