@@ -13,10 +13,15 @@ import android.net.http.SslError
 import android.content.ContentValues
 import android.os.Build
 import android.provider.MediaStore
+import android.provider.Settings
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
 import android.os.IBinder
+import android.os.SystemClock
 import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
@@ -35,8 +40,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -55,6 +62,10 @@ class MainActivity : AppCompatActivity() {
     companion object {
         /** Upper bound on a single Bridge.saveText payload (16 MB of chars). */
         private const val MAX_SAVE_TEXT = 16 * 1024 * 1024
+        /** How long away counts as "long enough that the page may be gone". */
+        private const val PING_AFTER_MS = 45_000L
+        /** How long the page gets to answer that ping before we rebuild it. */
+        private const val PING_TIMEOUT_MS = 5_000L
     }
 
     private lateinit var prefs: Prefs
@@ -75,6 +86,17 @@ class MainActivity : AppCompatActivity() {
     // hardened-allocator build turns from "usually gets away with it" into a
     // hard crash. Every entry point below checks this first.
     private var webViewDead = false
+    // The WebView must be rebuilt before there is anything to look at: the
+    // renderer died while we were in the background, and rebuilding is deferred
+    // to the moment the user actually comes back (see onRenderProcessGone).
+    private var pendingRebuild = false
+    // Last in-app URL the page reached, so a rebuild puts the user back on the
+    // screen they left instead of at the app's front door.
+    private var lastAppUrl: String? = null
+    // When we were last stopped, so onResume can tell a quick trip to the
+    // settings from hours in the background.
+    private var leftAt = 0L
+    private var pingToken = 0
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -107,7 +129,6 @@ class MainActivity : AppCompatActivity() {
             deliverArl(if (result.resultCode == RESULT_OK) arl else null)
         }
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
@@ -132,7 +153,27 @@ class MainActivity : AppCompatActivity() {
             Intent(this, PlayerService::class.java), connection, Context.BIND_AUTO_CREATE
         )
 
-        webView.settings.apply {
+        configureWebView(webView)
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (!webViewDead && webView.canGoBack()) webView.goBack()
+                // Keep the process (and the music) alive instead of finishing.
+                else moveTaskToBack(true)
+            }
+        })
+
+        webView.loadUrl(prefs.appUrl())
+    }
+
+    /**
+     * Everything that makes a bare WebView *our* WebView. Split out of onCreate
+     * so a WebView whose renderer the system killed can be replaced by an
+     * identically configured one, in place, without restarting the activity.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun configureWebView(wv: WebView) {
+        wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             databaseEnabled = true
@@ -146,7 +187,7 @@ class MainActivity : AppCompatActivity() {
                 else WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             userAgentString = "$userAgentString NSupySonicApp/1.0"
         }
-        webView.addJavascriptInterface(Bridge(), "NSNative")
+        wv.addJavascriptInterface(Bridge(), "NSNative")
 
         // A plain WebView silently drops any navigation whose response is
         // Content-Disposition: attachment (the share sheet's "Télécharger"
@@ -154,7 +195,7 @@ class MainActivity : AppCompatActivity() {
         // — without this listener nothing visible happens at all. Hand the
         // request off to the system DownloadManager instead, carrying the
         // session cookie so the auth-protected /api/share/* URLs still work.
-        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+        wv.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             startDownload(url, userAgent, contentDisposition, mimeType)
         }
 
@@ -169,13 +210,13 @@ class MainActivity : AppCompatActivity() {
             WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         ) {
             try {
-                WebViewCompat.addDocumentStartJavaScript(webView, shimJs, setOf(origin))
+                WebViewCompat.addDocumentStartJavaScript(wv, shimJs, setOf(origin))
             } catch (_: Exception) {
                 // Unsupported origin rule — onPageStarted still injects it.
             }
         }
 
-        webView.webViewClient = object : WebViewClient() {
+        wv.webViewClient = object : WebViewClient() {
             override fun onPageStarted(
                 view: WebView?, url: String?, favicon: android.graphics.Bitmap?
             ) {
@@ -221,6 +262,12 @@ class MainActivity : AppCompatActivity() {
                 if (!mainFrameFailed) errorView.visibility = View.GONE
             }
 
+            // Every navigation the page makes, hash routes included: the screen
+            // a rebuilt WebView should come back to.
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                if (isServerUrl(url)) lastAppUrl = url
+            }
+
             override fun onRenderProcessGone(
                 view: WebView?, detail: RenderProcessGoneDetail?
             ): Boolean {
@@ -231,20 +278,148 @@ class MainActivity : AppCompatActivity() {
                 // whose renderer is gone — a native use-after-free, and one of
                 // the few crashes an app hosting a WebView can actually cause.
                 disposeWebView()
-                if (!isFinishing && !isDestroyed) recreate()
+                // The audio went with the renderer, so the media notification
+                // is now a card whose buttons reach nothing. Take it down.
+                dropPlayback()
+                // Rebuild only for a user who is there to see it. Reloading the
+                // page with the screen off is what turned a long background
+                // pause into "I have to restart the app": the reload can fail
+                // (off the home network, no connectivity), parking the app on an
+                // error screen, and the fresh renderer it built is every bit as
+                // killable as the one we just lost — so it could die again, and
+                // again, until the user came back to a blank page. Waiting costs
+                // nothing: there is no audio left to keep alive.
+                pendingRebuild = true
+                if (!isFinishing && !isDestroyed &&
+                    lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+                ) {
+                    // Posted: we are inside a callback from the WebView provider
+                    // whose WebView we just destroyed — let that stack unwind
+                    // before building its replacement.
+                    errorView.post { rebuildWebView() }
+                }
                 return true
             }
         }
+    }
 
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                if (!webViewDead && webView.canGoBack()) webView.goBack()
-                // Keep the process (and the music) alive instead of finishing.
-                else moveTaskToBack(true)
-            }
-        })
+    /**
+     * Replace a dead (or wedged) WebView with a fresh one, on the screen the
+     * user was last on.
+     *
+     * This is the whole answer to "I left it paused in the background and had to
+     * restart the app": the audio, the queue and the UI all live in the
+     * renderer process, which Android is free to kill while nobody is looking at
+     * it, and a destroyed WebView can only ever show a blank page again. The
+     * SPA persists its session, so a rebuilt page comes back on the same track
+     * at the same position.
+     */
+    private fun rebuildWebView() {
+        if (isFinishing || isDestroyed) return
+        disposeWebView() // no-op when the renderer death already did it
+        val root = findViewById<FrameLayout>(R.id.root) ?: return
+        val wv = WebView(this)
+        wv.layoutParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        // Index 0: under the error overlay, exactly where the XML had it.
+        root.addView(wv, 0)
+        webView = wv
+        webViewDead = false
+        pendingRebuild = false
+        pingToken++ // a liveness ping still in flight is about a WebView that's gone
+        mainFrameFailed = false
+        errorView.visibility = View.GONE
+        configureWebView(wv)
+        val back = lastAppUrl?.takeIf { isServerUrl(it) } ?: prefs.appUrl()
+        wv.loadUrl(back)
+        offerBatteryExemptionOnce()
+    }
 
-        webView.loadUrl(prefs.appUrl())
+    /**
+     * We just caught Android killing the player in the background — the one
+     * moment where asking about battery optimization is neither nagging nor a
+     * guess. Offered once, ever; the setup screen keeps the same button for
+     * anyone who says no here.
+     */
+    @SuppressLint("BatteryLife")
+    private fun offerBatteryExemptionOnce() {
+        if (prefs.batteryOffered) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        prefs.batteryOffered = true
+        try {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.battery_killed_title)
+                .setMessage(R.string.battery_killed_message)
+                .setNegativeButton(R.string.battery_killed_later, null)
+                .setPositiveButton(R.string.battery_killed_action) { _, _ ->
+                    try {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    } catch (_: Exception) {
+                        startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                    }
+                }
+                .show()
+        } catch (_: Exception) {
+            // Activity going away under us — the offer isn't worth a crash.
+        }
+    }
+
+    /**
+     * The page (and with it the audio) is gone: take the media notification down
+     * rather than leave a card up whose buttons reach nothing.
+     */
+    private fun dropPlayback() {
+        serviceStarted = false
+        pendingState = null
+        service?.update(
+            PlayerService.State(
+                active = false, playing = false, title = "", artist = "", album = "",
+                cover = "", position = 0.0, duration = 0.0
+            )
+        )
+    }
+
+    /**
+     * Ask the page whether it is still alive, and rebuild it if it isn't.
+     *
+     * onRenderProcessGone catches a renderer the system kills outright, but not
+     * every way a long background stay can leave the page unusable (a renderer
+     * frozen past waking up, a WebView provider updated out from under us). What
+     * the user sees is a blank or frozen screen whose only cure used to be
+     * killing the app — so when we come back from a long absence, one round trip
+     * through the renderer settles it.
+     */
+    private fun pingPage() {
+        if (webViewDead || !::webView.isInitialized) return
+        // Never worth asking when the page is audibly alive — music playing IS
+        // the answer, and a rebuild would be the very outage we're preventing.
+        if (pendingState?.playing == true) return
+        // Nothing to suspect on the first resume of a launch: the page is still
+        // loading, and a load slower than the timeout is not a dead renderer.
+        if (leftAt == 0L) return
+        if (SystemClock.elapsedRealtime() - leftAt < PING_AFTER_MS) return
+        val token = ++pingToken
+        var answered = false
+        try {
+            webView.evaluateJavascript("1") { answered = true }
+        } catch (_: Exception) {
+            return // torn down under us; onRenderProcessGone owns that case
+        }
+        // Posted on the error overlay, not on the WebView: a WebView that gets
+        // destroyed in the meantime takes its pending messages with it, and this
+        // is precisely the message that has to survive that.
+        errorView.postDelayed({
+            if (!answered && token == pingToken && !webViewDead &&
+                !isFinishing && !isDestroyed
+            ) rebuildWebView()
+        }, PING_TIMEOUT_MS)
     }
 
     // Reopening the settings relaunches us (singleTask) via onNewIntent rather
@@ -262,8 +437,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStop() {
+        super.onStop()
+        leftAt = SystemClock.elapsedRealtime()
+    }
+
     override fun onResume() {
         super.onResume()
+        // Coming back to a page that died while we were away: rebuild it now
+        // that there is someone to see it (onRenderProcessGone deferred this),
+        // or retry a load that failed in the background — off the home network,
+        // say — instead of parking the user on an error screen with a button.
+        if (pendingRebuild || webViewDead) rebuildWebView()
+        else if (mainFrameFailed) reload()
+        else pingPage()
+
         // The login screen can go away without ever delivering a result — the
         // launcher icon re-entering this singleTask activity clears it off the
         // top, and so does a low-memory kill. Answer the SPA anyway, or its

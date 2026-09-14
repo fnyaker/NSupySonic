@@ -32,6 +32,11 @@
     <string name="download_failed">Échec du téléchargement</string>
     <string name="share_failed">Échec du partage</string>
 
+    <string name="battery_killed_title">Le lecteur a été arrêté</string>
+    <string name="battery_killed_message">Android a fermé le lecteur pendant qu\'il était en arrière-plan. Désactiver l\'optimisation de la batterie pour cette application l\'évite la plupart du temps.</string>
+    <string name="battery_killed_action">Désactiver</string>
+    <string name="battery_killed_later">Plus tard</string>
+
     <string name="error_title">Connexion impossible</string>
     <string name="error_unreachable">Impossible de charger %1$s</string>
     <string name="error_ssl">Certificat SSL invalide. Décoche « Vérifier le certificat SSL » dans les paramètres si ton serveur utilise un certificat auto-signé.</string>

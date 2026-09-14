@@ -8,6 +8,7 @@
   import GradientHeader from "../components/GradientHeader.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
+  import { rememberScreen, recallScreen } from "../lib/nav.js";
 
   export let params = {};
 
@@ -22,6 +23,11 @@
   let tab = "overview";
   let allTracks = null; // null = not loaded yet, [] = loaded/empty
   let tracksLoading = false;
+  // Which tab we were on when we left this history entry. load() clears the tab
+  // on every artist change, so it is consumed THERE (on the first load) rather
+  // than applied here, where it would be overwritten a moment later.
+  let restoredTab = recallScreen()?.tab || null;
+  $: rememberScreen({ tab });
 
   $: if (params.id && params.id !== id) {
     id = params.id;
@@ -55,7 +61,8 @@
     data = null;
     disco = null;
     fav = false;
-    tab = "overview";
+    tab = restoredTab || "overview";
+    restoredTab = null;
     allTracks = null;
     tracksLoading = false;
     try {
