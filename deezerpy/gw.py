@@ -116,6 +116,32 @@ class GW:
     def get_user_favorite_ids(self, checksum = None, limit = 10000, start = 0):
         return self.api_call('song.getFavoriteIds', {'nb': limit, 'start': start, 'checksum': checksum})
 
+    def get_user_menu(self, checksum=True, checksums=None):
+        """The account menu in one call (``deezer.userMenu``).
+
+        Returns ``PLAYLISTS``, ``EPISODE_BOOKMARKS`` and the favourite sections
+        (``FAVORITES_ALBUMS`` / ``_ARTISTS`` / ``_PLAYLISTS`` / ``_SHOWS`` /
+        ``_SONGS``) plus their friends/dislikes counterparts. Each section
+        carries a ``checksum`` so passing it back skips an unchanged section.
+        This is the call the current web app uses instead of ``pageProfile``
+        tabs. Confirmed from a web-player HAR capture.
+        """
+        return self.api_call('deezer.userMenu', {
+            'checksum': bool(checksum),
+            'checksums': checksums or {},
+        })
+
+    def get_all_feedbacks(self, checksums=None):
+        """Favourites/dislikes sets with per-section checksums
+        (``user.getAllFeedbacks``). A section whose checksum still matches
+        answers the string ``"Not modified"`` instead of its data."""
+        return self.api_call('user.getAllFeedbacks', {'checksums': checksums or {}})
+
+    def set_user_settings(self, settings):
+        """Persist a slice of user settings (``user.setSettings``), e.g.
+        ``{'site': {'player_repeat': 2}}``."""
+        return self.api_call('user.setSettings', {'settings': settings})
+
     def get_child_accounts(self):
         return self.api_call('deezer.getChildAccounts')
 
@@ -195,8 +221,13 @@ class GW:
             'PLAYLIST_ID': playlist_id,
             'lang': 'en',
             'header': True,
+            'tags': True,
             'tab': 0
         })
+
+    def set_playlist_seen(self, playlist_id):
+        """Clear a playlist's "new tracks" badge (``playlist.setSeen``)."""
+        return self.api_call('playlist.setSeen', {'playlist_id': playlist_id})
 
     def get_playlist_tracks(self, playlist_id):
         tracks_array = []
@@ -257,11 +288,31 @@ class GW:
     def delete_playlist(self, playlist_id):
         return self.api_call('playlist.delete', {'PLAYLIST_ID': playlist_id})
 
-    def add_song_to_favorites(self, sng_id):
-        return self.api_call('favorite_song.add', {'SNG_ID': sng_id})
+    def add_songs_to_favorites(self, songs, context="player"):
+        """Add tracks to the account's Deezer favourites (``song.addFavorites``).
 
-    def remove_song_from_favorites(self, sng_id):
-        return self.api_call('favorite_song.remove', {'SNG_ID': sng_id})
+        The batch form: ``IDS`` takes every id at once and the gateway answers
+        a favourites ``checksum`` (the current web app's method; the old
+        ``favorite_song.add`` is superseded). Confirmed from a HAR capture.
+        """
+        return self.api_call('song.addFavorites', {
+            'IDS': [str(s) for s in songs],
+            'CTXT': {'id': str(songs[0]) if songs else '', 't': context},
+        })
+
+    def remove_songs_from_favorites(self, songs, context="player"):
+        """Remove tracks from the account's Deezer favourites
+        (``song.removeFavorites``); batch, mirrors ``add_songs_to_favorites``."""
+        return self.api_call('song.removeFavorites', {
+            'IDS': [str(s) for s in songs],
+            'CTXT': {'id': str(songs[0]) if songs else '', 't': context},
+        })
+
+    def add_song_to_favorites(self, sng_id, context="player"):
+        return self.add_songs_to_favorites([sng_id], context)
+
+    def remove_song_from_favorites(self, sng_id, context="player"):
+        return self.remove_songs_from_favorites([sng_id], context)
 
     def add_album_to_favorites(self, alb_id):
         return self.api_call('album.addFavorite', {'ALB_ID': alb_id})
@@ -269,11 +320,17 @@ class GW:
     def remove_album_from_favorites(self, alb_id):
         return self.api_call('album.deleteFavorite', {'ALB_ID': alb_id})
 
-    def add_artist_to_favorites(self, art_id):
-        return self.api_call('artist.addFavorite', {'ART_ID': art_id})
+    def add_artist_to_favorites(self, art_id, context=None):
+        params = {'ART_ID': art_id}
+        if context:
+            params['CTXT'] = {'id': str(art_id), 't': context}
+        return self.api_call('artist.addFavorite', params)
 
-    def remove_artist_from_favorites(self, art_id):
-        return self.api_call('artist.deleteFavorite', {'ART_ID': art_id})
+    def remove_artist_from_favorites(self, art_id, context=None):
+        params = {'ART_ID': art_id}
+        if context:
+            params['CTXT'] = {'id': str(art_id), 't': context}
+        return self.api_call('artist.deleteFavorite', params)
 
     def add_playlist_to_favorites(self, playlist_id):
         return self.api_call('playlist.addFavorite', {'PARENT_PLAYLIST_ID': playlist_id})
@@ -457,11 +514,18 @@ class GW:
 
     # -- Flow / radio / mixes --------------------------------------------
 
-    def get_user_radio(self, user_id=None):
-        """The user's Flow: an endless personalized stream. ``data`` holds tracks."""
+    def get_user_radio(self, user_id=None, config_id=None):
+        """The user's Flow: an endless personalized stream. ``data`` holds tracks.
+
+        ``config_id`` selects a specific flow configuration (the current web
+        app asks e.g. ``motivation``, ``genre-techno``, ``genre-danceedm``);
+        omitted, the gateway answers the account's default Flow.
+        """
         params = {}
         if user_id is not None:
             params['user_id'] = user_id
+        if config_id:
+            params['config_id'] = config_id
         return self.api_call('radio.getUserRadio', params)
 
     def get_track_mix(self, sng_id, start_with_input_track=True):
@@ -515,6 +579,15 @@ class GW:
             episodes.extend(data)
             start += len(data)
         return episodes
+
+    def get_episodes(self, episode_ids):
+        """Several podcast episodes in one call (``episode.getListData``),
+        the episode counterpart of :meth:`get_tracks`."""
+        ids = [str(e) for e in episode_ids if e and str(e) != '0']
+        if not ids:
+            return []
+        body = self.api_call('episode.getListData', {'episode_ids': ids})
+        return body.get('data', []) if isinstance(body, dict) else []
 
     def add_show_to_favorites(self, show_id):
         return self.api_call('show.addFavorite', {

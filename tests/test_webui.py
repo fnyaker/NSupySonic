@@ -66,7 +66,7 @@ class MockGW:
 
     # -- flow / mix / reco ----------------------------------------------
 
-    def get_user_radio(self, user_id=None):
+    def get_user_radio(self, user_id=None, config_id=None):
         return {"data": [raw_track(3, "Flow1"), raw_track(4, "Flow2")]}
 
     def get_track_mix(self, sng_id, start_with_input_track=True):

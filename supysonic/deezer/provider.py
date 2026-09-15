@@ -658,8 +658,10 @@ class DeezerProvider:
 
     # -- Flow / radio / mixes --------------------------------------------
 
-    def get_flow(self) -> dict:
-        return self.dz.gw.get_user_radio(self.user_id)
+    def get_flow(self, config_id=None) -> dict:
+        """The account's Flow. ``config_id`` picks a specific flow
+        configuration (e.g. ``motivation``); omitted = the default Flow."""
+        return self.dz.gw.get_user_radio(self.user_id, config_id=config_id)
 
     def get_track_mix(self, sng_id) -> dict:
         return self.dz.gw.get_track_mix(sng_id)

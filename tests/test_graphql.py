@@ -135,5 +135,86 @@ class CallRetryTest(unittest.TestCase):
         self.assertEqual(len(sess.post_calls), 1)
 
 
+class GraphQLOperationsTest(unittest.TestCase):
+    """The functional pipe.deezer.com operations added from a HAR capture."""
+
+    def _gql(self, data):
+        sess = FakeSession(
+            auth_resp=FakeResp(text=FAKE_JWT),
+            post_responses=[FakeResp(json_data={"data": data})],
+        )
+        return GraphQL(sess, {}), sess
+
+    def test_albums_by_ids(self):
+        gql, sess = self._gql({"albumsByIds": [{"id": "1"}]})
+        self.assertEqual(gql.get_albums_by_ids(["1", "2"]), [{"id": "1"}])
+        body = sess.post_calls[0]["body"]
+        self.assertEqual(body["operationName"], "AlbumsById")
+        self.assertEqual(body["variables"], {"ids": ["1", "2"]})
+
+    def test_artists_by_ids(self):
+        gql, sess = self._gql({"artistsByIds": [{"id": "9"}]})
+        self.assertEqual(gql.get_artists_by_ids([9]), [{"id": "9"}])
+        self.assertEqual(sess.post_calls[0]["body"]["operationName"], "ArtistById")
+
+    def test_playlists_by_ids(self):
+        gql, sess = self._gql({"playlistsByIds": [{"id": "77"}]})
+        self.assertEqual(gql.get_playlists_by_ids(["77"]), [{"id": "77"}])
+        self.assertEqual(sess.post_calls[0]["body"]["operationName"], "PlaylistById")
+
+    def test_artist_discography_returns_nodes_and_page(self):
+        gql, sess = self._gql(
+            {
+                "artist": {
+                    "albums": {
+                        "edges": [{"node": {"id": "1"}}],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "c"},
+                    }
+                }
+            }
+        )
+        nodes, page = gql.get_artist_discography("9", nb=5)
+        self.assertEqual(nodes, [{"id": "1"}])
+        self.assertTrue(page["hasNextPage"])
+        body = sess.post_calls[0]["body"]
+        self.assertEqual(body["operationName"], "ArtistDiscographyByType")
+        self.assertEqual(body["variables"]["artistId"], "9")
+        self.assertEqual(body["variables"]["nb"], 5)
+
+    def test_my_favorite_albums(self):
+        gql, _ = self._gql(
+            {"me": {"userFavorites": {"rawAlbums": [{"id": "1", "favoritedAt": "x"}]}}}
+        )
+        self.assertEqual(
+            gql.get_my_favorite_albums(), [{"id": "1", "favoritedAt": "x"}]
+        )
+
+    def test_my_favorite_artists(self):
+        gql, _ = self._gql(
+            {"me": {"userFavorites": {"rawArtists": [{"id": "2"}]}}}
+        )
+        self.assertEqual(gql.get_my_favorite_artists(), [{"id": "2"}])
+
+    def test_my_favorite_playlists(self):
+        gql, _ = self._gql(
+            {"me": {"userFavorites": {"rawPlaylists": [{"id": "3"}]}}}
+        )
+        self.assertEqual(gql.get_my_favorite_playlists(), [{"id": "3"}])
+
+    def test_my_playlists(self):
+        gql, _ = self._gql({"me": {"rawPlaylists": [{"id": "4"}]}})
+        self.assertEqual(gql.get_my_playlists(), [{"id": "4"}])
+
+    def test_playlist_masthead(self):
+        gql, sess = self._gql({"playlist": {"id": "5", "title": "T"}})
+        self.assertEqual(gql.get_playlist_masthead("5"), {"id": "5", "title": "T"})
+        self.assertEqual(sess.post_calls[0]["body"]["operationName"], "PlaylistMasthead")
+
+    def test_flow_tuner_header(self):
+        gql, sess = self._gql({"flowConfig": {"id": "default", "title": "Flow"}})
+        self.assertEqual(gql.get_flow_tuner_header(), {"id": "default", "title": "Flow"})
+        self.assertEqual(sess.post_calls[0]["body"]["operationName"], "FlowTunerHeader")
+
+
 if __name__ == "__main__":
     unittest.main()
