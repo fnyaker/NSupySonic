@@ -25,13 +25,14 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 import requests
+from requests.utils import get_environ_proxies, select_proxy
 
 try:  # pycryptodome
     from Crypto.Cipher import Blowfish
 except ImportError:  # pycryptodomex
     from Cryptodome.Cipher import Blowfish
 
-from deezerpy import Deezer
+from deezerpy import Deezer, new_session
 from deezerpy.errors import DeezerError as DeezerPyError
 from deezerpy.errors import DeezerUnavailable, is_transport_failure
 from deezerpy._circuit import breaker
@@ -134,9 +135,16 @@ def _lookup_async(host: str, port: int):
 
     def run():
         try:
-            result["addresses"] = [
-                info[4][0] for info in socket.getaddrinfo(host, port)
-            ]
+            # SOCK_STREAM: without it getaddrinfo returns the same address once
+            # per socket type, and the caller would "fail over" between copies
+            # of the very same IP.
+            seen, addresses = set(), []
+            for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+                address = info[4][0]
+                if address not in seen:
+                    seen.add(address)
+                    addresses.append(address)
+            result["addresses"] = addresses
         except BaseException as exc:
             # Everything, so the slot below is always released and the caller
             # always gets an answer — a resolver can raise more than gaierror.
@@ -202,16 +210,32 @@ def resolve_addresses(host: str, port: int) -> "list[str]":
         raise DeezerError(f"cannot resolve {host}: {error}") from error
 
     addresses = result["addresses"]
+    if not addresses:
+        _cache_resolution(key, None, RESOLVE_FAILURE_TTL)
+        raise DeezerError(f"{host} resolves to no address")
     _cache_resolution(key, addresses, RESOLVE_CACHE_TTL)
     return addresses
 
 
-def check_public_url(url: str) -> None:
-    """Raise unless ``url`` is http(s) pointing at a public IP address.
+def url_port(parts) -> int:
+    """The port a URL addresses, default for its scheme. Never raises."""
+    try:
+        port = parts.port
+    except ValueError as exc:  # "https://h:99999/x"
+        raise DeezerError(f"refusing episode URL with a bad port: {exc}") from exc
+    return port or (443 if parts.scheme == "https" else 80)
+
+
+def check_public_url(url: str) -> "list[str]":
+    """The addresses ``url`` resolves to — raising unless every one is public.
 
     Blocks the SSRF targets that matter for a self-hosted server: loopback (the
     app's own admin API), link-local (169.254.169.254 cloud metadata) and RFC
     1918 / ULA neighbours on the LAN.
+
+    Returning the addresses is the point, not a convenience: the caller connects
+    to one of *these*, rather than handing the hostname back to a resolver that
+    is free to answer differently the second time (see ``_PinnedAddressAdapter``).
     """
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
@@ -219,8 +243,8 @@ def check_public_url(url: str) -> None:
     host = parts.hostname
     if not host:
         raise DeezerError("refusing episode URL without a host")
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    for address in resolve_addresses(host, port):
+    addresses = resolve_addresses(host, url_port(parts))
+    for address in addresses:
         ip = ipaddress.ip_address(address)
         if (
             ip.is_private
@@ -231,6 +255,75 @@ def check_public_url(url: str) -> None:
             or ip.is_unspecified
         ):
             raise DeezerError(f"refusing episode URL resolving to {ip}")
+    return addresses
+
+
+# How many of a host's addresses a pinned fetch will try. Pinning gives up the
+# fail-over that socket.create_connection() does for free over every address
+# getaddrinfo returned, so it is done explicitly — bounded, because each attempt
+# costs a connect timeout.
+MAX_PINNED_ADDRESSES = 4
+
+# requests grew build_connection_pool_key_attributes() in 2.32; it is the
+# supported way to say "connect here" without reaching into urllib3. setup.cfg
+# requires a new enough requests, so this only guards a forced downgrade.
+_CAN_PIN_ADDRESS = hasattr(
+    requests.adapters.HTTPAdapter, "build_connection_pool_key_attributes"
+)
+_warned_no_pinning = False
+
+
+class _PinnedAddressAdapter(requests.adapters.HTTPAdapter):
+    """Connects to one already-validated IP, whatever DNS says at connect time.
+
+    ``check_public_url`` resolves a name and decides it is public — and then
+    requests used to resolve it AGAIN before connecting. Two lookups, two
+    chances to answer: a hostile resolver returns a public address for the check
+    and 127.0.0.1 (or the cloud metadata service) for the fetch, and the body of
+    whatever answers gets archived and served back by /api/stream. That is DNS
+    rebinding, and no amount of checking the *name* fixes it — the only fix is to
+    connect to the address we actually validated.
+
+    This is not a weakening of TLS. The pinned address is used for the TCP
+    connection alone: SNI, certificate validation and the Host header all still
+    carry the real hostname (urllib3 prefers ``server_hostname`` over the
+    connection's host for both SNI and the certificate match), so the server
+    still has to prove it is that host.
+    """
+
+    def __init__(self, address: str, **kwargs):
+        self.address = address
+        super().__init__(**kwargs)
+
+    def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        host_params, pool_kwargs = super().build_connection_pool_key_attributes(
+            request, verify, cert
+        )
+        hostname = host_params["host"]
+        host_params = dict(host_params, host=self.address)
+        if host_params.get("scheme") == "https":
+            pool_kwargs = dict(pool_kwargs, server_hostname=hostname)
+        return host_params, pool_kwargs
+
+
+def host_header(parts) -> str:
+    """The ``Host:`` a URL implies — sent explicitly, since we address by IP."""
+    host = parts.hostname or ""
+    if ":" in host:  # an IPv6 literal, which the header wants in brackets
+        host = f"[{host}]"
+    port = url_port(parts)
+    default = 443 if parts.scheme == "https" else 80
+    return host if port == default else f"{host}:{port}"
+
+
+def _warn_once_about_pinning() -> None:
+    global _warned_no_pinning
+    if not _CAN_PIN_ADDRESS and not _warned_no_pinning:
+        _warned_no_pinning = True
+        logger.warning(
+            "requests is too old to pin an episode fetch to a validated address; "
+            "podcast downloads keep the pre-flight SSRF check only. Upgrade requests."
+        )
 
 
 def blowfish_key(track_id) -> bytes:
@@ -629,6 +722,53 @@ class DeezerProvider:
             raise DeezerError(f"no stream URL for episode {getattr(episode, 'deezer_id', '?')}")
         return url
 
+    def _open_validated(self, url: str, headers: dict, timeout):
+        """GET ``url``, connecting only to an address we have just validated.
+
+        Returns ``(session, response)``. The caller owns both and must close the
+        session once it is done reading the body — the session exists for this
+        one fetch because the address it is pinned to is specific to this hop.
+        """
+        addresses = check_public_url(url)
+        parts = urlsplit(url)
+        request_headers = dict(headers)
+
+        if not _CAN_PIN_ADDRESS or select_proxy(url, get_environ_proxies(url)):
+            # Either egress goes through a proxy — which does its own resolving,
+            # so pinning here would pin the wrong end of the connection, and the
+            # operator's proxy is the boundary — or requests is too old to say
+            # "connect here" (see _CAN_PIN_ADDRESS). The pre-flight check above
+            # stands on its own; it just no longer closes the rebinding window.
+            _warn_once_about_pinning()
+            session = new_session()
+            return session, session.get(
+                url, headers=request_headers, stream=True,
+                timeout=timeout, allow_redirects=False,
+            )
+
+        # Sent explicitly: the connection is addressed by IP, so urllib3 would
+        # otherwise put that IP in the Host header and the CDN would not know
+        # which site is being asked for.
+        request_headers["Host"] = host_header(parts)
+
+        last = None
+        for address in addresses[:MAX_PINNED_ADDRESSES]:
+            session = new_session()
+            adapter = _PinnedAddressAdapter(address)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            try:
+                return session, session.get(
+                    url, headers=request_headers, stream=True,
+                    timeout=timeout, allow_redirects=False,
+                )
+            except requests.RequestException as exc:
+                # One address out of several can simply be down. This is the
+                # fail-over create_connection() used to do over the whole list.
+                session.close()
+                last = exc
+        raise DeezerError(f"could not reach {parts.hostname}: {last}") from last
+
     def iter_episode(self, url: str):
         """Yield a podcast episode's MP3 bytes from its host.
 
@@ -639,32 +779,30 @@ class DeezerProvider:
         archived and then served back by /api/stream, so an unchecked fetch is a
         readable SSRF: a redirect chain ending at 169.254.169.254 or at this
         very server would be stored and handed to the client. Redirects are
-        therefore followed one hop at a time, and every hop is validated
-        (scheme + resolved IP) before it is requested.
+        therefore followed one hop at a time, every hop is validated (scheme +
+        resolved IP), and the fetch then connects to the very address that was
+        validated rather than resolving the name a second time.
         """
         headers = dict(self.dz.http_headers)
         headers["Referer"] = "https://www.deezer.com/"
         current = url
         for _ in range(MAX_EPISODE_REDIRECTS + 1):
-            check_public_url(current)
-            with self.dz.session.get(
-                current,
-                headers=headers,
-                stream=True,
-                timeout=(10, 120),
-                allow_redirects=False,
-            ) as resp:
-                if resp.is_redirect or resp.is_permanent_redirect:
-                    location = resp.headers.get("Location")
-                    if not location:
-                        raise DeezerError("redirect without a Location header")
-                    current = urljoin(current, location)
-                    continue
-                resp.raise_for_status()
-                for chunk in resp.iter_content(65536):
-                    if chunk:
-                        yield chunk
-                return
+            session, response = self._open_validated(current, headers, (10, 120))
+            try:
+                with response as resp:
+                    if resp.is_redirect or resp.is_permanent_redirect:
+                        location = resp.headers.get("Location")
+                        if not location:
+                            raise DeezerError("redirect without a Location header")
+                        current = urljoin(current, location)
+                        continue
+                    resp.raise_for_status()
+                    for chunk in resp.iter_content(65536):
+                        if chunk:
+                            yield chunk
+                    return
+            finally:
+                session.close()
         raise DeezerError(f"too many redirects fetching {url}")
 
     def download_episode_to(self, url: str, dest: Path) -> None:

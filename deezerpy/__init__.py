@@ -97,6 +97,16 @@ class _Session(requests.Session):
         return response
 
 
+def new_session() -> _Session:
+    """A session carrying this project's timeout and circuit breaker.
+
+    Anything in the app that speaks HTTP on Deezer's behalf — including the
+    per-fetch sessions the podcast SSRF pinning needs — starts here rather than
+    with a bare ``requests.Session``, which has neither.
+    """
+    return _Session()
+
+
 def _close_quietly(session) -> None:
     try:
         session.close()

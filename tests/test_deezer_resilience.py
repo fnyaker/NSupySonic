@@ -11,12 +11,16 @@ a missing row — never a wrong verdict (a track declared unavailable, a show
 declared gone) and never the app itself.
 """
 
+import ipaddress
 import json
 import socket
 import tempfile
 import threading
 import time
+import types
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import requests
 
@@ -514,6 +518,175 @@ class PodcastDnsTestCase(unittest.TestCase):
         self.addCleanup(setattr, socket, "getaddrinfo", original)
         with self.assertRaises(DeezerError):
             self.mod.check_public_url("https://sneaky.example/ep.mp3")
+
+
+class _Recorder(BaseHTTPRequestHandler):
+    """A real HTTP server that writes down who actually reached it."""
+
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
+        self.server.hits.append({"path": self.path, "host": self.headers.get("Host")})
+        body = b"AUDIO"
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # keep the test output clean
+        pass
+
+
+class AddressPinningTestCase(unittest.TestCase):
+    """The address that was validated is the address that gets connected to.
+
+    Checking the *name* can never be enough: the guard resolves it, and then the
+    HTTP client resolves it again. A resolver that answers differently the second
+    time (DNS rebinding) walks straight through a name-based check.
+    """
+
+    def setUp(self):
+        from supysonic.deezer import provider as provider_mod
+
+        self.mod = provider_mod
+        provider_mod._resolve_cache.clear()
+        self.addCleanup(provider_mod._resolve_cache.clear)
+        self.provider = provider_mod.DeezerProvider("arl", tempfile.mkdtemp(), "FLAC")
+        self.provider._dz = types.SimpleNamespace(http_headers={"User-Agent": "test"})
+        breaker.reset()
+        self.addCleanup(breaker.reset)
+
+    def serve(self, address, port=0):
+        server = ThreadingHTTPServer((address, port), _Recorder)
+        server.hits = []
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def pin_to(self, addresses):
+        """Have the guard approve exactly ``addresses``, whatever DNS says."""
+        real = self.mod.check_public_url
+        self.mod.check_public_url = lambda url: list(addresses)
+        self.addCleanup(setattr, self.mod, "check_public_url", real)
+
+    def allow_loopback(self):
+        """Keep the public-address rule out of the way.
+
+        These tests are about the pin, not the classification (SsrfGuardTestCase
+        owns that) — and every address a test can actually bind to is loopback,
+        which the real guard refuses by design.
+        """
+        real = self.mod.check_public_url
+
+        def permissive(url):
+            parts = urlsplit(url)
+            return self.mod.resolve_addresses(parts.hostname, self.mod.url_port(parts))
+
+        self.mod.check_public_url = permissive
+        self.addCleanup(setattr, self.mod, "check_public_url", real)
+        return real
+
+    def rebind(self, first, later):
+        """A resolver that answers ``first`` once, then ``later`` for ever.
+
+        A NAME resolver: an address passed back in resolves to itself, exactly
+        as the real one does. That is not a detail — ``create_connection`` calls
+        ``getaddrinfo`` even when handed a literal IP, and a stub that rebound
+        *that* too would report a failure the code does not have (and, worse,
+        would keep reporting success once the code was fixed).
+        """
+        answers = []
+
+        def getaddrinfo(host, port, *a, **kw):
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                pass
+            else:
+                return [(2, 1, 6, "", (host, port))]
+            answers.append(host)
+            address = first if len(answers) == 1 else later
+            return [(2, 1, 6, "", (address, port))]
+
+        original = socket.getaddrinfo
+        socket.getaddrinfo = getaddrinfo
+        self.addCleanup(setattr, socket, "getaddrinfo", original)
+        return answers
+
+    def test_a_rebinding_resolver_cannot_move_the_connection(self):
+        legitimate = self.serve("127.0.0.1")
+        port = legitimate.server_address[1]
+        try:
+            rebound = self.serve("127.0.0.2", port)
+        except OSError as exc:  # pragma: no cover - depends on the host's stack
+            self.skipTest(f"cannot bind a second loopback address: {exc}")
+
+        self.allow_loopback()
+        lookups = self.rebind("127.0.0.1", "127.0.0.2")
+
+        body = b"".join(
+            self.provider.iter_episode(f"http://podcast.test:{port}/ep.mp3")
+        )
+
+        self.assertEqual(body, b"AUDIO")
+        # The name was looked up ONCE, by the guard. Nothing resolved it again.
+        self.assertEqual(lookups, ["podcast.test"])
+        # The address the guard approved is the one that served us...
+        self.assertEqual(len(legitimate.hits), 1)
+        # ...and the address DNS switched to afterwards was never contacted.
+        self.assertEqual(rebound.hits, [])
+
+    def test_the_host_header_still_names_the_real_site(self):
+        # Addressing by IP must not turn into asking a CDN for the wrong site.
+        server = self.serve("127.0.0.1")
+        port = server.server_address[1]
+        self.allow_loopback()
+        self.rebind("127.0.0.1", "127.0.0.1")
+
+        b"".join(self.provider.iter_episode(f"http://podcast.test:{port}/ep.mp3"))
+        self.assertEqual(server.hits[0]["host"], f"podcast.test:{port}")
+        self.assertEqual(server.hits[0]["path"], "/ep.mp3")
+
+    def test_it_still_fails_over_between_a_host_addresses(self):
+        # Pinning gives up create_connection()'s walk over every address, so the
+        # walk is done here instead: a dead first address must not lose the fetch.
+        server = self.serve("127.0.0.1")
+        port = server.server_address[1]
+        self.pin_to(["127.0.0.3", "127.0.0.1"])  # nothing is listening on .3
+
+        body = b"".join(
+            self.provider.iter_episode(f"http://podcast.test:{port}/ep.mp3")
+        )
+        self.assertEqual(body, b"AUDIO")
+        self.assertEqual(len(server.hits), 1)
+
+    def test_https_keeps_sni_and_certificate_checking_on_the_real_name(self):
+        # The pin moves the TCP connection only. If it moved the TLS identity
+        # too, an attacker's certificate for the IP would be accepted.
+        from requests.models import PreparedRequest
+
+        adapter = self.mod._PinnedAddressAdapter("93.184.216.34")
+        request = PreparedRequest()
+        request.prepare(method="GET", url="https://cdn.podcast.test/ep.mp3")
+        host_params, pool_kwargs = adapter.build_connection_pool_key_attributes(
+            request, True, None
+        )
+        self.assertEqual(host_params["host"], "93.184.216.34")
+        self.assertEqual(pool_kwargs["server_hostname"], "cdn.podcast.test")
+
+    def test_plain_http_does_not_get_a_tls_only_option(self):
+        from requests.models import PreparedRequest
+
+        adapter = self.mod._PinnedAddressAdapter("93.184.216.34")
+        request = PreparedRequest()
+        request.prepare(method="GET", url="http://cdn.podcast.test/ep.mp3")
+        host_params, pool_kwargs = adapter.build_connection_pool_key_attributes(
+            request, True, None
+        )
+        self.assertEqual(host_params["host"], "93.184.216.34")
+        self.assertNotIn("server_hostname", pool_kwargs)
 
 
 class AvailabilityTestCase(unittest.TestCase):
