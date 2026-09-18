@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260918"
+SCHEMA_VERSION = "20260919"
 
 
 def now():
@@ -708,6 +708,72 @@ class TrackAnalysis(_Model):
     data = TextField(null=True)
 
 
+class GenreTag(_Model):
+    """A genre label the owner of this server invented.
+
+    Deliberately NOT a fixed taxonomy. The whole point of the tagging studio is
+    that "frenchcore", "hardtekk", "zaag" and "pieep" are distinctions this
+    library cares about and no published genre list draws — so the vocabulary is
+    the user's, and the model is trained to it.
+    """
+
+    # AutoField, not this module's PrimaryKeyField: that one is a UUID, and a
+    # vocabulary of a dozen rows the API addresses as /genre/tags/<int:id> wants
+    # a small integer. The schema says INTEGER too.
+    id = AutoField()
+    name = CharField(48, unique=True)
+    color = CharField(16, null=True)
+    # Which of the renderer's five archetypes this genre should drive. A name
+    # the user invented means nothing to the animation engine, so they say once
+    # what it looks like; null falls back to whatever the heuristic decides.
+    archetype = CharField(16, null=True)
+    created = DateTimeField(default=now)
+
+
+class TrackTag(_Model):
+    """One manual label: this track is that genre.
+
+    Global rather than per-user, and admin-only to write: there is ONE model
+    trained from these, so two users disagreeing about what counts as hardtekk
+    would be training it against itself.
+    """
+
+    track = ForeignKeyField(Track, backref="tags", on_delete="CASCADE")
+    tag = ForeignKeyField(GenreTag, backref="tracks", on_delete="CASCADE")
+    created = DateTimeField(default=now)
+
+    class Meta:
+        primary_key = CompositeKey("track", "tag")
+
+
+class GenreModel(_Model):
+    """A classification head trained in the browser and shipped here.
+
+    Only the HEAD: a matrix from the frozen extractor's 1280-dimensional
+    embedding to the user's own labels. That is a few tens of kilobytes and a
+    dot product to evaluate, which is why the server needs no ML framework to
+    use it — and why training it needs no WebAssembly.
+    """
+
+    id = AutoField()  # an integer, like the schema — see GenreTag above
+    version = IntegerField(default=1)
+    created = DateTimeField(default=now)
+    active = BooleanField(default=True)
+    # "linear" or "mlp". A linear head is enough for genres that are far
+    # apart; genres that sound alike need a hidden layer, and that is what the
+    # studio's deep training produces.
+    kind = CharField(16, default="linear")
+    hidden = IntegerField(default=0)
+    # The label order the weight matrix is written in.
+    labels = TextField()
+    # base64 float16: the weight matrix then the bias, row-major.
+    weights = TextField()
+    # How it scored when it was trained, as JSON — shown in the studio so the
+    # user can see whether their tagging is enough yet.
+    metrics = TextField(null=True)
+    dim = IntegerField(default=1280)
+
+
 class TrackArtist(_Model):
     """One credited artist on a track — the multi-artist ("feat.") link.
 
@@ -1136,6 +1202,9 @@ def _migration_order():
         Track,
         TrackAnalysis,  # after Track: it references it
         TrackArtist,  # after Track and Artist: it references both
+        GenreTag,
+        TrackTag,  # after Track and GenreTag: it references both
+        GenreModel,
         User,
         ClientPrefs,
         StarredFolder,

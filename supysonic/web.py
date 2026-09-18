@@ -178,7 +178,12 @@ def create_application(config=None):
     # /image endpoints — everything else already goes through /api/cover.
     csp = (
         "default-src 'self'; "
-        "script-src 'self'; "
+        # 'wasm-unsafe-eval' is the NARROW directive, added for exactly this
+        # case: it permits WebAssembly compilation and nothing else. It does
+        # NOT re-enable eval(), new Function() or inline script — that is
+        # 'unsafe-eval', which stays refused. Without it the genre studio's
+        # training kernel cannot be instantiated at all.
+        "script-src 'self' 'wasm-unsafe-eval'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https://*.dzcdn.net https://api.deezer.com; "
         "media-src 'self' blob:; "

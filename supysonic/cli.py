@@ -576,6 +576,59 @@ def deezer_analyze(config, force, limit):
     )
 
 
+@deezer.command("embed")
+@click.option("--force", is_flag=True, help="Re-extract even tracks that already have a vector.")
+@click.option("--limit", type=int, default=None, help="Stop after N extracted tracks.")
+@click.option("--self-test", is_flag=True, help="Only check the extractor is set up correctly.")
+@click.pass_obj
+def deezer_embed(config, force, limit, self_test):
+    """Extract the audio embedding used by the genre tagging studio.
+
+    Needs onnxruntime and a copy of the ONNX feature extractor; point at it with
+    [deezer] embed_model, or drop it in <cache_dir>/models/. The model is a
+    third-party artefact with its own licence, so it is never downloaded for you.
+
+    Run --self-test FIRST. A mel front-end that does not match what the model was
+    trained on does not crash — it produces vectors that look healthy and mean
+    nothing, and everything downstream then learns nothing. The test catches
+    that without needing a reference: two halves of the same track must embed
+    closer together than two different tracks do.
+    """
+    from .db import Track
+    from .deezer.analysis import backfill_embeddings
+    from .deezer.embedding import self_test as run_self_test
+    from .deezer.embedding import why_unavailable
+
+    why = why_unavailable()
+    if why:
+        click.echo(f"Extractor unavailable: {why}")
+        raise SystemExit(1)
+
+    if self_test:
+        paths = [
+            t.path
+            for t in Track.select().where(Track.last_modification > 0).limit(30)
+            if t.path
+        ]
+        click.echo("Checking the extractor on your own tracks...")
+        res = run_self_test(paths, progress=click.echo)
+        if res.get("ok"):
+            click.echo(
+                "OK — same track {same_track}, different tracks {different_tracks} "
+                "(margin {margin}, {tracks} tracks).".format(**res)
+            )
+            return
+        click.echo(f"FAILED: {res.get('reason')}")
+        raise SystemExit(1)
+
+    click.echo("Extracting embeddings...")
+    stats = backfill_embeddings(force=force, limit=limit, progress=click.echo)
+    click.echo(
+        "Done. embedded={done} skipped={skipped} failed={failed} "
+        "(scanned {scanned}).".format(**stats)
+    )
+
+
 @deezer.command("scan-local")
 @click.pass_obj
 def deezer_scan_local(config):

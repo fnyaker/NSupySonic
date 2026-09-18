@@ -27,7 +27,9 @@
     current,
     playing,
     toasts,
+    isAdmin,
   } from "../lib/stores.js";
+  import { push } from "svelte-spa-router";
   import { MODES, effectiveMode } from "../lib/viz/index.js";
   import { PALETTES } from "../lib/viz/palette.js";
   import { TIERS, autoTier } from "../lib/viz/quality.js";
@@ -279,6 +281,24 @@
       <span class="bar"></span>
     </div>
   </div>
+
+  {#if $isAdmin}
+    <!-- The escape hatch from a fixed vocabulary. The classifier above knows the
+         genres it was written with; the studio is where you teach it yours. -->
+    <div class="studio">
+      <div>
+        <strong>Studio de genres</strong>
+        <p class="muted">
+          Le classifieur ci-dessus connaît les styles avec lesquels il a été écrit.
+          Si le vôtre lui échappe — un sous-genre, une scène, votre propre découpage —
+          créez-le, étiquetez quelques titres et entraînez le modèle ici même.
+        </p>
+      </div>
+      <button class="studio-btn" on:click={() => push("/genres")}>
+        <Icon name="sliders" size={16} /> Ouvrir
+      </button>
+    </div>
+  {/if}
 </section>
 
 <section class="card">
@@ -540,6 +560,41 @@
     height: 18px;
     accent-color: var(--accent);
   }
+  .studio {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+    padding: 14px 16px;
+    border: 1px solid var(--border, #2a2d33);
+    border-radius: 14px;
+  }
+  .studio p {
+    margin: 4px 0 0;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    max-width: 52ch;
+  }
+  .studio-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface-2, #1b1d21);
+    border: 1px solid var(--border, #2a2d33);
+    border-radius: 11px;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    padding: 9px 15px;
+    cursor: pointer;
+    flex: none;
+  }
+  .studio-btn:hover {
+    background: var(--surface-3, #24262b);
+  }
+
   .readout {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

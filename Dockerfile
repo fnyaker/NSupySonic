@@ -33,7 +33,7 @@ COPY --from=webbuilder /web/supysonic/webui/dist /src/supysonic/webui/dist
 # The trailing block copies the built SPA next to the installed package, in case
 # package_data didn't pick up the gitignored dist directory (belt + braces).
 RUN pip install --upgrade pip setuptools wheel \
- && pip install --no-build-isolation ".[postgresql]" gunicorn \
+ && pip install --no-build-isolation ".[postgresql,embedding]" gunicorn \
  && DEST="$(cd / && python -c 'import os, supysonic.webui as w; print(os.path.dirname(w.__file__))')" \
  && if [ "$DEST" != "/src/supysonic/webui" ]; then \
         mkdir -p "$DEST/dist" \

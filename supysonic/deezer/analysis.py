@@ -64,6 +64,10 @@ ANALYSIS_VERSION = 1
 MAX_SECONDS = 600
 # One ffmpeg run must not be able to spin forever on a broken file.
 FFMPEG_TIMEOUT = 300
+# How sure a trained head has to be before it overrides the rules. Below this
+# the track is simply unlike anything it was taught, and a confident-sounding
+# wrong label is worse than the honest general answer.
+MODEL_MIN_CONFIDENCE = 0.45
 # Analysis is background work with no deadline: one at a time keeps it from
 # competing with streaming for the box.
 _slot = threading.BoundedSemaphore(1)
@@ -541,6 +545,18 @@ def analyze_track(track: Track, provider=None, force: bool = False):
     except Exception:
         logger.warning("analysis: tempo pass failed for %s", track.path, exc_info=True)
 
+    # The frozen extractor's vector, when this server can make one. It is what
+    # the tagging studio trains on and what a trained head reads; producing it
+    # here means it rides the same single decode budget as everything else.
+    vec = None
+    try:
+        from . import embedding as emb
+
+        if emb.available():
+            vec = emb.ensure_embedding(track)
+    except Exception:
+        logger.warning("analysis: embedding failed for %s", track.path, exc_info=True)
+
     feats.update(
         bpm=bpm or 0.0,
         bpm_confidence=bpm_conf,
@@ -550,6 +566,25 @@ def analyze_track(track: Track, provider=None, force: bool = False):
         lufs=feats.get("lufs"),
     )
     style, style_conf, arch, weights = classify(feats)
+    source = "heuristic"
+    model_dist = None
+    # A head trained on the user's OWN vocabulary outranks the heuristic, and
+    # should: the rules below encode what genres tend to look like in general,
+    # while the head was taught what they look like in THIS library. It only
+    # speaks when it is reasonably sure, so an unfamiliar track still falls
+    # through to the rules rather than being forced into the nearest label.
+    if vec is not None:
+        try:
+            from . import genre as gen
+
+            guess = gen.predict(vec)
+            if guess and guess[1] >= MODEL_MIN_CONFIDENCE:
+                style, style_conf = guess[0], guess[1]
+                arch = gen.archetype_for(guess[0]) or arch
+                source = "model"
+                model_dist = guess[2]
+        except Exception:
+            logger.warning("analysis: genre head failed for %s", track.path, exc_info=True)
 
     payload = {
         "centroid": round(feats["centroid"], 1),
@@ -562,6 +597,9 @@ def analyze_track(track: Track, provider=None, force: bool = False):
         "lra": round(feats["lra"], 2),
         "pulse": pulse,
         "archetypes": weights,
+        "styleSource": source,
+        "model": model_dist,
+        "embedded": vec is not None,
         "took": round(time.monotonic() - t0, 2),
     }
     row = existing or TrackAnalysis(track=track)
@@ -599,6 +637,9 @@ def payload_for(row):
         "styleConfidence": row.style_confidence,
         "archetype": row.archetype,
         "archetypes": data.get("archetypes") or {},
+        # Where the style came from: the user's own trained head, or the rules.
+        "styleSource": data.get("styleSource", "heuristic"),
+        "embedded": bool(data.get("embedded")),
         "pulse": data.get("pulse", 0),
         "lufs": data.get("lufs"),
         "lra": data.get("lra"),
@@ -672,4 +713,40 @@ def backfill(provider=None, force=False, limit=None, progress=None):
         stats["done"] += 1
         if stats["done"] % 25 == 0:
             say(f"  {stats['done']} analysed...")
+    return stats
+
+
+def backfill_embeddings(force=False, limit=None, progress=None):
+    """Extract the frozen vector for every archived track that lacks one.
+
+    Separate from `backfill` because it has a different cost profile and a
+    different prerequisite: it needs onnxruntime and the model file, and it is
+    the slow one. Running it is how a library becomes taggable.
+    """
+    from . import embedding as emb
+
+    say = progress or (lambda *_: None)
+    why = emb.why_unavailable()
+    if why:
+        say(f"Extractor unavailable: {why}")
+        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0}
+
+    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0}
+    for track in Track.select().where(Track.last_modification > 0).order_by(Track.created):
+        if limit is not None and stats["done"] >= limit:
+            break
+        stats["scanned"] += 1
+        if not track.path or not os.path.isfile(track.path):
+            stats["skipped"] += 1
+            continue
+        if not force and emb.load_embedding(track) is not None:
+            stats["skipped"] += 1
+            continue
+        vec = emb.embed_file(track.path)
+        if vec is None or not emb.save_embedding(track, vec):
+            stats["failed"] += 1
+            continue
+        stats["done"] += 1
+        if stats["done"] % 20 == 0:
+            say(f"  {stats['done']} embedded...")
     return stats

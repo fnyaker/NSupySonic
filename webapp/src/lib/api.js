@@ -211,6 +211,26 @@ export const api = {
   // error when the file isn't archived — see supysonic/webui/edges.py.
   audioEdges: (id, db) => req("/audio/edges/" + id + "?db=" + encodeURIComponent(db)),
 
+  // -- the genre studio (admin) ----------------------------------------------
+  // Your own genre vocabulary, your labels, and the small head trained from
+  // them in the browser. See supysonic/webui/genre.py.
+  genreStatus: () => req("/genre/status"),
+  genreTagCreate: (name, color, archetype) =>
+    req("/genre/tags", { method: "POST", body: body({ name, color, archetype }) }),
+  genreTagEdit: (id, patch) =>
+    req("/genre/tags/" + id, { method: "PATCH", body: body(patch) }),
+  genreTagDelete: (id) => req("/genre/tags/" + id, { method: "DELETE" }),
+  genreLabel: (track, tag) =>
+    req("/genre/label", { method: "POST", body: body({ track, tag }) }),
+  genreCandidates: (limit = 40) => req("/genre/candidates?limit=" + limit),
+  genreLabelled: () => req("/genre/labelled"),
+  genreEmbeddings: (ids) =>
+    req("/genre/embeddings", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),
+  genreModel: () => req("/genre/model"),
+  genreModelPut: (payload) =>
+    req("/genre/model", { method: "PUT", body: body(payload) }),
+  genreModelDelete: () => req("/genre/model", { method: "DELETE" }),
+
   // radios
   trackRadio: (id) => req("/radio/track/" + id),
   artistRadio: (id) => req("/radio/artist/" + id),
