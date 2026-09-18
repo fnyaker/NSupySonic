@@ -11,6 +11,7 @@
     openReplace,
     resolvedUnavailable,
     unavailableVersion,
+    playlists,
   } from "../lib/stores.js";
   import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
@@ -40,10 +41,13 @@
   }
   // favTracks is a shared cache: instant on revisit, refreshed in background.
   $: favorites = $favTracks;
-  let playlists = null;
+  // Straight off the shared store: a playlist created from the "add to
+  // playlist" sheet (which opens OVER this screen, so nothing here remounts)
+  // shows up in this tab the moment it exists.
+  $: myPlaylists = $playlists;
   let plQuery = saved?.plQuery ?? "";
   $: rememberScreen({ tab, plQuery });
-  $: shownPlaylists = filterPlaylists(playlists, plQuery);
+  $: shownPlaylists = filterPlaylists(myPlaylists, plQuery);
   function filterPlaylists(list, term) {
     if (!list) return null;
     const t = term.trim().toLowerCase();
@@ -84,7 +88,7 @@
 
   onMount(() => {
     loadMyFavorites();
-    if ($isAdmin) userPlaylists().then((p) => (playlists = p));
+    if ($isAdmin) userPlaylists();
     loadLocal();
     loadUsage();
   });
@@ -149,9 +153,9 @@
     if (local?.length) player.playQueue(local, 0, { kind: "local" });
   }
 
-  // Manual "refresh from Deezer" (shared action), then refresh this page's list.
+  // Manual "refresh from Deezer" (shared action), then refresh the playlists.
   async function syncDeezer() {
-    if (await runDeezerSync()) playlists = await userPlaylists(true);
+    if (await runDeezerSync()) userPlaylists(true);
   }
 </script>
 
@@ -212,9 +216,9 @@
     <TrackBrowser tracks={favorites} context={{ kind: "favorites" }} />
   {/if}
 {:else if tab === "playlists"}
-  {#if playlists === null}
+  {#if myPlaylists === null}
     <Skeleton kind="shelf" />
-  {:else if !playlists.length}
+  {:else if !myPlaylists.length}
     <p class="muted hint">Aucune playlist.</p>
   {:else}
     <div class="pl-search">

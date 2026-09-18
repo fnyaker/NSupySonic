@@ -130,6 +130,15 @@ export function deleteFxPreset(id) {
   fxPresets.update((list) => list.filter((p) => p.id !== id));
 }
 
+// -- the account's playlists ------------------------------------------------
+// One shared, reactive copy of the playlist list. EVERY view that lists
+// playlists (the sidebar, the library tab, the "add to playlist" picker) reads
+// this store, so creating / renaming / deleting one from any of them shows up
+// in all of them at once — a mounted screen has no stale array of its own to go
+// out of date. Owned by lib/actions.js (userPlaylists / invalidatePlaylists).
+// null = never loaded yet (skeleton), [] = loaded and empty.
+export const playlists = writable(null);
+
 // -- offline / downloads ----------------------------------------------------
 
 // Default quality used when downloading a track to the device (overridable per

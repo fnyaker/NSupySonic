@@ -11,6 +11,7 @@ import { get } from "svelte/store";
 import { api } from "./api.js";
 import { coverKey } from "./format.js";
 import { logInfo } from "./log.js";
+import { primeGain } from "./gaincache.js";
 import {
   downloads,
   downloadsSize,
@@ -266,6 +267,12 @@ export async function downloadTrack(track, quality, onProgress = null) {
     } else {
       blob = await res.blob();
     }
+
+    // Learn the ReplayGain now, so it is stored WITH the file: a downloaded
+    // track must never ask the network how loud it is when it starts — offline
+    // it couldn't, and online it would be a volume change mid-song. A no-op
+    // when the gain is already known or cached (the usual case).
+    await primeGain(track).catch(() => {});
 
     const db = await openDB();
     const t = tx(db, ["meta", "audio"], "readwrite");

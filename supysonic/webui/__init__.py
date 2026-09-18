@@ -1702,6 +1702,76 @@ def track_gain(track_id):
     return jsonify({"gain": gain})
 
 
+# How many ids one batch may ask about. The player asks for what it is about to
+# play plus its lookahead window — a handful — so this is generous; it is here
+# to bound the gateway call, not the caller.
+GAIN_BATCH_MAX = 100
+
+
+@webapi.route("/gains", methods=["POST"])
+@login_required
+def track_gains():
+    """ReplayGain for a whole run of tracks in ONE call.
+
+    The player normalizes a track at the instant its source is swapped in, so a
+    gain that arrives later is a volume change in the middle of a song. This is
+    what lets it ask for everything it is about to play — the current track and
+    its lookahead window — before any of it starts, instead of one late request
+    per track.
+
+    Answers from the database first (already known for anything imported or
+    archived), then ONE gateway call for the rest. A Deezer outage costs
+    nothing: the DB answers are returned and the unknown ones stay null (an
+    unknown gain simply means that track isn't normalized, never an error).
+    """
+    data = request.get_json(silent=True) or {}
+    raw = data.get("ids") or []
+    if not isinstance(raw, list):
+        return jsonify({"error": "ids must be a list"}), 400
+    # De-duplicated, order-preserving, numeric ids only (locals have no gain).
+    ids = list(dict.fromkeys(str(x) for x in raw if _valid_id(x)))[:GAIN_BATCH_MAX]
+    if not ids:
+        return jsonify({"gains": {}})
+
+    from ..deezer import ids as dz_ids
+
+    gains = {i: None for i in ids}
+    # One query for the lot, keyed by the canonical uuid5 (the rows' primary
+    # key) so this is an index lookup rather than a scan on deezer_id.
+    by_uuid = {dz_ids.track_uuid(i): i for i in ids}
+    rows = {}
+    try:
+        for row in Track.select().where(Track.id.in_(list(by_uuid))):
+            sng = by_uuid.get(row.id)
+            if sng is None:
+                continue
+            rows[sng] = row
+            if row.gain is not None:
+                gains[sng] = row.gain
+    except Exception:
+        logger.warning("gain batch DB lookup failed", exc_info=True)
+
+    missing = [i for i in ids if gains[i] is None]
+    provider = _dz_live() if missing else None
+    if provider is not None:
+        try:
+            for info in provider.get_tracks(missing):
+                sng = str((info or {}).get("SNG_ID") or "")
+                if sng not in gains:
+                    continue
+                gain = _gain(info.get("GAIN"))
+                if gain is None:
+                    continue
+                gains[sng] = gain
+                row = rows.get(sng)
+                if row is not None:
+                    row.gain = gain
+                    row.save()
+        except Exception:
+            _log_deezer_failure("gain batch lookup failed for %d track(s)", len(missing))
+    return jsonify({"gains": gains})
+
+
 # -- radio / flow / recommendations -----------------------------------------
 
 

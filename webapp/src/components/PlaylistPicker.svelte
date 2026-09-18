@@ -4,9 +4,14 @@
     playlistPicker,
     closePlaylistPicker,
     lastPlaylist,
+    playlists,
     toasts,
   } from "../lib/stores.js";
-  import { userPlaylists, addTrackToPlaylist, invalidatePlaylists } from "../lib/actions.js";
+  import {
+    userPlaylists,
+    addTrackToPlaylist,
+    upsertPlaylistLocal,
+  } from "../lib/actions.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
   import { isLocalId, artistLine } from "../lib/format.js";
@@ -15,18 +20,18 @@
   // into. Searchable (typing filters by title), last-used playlist pinned on
   // top, and the search text doubles as the name for a brand-new playlist.
   let q = "";
-  let playlists = null;
   let busy = false;
 
   $: track = $playlistPicker?.track || null;
   $: if ($playlistPicker) open();
-  async function open() {
+  function open() {
     q = "";
-    playlists = null;
-    playlists = await userPlaylists();
+    // The list is the shared store's — already on screen if it was loaded
+    // earlier this session, and kept current by every other view that edits it.
+    userPlaylists();
   }
 
-  $: shown = filterList(playlists, q, $lastPlaylist);
+  $: shown = filterList($playlists, q, $lastPlaylist);
   function filterList(list, term, last) {
     if (!list) return null;
     let out = list;
@@ -55,7 +60,16 @@
     busy = true;
     try {
       const r = await api.createPlaylist(title, [String(track.deezer_id)]);
-      invalidatePlaylists();
+      // Show it everywhere NOW (library tab, sidebar, this picker), then let the
+      // refetch fill in the server's version of the row.
+      if (r?.id)
+        upsertPlaylistLocal({
+          id: String(r.id),
+          title,
+          deezer_id: r.deezer_id,
+          nb_tracks: 1,
+        });
+      userPlaylists(true);
       if (r?.id) lastPlaylist.set({ id: String(r.id), title });
       toasts.push(`Ajouté à « ${title} »`);
       closePlaylistPicker();

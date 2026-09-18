@@ -3,7 +3,13 @@
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { player, isAdmin, toasts, lastPlaylist, openExport } from "../lib/stores.js";
-  import { toggleEntityFavorite, invalidatePlaylists, downloadTracks } from "../lib/actions.js";
+  import {
+    toggleEntityFavorite,
+    invalidatePlaylists,
+    upsertPlaylistLocal,
+    removePlaylistLocal,
+    downloadTracks,
+  } from "../lib/actions.js";
   import { duration as fmtDuration, isLocalId, artistSearch } from "../lib/format.js";
   import { reconcilePayload } from "../lib/reconcile.js";
   import Cover from "../components/Cover.svelte";
@@ -152,6 +158,7 @@
     data = data;
     try {
       await api.editPlaylist(id, { title, description: draftDesc.trim() });
+      upsertPlaylistLocal({ id, title }); // rename everywhere, at once
       invalidatePlaylists();
     } catch {
       toasts.push("Échec de l'enregistrement", "error");
@@ -254,6 +261,7 @@
     if (!window.confirm(`Supprimer la playlist « ${data.playlist.title} » ?`)) return;
     try {
       await api.deletePlaylist(id);
+      removePlaylistLocal(id); // gone from the sidebar/library before we leave
       invalidatePlaylists();
       // Drop the "add to last playlist" shortcut if it pointed here.
       if ($lastPlaylist?.id === id) lastPlaylist.set(null);

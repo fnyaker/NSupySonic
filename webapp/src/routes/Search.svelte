@@ -91,6 +91,16 @@
     results.tracks?.length ||
     results.playlists?.length ||
     (results.podcasts?.length && $isAdmin);
+
+  // "Tout" leads with the titles, because that is what a search is usually for:
+  // the top handful, then one row of albums, then one of artists. Ten is the
+  // most that still reads as a shortlist on a phone rather than a page you have
+  // to scroll past to reach anything else — the rest is one tap away on the
+  // Titres tab.
+  const TOP_TRACKS = 10;
+  $: topTracks =
+    tab === "all" ? (results.tracks || []).slice(0, TOP_TRACKS) : results.tracks || [];
+  $: moreTracks = Math.max(0, (results.tracks?.length || 0) - TOP_TRACKS);
 </script>
 
 <div class="bar fade-in">
@@ -124,34 +134,61 @@
 {:else if !hasResults}
   <p class="muted hint">Aucun résultat pour « {q} ».</p>
 {:else}
-  {#if (tab === "all" || tab === "artists") && results.artists?.length}
-    <h2>Artistes</h2>
-    <div class={tab === "artists" ? "grid" : "shelf"}>
-      {#each results.artists as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}
+  {#if (tab === "all" || tab === "tracks") && results.tracks?.length}
+    <div class="sechead">
+      <h2>Titres</h2>
+      {#if tab === "all" && moreTracks}
+        <button class="seeall" on:click={() => (tab = "tracks")}>
+          Tout afficher<span class="count">{results.tracks.length}</span>
+        </button>
+      {/if}
     </div>
+    <TrackList tracks={topTracks} />
   {/if}
 
   {#if (tab === "all" || tab === "albums") && results.albums?.length}
-    <h2>Albums</h2>
+    <div class="sechead">
+      <h2>Albums</h2>
+      {#if tab === "all" && results.albums.length > 1}
+        <button class="seeall" on:click={() => (tab = "albums")}>Tout afficher</button>
+      {/if}
+    </div>
     <div class={tab === "albums" ? "grid" : "shelf"}>
       {#each results.albums as a (a.deezer_id)}<Card item={a} kind="album" />{/each}
     </div>
   {/if}
 
+  {#if (tab === "all" || tab === "artists") && results.artists?.length}
+    <div class="sechead">
+      <h2>Artistes</h2>
+      {#if tab === "all" && results.artists.length > 1}
+        <button class="seeall" on:click={() => (tab = "artists")}>Tout afficher</button>
+      {/if}
+    </div>
+    <div class={tab === "artists" ? "grid" : "shelf"}>
+      {#each results.artists as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}
+    </div>
+  {/if}
+
   {#if (tab === "all" || tab === "playlists") && results.playlists?.length}
-    <h2>Playlists</h2>
+    <div class="sechead">
+      <h2>Playlists</h2>
+      {#if tab === "all" && results.playlists.length > 1}
+        <button class="seeall" on:click={() => (tab = "playlists")}>Tout afficher</button>
+      {/if}
+    </div>
     <div class={tab === "playlists" ? "grid" : "shelf"}>
       {#each results.playlists as p (p.deezer_id)}<Card item={p} kind="playlist" />{/each}
     </div>
   {/if}
 
-  {#if (tab === "all" || tab === "tracks") && results.tracks?.length}
-    <h2>Titres</h2>
-    <TrackList tracks={results.tracks} />
-  {/if}
-
   {#if $isAdmin && (tab === "all" || tab === "podcasts") && results.podcasts?.length}
-    <h2>Podcasts</h2>
+    <div class="sechead">
+      <h2>Podcasts</h2>
+      {#if tab === "all" && results.podcasts.length > 1}
+        <button class="seeall" on:click={() => (tab = "podcasts")}>Tout afficher</button>
+      {/if}
+    </div>
     <div class={tab === "podcasts" ? "grid" : "shelf"}>
       {#each results.podcasts as p (p.deezer_id)}<PodcastCard item={p} />{/each}
     </div>
@@ -193,5 +230,40 @@
   }
   .hint {
     margin-top: 28px;
+  }
+  /* The section title and its "tout afficher" share a baseline: the link sits
+     at the end of the row rather than under the heading, so the eye reads
+     "Titres … tout afficher" as one line and the shelves below stay flush. */
+  .sechead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .seeall {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 7px;
+    flex: none;
+    padding: 0;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .seeall:hover {
+    color: var(--text);
+  }
+  .seeall .count {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text-dim);
+    background: var(--bg-card);
+    border-radius: 999px;
+    padding: 2px 7px;
+  }
+  .seeall:hover .count {
+    color: var(--text);
   }
 </style>

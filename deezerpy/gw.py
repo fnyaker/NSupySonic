@@ -166,6 +166,18 @@ class GW:
                 tracks_array.append(EMPTY_TRACK_OBJ)
         return tracks_array
 
+    def get_tracks_data(self, sng_ids):
+        """Several tracks in ONE call, matched by SNG_ID instead of position.
+
+        ``get_tracks`` above maps the answer back onto the requested ids
+        positionally and walks off the end of the list the moment Deezer
+        returns fewer rows than were asked for — a single dead id does it.
+        Callers that can match on SNG_ID themselves want this one.
+        """
+        body = self.api_call('song.getListData', {'SNG_IDS': [str(i) for i in sng_ids]})
+        data = (body or {}).get('data') or []
+        return [t for t in data if isinstance(t, dict)]
+
     def get_album(self, alb_id):
         return self.api_call('album.getData', {'ALB_ID': alb_id})
 

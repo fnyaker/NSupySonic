@@ -18,6 +18,7 @@ import {
   playCacheSize,
 } from "./stores.js";
 import { isDownloaded } from "./offline.js";
+import { primeGain } from "./gaincache.js";
 
 const DB_NAME = "nsupy-playcache";
 const DB_VERSION = 1;
@@ -141,6 +142,9 @@ export async function prefetchTrack(track, quality) {
     if (!blob || !blob.size) return;
     await putAudio(id, blob, quality, type);
     await cacheCover(track.album && track.album.cover, id);
+    // The gain belongs with the audio: a track whose bytes are on the device
+    // must never have to ask the network how loud it is when it starts.
+    primeGain(track).catch(() => {});
     await enforce(get(playCacheLimit));
   } catch {
     /* network/decoding hiccup — a missed prefetch is harmless */
