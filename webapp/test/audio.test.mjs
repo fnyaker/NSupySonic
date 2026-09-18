@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { buildBandPlan, buildEnergyPlan, readBands, readEnergy, ENERGY_BANDS } from "../src/lib/audio/spectrum.js";
 import { createFeatureExtractor } from "../src/lib/audio/features.js";
 import { createBeatTracker, ODF_HZ } from "../src/lib/audio/tempo.js";
-import { createStyleClassifier } from "../src/lib/audio/style.js";
+import { createStyleClassifier, FAMILY_LIST } from "../src/lib/audio/style.js";
 
 const SR = 48000;
 const FFT_LO = 8192;
@@ -237,6 +237,34 @@ test("a fast, distorted, gridded kick reads as one of the hard families", () => 
     ["industrial", "hard"].includes(out.kick.type),
     `kick classified as ${out.kick.type}`
   );
+});
+
+test("the added families are all reachable", () => {
+  const ids = new Set(FAMILY_LIST.map((f) => f.id));
+  for (const id of [
+    "hardcore", "tribecore", "speedcore", "industrial", "rawstyle",
+    "hardtechno", "dance", "dnb", "dubstep", "disco", "psytrance",
+  ])
+    assert.ok(ids.has(id), `${id} is missing from the client families`);
+});
+
+test("a syncopated, sub-heavy 174 BPM groove reads as drum & bass", () => {
+  const cls = createStyleClassifier();
+  const energy = { sub: 0.45, bass: 0.6, lowMid: 0.2, mid: 0.25, high: 0.15, air: 0.08 };
+  const features = {
+    level: 0.8, flux: 0.15, lowFlux: 0, midFlux: 0.06, highFlux: 0.04,
+    centroidN: 0.45, flatness: 0.4, percussivity: 0.8, vocalMod: 0.05,
+    crest: 3.2, silent: false,
+  };
+  const beat = {
+    bpm: 174, confidence: 0.9, phase: 0, beat: false, beatIndex: 0, barPos: 0,
+    beatsPerBar: 4, downbeat: false, onset: 0, kickPulse: 0.4, period: 60 / 174,
+    locked: true,
+  };
+  let out = null;
+  const dt = 1 / 90;
+  for (let i = 0; i < 900; i++) out = cls.process(features, beat, energy, i * dt, dt);
+  assert.equal(out.dominant, "dnb", `dominant was ${out.dominant}`);
 });
 
 test("a sustained, tonal, tempo-less signal reads as sustained", () => {

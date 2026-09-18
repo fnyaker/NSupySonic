@@ -491,9 +491,11 @@ genres". The heuristic above knows the styles it was written with; this teaches 
 
 - **The studio opens onto the engine's own vocabulary.** The first admin visit seeds a `GenreTag`
   per family in `analysis.FAMILIES` (label, colour, archetype), so tagging starts by CONFIRMING a
-  guess instead of typing twenty genres first. It is one-time (a `Meta` flag) and only ever adds:
-  a genre you delete stays deleted, and the *Genres du moteur* button brings back just the missing
-  ones. Only the admin seeds; a guest reading `/genre/status` writes nothing.
+  guess instead of typing thirty genres first. It is additive and version-aware (a `Meta` value
+  remembers how many the engine knew): a release that adds families re-syncs them on the next admin
+  visit, a genre you delete stays deleted as long as the vocabulary has not changed, and the
+  *Genres du moteur* button brings back just the missing ones. Only the admin seeds; a guest reading
+  `/genre/status` writes nothing.
 - **Measuring the library is a button, not a shell.** The Étiquetage tab starts the very backfill
   the CLI runs (`POST /genre/embed`, admin-only, worker + poll): every archived track without a
   vector is decoded once, so pressing it again only picks up what has been archived since. The

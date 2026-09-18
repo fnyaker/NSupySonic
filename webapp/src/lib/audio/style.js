@@ -10,8 +10,9 @@
 //
 // TWO OUTPUTS, for two different jobs:
 //
-//  - `families` is the fine-grained read (techno / frenchcore / uptempo / zaag /
-//    pieep / rock / metal / strings / …). It exists because it is legible: it
+//  - `families` is the fine-grained read (techno / hardcore / tribe / uptempo /
+//    frenchcore / zaag / drum & bass / dance / …). It exists because it is
+//    legible: it
 //    is what the UI shows the user, and what makes the mode feel like it is
 //    actually listening.
 //  - `archetypes` is the coarse read the renderer blends on — sustain, voice,
@@ -141,6 +142,63 @@ const FAMILIES = [
       above(s.airRatio, 0.1, 0.18),
   },
   {
+    id: "dance",
+    label: "Dance / EDM",
+    a: "groove",
+    // Mainstage: a clean four-on-the-floor kick under bright leads and hats.
+    w: (s) =>
+      inRange(s.bpm, 118, 136, 10) *
+      above(s.kickPulse, 0.5, 0.3) *
+      above(s.airRatio, 0.1, 0.18) *
+      below(s.flat, 0.55, 0.3) *
+      s.kSoft,
+  },
+  {
+    id: "dnb",
+    label: "Drum & bass",
+    a: "groove",
+    // Breakbeats: a steady tempo but a syncopated kick, and a lot of sub.
+    w: (s) =>
+      inRange(s.bpm, 160, 182, 10) *
+      inRange(s.kickPulse, 0.2, 0.65, 0.25) *
+      above(s.subRatio, 0.2, 0.2) *
+      above(s.perc, 0.5, 0.3),
+  },
+  {
+    id: "dubstep",
+    label: "Dubstep",
+    a: "groove",
+    // Half-time and sparse: the kick is rare and the sub carries the drop.
+    w: (s) =>
+      inRange(s.bpm, 136, 148, 8) *
+      below(s.kickPulse, 0.55, 0.3) *
+      above(s.subRatio, 0.28, 0.2) *
+      below(s.centroid, 0.55, 0.25),
+  },
+  {
+    id: "disco",
+    label: "Disco / funk",
+    a: "groove",
+    // Played, not programmed: four-on-the-floor with real dynamics left in it.
+    w: (s) =>
+      inRange(s.bpm, 106, 124, 10) *
+      above(s.kickPulse, 0.45, 0.3) *
+      below(s.flat, 0.45, 0.25) *
+      above(s.crest, 2.6, 2.5) *
+      inRange(s.centroid, 0.25, 0.6),
+  },
+  {
+    id: "psytrance",
+    label: "Psytrance",
+    a: "groove",
+    // A rolling bassline on a fast grid, bright and clean.
+    w: (s) =>
+      inRange(s.bpm, 138, 152, 10) *
+      above(s.kickPulse, 0.55, 0.3) *
+      inRange(s.flat, 0.25, 0.55, 0.2) *
+      above(s.airRatio, 0.12, 0.18),
+  },
+  {
     id: "hardstyle",
     label: "Hardstyle",
     a: "hard",
@@ -217,6 +275,77 @@ const FAMILIES = [
       above(s.airRatio, 0.2, 0.18) *
       above(s.centroid, 0.62, 0.2) *
       below(s.flat, 0.55, 0.3),
+  },
+  {
+    id: "hardcore",
+    label: "Hardcore",
+    a: "hard",
+    // Mainstream hardcore: a distorted kick on every beat, squashed flat.
+    w: (s) =>
+      inRange(s.bpm, 148, 195, 18) *
+      above(s.kickPulse, 0.45, 0.3) *
+      inRange(s.flat, 0.4, 0.75, 0.2) *
+      Math.max(s.kHard, s.kIndus * 0.8),
+  },
+  {
+    id: "tribecore",
+    label: "Tribe",
+    a: "hard",
+    // Tribe: percussive and mid-heavy rather than one wall of noise.
+    w: (s) =>
+      inRange(s.bpm, 150, 190, 20) *
+      above(s.kickPulse, 0.45, 0.3) *
+      inRange(s.flat, 0.32, 0.62, 0.2) *
+      above(s.perc, 0.5, 0.3) *
+      above(s.midRatio, 0.3, 0.25) *
+      Math.max(s.kHard, s.kIndus * 0.7),
+  },
+  {
+    id: "speedcore",
+    label: "Speedcore",
+    a: "hard",
+    // Past 250 BPM the grid is at its limit; only the noise is left.
+    w: (s) =>
+      inRange(s.bpm, 245, 300, 22) *
+      above(s.flat, 0.5, 0.22) *
+      above(s.kIndus, 0.4, 0.3) *
+      below(s.crest, 3.5, 2.5),
+  },
+  {
+    id: "industrial",
+    label: "Indus",
+    a: "hard",
+    // A metallic, noisy kick is the whole tell.
+    w: (s) =>
+      inRange(s.bpm, 140, 185, 22) *
+      above(s.kickPulse, 0.4, 0.3) *
+      above(s.flat, 0.45, 0.25) *
+      above(s.kIndus, 0.45, 0.3) *
+      below(s.crest, 3.6, 2.6),
+  },
+  {
+    id: "rawstyle",
+    label: "Rawstyle",
+    a: "hard",
+    // Hardstyle's harder cousin: same grid, a rougher, more distorted kick.
+    w: (s) =>
+      inRange(s.bpm, 148, 163, 10) *
+      above(s.kickPulse, 0.45, 0.3) *
+      inRange(s.flat, 0.45, 0.72, 0.18) *
+      above(s.kHard, 0.5, 0.3) *
+      below(s.crest, 3.2, 2.4),
+  },
+  {
+    id: "hardtechno",
+    label: "Hard techno",
+    a: "hard",
+    // Looped, driving and harder than techno proper, without the hardstyle kick.
+    w: (s) =>
+      inRange(s.bpm, 138, 162, 12) *
+      above(s.kickPulse, 0.55, 0.3) *
+      inRange(s.flat, 0.3, 0.6, 0.2) *
+      Math.max(s.kHard, s.kIndus * 0.6) *
+      below(s.crest, 4, 2.8),
   },
   {
     id: "rock",

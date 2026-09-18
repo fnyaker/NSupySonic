@@ -159,9 +159,10 @@ def archetype_for(label):
 # --- the studio's starting vocabulary ---------------------------------------
 # A fresh studio opens onto nothing, which means every genre the engine can
 # already guess has to be retyped before a single track can be confirmed. So the
-# engine's own families (deezer/analysis.py) are seeded as ready-made tags. A
-# Meta flag makes it one-time: a genre the user deliberately deletes must not
-# come back on the next page load.
+# engine's own families (deezer/analysis.py) are seeded as ready-made tags.
+# A Meta value remembers how many the engine knew last time, so a later release
+# that adds families re-syncs them on the next admin visit — while a genre the
+# user deleted stays deleted as long as the vocabulary has not changed.
 SEED_META_KEY = "genre_seeded"
 # Distinct hues, so a vocabulary seeded in one go never repeats a colour.
 DEFAULT_COLORS = [
@@ -172,19 +173,31 @@ DEFAULT_COLORS = [
 ]
 
 
+def seed_signature() -> str:
+    """How many genres the engine knows — the seed's "already done" marker."""
+    from .analysis import known_genres
+
+    return str(len(known_genres()))
+
+
 def seed_default_tags(force: bool = False) -> int:
     """Create the engine's genres as tags; returns how many were added.
 
     Idempotent and additive: existing names are left exactly as they are (the
     user may have recoloured or re-archetyped one), and nothing is ever edited
-    or deleted. Runs once unless `force`, which only fills in what is missing.
+    or deleted. Runs when the engine's vocabulary has changed since the last run,
+    or always with `force` (the studio's "Genres du moteur" button), which only
+    fills in what is missing.
     """
     from ..db import Meta
     from .analysis import known_genres
 
+    specs = known_genres()
+    signature = str(len(specs))
     if not force:
         try:
-            if Meta.get_or_none(Meta.key == SEED_META_KEY) is not None:
+            row = Meta.get_or_none(Meta.key == SEED_META_KEY)
+            if row is not None and (row.value or "") == signature:
                 return 0
         except Exception:
             logger.debug("genre: could not read the seed flag", exc_info=True)
@@ -193,7 +206,7 @@ def seed_default_tags(force: bool = False) -> int:
     created = 0
     try:
         existing = {t.name for t in GenreTag.select(GenreTag.name)}
-        for i, (name, archetype) in enumerate(known_genres()):
+        for i, (name, archetype) in enumerate(specs):
             name = str(name)[:48]
             if name in existing:
                 continue
@@ -213,7 +226,12 @@ def seed_default_tags(force: bool = False) -> int:
         logger.warning("genre: seeding default tags failed", exc_info=True)
 
     try:
-        Meta.get_or_create(key=SEED_META_KEY, defaults={"value": "1"})
+        row = Meta.get_or_none(Meta.key == SEED_META_KEY)
+        if row is None:
+            Meta.create(key=SEED_META_KEY, value=signature)
+        else:
+            row.value = signature
+            row.save()
     except Exception:
         logger.debug("genre: could not store the seed flag", exc_info=True)
     return created

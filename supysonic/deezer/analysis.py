@@ -419,6 +419,21 @@ FAMILIES = [
     ("trance", "Trance", "groove", lambda f: (
         _in_range(f["bpm"], 132, 145, 12) * _above(f["pulse"], 0.45, 0.3)
         * _above(f["rolloff"], 6500, 2500) * _below(f["flatness"], 0.45, 0.22))),
+    ("dance", "Dance / EDM", "groove", lambda f: (
+        _in_range(f["bpm"], 118, 136, 10) * _above(f["pulse"], 0.5, 0.3)
+        * _above(f["rolloff"], 6000, 3000) * _below(f["flatness"], 0.5, 0.25))),
+    ("dnb", "Drum & bass", "groove", lambda f: (
+        _in_range(f["bpm"], 160, 182, 10) * _in_range(f["pulse"], 0.25, 0.7, 0.25)
+        * _below(f["flatness"], 0.5, 0.2) * _above(f["flux_peak"], 1.5, 0.8))),
+    ("dubstep", "Dubstep", "groove", lambda f: (
+        _in_range(f["bpm"], 136, 148, 8) * _below(f["pulse"], 0.55, 0.3)
+        * _below(f["centroid"], 2200, 1400) * _below(f["lra"], 8, 3))),
+    ("disco", "Disco / funk", "groove", lambda f: (
+        _in_range(f["bpm"], 106, 124, 10) * _above(f["pulse"], 0.45, 0.3)
+        * _below(f["flatness"], 0.42, 0.22) * _in_range(f["lra"], 5, 12, 4))),
+    ("psytrance", "Psytrance", "groove", lambda f: (
+        _in_range(f["bpm"], 138, 152, 10) * _above(f["pulse"], 0.55, 0.3)
+        * _in_range(f["flatness"], 0.25, 0.55, 0.2) * _above(f["rolloff"], 6500, 3000))),
     ("hardstyle", "Hardstyle", "hard", lambda f: (
         _in_range(f["bpm"], 145, 162, 12) * _above(f["pulse"], 0.45, 0.3)
         * _below(f["lra"], 6.5, 3.5))),
@@ -440,6 +455,26 @@ FAMILIES = [
     ("pieep", "Pieep", "hard", lambda f: (
         _in_range(f["bpm"], 170, 260, 40) * _above(f["centroid"], 3600, 1600)
         * _above(f["rolloff"], 8000, 2500) * _below(f["flatness"], 0.55, 0.25))),
+    ("hardcore", "Hardcore", "hard", lambda f: (
+        _in_range(f["bpm"], 148, 195, 18) * _above(f["pulse"], 0.45, 0.3)
+        * _in_range(f["flatness"], 0.4, 0.75, 0.2) * _below(f["lra"], 6.5, 3))),
+    ("tribecore", "Tribe", "hard", lambda f: (
+        _in_range(f["bpm"], 150, 190, 20) * _above(f["pulse"], 0.45, 0.3)
+        * _in_range(f["flatness"], 0.32, 0.62, 0.2) * _above(f["entropy"], 0.55, 0.2)
+        * _above(f["flux_peak"], 1.4, 0.8))),
+    ("speedcore", "Speedcore", "hard", lambda f: (
+        _in_range(f["bpm"], 245, 300, 22) * _above(f["flatness"], 0.5, 0.22)
+        * _below(f["lra"], 5, 2.5) * _above(f["entropy"], 0.65, 0.25))),
+    ("industrial", "Indus", "hard", lambda f: (
+        _in_range(f["bpm"], 140, 185, 22) * _above(f["pulse"], 0.4, 0.3)
+        * _above(f["flatness_hi"], 0.5, 0.25) * _above(f["entropy"], 0.6, 0.25)
+        * _below(f["lra"], 6, 3))),
+    ("rawstyle", "Rawstyle", "hard", lambda f: (
+        _in_range(f["bpm"], 148, 163, 10) * _above(f["pulse"], 0.45, 0.3)
+        * _in_range(f["flatness"], 0.45, 0.72, 0.18) * _below(f["lra"], 5.5, 2.5))),
+    ("hardtechno", "Hard techno", "hard", lambda f: (
+        _in_range(f["bpm"], 138, 162, 12) * _above(f["pulse"], 0.55, 0.3)
+        * _in_range(f["flatness"], 0.3, 0.6, 0.2) * _below(f["lra"], 6, 3))),
     ("rock", "Rock", "rock", lambda f: (
         _in_range(f["bpm"], 95, 170, 35) * _in_range(f["flatness"], 0.28, 0.62, 0.2)
         * _in_range(f["lra"], 5, 11, 4) * _below(f["pulse"], 0.55, 0.3))),

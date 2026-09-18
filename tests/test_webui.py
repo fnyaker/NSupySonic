@@ -3440,8 +3440,8 @@ class GenreStudioTestCase(unittest.TestCase):
                 progress=[], error=None,
             )
         # Mark the engine vocabulary as already seeded so the tests that predate
-        # it start from an empty studio. The seeding tests clear this flag.
-        Meta.create(key=gen.SEED_META_KEY, value="1")
+        # it start from an empty studio. The seeding tests clear this row.
+        Meta.create(key=gen.SEED_META_KEY, value=gen.seed_signature())
 
     def tearDown(self):
         from supysonic.deezer import genre as gen
@@ -3557,6 +3557,12 @@ class GenreStudioTestCase(unittest.TestCase):
             self.assertIn(label, by_name)
             self.assertEqual(by_name[label]["archetype"], archetype)
             self.assertTrue(by_name[label]["color"])
+        # The hardcore/tribe and dance additions are part of the engine's set.
+        for label in (
+            "Hardcore", "Tribe", "Speedcore", "Indus", "Rawstyle", "Hard techno",
+            "Dance / EDM", "Drum & bass", "Dubstep", "Disco / funk", "Psytrance",
+        ):
+            self.assertIn(label, by_name)
         # Idempotent: a second visit changes nothing.
         again = self.client.get("/api/genre/status").json
         self.assertEqual(len(again["tags"]), len(expected))
@@ -3581,6 +3587,20 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertIn(first["name"], names)
         # Running it again adds nothing (and never duplicates).
         self.assertEqual(self.client.post("/api/genre/tags/defaults").json["created"], 0)
+
+    def test_a_grown_engine_vocabulary_is_re_seeded(self):
+        """A release that adds families must reach an existing install without
+        the admin having to retype anything."""
+        from supysonic.deezer import analysis as ana
+        from supysonic.deezer import genre as gen
+
+        # Pretend the last seed ran when the engine knew one genre fewer.
+        row = Meta.get(Meta.key == gen.SEED_META_KEY)
+        row.value = str(len(ana.known_genres()) - 1)
+        row.save()
+        self._login()
+        body = self.client.get("/api/genre/status").json
+        self.assertEqual(len(body["tags"]), len(ana.known_genres()))
 
     def test_a_guest_does_not_seed_the_vocabulary(self):
         self._clear_seed_flag()
