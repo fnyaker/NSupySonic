@@ -3875,9 +3875,26 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertIn("available", body["extractor"])
         self.assertIn("onnxruntime", body["extractor"])
         self.assertIn("uploadable", body["extractor"])
+        # The studio points at the exact export the front-end needs.
+        self.assertIn("bsdynamic-1.onnx", body["extractor"]["model_url"])
         # Without onnxruntime it must say so rather than pretending.
         if not body["extractor"]["available"]:
             self.assertTrue(body["extractor"]["reason"])
+
+    def test_the_dynamic_export_is_required(self):
+        """The front-end feeds a variable number of patches, so the "-bs64"
+        export (fixed batch of 64) must be refused with a sentence that says so
+        — that is the exact mistake a "how do I get the model?" leads to."""
+        from supysonic.deezer import embedding as emb
+
+        # The dynamic export: symbolic batch, 128 frames, 96 mel bands.
+        self.assertIsNone(emb._input_problem(["n", 128, 96]))
+        self.assertIsNone(emb._input_problem([None, 128, 96]))
+        self.assertIsNone(emb._input_problem(["n", "p", 96]))
+        problem = emb._input_problem([64, 128, 96])
+        self.assertIn("fixed batch", problem)
+        self.assertIn(emb.MODEL_FILENAME, problem)
+        self.assertIn("expects", emb._input_problem(["n", 128, 64]))
 
     # -- the extractor -----------------------------------------------------
 

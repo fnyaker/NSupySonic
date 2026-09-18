@@ -73,6 +73,9 @@ def _extractor_status() -> dict:
         "onnxruntime": emb.onnxruntime_available(),
         "model": emb.model_info(),
         "uploadable": emb.can_write_model(),
+        # Where to get the exact export the front-end needs, so the studio never
+        # has to say "find the model file yourself".
+        "model_url": emb.MODEL_URL,
     }
 
 

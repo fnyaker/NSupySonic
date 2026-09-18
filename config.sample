@@ -214,8 +214,11 @@ enabled = no
 ; onnxruntime, i.e. supysonic[embedding]). It is a third-party artefact with its
 ; own licence, so it is NEVER downloaded for you: either import a copy from the
 ; genre studio's "Extracteur" card in the web UI, or point this at one you
-; obtained yourself. Leave unset when you used the web UI.
-;embed_model = /var/supysonic/models/discogs-effnet-bs64-1.onnx
+; obtained yourself. Get the DYNAMIC-batch export (the "-bs64" one has a fixed
+; batch of 64 and the extractor will refuse it):
+; https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bsdynamic-1.onnx
+; Leave unset when you used the web UI.
+;embed_model = /var/supysonic/models/discogs-effnet-bsdynamic-1.onnx
 
 ; Quality fetched from Deezer and archived. FLAC | MP3_320 | MP3_128.
 ; Lower qualities requested by clients are produced by the existing transcoder

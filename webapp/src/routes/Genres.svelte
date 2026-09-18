@@ -865,8 +865,12 @@
                 />
               </label>
               <p class="small muted">
-                Le fichier <code>discogs-effnet-bs64-1.onnx</code> de l'extracteur
-                MusiCNN. Il reste sur votre serveur.
+                Téléchargez
+                <a href={extractor.model_url} target="_blank" rel="noopener">
+                  discogs-effnet-bsdynamic-1.onnx
+                </a>
+                chez Essentia (≈ 18 Mo), puis importez-le ici. Il reste sur votre
+                serveur.
               </p>
             {:else}
               <p class="small">

@@ -587,6 +587,11 @@ def deezer_embed(config, force, limit, self_test):
     Needs onnxruntime and a copy of the ONNX feature extractor. Import one in
     the web UI's genre studio ("Extracteur" card) — it lands in
     <cache_dir>/models/ — or point [deezer] embed_model at a copy of your own.
+
+    Get the DYNAMIC-batch export (the "-bs64" one has a fixed batch of 64 and
+    will be refused):
+    https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bsdynamic-1.onnx
+
     The model is a third-party artefact with its own licence, so it is never
     downloaded for you.
 

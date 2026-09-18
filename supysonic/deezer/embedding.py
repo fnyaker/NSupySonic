@@ -54,11 +54,20 @@ logger = logging.getLogger(__name__)
 EMBED_VERSION = 1
 EMBED_DIM = 1280  # discogs-effnet's penultimate layer
 
-# The one export this front-end is written for. The name is fixed because the
-# mel parameters below only match this model, so a model the web UI uploads is
-# stored under exactly this name — and the operator who points `embed_model` at
-# a copy of their own can keep it wherever they like.
-MODEL_FILENAME = "discogs-effnet-bs64-1.onnx"
+# The one export this front-end is written for. It must be the DYNAMIC-batch
+# ONNX, not the "-bs64" one: the latter declares a fixed batch of 64, while the
+# front-end feeds however many patches a track yields (up to MAX_PATCHES), so
+# onnxruntime would refuse it. The name is otherwise fixed because the mel
+# parameters below only match this model — a model the web UI uploads is stored
+# under exactly this name.
+MODEL_FILENAME = "discogs-effnet-bsdynamic-1.onnx"
+# Where the operator gets it. Never fetched for them: third-party artefact,
+# its own licence (non-commercial). Kept here so the studio can say precisely
+# what to download instead of "the model file".
+MODEL_URL = (
+    "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/"
+    "discogs-effnet-bsdynamic-1.onnx"
+)
 # The published model is ~40 MB. A gigabyte is far past anything legitimate and
 # stops one hostile upload from filling the disk.
 MODEL_MAX_BYTES = 1024 * 1024 * 1024
@@ -243,14 +252,27 @@ def model_info() -> dict | None:
     }
 
 
-def _input_fits(shape) -> bool:
-    """Whether a declared input shape can be this front-end's output.
-
-    The batch and patch axes are often symbolic; only the trailing fixed axis is
-    trusted, exactly as ``_run`` does at inference time. It is enough to reject
-    an image or text model the operator grabbed by mistake."""
-    fixed = [d for d in shape if isinstance(d, int)]
-    return not fixed or fixed[-1] == MEL_BANDS
+def _input_problem(shape) -> str | None:
+    """None when a declared input shape can be this front-end's output, else a
+    sentence saying why not — used both to reject an upload and to refuse a
+    model at inference time."""
+    if not shape:
+        return "the model declares no input shape"
+    # The front-end feeds a different number of patches per track, so a fixed
+    # batch axis is fatal — and it is the exact trap of grabbing the "-bs64"
+    # export instead of the dynamic one.
+    if isinstance(shape[0], int):
+        return (
+            f"this model has a fixed batch size ({shape[0]}); use the "
+            f"dynamic-batch export {MODEL_FILENAME}"
+        )
+    tail = [d for d in shape[1:] if isinstance(d, int)]
+    if tail and tail[-1] != MEL_BANDS:
+        return (
+            f"this model expects {shape}, but the extractor expects "
+            f"(n, {PATCH_FRAMES}, {MEL_BANDS})"
+        )
+    return None
 
 
 def validate_model(path: str):
@@ -269,13 +291,8 @@ def validate_model(path: str):
     inputs = session.get_inputs()
     if not inputs:
         return False, "the model exposes no input"
-    shape = inputs[0].shape
-    if not _input_fits(shape):
-        return False, (
-            f"this model expects {shape}, but the extractor expects "
-            f"(*, {PATCH_FRAMES}, {MEL_BANDS})"
-        )
-    return True, None
+    problem = _input_problem(inputs[0].shape)
+    return (False, problem) if problem else (True, None)
 
 
 def _unlink(path) -> None:
@@ -507,8 +524,9 @@ def _run(patches):
     inp = sess.get_inputs()[0]
     # Believe the model, not our assumption: if its declared input is not what
     # we built, say so rather than feeding it something shaped plausibly wrong.
-    if not _input_fits(inp.shape):
-        raise ValueError(f"model expects {inp.shape}, front-end makes {patches.shape}")
+    problem = _input_problem(inp.shape)
+    if problem:
+        raise ValueError(f"{problem} (front-end makes {patches.shape})")
     outs = sess.run(None, {inp.name: patches.astype(np.float32)})
     # The published model has two outputs: the 400 style activations and the
     # penultimate embedding. Take whichever is EMBED_DIM wide; with a single

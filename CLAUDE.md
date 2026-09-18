@@ -497,8 +497,12 @@ genres". The heuristic above knows the styles it was written with; this teaches 
 - **The model is never vendored and never fetched silently.** It is a third-party artefact with its
   own licence (CC BY-NC-ND), so the operator supplies a copy they obtained themselves — imported
   from the studio's **Extracteur** card (`POST /api/genre/extractor`, admin-only, stored in
-  `<cache_dir>/models/discogs-effnet-bs64-1.onnx`) or pointed at with `[deezer] embed_model`.
-  `supysonic-cli deezer embed --help` says where to get it. onnxruntime is an optional dependency
+  `<cache_dir>/models/discogs-effnet-bsdynamic-1.onnx`) or pointed at with `[deezer] embed_model`.
+  It must be the **dynamic-batch** ONNX export
+  (`https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bsdynamic-1.onnx`):
+  the front-end feeds however many patches a track yields, and the `-bs64` export declares a fixed
+  batch of 64, which onnxruntime refuses — `validate_model` rejects it with that sentence rather than
+  letting it fail at inference. onnxruntime is an optional dependency
   (`pip install 'supysonic[embedding]'`, and in the Docker image): without it the module reports
   itself unavailable and the heuristic classifier keeps doing its job unchanged.
 - **The front-end is the dangerous part.** A mel-spectrogram with the wrong window, scale or
