@@ -841,9 +841,15 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None):
     why = emb.why_unavailable()
     if why:
         say(f"Extractor unavailable: {why}")
-        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0}
+        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": why}
+    # One check up front. A model that cannot load would otherwise be reported as
+    # thousands of per-track failures, which tells the operator nothing.
+    load_err = emb.session_error()
+    if load_err:
+        say(f"Extractor unusable: {load_err}")
+        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": load_err}
 
-    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0}
+    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None}
     for track in Track.select().where(Track.last_modification > 0).order_by(Track.created):
         if limit is not None and stats["done"] >= limit:
             break
@@ -856,9 +862,13 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None):
             stats["skipped"] += 1
             report(stats)
             continue
-        vec = emb.embed_file(track.path)
+        vec, reason = emb.embed_file_verbose(track.path)
         if vec is None or not emb.save_embedding(track, vec):
             stats["failed"] += 1
+            if stats["error"] is None and reason:
+                # The first reason is representative: the usual causes (a broken
+                # model, a missing ffmpeg) fail every track the same way.
+                stats["error"] = reason
             report(stats)
             continue
         stats["done"] += 1

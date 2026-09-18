@@ -4025,6 +4025,8 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertIsNone(emb._input_problem(["n", 128, 96]))
         self.assertIsNone(emb._input_problem([None, 128, 96]))
         self.assertIsNone(emb._input_problem(["n", "p", 96]))
+        # A non-positive leading axis is a dynamic sentinel, not a batch size.
+        self.assertIsNone(emb._input_problem([-1, 128, 96]))
         problem = emb._input_problem([64, 128, 96])
         self.assertIn("fixed batch", problem)
         self.assertIn(emb.MODEL_FILENAME, problem)
@@ -4152,6 +4154,24 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertIn("running", body)
         self.assertIn("total", body)
         self.assertIn("done", body)
+
+    def test_the_embed_backfill_reports_a_reason(self):
+        """A run that cannot measure anything must say WHY in one sentence,
+        not report thousands of per-track failures."""
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer.analysis import backfill_embeddings
+
+        if emb.why_unavailable():
+            stats = backfill_embeddings()
+            self.assertEqual(stats["scanned"], 0)
+            self.assertTrue(stats["error"])
+        # The per-file path carries its own reason too.
+        vec, reason = emb.embed_file_verbose("/no/such/file.mp3")
+        self.assertIsNone(vec)
+        self.assertTrue(reason)
+        with self.app.app_context():
+            err = emb.session_error()
+        self.assertTrue(err is None or isinstance(err, str))
 
     def test_the_embed_worker_reports_progress_and_finishes(self):
         """The job is a worker, not a request: it must fill the counters as it

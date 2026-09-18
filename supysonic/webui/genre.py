@@ -65,14 +65,20 @@ def _extractor_status() -> dict:
     """What the studio needs to know about the extractor."""
     from ..deezer import embedding as emb
 
+    usable = emb.available() and bool(emb.model_path())
     return {
-        "available": emb.available() and bool(emb.model_path()),
+        "available": usable,
         "reason": emb.why_unavailable(),
         "dim": emb.EMBED_DIM,
         "version": emb.EMBED_VERSION,
         "onnxruntime": emb.onnxruntime_available(),
         "model": emb.model_info(),
         "uploadable": emb.can_write_model(),
+        # A model that is present but will not load (a wrong file, an input the
+        # front-end cannot feed) is the one failure that otherwise shows up as
+        # thousands of per-track failures. Loading is cached, so this costs one
+        # model load on the first studio visit and nothing after.
+        "session_error": emb.session_error() if usable else None,
         # Where to get the exact export the front-end needs, so the studio never
         # has to say "find the model file yourself".
         "model_url": emb.MODEL_URL,

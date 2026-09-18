@@ -74,6 +74,16 @@
   let previewId = null;
   let previewTime = 0;
   let previewDuration = 0;
+  let previewSeekTarget = null;
+  // The bar needs a length before the stream reports one (a transcode in
+  // progress has none), so fall back to the candidate's known duration.
+  $: previewTotal = previewDuration || current?.duration || 0;
+  // One volume for the whole app: the preview follows the player's, and the
+  // slider in the preview bar sets it.
+  $: if (audio) {
+    audio.volume = $player.volume;
+    audio.muted = $player.muted;
+  }
 
   // -- training ---------------------------------------------------------------
   // Training modes. The linear head is the default because it is a second and
@@ -270,7 +280,7 @@
   // A dedicated element rather than the real player: previewing a hundred
   // candidates must not touch the queue, the history or the play counts. It
   // does pause the player, because two things playing at once is nobody's
-  // intent.
+  // intent. The volume is the player's own — one volume for the whole app.
   function togglePreview() {
     if (!current) return;
     if (previewing && previewId === current.id) {
@@ -283,15 +293,11 @@
     previewTime = 0;
     previewDuration = 0;
     audio.src = api.streamUrl(current.deezer_id || current.id, $downloadQuality);
-    audio.currentTime = 0;
-    const jump = () => {
-      // A third of the way in: past the intro, into whatever the track actually
-      // is. A genre judged from the first eight bars is a genre judged wrong.
-      if (audio.duration && isFinite(audio.duration))
-        audio.currentTime = audio.duration * 0.33;
-      audio.removeEventListener("loadedmetadata", jump);
-    };
-    audio.addEventListener("loadedmetadata", jump);
+    // A third of the way in: past the intro, into whatever the track actually
+    // is. A genre judged from the first eight bars is a genre judged wrong. The
+    // stream may not be seekable yet (the server archives while it streams), so
+    // this goes through the same chase as a user seek rather than being lost.
+    previewSeekTarget = current.duration ? current.duration * 0.33 : null;
     audio.play().then(
       () => (previewing = true),
       () => (previewing = false)
@@ -302,19 +308,60 @@
     audio.pause();
     previewing = false;
     previewId = null;
+    previewSeekTarget = null;
+  }
+  // Whether the element can currently seek to `t`. A transcode in progress has
+  // no Content-Length, so `duration` is Infinity/NaN and only the buffered
+  // range answers.
+  function previewSeekable(t) {
+    if (!audio) return false;
+    try {
+      const s = audio.seekable;
+      for (let i = 0; i < s.length; i++)
+        if (t >= s.start(i) && t <= s.end(i)) return true;
+    } catch {
+      /* element not ready */
+    }
+    return false;
+  }
+  function applyPreviewSeek(t) {
+    if (!audio) return;
+    if (audio.readyState < 1 || previewSeekable(t)) {
+      try {
+        audio.currentTime = t;
+        previewSeekTarget = null;
+      } catch {
+        previewSeekTarget = t;
+      }
+      return;
+    }
+    // Not seekable yet: remember it and land it as soon as the buffer allows.
+    previewSeekTarget = t;
   }
   // The scrubber follows the element's own clock, so it stays true to whatever
   // the stream/transcode pipeline is actually delivering.
   function onPreviewTime() {
     if (!audio) return;
-    previewTime = audio.currentTime || 0;
     if (audio.duration && isFinite(audio.duration)) previewDuration = audio.duration;
+    if (previewSeekTarget != null) {
+      if (previewSeekable(previewSeekTarget)) {
+        const t = previewSeekTarget;
+        previewSeekTarget = null;
+        try {
+          audio.currentTime = t;
+          previewTime = t;
+        } catch {
+          /* lost the race — the bar falls back to the real position */
+        }
+      }
+      return;
+    }
+    previewTime = audio.currentTime || 0;
   }
   function seekPreview(ev) {
-    if (!audio) return;
-    const t = Math.max(0, Math.min(previewDuration || 0, Number(ev.target.value) || 0));
-    audio.currentTime = t;
+    const t = Math.max(0, Math.min(previewTotal || 0, Number(ev.target.value) || 0));
     previewTime = t;
+    applyPreviewSeek(t);
   }
   const fmtClock = (s) => {
     if (!s || !isFinite(s)) return "0:00";
@@ -538,7 +585,9 @@
       }
       embedPoll = null;
       if (embed?.error) {
-        toasts.push("Calcul interrompu", "error");
+        toasts.push(embed.error, "error");
+      } else if (embed?.failed) {
+        toasts.push(`${embed.failed} titre${embed.failed > 1 ? "s" : ""} en échec`, "error");
       } else {
         const n = embed?.done || 0;
         toasts.push(`${n} empreinte${n > 1 ? "s" : ""} calculée${n > 1 ? "s" : ""}`);
@@ -633,6 +682,8 @@
   on:timeupdate={onPreviewTime}
   on:loadedmetadata={onPreviewTime}
   on:durationchange={onPreviewTime}
+  on:progress={onPreviewTime}
+  on:canplay={onPreviewTime}
   preload="none"
 ></audio>
 
@@ -792,15 +843,31 @@
                 {/if}
               </div>
             {:else}
-              <button class="ghost" on:click={startEmbed}>
+              <button
+                class="ghost"
+                on:click={startEmbed}
+                disabled={!!extractor.session_error}
+              >
                 <Icon name="activity" size={16} /> Calculer les empreintes
               </button>
-              <span class="muted small">
-                Mesure les titres qui n'en ont pas encore — l'entraînement ne voit
-                que ce qui a été mesuré.
-              </span>
+              {#if embed && (embed.done || embed.failed)}
+                <span class="muted small">
+                  Dernier passage : <strong>{embed.done}</strong> calculée{embed.done > 1 ? "s" : ""}{#if embed.failed},
+                    <span class="bad">{embed.failed} en échec</span>{/if}
+                </span>
+              {:else}
+                <span class="muted small">
+                  Mesure les titres qui n'en ont pas encore — l'entraînement ne voit
+                  que ce qui a été mesuré.
+                </span>
+              {/if}
             {/if}
           </div>
+          {#if extractor.session_error}
+            <div class="banner bad">
+              <Icon name="alert" size={16} /><span>{extractor.session_error}</span>
+            </div>
+          {/if}
           {#if embed?.error}
             <div class="banner bad">
               <Icon name="alert" size={16} /><span>{embed.error}</span>
@@ -892,14 +959,34 @@
               class="seek"
               type="range"
               min="0"
-              max={previewDuration || 0}
+              max={previewTotal}
               step="0.1"
               value={previewTime}
               on:input={seekPreview}
-              disabled={!previewDuration}
+              disabled={!previewTotal}
               aria-label="Position de la préécoute"
             />
-            <span class="ptime">{fmtClock(previewDuration)}</span>
+            <span class="ptime">{fmtClock(previewTotal)}</span>
+            <button
+              class="icon-btn"
+              on:click={() => player.toggleMute()}
+              aria-label={$player.muted ? "Rétablir le son" : "Muet"}
+            >
+              <Icon
+                name={$player.muted || $player.volume === 0 ? "mute" : "volume"}
+                size={15}
+              />
+            </button>
+            <input
+              class="pvol"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={$player.muted ? 0 : $player.volume}
+              on:input={(e) => player.setVolume(+e.target.value)}
+              aria-label="Volume"
+            />
           </div>
 
           <div class="choices">
@@ -963,6 +1050,14 @@
             <span>
               <code>onnxruntime</code> n'est pas installé sur le serveur : le modèle ne
               pourra pas tourner avant d'installer <code>supysonic[embedding]</code>.
+            </span>
+          </div>
+        {/if}
+        {#if extractor.session_error}
+          <div class="banner bad">
+            <Icon name="alert" size={16} />
+            <span>
+              Le modèle est présent mais ne se charge pas : {extractor.session_error}
             </span>
           </div>
         {/if}
@@ -1528,6 +1623,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-wrap: wrap;
     margin-top: 10px;
     padding: 6px 10px;
     background: var(--surface-2, #1b1d21);
@@ -1551,7 +1647,8 @@
     text-align: center;
   }
   .seek {
-    flex: 1;
+    flex: 1 1 140px;
+    min-width: 100px;
     -webkit-appearance: none;
     appearance: none;
     height: 4px;
@@ -1580,6 +1677,34 @@
   .seek:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  .pvol {
+    flex: 0 0 84px;
+    width: 84px;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--surface-3, #24262b);
+    outline: none;
+    cursor: pointer;
+  }
+  .pvol::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--accent, #22d3ee);
+    border: 0;
+    cursor: pointer;
+  }
+  .pvol::-moz-range-thumb {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--accent, #22d3ee);
+    border: 0;
+    cursor: pointer;
   }
   .art {
     position: relative;

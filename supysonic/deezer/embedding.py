@@ -87,6 +87,8 @@ FFMPEG_TIMEOUT = 300
 _lock = threading.Lock()
 _session = None
 _session_failed = False
+# Why the last load failed, so the studio can say more than "0 computed".
+_session_error = None
 _mel_fb = None
 
 
@@ -260,8 +262,9 @@ def _input_problem(shape) -> str | None:
         return "the model declares no input shape"
     # The front-end feeds a different number of patches per track, so a fixed
     # batch axis is fatal — and it is the exact trap of grabbing the "-bs64"
-    # export instead of the dynamic one.
-    if isinstance(shape[0], int):
+    # export instead of the dynamic one. Non-positive integers are sentinels for
+    # a dynamic axis in some exports, not a real batch size.
+    if isinstance(shape[0], int) and shape[0] > 1:
         return (
             f"this model has a fixed batch size ({shape[0]}); use the "
             f"dynamic-batch export {MODEL_FILENAME}"
@@ -379,10 +382,11 @@ def delete_model() -> bool:
 
 def reset_session() -> None:
     """Forget the loaded model so the next extraction reloads from disk."""
-    global _session, _session_failed
+    global _session, _session_failed, _session_error
     with _lock:
         _session = None
         _session_failed = False
+        _session_error = None
 
 
 def _mel_filterbank(np):
@@ -489,7 +493,7 @@ def _make_session(path):
 
 
 def _load_session():
-    global _session, _session_failed
+    global _session, _session_failed, _session_error
     if _session is not None or _session_failed:
         return _session
     with _lock:
@@ -498,20 +502,34 @@ def _load_session():
         path = model_path()
         if not path:
             _session_failed = True
+            _session_error = "no model file"
             return None
         try:
             _session = _make_session(path)
+            _session_error = None
             logger.info(
                 "embedding model loaded: %s (inputs=%s outputs=%s)",
                 os.path.basename(path),
                 [(i.name, i.shape) for i in _session.get_inputs()],
                 [o.name for o in _session.get_outputs()],
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("embedding: could not load %s", path, exc_info=True)
             _session_failed = True
             _session = None
+            _session_error = f"{os.path.basename(path)}: {exc}"
     return _session
+
+
+def session_error() -> str | None:
+    """Why the model cannot be used, or None when it loads.
+
+    Loading is cached, so this is cheap after the first call. The studio asks
+    once before a backfill: failing 3000 tracks one by one tells the operator
+    nothing, while one sentence about the model tells them everything."""
+    if _load_session() is not None:
+        return None
+    return _session_error or "the model could not be loaded (see the server log)"
 
 
 def _run(patches):
@@ -545,18 +563,30 @@ def _run(patches):
 
 def embed_file(path):
     """A single L2-normalized vector summarising the whole file, or None."""
+    vec, _reason = embed_file_verbose(path)
+    return vec
+
+
+def embed_file_verbose(path):
+    """``(vector, reason)`` — exactly one of which is set.
+
+    The reason is what turns "3000 tracks failed" into a sentence the operator
+    can act on: a missing ffmpeg, a model with the wrong input shape, a file
+    that is too short."""
+    if not available():
+        return None, why_unavailable() or "extractor unavailable"
+    if not os.path.isfile(path):
+        return None, "file missing"
     import numpy as np
 
-    if not available() or not os.path.isfile(path):
-        return None
     try:
         mel = _log_mel(_decode(path))
-    except Exception:
+    except Exception as exc:
         logger.warning("embedding: front-end failed for %s", path, exc_info=True)
-        return None
+        return None, f"decode/front-end: {exc}"
     total = mel.shape[0] // PATCH_FRAMES
     if total < 1:
-        return None
+        return None, "too short to embed"
     # Spread the patches over the whole track rather than taking the first two
     # minutes: an intro is the least representative part of a piece, which is
     # the entire reason this is measured over the whole file.
@@ -565,10 +595,12 @@ def embed_file(path):
     patches = np.stack([mel[j * PATCH_FRAMES : (j + 1) * PATCH_FRAMES] for j in idx])
     try:
         vec = _run(patches)
-    except Exception:
+    except Exception as exc:
         logger.warning("embedding: inference failed for %s", path, exc_info=True)
-        return None
-    return None if vec is None else vec.astype("float32")
+        return None, f"inference: {exc}"
+    if vec is None:
+        return None, session_error() or "no model session"
+    return vec.astype("float32"), None
 
 
 # --- storage ----------------------------------------------------------------

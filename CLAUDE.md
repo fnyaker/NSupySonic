@@ -560,8 +560,10 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   keyboard is the interface (`1`…`9` choose, `↵` confirms, `→` skips, `espace` previews) and the
   preview jumps a third of the way into the track — nobody judges a genre from the intro. The
   preview carries a **seek bar that follows the element's own clock**, so it stays true to whatever
-  the stream/transcode pipeline is actually delivering. The button is in Réglages → Animations →
-  Analyse rythmique.
+  the stream/transcode pipeline is actually delivering: its length falls back to the candidate's
+  known duration when the stream reports none, and a seek on a not-yet-seekable source is chased
+  and landed as soon as the buffer allows rather than being dropped. The preview shares the
+  player's volume, with its own slider. The button is in Réglages → Animations → Analyse rythmique.
 
 **Audio analysis** (`webapp/src/lib/audio/`) is ONE engine, shared. `engine.js` owns a single clock
 and a single pass over the analysers; every view reads the same frame object by reference, so a
