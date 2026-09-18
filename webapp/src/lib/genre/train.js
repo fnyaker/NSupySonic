@@ -377,9 +377,11 @@ function f32ToF16(value) {
  */
 export function encodeHead(head) {
   const blocks =
-    head.kind === "mlp"
-      ? [head.W1, head.b1, head.W2, head.b2]
-      : [head.W, head.b];
+    head.kind === "mlp2"
+      ? [head.W1, head.b1, head.W2, head.b2, head.W3, head.b3]
+      : head.kind === "mlp"
+        ? [head.W1, head.b1, head.W2, head.b2]
+        : [head.W, head.b];
   let total = 0;
   for (const blk of blocks) total += blk.length;
   const out = new Uint16Array(total);

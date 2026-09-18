@@ -159,6 +159,20 @@ test("encodeHead lays an MLP out as W1, b1, W2, b2", () => {
   assert.deepEqual(Array.from(back), [1, 2, 3, 4, 0.5, 0.25, 8, 16, -2]);
 });
 
+test("encodeHead lays a two-layer MLP out as W1,b1,W2,b2,W3,b3", () => {
+  const head = {
+    kind: "mlp2",
+    W1: Float32Array.from([1, 2]),
+    b1: Float32Array.from([0.5]),
+    W2: Float32Array.from([3]),
+    b2: Float32Array.from([0.25]),
+    W3: Float32Array.from([4]),
+    b3: Float32Array.from([-1]),
+  };
+  const back = decodeEmbedding(encodeHead(head));
+  assert.deepEqual(Array.from(back), [1, 2, 0.5, 3, 0.25, 4, -1]);
+});
+
 test("a big head survives encoding (no argument-count overflow)", () => {
   // String.fromCharCode.apply blows the stack past ~100k arguments, which a
   // 128x1280 first layer is well past — this is the chunking, pinned.
@@ -271,6 +285,25 @@ test("the folded-back first layer is the one that was trained", async () => {
   // A projected matrix copied straight out would leave 8*32 = 256 values and
   // the rest zero; the composition is dense.
   assert.ok(nonzero > 8 * 128 * 0.9, `only ${nonzero} non-zero weights`);
+});
+
+test("a second hidden layer ships as an mlp2 and still learns", async () => {
+  const data = clusters(5, 16, 256, 0.08, 17);
+  const head = await trainDeep(data, KERNEL, null, {
+    epochs: 40,
+    folds: 2,
+    hidden: 32,
+    hidden2: 32,
+  });
+  assert.equal(head.kind, "mlp2");
+  assert.equal(head.metrics.hidden2, 32);
+  assert.equal(head.W1.length, 32 * data.d);
+  assert.equal(head.b1.length, 32);
+  assert.equal(head.W2.length, 32 * 32);
+  assert.equal(head.b2.length, 32);
+  assert.equal(head.W3.length, data.labels.length * 32);
+  assert.equal(head.b3.length, data.labels.length);
+  assert.ok(head.metrics.balanced > 0.9, `balanced was ${head.metrics.balanced}`);
 });
 
 test("deep training refuses a set too small to mean anything", async () => {

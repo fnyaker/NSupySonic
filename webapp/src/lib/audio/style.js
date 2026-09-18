@@ -381,6 +381,229 @@ const FAMILIES = [
       below(s.crest, 3, 1.8) *
       above(s.midRatio, 0.3, 0.25),
   },
+  // --- urbain / global ------------------------------------------------------
+  {
+    id: "rap",
+    label: "Rap",
+    a: "voice",
+    // Words over a beat: the syllabic modulation is the tell, not the grid.
+    w: (s) =>
+      inRange(s.bpm, 80, 105, 18) *
+      above(s.vocal, 0.32, 0.3) *
+      below(s.flat, 0.45, 0.25) *
+      inRange(s.centroid, 0.25, 0.6),
+  },
+  {
+    id: "trap",
+    label: "Trap",
+    a: "groove",
+    // Half-time 808: sparse kicks, a lot of sub, hats doing the motion.
+    w: (s) =>
+      inRange(s.bpm, 128, 152, 12) *
+      above(s.subRatio, 0.3, 0.2) *
+      below(s.kickPulse, 0.62, 0.3) *
+      above(s.perc, 0.4, 0.3),
+  },
+  {
+    id: "reggaeton",
+    label: "Reggaeton",
+    a: "groove",
+    // Dembow: a steady mid-tempo grid with a heavy, round low end.
+    w: (s) =>
+      inRange(s.bpm, 86, 104, 10) *
+      above(s.kickPulse, 0.45, 0.3) *
+      above(s.subRatio, 0.22, 0.2) *
+      below(s.flat, 0.5, 0.25),
+  },
+  {
+    id: "afrohouse",
+    label: "Afro house",
+    a: "groove",
+    // Percussive and organic: busy transients over a four-on-the-floor.
+    w: (s) =>
+      inRange(s.bpm, 116, 126, 8) *
+      above(s.kickPulse, 0.5, 0.3) *
+      above(s.perc, 0.5, 0.3) *
+      below(s.flat, 0.45, 0.25),
+  },
+  {
+    id: "amapiano",
+    label: "Amapiano",
+    a: "groove",
+    // The log drum: sub-heavy, sparse and slow for a house grid.
+    w: (s) =>
+      inRange(s.bpm, 106, 120, 8) *
+      above(s.subRatio, 0.28, 0.2) *
+      below(s.kickPulse, 0.62, 0.3) *
+      below(s.centroid, 0.55, 0.25),
+  },
+  {
+    id: "garage",
+    label: "UK garage",
+    a: "groove",
+    // Shuffled two-step: sub bass, busy percussion, off-grid hits.
+    w: (s) =>
+      inRange(s.bpm, 126, 140, 8) *
+      inRange(s.kickPulse, 0.25, 0.65, 0.25) *
+      above(s.subRatio, 0.24, 0.2) *
+      above(s.perc, 0.5, 0.3),
+  },
+  {
+    id: "breakbeat",
+    label: "Breakbeat",
+    a: "groove",
+    // A broken beat under a steady tempo — the kick is not on every beat.
+    w: (s) =>
+      inRange(s.bpm, 125, 152, 10) *
+      inRange(s.kickPulse, 0.25, 0.65, 0.25) *
+      above(s.perc, 0.55, 0.3),
+  },
+  {
+    id: "dancehall",
+    label: "Dancehall",
+    a: "groove",
+    // Riddim: mid-tempo, sub-heavy, less strictly gridded than house.
+    w: (s) =>
+      inRange(s.bpm, 88, 112, 10) *
+      above(s.kickPulse, 0.45, 0.3) *
+      above(s.subRatio, 0.22, 0.2) *
+      below(s.flat, 0.45, 0.25),
+  },
+  {
+    id: "reggae",
+    label: "Reggae",
+    a: "groove",
+    // The offbeat skank over a slow, deep one-drop.
+    w: (s) =>
+      inRange(s.bpm, 58, 92, 12) *
+      above(s.subRatio, 0.24, 0.2) *
+      below(s.flat, 0.45, 0.25) *
+      above(s.perc, 0.4, 0.3),
+  },
+  // --- house / downtempo ----------------------------------------------------
+  {
+    id: "synthwave",
+    label: "Synthwave",
+    a: "groove",
+    // Retro: a clean grid under warm, sustained analogue pads.
+    w: (s) =>
+      inRange(s.bpm, 98, 122, 10) *
+      above(s.kickPulse, 0.4, 0.3) *
+      below(s.flat, 0.42, 0.22) *
+      inRange(s.centroid, 0.3, 0.65),
+  },
+  {
+    id: "funk",
+    label: "Funk",
+    a: "groove",
+    // Played and syncopated, bright and dry rather than distorted.
+    w: (s) =>
+      inRange(s.bpm, 95, 125, 12) *
+      above(s.kickPulse, 0.4, 0.3) *
+      above(s.perc, 0.55, 0.3) *
+      below(s.flat, 0.45, 0.25),
+  },
+  {
+    id: "lofi",
+    label: "Lo-fi",
+    a: "sustain",
+    // Slow, soft and warm, with the top end rolled off.
+    w: (s) =>
+      inRange(s.bpm, 68, 98, 12) *
+      below(s.kickPulse, 0.5, 0.3) *
+      below(s.centroid, 0.5, 0.22) *
+      below(s.perc, 0.5, 0.3),
+  },
+  // --- voix / racines -------------------------------------------------------
+  {
+    id: "pop",
+    label: "Pop",
+    a: "voice",
+    // A sung hook, clean and bright, on a light grid.
+    w: (s) =>
+      inRange(s.bpm, 88, 132, 14) *
+      above(s.vocal, 0.3, 0.3) *
+      below(s.flat, 0.45, 0.25) *
+      inRange(s.centroid, 0.3, 0.68),
+  },
+  {
+    id: "soul",
+    label: "Soul",
+    a: "voice",
+    // A warm, vocal, played mid-tempo with dynamics left in.
+    w: (s) =>
+      inRange(s.bpm, 58, 102, 16) *
+      above(s.vocal, 0.3, 0.3) *
+      below(s.flat, 0.45, 0.25) *
+      inRange(s.centroid, 0.25, 0.6),
+  },
+  {
+    id: "blues",
+    label: "Blues",
+    a: "voice",
+    // Live instruments, real crest, a wide dynamic range.
+    w: (s) =>
+      inRange(s.bpm, 58, 122, 18) *
+      below(s.flat, 0.45, 0.25) *
+      above(s.crest, 2.8, 2.5) *
+      inRange(s.centroid, 0.25, 0.6),
+  },
+  {
+    id: "country",
+    label: "Country",
+    a: "voice",
+    // Acoustic and sung, again with the dynamics a limiter would erase.
+    w: (s) =>
+      inRange(s.bpm, 78, 142, 20) *
+      above(s.vocal, 0.25, 0.3) *
+      below(s.flat, 0.45, 0.25) *
+      above(s.crest, 2.8, 2.5),
+  },
+  {
+    id: "folk",
+    label: "Folk",
+    a: "voice",
+    // Sparse and acoustic: tonal, quiet transients, no machine pulse.
+    w: (s) =>
+      inRange(s.bpm, 78, 132, 18) *
+      below(s.flat, 0.4, 0.22) *
+      below(s.perc, 0.45, 0.3) *
+      above(s.crest, 3, 2.5),
+  },
+  // --- rock ----------------------------------------------------------------
+  {
+    id: "punk",
+    label: "Punk",
+    a: "rock",
+    // Fast, raw and loud, but played rather than programmed.
+    w: (s) =>
+      inRange(s.bpm, 140, 205, 20) *
+      above(s.flat, 0.42, 0.22) *
+      above(s.midRatio, 0.3, 0.25) *
+      below(s.kickPulse, 0.65, 0.3),
+  },
+  {
+    id: "indie",
+    label: "Indie",
+    a: "rock",
+    // Guitars and a live kit, less saturated than metal or hard rock.
+    w: (s) =>
+      inRange(s.bpm, 98, 152, 18) *
+      inRange(s.flat, 0.32, 0.62, 0.2) *
+      above(s.midRatio, 0.28, 0.25) *
+      below(s.kickPulse, 0.6, 0.3),
+  },
+  {
+    id: "hardrock",
+    label: "Hard rock",
+    a: "rock",
+    // Distorted guitars and a real drum kit, short of metal's wall.
+    w: (s) =>
+      inRange(s.bpm, 98, 152, 18) *
+      above(s.flat, 0.42, 0.22) *
+      above(s.midRatio, 0.32, 0.25) *
+      below(s.kickPulse, 0.62, 0.3),
+  },
   {
     id: "electronic",
     label: "Électronique",

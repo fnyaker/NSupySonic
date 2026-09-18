@@ -72,8 +72,36 @@
   let audio = null;
   let previewing = false;
   let previewId = null;
+  let previewTime = 0;
+  let previewDuration = 0;
 
   // -- training ---------------------------------------------------------------
+  // Training modes. The linear head is the default because it is a second and
+  // often enough; the deep ones are the escalation, and the second is bigger
+  // still because the boundaries that survive a 256-wide MLP are the genuinely
+  // hard ones.
+  const MODES = [
+    {
+      id: "linear",
+      label: "Rapide",
+      desc: "Tête linéaire. Une seconde. Le bon choix par défaut.",
+    },
+    {
+      id: "deep",
+      label: "Approfondi",
+      desc: "Réseau 256, une couche cachée, compilé en WebAssembly. Quelques secondes.",
+    },
+    {
+      id: "deep2",
+      label: "Maximum",
+      desc: "Réseau 2×512, deux couches cachées. Plusieurs minutes — pour les genres que rien d'autre ne sépare.",
+    },
+  ];
+  const TRAIN_OPTS = {
+    linear: {},
+    deep: { hidden: 256, hidden2: 0, epochs: 120 },
+    deep2: { hidden: 512, hidden2: 512, epochs: 180 },
+  };
   let mode = "linear";
   let training = false;
   let progress = 0;
@@ -252,6 +280,8 @@
     if (!audio) return;
     player.pause();
     previewId = current.id;
+    previewTime = 0;
+    previewDuration = 0;
     audio.src = api.streamUrl(current.deezer_id || current.id, $downloadQuality);
     audio.currentTime = 0;
     const jump = () => {
@@ -273,6 +303,24 @@
     previewing = false;
     previewId = null;
   }
+  // The scrubber follows the element's own clock, so it stays true to whatever
+  // the stream/transcode pipeline is actually delivering.
+  function onPreviewTime() {
+    if (!audio) return;
+    previewTime = audio.currentTime || 0;
+    if (audio.duration && isFinite(audio.duration)) previewDuration = audio.duration;
+  }
+  function seekPreview(ev) {
+    if (!audio) return;
+    const t = Math.max(0, Math.min(previewDuration || 0, Number(ev.target.value) || 0));
+    audio.currentTime = t;
+    previewTime = t;
+  }
+  const fmtClock = (s) => {
+    if (!s || !isFinite(s)) return "0:00";
+    const m = Math.floor(s / 60);
+    return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  };
 
   // -- training ---------------------------------------------------------------
   async function buildMatrix() {
@@ -323,15 +371,15 @@
     try {
       const data = await buildMatrix();
       const skipped = data.skipped;
-      progressStage = mode === "deep" ? "entraînement approfondi" : "entraînement";
+      progressStage = mode === "linear" ? "entraînement" : "entraînement approfondi";
       const trained = await train(
         data,
-        mode,
+        mode === "linear" ? "linear" : "deep",
         (stage, pct) => {
           progressStage = stage === "done" ? "terminé" : progressStage;
           progress = 0.25 + 0.75 * (pct || 0);
         },
-        {}
+        TRAIN_OPTS[mode] || {}
       );
       trained.skipped = skipped;
       head = trained;
@@ -579,7 +627,14 @@
 </script>
 
 <svelte:window on:keydown={onKey} />
-<audio bind:this={audio} on:ended={stopPreview} preload="none"></audio>
+<audio
+  bind:this={audio}
+  on:ended={stopPreview}
+  on:timeupdate={onPreviewTime}
+  on:loadedmetadata={onPreviewTime}
+  on:durationchange={onPreviewTime}
+  preload="none"
+></audio>
 
 <div class="page">
   <header class="head">
@@ -821,6 +876,32 @@
             </div>
           </div>
 
+          <div class="preview-bar" class:on={previewId === current.id}>
+            <button
+              class="icon-btn"
+              on:click={togglePreview}
+              aria-label={previewing && previewId === current.id ? "Pause" : "Écouter un extrait"}
+            >
+              <Icon
+                name={previewing && previewId === current.id ? "pause" : "play"}
+                size={16}
+              />
+            </button>
+            <span class="ptime">{fmtClock(previewTime)}</span>
+            <input
+              class="seek"
+              type="range"
+              min="0"
+              max={previewDuration || 0}
+              step="0.1"
+              value={previewTime}
+              on:input={seekPreview}
+              disabled={!previewDuration}
+              aria-label="Position de la préécoute"
+            />
+            <span class="ptime">{fmtClock(previewDuration)}</span>
+          </div>
+
           <div class="choices">
             {#each tags as tag, i}
               <button
@@ -1027,17 +1108,12 @@
         {/if}
 
         <div class="modes">
-          <button class="mode" class:sel={mode === "linear"} on:click={() => (mode = "linear")}>
-            <strong>Rapide</strong>
-            <span class="muted">Tête linéaire. Une seconde. Le bon choix par défaut.</span>
-          </button>
-          <button class="mode" class:sel={mode === "deep"} on:click={() => (mode = "deep")}>
-            <strong>Approfondi</strong>
-            <span class="muted">
-              Réseau à couche cachée, compilé en WebAssembly. Quelques secondes, pour
-              les genres que le mode rapide n'arrive pas à séparer.
-            </span>
-          </button>
+          {#each MODES as m}
+            <button class="mode" class:sel={mode === m.id} on:click={() => (mode = m.id)}>
+              <strong>{m.label}</strong>
+              <span class="muted">{m.desc}</span>
+            </button>
+          {/each}
         </div>
 
         <div class="run">
@@ -1447,6 +1523,63 @@
     background: var(--surface-2, #1b1d21);
     border-radius: 16px;
     padding: 18px;
+  }
+  .preview-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+    padding: 6px 10px;
+    background: var(--surface-2, #1b1d21);
+    border-radius: 12px;
+    opacity: 0.75;
+    transition: opacity 0.15s, box-shadow 0.15s;
+  }
+  .preview-bar.on {
+    opacity: 1;
+    box-shadow: 0 0 0 1px var(--accent, #22d3ee) inset;
+  }
+  .preview-bar .icon-btn {
+    width: 32px;
+    height: 32px;
+  }
+  .ptime {
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim, #9aa0a6);
+    min-width: 34px;
+    text-align: center;
+  }
+  .seek {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--surface-3, #24262b);
+    outline: none;
+    cursor: pointer;
+  }
+  .seek::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent, #22d3ee);
+    border: 0;
+    cursor: pointer;
+  }
+  .seek::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent, #22d3ee);
+    border: 0;
+    cursor: pointer;
+  }
+  .seek:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .art {
     position: relative;

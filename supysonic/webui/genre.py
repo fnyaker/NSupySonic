@@ -38,10 +38,10 @@ CANDIDATE_MAX = 100
 # that a normal library fills the page on the first pass, small enough that a
 # pathological one cannot turn the request into a table scan.
 CANDIDATE_SCAN_MAX = 4000
-# A head for a 1280-d extractor and fifty genres is ~130 KB of base64. Four
-# megabytes is far past anything legitimate and stops a bad request from being
-# a memory problem.
-MODEL_MAX_BYTES = 4 * 1024 * 1024
+# A head for a 1280-d extractor and fifty genres is ~130 KB of base64. A big
+# two-layer MLP (2x512) is ~2.5 MB. Eight megabytes is far past anything
+# legitimate and stops a bad request from being a memory problem.
+MODEL_MAX_BYTES = 8 * 1024 * 1024
 ARCHETYPES = ("sustain", "voice", "groove", "hard", "rock")
 
 # -- the extractor's self-test job -------------------------------------------
@@ -630,10 +630,10 @@ def genre_model():
         return jsonify({"error": "bad dim"}), 400
 
     kind = str(data.get("kind") or "linear").lower()
-    if kind not in ("linear", "mlp"):
+    if kind not in ("linear", "mlp", "mlp2"):
         return jsonify({"error": "unknown kind"}), 400
     hidden = int(data.get("hidden") or 0)
-    if kind == "mlp" and not (1 <= hidden <= 2048):
+    if kind in ("mlp", "mlp2") and not (1 <= hidden <= 2048):
         return jsonify({"error": "bad hidden size"}), 400
 
     row = GenreModel.create(

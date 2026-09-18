@@ -490,12 +490,12 @@ stand in for an event.
 genres". The heuristic above knows the styles it was written with; this teaches it yours.
 
 - **The studio opens onto the engine's own vocabulary.** The first admin visit seeds a `GenreTag`
-  per family in `analysis.FAMILIES` (label, colour, archetype), so tagging starts by CONFIRMING a
-  guess instead of typing thirty genres first. It is additive and version-aware (a `Meta` value
-  remembers how many the engine knew): a release that adds families re-syncs them on the next admin
-  visit, a genre you delete stays deleted as long as the vocabulary has not changed, and the
-  *Genres du moteur* button brings back just the missing ones. Only the admin seeds; a guest reading
-  `/genre/status` writes nothing.
+  per family in `analysis.FAMILIES` (label, colour, archetype) — fifty-odd, from ambient to
+  speedcore, rap to psytrance — so tagging starts by CONFIRMING a guess instead of typing the
+  vocabulary first. It is additive and version-aware (a `Meta` value remembers how many the engine
+  knew): a release that adds families re-syncs them on the next admin visit, a genre you delete
+  stays deleted as long as the vocabulary has not changed, and the *Genres du moteur* button brings
+  back just the missing ones. Only the admin seeds; a guest reading `/genre/status` writes nothing.
 - **Measuring the library is a button, not a shell.** The Étiquetage tab starts the very backfill
   the CLI runs (`POST /genre/embed`, admin-only, worker + poll): every archived track without a
   vector is decoded once, so pressing it again only picks up what has been archived since. The
@@ -529,12 +529,14 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   set on one that does not — and that is also why the studio's candidate list is never gated on the
   extractor.
 - **Training is the browser's job, in a Worker** (`lib/genre/trainer.js` → `worker.js`). Seconds of
-  solid arithmetic on the main thread is not a progress bar, it is a freeze. Two trainers:
-  `train.js` is a linear softmax head (a second, the right default), `deep.js` is an MLP on a
+  solid arithmetic on the main thread is not a progress bar, it is a freeze. Three modes:
+  `train.js` is a linear softmax head (a second, the right default), and `deep.js` is an MLP on a
   committed WebAssembly kernel (`wasm/kernel.c`, `build.sh`, ~4 KB) for the genres a plane cannot
-  separate — hardtekk against frenchcore, zaag against uptempo. Measured against the identical loops
-  in JavaScript, the kernel's `fwd` is 8× and `accum_outer` 12×. The `.wasm` is committed on purpose:
-  no toolchain is needed to build this repository.
+  separate — hardtekk against frenchcore, zaag against uptempo. The MLP is a **generic stack of
+  dense layers**, so the studio offers one hidden layer (256) or two (2×512): the second bends a
+  boundary the first only bent once. Measured against the identical loops in JavaScript, the
+  kernel's `fwd` is 8× and `accum_outer` 12×. The `.wasm` is committed on purpose: no toolchain is
+  needed to build this repository.
 - The linear trainer's **random projection is decided by the score**, not assumed: it is free on
   clustered data (1.000 at 4× the speed) and costly on marginal data, so it trains projected and
   re-runs at full width when balanced accuracy comes back under 0.8. The deep trainer keeps the same
@@ -549,14 +551,17 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   left out. And two users disagreeing about what hardtekk is would train the single shared model
   against itself.
 - The studio ships the head as base64 float16 (`encodeHead`: `W, b` for a linear head, `W1, b1, W2,
-  b2` for an MLP) and `PUT /api/genre/model` **refuses a head it cannot read back** — it stores,
-  re-reads, and deletes the row if the weights do not match the labels and dim given. A model stored
-  but unusable would silently do nothing for ever.
+  b2` for an MLP, `W1, b1, W2, b2, W3, b3` for a two-hidden-layer one) and `PUT /api/genre/model`
+  **refuses a head it cannot read back** — it stores, re-reads, and deletes the row if the weights
+  do not match the labels and dim given. A model stored but unusable would silently do nothing for
+  ever.
 - Tagging is **confirming, not typing**: every candidate arrives with the current model's guess,
   ordered by play count (the labels that matter are on the music this library actually plays), the
   keyboard is the interface (`1`…`9` choose, `↵` confirms, `→` skips, `espace` previews) and the
-  preview jumps a third of the way into the track — nobody judges a genre from the intro. The button
-  is in Réglages → Animations → Analyse rythmique.
+  preview jumps a third of the way into the track — nobody judges a genre from the intro. The
+  preview carries a **seek bar that follows the element's own clock**, so it stays true to whatever
+  the stream/transcode pipeline is actually delivering. The button is in Réglages → Animations →
+  Analyse rythmique.
 
 **Audio analysis** (`webapp/src/lib/audio/`) is ONE engine, shared. `engine.js` owns a single clock
 and a single pass over the analysers; every view reads the same frame object by reference, so a

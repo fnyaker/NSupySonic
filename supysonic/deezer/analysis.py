@@ -484,6 +484,70 @@ FAMILIES = [
     ("brutal", "Death / brutal", "rock", lambda f: (
         _in_range(f["bpm"], 200, 300, 40) * _above(f["flatness"], 0.55, 0.2)
         * _below(f["lra"], 5, 2.5) * _below(f["pulse"], 0.6, 0.3))),
+    # --- urbain / global ----------------------------------------------------
+    ("rap", "Rap", "voice", lambda f: (
+        _in_range(f["bpm"], 80, 105, 18) * _above(f["pulse"], 0.35, 0.3)
+        * _below(f["flatness"], 0.4, 0.22) * _in_range(f["centroid"], 700, 2600, 1200))),
+    ("trap", "Trap", "groove", lambda f: (
+        _in_range(f["bpm"], 128, 152, 12) * _below(f["pulse"], 0.68, 0.3)
+        * _below(f["centroid"], 2400, 1200) * _below(f["lra"], 7, 3))),
+    ("reggaeton", "Reggaeton", "groove", lambda f: (
+        _in_range(f["bpm"], 86, 104, 10) * _above(f["pulse"], 0.45, 0.3)
+        * _below(f["flatness"], 0.45, 0.22) * _below(f["centroid"], 2800, 1400))),
+    ("afrohouse", "Afro house", "groove", lambda f: (
+        _in_range(f["bpm"], 116, 126, 8) * _above(f["pulse"], 0.5, 0.3)
+        * _below(f["flatness"], 0.42, 0.22) * _above(f["flux_peak"], 1.3, 0.6))),
+    ("amapiano", "Amapiano", "groove", lambda f: (
+        _in_range(f["bpm"], 106, 120, 8) * _above(f["pulse"], 0.45, 0.3)
+        * _below(f["centroid"], 2400, 1200) * _below(f["lra"], 7, 3))),
+    ("garage", "UK garage", "groove", lambda f: (
+        _in_range(f["bpm"], 126, 140, 8) * _in_range(f["pulse"], 0.3, 0.7, 0.25)
+        * _above(f["flux_peak"], 1.4, 0.6) * _below(f["flatness"], 0.45, 0.22))),
+    ("breakbeat", "Breakbeat", "groove", lambda f: (
+        _in_range(f["bpm"], 125, 152, 10) * _in_range(f["pulse"], 0.3, 0.7, 0.25)
+        * _above(f["flux_peak"], 1.5, 0.7) * _below(f["flatness"], 0.5, 0.2))),
+    ("dancehall", "Dancehall", "groove", lambda f: (
+        _in_range(f["bpm"], 88, 112, 10) * _above(f["pulse"], 0.45, 0.3)
+        * _below(f["flatness"], 0.42, 0.22) * _below(f["centroid"], 2600, 1300))),
+    ("reggae", "Reggae", "groove", lambda f: (
+        _in_range(f["bpm"], 58, 92, 12) * _below(f["flatness"], 0.42, 0.22)
+        * _in_range(f["centroid"], 700, 2800, 1300) * _below(f["lra"], 8, 3))),
+    # --- house / downtempo --------------------------------------------------
+    ("synthwave", "Synthwave", "groove", lambda f: (
+        _in_range(f["bpm"], 98, 122, 10) * _above(f["pulse"], 0.4, 0.3)
+        * _below(f["flatness"], 0.4, 0.2) * _in_range(f["centroid"], 1200, 3200, 1400))),
+    ("funk", "Funk", "groove", lambda f: (
+        _in_range(f["bpm"], 95, 125, 12) * _above(f["pulse"], 0.45, 0.3)
+        * _below(f["flatness"], 0.42, 0.2) * _above(f["flux_peak"], 1.4, 0.6))),
+    ("lofi", "Lo-fi", "sustain", lambda f: (
+        _in_range(f["bpm"], 68, 98, 12) * _below(f["pulse"], 0.5, 0.3)
+        * _below(f["centroid"], 2200, 1200) * _below(f["lra"], 7, 3))),
+    # --- voix / racines -----------------------------------------------------
+    ("pop", "Pop", "voice", lambda f: (
+        _in_range(f["bpm"], 88, 132, 14) * _above(f["pulse"], 0.4, 0.3)
+        * _below(f["flatness"], 0.42, 0.22) * _in_range(f["centroid"], 1000, 3400, 1300))),
+    ("soul", "Soul", "voice", lambda f: (
+        _in_range(f["bpm"], 58, 102, 16) * _below(f["flatness"], 0.4, 0.2)
+        * _in_range(f["centroid"], 700, 2800, 1300) * _in_range(f["lra"], 5, 12, 4))),
+    ("blues", "Blues", "voice", lambda f: (
+        _in_range(f["bpm"], 58, 122, 18) * _below(f["flatness"], 0.42, 0.22)
+        * _in_range(f["lra"], 6, 14, 4) * _in_range(f["centroid"], 700, 3000, 1300))),
+    ("country", "Country", "voice", lambda f: (
+        _in_range(f["bpm"], 78, 142, 20) * _below(f["flatness"], 0.4, 0.2)
+        * _in_range(f["lra"], 6, 14, 4) * _in_range(f["centroid"], 900, 3200, 1300))),
+    ("folk", "Folk", "voice", lambda f: (
+        _in_range(f["bpm"], 78, 132, 18) * _below(f["flatness"], 0.35, 0.2)
+        * _below(f["pulse"], 0.5, 0.3) * _in_range(f["lra"], 7, 15, 4))),
+    # --- rock ---------------------------------------------------------------
+    ("punk", "Punk", "rock", lambda f: (
+        _in_range(f["bpm"], 140, 205, 20) * _above(f["flatness"], 0.4, 0.22)
+        * _below(f["lra"], 7, 3) * _below(f["pulse"], 0.6, 0.3))),
+    ("indie", "Indie", "rock", lambda f: (
+        _in_range(f["bpm"], 98, 152, 18) * _in_range(f["flatness"], 0.3, 0.6, 0.2)
+        * _in_range(f["lra"], 5, 11, 4) * _below(f["pulse"], 0.55, 0.3))),
+    ("hardrock", "Hard rock", "rock", lambda f: (
+        _in_range(f["bpm"], 98, 152, 18) * _above(f["flatness"], 0.4, 0.22)
+        * _in_range(f["lra"], 4, 9, 3) * _below(f["pulse"], 0.6, 0.3))),
     # The catch-all: clearly machine-made and clearly rhythmic, nothing more
     # specific fitting. Weak on purpose — it should only ever win by default.
     ("electronic", "Électronique", "groove", lambda f: (

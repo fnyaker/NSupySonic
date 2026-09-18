@@ -3855,6 +3855,51 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertEqual(gen.predict([1, 0])[0], "up")
         self.assertEqual(gen.predict([-1, 0])[0], "down")
 
+    def test_a_two_layer_mlp_round_trips(self):
+        """Two hidden layers are the same wire format with one more block."""
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        dim, hidden = 2, 2
+        w1 = [[2, 0], [0, 2]]
+        b1 = [0, 0]
+        w2 = [[2, 0], [0, 2]]
+        b2 = [0, 0]
+        w3 = [[2, 0], [0, 2]]
+        b3 = [0, 0]
+        flat = (
+            [v for row in w1 for v in row] + b1
+            + [v for row in w2 for v in row] + b2
+            + [v for row in w3 for v in row] + b3
+        )
+        r = self.client.put(
+            "/api/genre/model",
+            json={
+                "labels": ["up", "down"],
+                "weights": self._encode(flat),
+                "dim": dim,
+                "kind": "mlp2",
+                "hidden": hidden,
+            },
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        gen.invalidate()
+        self.assertEqual(gen.predict([1, 0])[0], "up")
+        self.assertEqual(gen.predict([0, 1])[0], "down")
+        # One block short is refused, not stored as something that cannot read.
+        short = flat[:-1]
+        r = self.client.put(
+            "/api/genre/model",
+            json={
+                "labels": ["up", "down"],
+                "weights": self._encode(short),
+                "dim": dim,
+                "kind": "mlp2",
+                "hidden": hidden,
+            },
+        )
+        self.assertEqual(r.status_code, 400)
+
     def test_a_head_that_does_not_fit_is_refused_and_not_stored(self):
         """Weights, labels and dim must agree. A head stored but unreadable
         would silently do nothing for ever."""

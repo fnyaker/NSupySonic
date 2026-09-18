@@ -24,10 +24,16 @@
 const ALIGN = 16;
 
 export const DEEP_DEFAULTS = {
-  hidden: 128,
-  // Forty epochs left it visibly undertrained (0.571 where eighty reach 0.679
-  // on the same non-separable set); past eighty it only overfits and slows.
-  epochs: 80,
+  // The first hidden layer. 128 was the whole model before; a wider one is the
+  // cheapest accuracy there is, and the kernel is generic over the width.
+  hidden: 256,
+  // A SECOND hidden layer, 0 for none. The boundary between neighbouring
+  // subgenres (hardtekk against frenchcore, zaag against uptempo) is not one
+  // plane, and one hidden layer only bends it once. This bends it again.
+  hidden2: 0,
+  // More epochs than a tiny net needs: a bigger one also takes longer to
+  // converge, and training was never the slow part of this workflow.
+  epochs: 120,
   // 0.02 is not the fastest to converge, but it is the steadiest: at 0.03-0.04
   // the run-to-run spread on hard data is wider than the gain.
   lr: 0.02,
@@ -105,23 +111,87 @@ function softmax(v, n) {
   for (let i = 0; i < n; i++) v[i] *= inv;
 }
 
+/** One fully-connected layer's parameters, gradients and Adam moments. */
+function makeLayer(K, out, inDim) {
+  return {
+    out,
+    in: inDim,
+    W: K.alloc(out * inDim), b: K.alloc(out),
+    gW: K.alloc(out * inDim), gb: K.alloc(out),
+    mW: K.alloc(out * inDim), vW: K.alloc(out * inDim),
+    mb: K.alloc(out), vb: K.alloc(out),
+  };
+}
+
 /**
- * Train one MLP over rows already in wasm memory.
- * Returns float indices of the four parameter blocks.
+ * A stack of dense layers: `widths` are the hidden widths then the class count.
+ * Everything lives in wasm memory; `X` is the (projected) training matrix.
  */
-function fitMLP(K, ptrs, n, d, h, C, y, classW, opt, order) {
-  const E = K.exports;
-  const { X, W1, b1, W2, b2, gW1, gb1, gW2, gb2, mW1, vW1, mb1, vb1, mW2, vW2,
-          mb2, vb2, hid, logits, dh } = ptrs;
-  // Nothing in here grows the arena, so one view for the whole fit — rebuilding
-  // it per example was an allocation on the hot path.
+function buildNet(K, Xp, widths) {
+  const layers = [];
+  for (let i = 1; i < widths.length; i++) {
+    layers.push(makeLayer(K, widths[i], widths[i - 1]));
+  }
+  const acts = [];
+  const dacts = [];
+  for (let l = 0; l < layers.length - 1; l++) {
+    acts.push(K.alloc(layers[l].out));
+    dacts.push(K.alloc(layers[l].out));
+  }
+  const logits = K.alloc(layers[layers.length - 1].out);
+  return { X: Xp, layers, acts, dacts, logits };
+}
+
+function netFloats(widths) {
+  // [d, h1, (h2), C]: four copies of every weight (value, grad, two moments)
+  // and of every bias, plus the activation buffers and the logits.
+  let total = 0;
+  for (let i = 1; i < widths.length; i++) {
+    total += widths[i] * widths[i - 1] * 4 + widths[i] * 4;
+  }
+  for (let i = 1; i < widths.length - 1; i++) total += widths[i] * 2;
+  total += widths[widths.length - 1];
+  return total;
+}
+
+function initNet(K, net, d) {
   const mem = K.f32;
+  const rand = rng((Math.random() * 0xffffffff) >>> 0);
+  for (const layer of net.layers) {
+    // He initialisation: a relu layer started from a uniform scale either dies
+    // or saturates, and either way the first epochs are wasted.
+    const s = Math.sqrt(2 / layer.in);
+    for (let i = 0; i < layer.out * layer.in; i++) mem[layer.W + i] = gauss(rand) * s;
+    mem.fill(0, layer.b, layer.b + layer.out);
+    for (const [p, len] of [
+      [layer.gW, layer.out * layer.in], [layer.gb, layer.out],
+      [layer.mW, layer.out * layer.in], [layer.vW, layer.out * layer.in],
+      [layer.mb, layer.out], [layer.vb, layer.out],
+    ])
+      mem.fill(0, p, p + len);
+  }
+}
+
+/**
+ * Train the stack over rows already in wasm memory, with Adam, L2, class
+ * weights and a cosine-decayed learning rate.
+ */
+function fitNet(K, net, n, d, C, y, classW, opt, order) {
+  const E = K.exports;
+  const mem = K.f32;
+  const { layers, acts, dacts, logits } = net;
+  const L = layers.length;
   const b1a = 0.9;
   const b2a = 0.999;
   let t = 0;
   const logitsView = new Float32Array(C);
 
   for (let epoch = 0; epoch < opt.epochs; epoch++) {
+    // Cosine decay to a quarter of the rate: a big net trains fast at first and
+    // then needs to settle, and a fixed rate either overshoots at the end or
+    // crawls at the start.
+    const lr =
+      opt.lr * (0.25 + 0.75 * (0.5 + 0.5 * Math.cos((Math.PI * epoch) / Math.max(1, opt.epochs))));
     for (let i = n - 1; i > 0; i--) {
       const j = (Math.random() * (i + 1)) | 0;
       const tmp = order[i];
@@ -133,42 +203,72 @@ function fitMLP(K, ptrs, n, d, h, C, y, classW, opt, order) {
       let wsum = 0;
       for (let k = start; k < end; k++) {
         const i = order[k];
-        const x = X + i * d;
-        E.fwd(W1 << 2, b1 << 2, x << 2, hid << 2, h, d);
-        E.relu(hid << 2, h);
-        E.fwd(W2 << 2, b2 << 2, hid << 2, logits << 2, C, h);
+        const x = net.X + i * d;
+        // Forward, storing every hidden activation for the backward pass.
+        let prev = x;
+        let prevLen = d;
+        for (let l = 0; l < L; l++) {
+          const layer = layers[l];
+          const isLast = l === L - 1;
+          const outPtr = isLast ? logits : acts[l];
+          E.fwd(layer.W << 2, layer.b << 2, prev << 2, outPtr << 2, layer.out, prevLen);
+          if (!isLast) E.relu(outPtr << 2, layer.out);
+          prev = outPtr;
+          prevLen = layer.out;
+        }
         for (let c = 0; c < C; c++) logitsView[c] = mem[logits + c];
         softmax(logitsView, C);
         const w = classW[y[i]];
         wsum += w;
         for (let c = 0; c < C; c++)
           mem[logits + c] = w * (logitsView[c] - (c === y[i] ? 1 : 0));
-        E.accum_outer(gW2 << 2, logits << 2, hid << 2, C, h);
-        for (let c = 0; c < C; c++) mem[gb2 + c] += mem[logits + c];
-        E.matvec_t(W2 << 2, logits << 2, dh << 2, C, h);
-        E.relu_back(dh << 2, hid << 2, h);
-        E.accum_outer(gW1 << 2, dh << 2, x << 2, h, d);
-        for (let j2 = 0; j2 < h; j2++) mem[gb1 + j2] += mem[dh + j2];
+        // Backward through every layer.
+        let g = logits;
+        for (let l = L - 1; l >= 0; l--) {
+          const layer = layers[l];
+          const aPrev = l === 0 ? x : acts[l - 1];
+          const aPrevLen = l === 0 ? d : layers[l - 1].out;
+          E.accum_outer(layer.gW << 2, g << 2, aPrev << 2, layer.out, aPrevLen);
+          for (let r = 0; r < layer.out; r++) mem[layer.gb + r] += mem[g + r];
+          if (l > 0) {
+            const dPrev = dacts[l - 1];
+            E.matvec_t(layer.W << 2, g << 2, dPrev << 2, layer.out, aPrevLen);
+            E.relu_back(dPrev << 2, acts[l - 1] << 2, aPrevLen);
+            g = dPrev;
+          }
+        }
       }
       t++;
       const scale = 1 / (wsum || 1);
       const bc1 = 1 - Math.pow(b1a, t);
       const bc2 = 1 - Math.pow(b2a, t);
-      E.adam(W1 << 2, mW1 << 2, vW1 << 2, gW1 << 2, h * d, scale, opt.lr, opt.l2, bc1, bc2);
-      E.adam(b1 << 2, mb1 << 2, vb1 << 2, gb1 << 2, h, scale, opt.lr, 0, bc1, bc2);
-      E.adam(W2 << 2, mW2 << 2, vW2 << 2, gW2 << 2, C * h, scale, opt.lr, opt.l2, bc1, bc2);
-      E.adam(b2 << 2, mb2 << 2, vb2 << 2, gb2 << 2, C, scale, opt.lr, 0, bc1, bc2);
+      for (const layer of layers) {
+        E.adam(layer.W << 2, layer.mW << 2, layer.vW << 2, layer.gW << 2,
+               layer.out * layer.in, scale, lr, opt.l2, bc1, bc2);
+        E.adam(layer.b << 2, layer.mb << 2, layer.vb << 2, layer.gb << 2,
+               layer.out, scale, lr, 0, bc1, bc2);
+      }
     }
   }
 }
 
-function predictMLP(K, ptrs, i, d, h, C, out) {
+function predictNet(K, net, i, d, C, out) {
   const E = K.exports;
-  E.fwd(ptrs.W1 << 2, ptrs.b1 << 2, (ptrs.X + i * d) << 2, ptrs.hid << 2, h, d);
-  E.relu(ptrs.hid << 2, h);
-  E.fwd(ptrs.W2 << 2, ptrs.b2 << 2, ptrs.hid << 2, ptrs.logits << 2, C, h);
   const mem = K.f32;
-  for (let c = 0; c < C; c++) out[c] = mem[ptrs.logits + c];
+  const { layers, acts, logits } = net;
+  const L = layers.length;
+  let prev = net.X + i * d;
+  let prevLen = d;
+  for (let l = 0; l < L; l++) {
+    const layer = layers[l];
+    const isLast = l === L - 1;
+    const outPtr = isLast ? logits : acts[l];
+    E.fwd(layer.W << 2, layer.b << 2, prev << 2, outPtr << 2, layer.out, prevLen);
+    if (!isLast) E.relu(outPtr << 2, layer.out);
+    prev = outPtr;
+    prevLen = layer.out;
+  }
+  for (let c = 0; c < C; c++) out[c] = mem[logits + c];
   let best = 0;
   for (let c = 1; c < C; c++) if (out[c] > out[best]) best = c;
   return best;
@@ -188,13 +288,13 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
 
   const useProj = opt.proj > 0 && d > opt.proj * 1.5;
   const k = useProj ? opt.proj : d;
-  const h = opt.hidden;
+  const h = Math.max(1, opt.hidden | 0);
+  const h2 = Math.max(0, opt.hidden2 | 0);
   const seed = (Math.random() * 0xffffffff) >>> 0;
+  // [input, hidden1, (hidden2), classes]: one hidden layer, or two.
+  const widths = h2 > 0 ? [k, h, h2, C] : [k, h, C];
 
-  // Room for the training rows plus every parameter, gradient and Adam moment
-  // (four copies of every block: value, gradient, and Adam's two moments).
-  const params = h * k + h + C * h + C;
-  const need = n * k + 4 * params + h + C + h + 4096;
+  const need = n * k + netFloats(widths) + 4096;
   const K = await loadKernel(wasm, need);
 
   // Project (or copy) the training rows into wasm memory.
@@ -220,14 +320,7 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
     K.f32.set(X, Xp);
   }
 
-  const ptrs = {
-    X: Xp,
-    W1: K.alloc(h * k), b1: K.alloc(h), W2: K.alloc(C * h), b2: K.alloc(C),
-    gW1: K.alloc(h * k), gb1: K.alloc(h), gW2: K.alloc(C * h), gb2: K.alloc(C),
-    mW1: K.alloc(h * k), vW1: K.alloc(h * k), mb1: K.alloc(h), vb1: K.alloc(h),
-    mW2: K.alloc(C * h), vW2: K.alloc(C * h), mb2: K.alloc(C), vb2: K.alloc(C),
-    hid: K.alloc(h), logits: K.alloc(C), dh: K.alloc(h),
-  };
+  const net = buildNet(K, Xp, widths);
 
   const counts = new Float32Array(C);
   for (let i = 0; i < n; i++) counts[y[i]]++;
@@ -238,24 +331,6 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
     wsum += classW[c];
   }
   for (let c = 0; c < C; c++) classW[c] *= C / (wsum || 1);
-
-  function initParams() {
-    const mem = K.f32;
-    const rand = rng((Math.random() * 0xffffffff) >>> 0);
-    // He initialisation: a relu layer started from a uniform scale either dies
-    // or saturates, and either way the first epochs are wasted.
-    const s1 = Math.sqrt(2 / k);
-    for (let i = 0; i < h * k; i++) mem[ptrs.W1 + i] = gauss(rand) * s1;
-    const s2 = Math.sqrt(2 / h);
-    for (let i = 0; i < C * h; i++) mem[ptrs.W2 + i] = gauss(rand) * s2;
-    for (const [p, len] of [[ptrs.b1, h], [ptrs.b2, C]]) mem.fill(0, p, p + len);
-    for (const [p, len] of [
-      [ptrs.gW1, h * k], [ptrs.gb1, h], [ptrs.gW2, C * h], [ptrs.gb2, C],
-      [ptrs.mW1, h * k], [ptrs.vW1, h * k], [ptrs.mb1, h], [ptrs.vb1, h],
-      [ptrs.mW2, C * h], [ptrs.vW2, C * h], [ptrs.mb2, C], [ptrs.vb2, C],
-    ])
-      mem.fill(0, p, p + len);
-  }
 
   // Stratified folds, as in the linear trainer.
   const byClass = Array.from({ length: C }, () => []);
@@ -283,14 +358,13 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
     const testIdx = [];
     for (let i = 0; i < n; i++) (assign[i] === f ? testIdx : trainIdx).push(i);
     if (!trainIdx.length || !testIdx.length) continue;
-    initParams();
+    initNet(K, net, k);
     const order = Int32Array.from(trainIdx);
-    fitMLP(K, ptrs, trainIdx.length, k, h, C, y, classW, opt,
-           // fitMLP shuffles `order` in place and indexes X by its values, so
-           // the fold's own row indices go in directly — no packing needed.
-           order);
+    // fitNet shuffles `order` in place and indexes X by its values, so the
+    // fold's own row indices go in directly — no packing needed.
+    fitNet(K, net, trainIdx.length, k, C, y, classW, opt, order);
     for (const i of testIdx) {
-      const got = predictMLP(K, ptrs, i, k, h, C, scratch);
+      const got = predictNet(K, net, i, k, C, scratch);
       confusion[y[i]][got]++;
       if (got === y[i]) correct++;
       total++;
@@ -299,33 +373,34 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
 
   report("deep", 0.85);
   await yieldToUI();
-  initParams();
+  initNet(K, net, k);
   const allOrder = new Int32Array(n);
   for (let i = 0; i < n; i++) allOrder[i] = i;
-  fitMLP(K, ptrs, n, k, h, C, y, classW, opt, allOrder);
+  fitNet(K, net, n, k, C, y, classW, opt, allOrder);
 
-  // Fold the projection back into the first layer, so what ships is a plain
-  // MLP over the original embedding and the server knows nothing about any of
-  // this.
+  // Pull every layer out of wasm, folding the projection back into the first
+  // one, so what ships is a plain MLP over the original embedding and the
+  // server knows nothing about any of this.
   const mem = K.f32;
-  const W1 = new Float32Array(h * d);
-  if (useProj) {
-    for (let r = 0; r < h; r++) {
-      const wr = ptrs.W1 + r * k;
-      const orow = r * d;
-      for (let i = 0; i < k; i++) {
-        const w = mem[wr + i];
-        if (w === 0) continue;
-        const prow = i * d;
-        for (let j = 0; j < d; j++) W1[orow + j] += w * P[prow + j];
+  const blocks = net.layers.map((layer, l) => {
+    const inDim = l === 0 ? d : layer.in;
+    const W = new Float32Array(layer.out * inDim);
+    if (l === 0 && useProj) {
+      for (let r = 0; r < layer.out; r++) {
+        const wr = layer.W + r * k;
+        const orow = r * d;
+        for (let i = 0; i < k; i++) {
+          const w = mem[wr + i];
+          if (w === 0) continue;
+          const prow = i * d;
+          for (let j = 0; j < d; j++) W[orow + j] += w * P[prow + j];
+        }
       }
+    } else {
+      W.set(mem.subarray(layer.W, layer.W + layer.out * layer.in));
     }
-  } else {
-    W1.set(mem.subarray(ptrs.W1, ptrs.W1 + h * d));
-  }
-  const b1 = mem.slice(ptrs.b1, ptrs.b1 + h);
-  const W2 = mem.slice(ptrs.W2, ptrs.W2 + C * h);
-  const b2 = mem.slice(ptrs.b2, ptrs.b2 + C);
+    return { W, b: mem.slice(layer.b, layer.b + layer.out) };
+  });
 
   const perClass = labels.map((name, c) => {
     const row = confusion[c];
@@ -345,20 +420,20 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
   const balanced = scored.reduce((a, c) => a + c.recall, 0) / (scored.length || 1);
   report("done", 1);
 
-  return {
-    kind: "mlp",
+  const head = {
+    // "mlp" is one hidden layer (W1,b1,W2,b2); "mlp2" is two (W1,b1,W2,b2,W3,b3).
+    // Named rather than assumed: encodeHead's layout and the server's reader
+    // both branch on it.
+    kind: widths.length === 4 ? "mlp2" : "mlp",
     labels,
     dim: d,
     hidden: h,
-    W1,
-    b1,
-    W2,
-    b2,
     metrics: {
       examples: n,
       classes: C,
       folds,
       hidden: h,
+      hidden2: h2,
       projected: useProj ? k : 0,
       accuracy: total ? +(correct / total).toFixed(3) : 0,
       balanced: +balanced.toFixed(3),
@@ -366,4 +441,9 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
       confusion: confusion.map((r) => Array.from(r)),
     },
   };
+  blocks.forEach((blk, i) => {
+    head[`W${i + 1}`] = blk.W;
+    head[`b${i + 1}`] = blk.b;
+  });
+  return head;
 }

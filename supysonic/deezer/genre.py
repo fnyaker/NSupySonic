@@ -74,7 +74,30 @@ def active_head():
         hidden = int(row.hidden or 0)
         head = {"labels": labels, "dim": dim, "kind": kind, "hidden": hidden,
                 "id": row.id, "version": row.version}
-        if kind == "mlp":
+        if kind == "mlp2":
+            want = (
+                hidden * dim + hidden
+                + hidden * hidden + hidden
+                + n * hidden + n
+            )
+            if n < 2 or hidden < 1 or len(flat) != want:
+                raise ValueError(
+                    f"weights are {len(flat)} long, expected {want} for a "
+                    f"two-layer MLP of {dim}x{hidden}x{hidden}x{n}"
+                )
+            o = 0
+            head["w1"] = [flat[o + i * dim : o + (i + 1) * dim] for i in range(hidden)]
+            o += hidden * dim
+            head["b1"] = flat[o : o + hidden]
+            o += hidden
+            head["w2"] = [flat[o + i * hidden : o + (i + 1) * hidden] for i in range(hidden)]
+            o += hidden * hidden
+            head["b2"] = flat[o : o + hidden]
+            o += hidden
+            head["w3"] = [flat[o + i * hidden : o + (i + 1) * hidden] for i in range(n)]
+            o += n * hidden
+            head["b3"] = flat[o : o + n]
+        elif kind == "mlp":
             want = hidden * dim + hidden + n * hidden + n
             if n < 2 or hidden < 1 or len(flat) != want:
                 raise ValueError(
@@ -118,7 +141,28 @@ def predict(vec):
     x = list(vec)
     if len(x) != dim:
         return None
-    if head["kind"] == "mlp":
+    if head["kind"] == "mlp2":
+        h1 = []
+        for row, bias in zip(head["w1"], head["b1"]):
+            acc = bias
+            for i in range(dim):
+                acc += row[i] * x[i]
+            h1.append(acc if acc > 0 else 0.0)  # relu
+        h2 = []
+        for row, bias in zip(head["w2"], head["b2"]):
+            acc = bias
+            for i, h in enumerate(h1):
+                if h:
+                    acc += row[i] * h
+            h2.append(acc if acc > 0 else 0.0)  # relu
+        logits = []
+        for row, bias in zip(head["w3"], head["b3"]):
+            acc = bias
+            for i, h in enumerate(h2):
+                if h:
+                    acc += row[i] * h
+            logits.append(acc)
+    elif head["kind"] == "mlp":
         hid = []
         for row, bias in zip(head["w1"], head["b1"]):
             acc = bias
