@@ -237,6 +237,19 @@ CREATE TABLE IF NOT EXISTS podcast_marker (
 CREATE INDEX IF NOT EXISTS index_podcast_marker_user_id_fk ON podcast_marker(user_id);
 CREATE INDEX IF NOT EXISTS index_podcast_marker_episode_id_fk ON podcast_marker(episode_id);
 
+CREATE TABLE IF NOT EXISTS track_analysis (
+    track_id UUID NOT NULL PRIMARY KEY REFERENCES track,
+    version INTEGER NOT NULL DEFAULT 0,
+    analyzed TIMESTAMP NOT NULL,
+    bpm DOUBLE PRECISION,
+    bpm_confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+    bpm_source VARCHAR(16),
+    style VARCHAR(24),
+    style_confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+    archetype VARCHAR(16),
+    data TEXT
+);
+
 CREATE TABLE IF NOT EXISTS track_artist (
     track_id UUID NOT NULL REFERENCES track,
     artist_id UUID NOT NULL REFERENCES artist,

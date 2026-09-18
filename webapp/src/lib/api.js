@@ -201,6 +201,11 @@ export const api = {
   trackGains: (ids) =>
     req("/gains", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),
 
+  // Tempo + style for a whole run of tracks, measured server-side once per
+  // file — see supysonic/deezer/analysis.py and lib/analysis.js.
+  trackAnalyses: (ids) =>
+    req("/analyses", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),
+
   // Where the audio actually starts and stops inside the archived file, for
   // the crossfade's silence trimming. Answers {ready:false} rather than an
   // error when the file isn't archived — see supysonic/webui/edges.py.

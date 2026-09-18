@@ -22,6 +22,8 @@
   let viz;
   let sub = null;
   let live = false;
+  let playing = false;
+  let loaded = false;
   let supported = true;
   let meta = { title: "", artist: "", album: "", cover: "", rgb: null };
   let style = { label: "", bpm: 0, confidence: 0, kick: "" };
@@ -73,7 +75,11 @@
         // rather than flashing back to the default in between.
         meta = { ...meta, ...m, rgb: m.rgb ?? meta.rgb };
       },
-      (ok) => (live = ok)
+      (st) => {
+        live = st.alive;
+        playing = st.playing;
+        loaded = st.loaded;
+      }
     );
     supported = sub.supported;
     showUI();
@@ -103,6 +109,7 @@
 <div
   class="screen"
   class:idle={!uiVisible}
+  data-link={live ? (playing ? "playing" : loaded ? "paused" : "idle") : "offline"}
   on:pointermove={showUI}
   on:pointerdown={showUI}
   role="presentation"
@@ -116,6 +123,7 @@
     fps={0}
     layout="full"
     external
+    paused={!playing}
     coverRgb={meta.rgb}
   />
 
@@ -132,6 +140,11 @@
         page s'anime toute seule. Rien n'est lu ici, c'est le même morceau, la
         même analyse, la même seconde.
       </p>
+    </div>
+  {:else if !playing}
+    <div class="notice quiet">
+      <h1>{loaded ? "En pause" : "Rien en lecture"}</h1>
+      <p>{loaded ? "L'animation reprend dès que la lecture repart." : "Lancez un titre depuis le lecteur."}</p>
     </div>
   {/if}
 
@@ -194,6 +207,11 @@
     text-align: center;
     padding: 0 10vw;
     color: rgba(255, 255, 255, 0.82);
+  }
+  .notice.quiet {
+    /* A paused player is not an error — say so quietly and let the fading
+       scene behind it still be the thing on screen. */
+    opacity: 0.55;
   }
   .notice h1 {
     font-size: clamp(1.4rem, 3.4vw, 2.4rem);

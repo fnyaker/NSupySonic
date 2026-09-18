@@ -235,6 +235,19 @@ CREATE TABLE IF NOT EXISTS podcast_marker (
 CREATE INDEX index_podcast_marker_user_id_fk ON podcast_marker(user_id);
 CREATE INDEX index_podcast_marker_episode_id_fk ON podcast_marker(episode_id);
 
+CREATE TABLE IF NOT EXISTS track_analysis (
+    track_id CHAR(32) NOT NULL PRIMARY KEY REFERENCES track(id),
+    version INTEGER NOT NULL DEFAULT 0,
+    analyzed DATETIME NOT NULL,
+    bpm DOUBLE,
+    bpm_confidence DOUBLE NOT NULL DEFAULT 0,
+    bpm_source VARCHAR(16),
+    style VARCHAR(24),
+    style_confidence DOUBLE NOT NULL DEFAULT 0,
+    archetype VARCHAR(16),
+    data TEXT
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS track_artist (
     track_id CHAR(32) NOT NULL REFERENCES track(id),
     artist_id CHAR(32) NOT NULL REFERENCES artist(id),

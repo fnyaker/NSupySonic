@@ -546,6 +546,36 @@ def deezer_lyrics(config, overwrite, limit):
     )
 
 
+@deezer.command("analyze")
+@click.option("--force", is_flag=True, help="Re-measure even tracks that already have a verdict.")
+@click.option("--limit", type=int, default=None, help="Stop after N measured tracks.")
+@click.pass_obj
+def deezer_analyze(config, force, limit):
+    """Measure tempo and style for every archived track that lacks them.
+
+    The player is handed these instead of working them out live from the first
+    seconds of each track. Normally this happens on its own the moment a track
+    is archived; this is the catch-up for tracks that predate it, and the way to
+    re-measure everything after the analysis itself improves.
+    """
+    from .deezer import get_provider
+    from .deezer.analysis import backfill
+
+    # Optional: Deezer publishes a bpm per track, which is exact and free, so
+    # with a provider the tempo comes from there and only the descriptors are
+    # measured. Without one, everything is measured from the files.
+    provider = get_provider(config)
+    if provider is None:
+        click.echo("Deezer proxy disabled; measuring tempo from the files.")
+
+    click.echo("Analysing archived tracks...")
+    stats = backfill(provider, force=force, limit=limit, progress=click.echo)
+    click.echo(
+        "Done. analysed={done} skipped={skipped} failed={failed} "
+        "(scanned {scanned}).".format(**stats)
+    )
+
+
 @deezer.command("scan-local")
 @click.pass_obj
 def deezer_scan_local(config):

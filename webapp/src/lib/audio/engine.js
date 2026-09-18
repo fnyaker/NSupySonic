@@ -19,6 +19,15 @@
 //    a message every 4 render quanta (~94 Hz at 48 kHz) is never throttled, so
 //    the feed survives. rAF is the fallback where AudioWorklet is missing.
 //
+//    The upgrade to that clock is RETRIED rather than attempted once. An
+//    AudioWorklet needs an AudioContext, and the context only exists once
+//    something wired the player's element into the graph — which normally
+//    happens when playback starts, i.e. AFTER a projector window has already
+//    subscribed. Giving up on the first look left the engine on rAF for the
+//    rest of the session, and the projector then froze the moment the player
+//    tab went behind it. `ensureState` calls back here the instant the context
+//    appears, so the upgrade happens exactly once, as soon as it is possible.
+//
 // 3. LOOK-AHEAD IS APPLIED TO THE OUTPUT, NOT ASSUMED AWAY. The analysers tap
 //    the graph BEFORE its delay node, so with a look-ahead configured they see
 //    audio the listener has not heard yet. That is what lets an unpredicted hit
@@ -30,7 +39,8 @@
 //    zero both are no-ops.
 
 import { get, writable } from "svelte/store";
-import { current } from "../stores.js";
+import { current, player } from "../stores.js";
+import { knownAnalysis, primeAnalyses } from "../analysis.js";
 import {
   getAnalysers,
   getContext,
@@ -61,6 +71,8 @@ let analysisLevel = LEVEL.SPECTRUM;
 let subs = [];
 let running = false;
 let clock = null; // { stop() }
+let clockKind = "none"; // "raf" until the audio-thread clock can be installed
+let upgrading = false;
 let plans = null;
 let features = null;
 let beatTracker = null;
@@ -70,6 +82,14 @@ let hiData = null;
 let lastT = 0;
 let lastTrackId = null;
 let backgroundOk = false; // a projector page is listening: keep going when hidden
+// The server's whole-track verdict for whatever is playing, once it arrives.
+// See lib/analysis.js: it is an accelerator, never a dependency.
+let verdict = null;
+let verdictSeeded = false;
+// How many tracks ahead to ask for. The queue moves one at a time and the
+// answers are tiny, so a short window keeps every upcoming track's verdict in
+// hand well before it starts.
+const ANALYSIS_WINDOW = 6;
 
 const energyLin = { sub: 0, bass: 0, lowMid: 0, mid: 0, high: 0, air: 0 };
 const energyDb = new Float32Array(ENERGY_BANDS.length);
@@ -110,11 +130,12 @@ export const readout = writable({
   styleConfidence: 0,
   kick: "",
   archetype: "",
+  served: false,
 });
 let lastReadout = 0;
 const readoutState = {
   bpm: 0, locked: false, confidence: 0, style: "", styleLabel: "",
-  styleConfidence: 0, kick: "", archetype: "",
+  styleConfidence: 0, kick: "", archetype: "", served: false,
 };
 
 function publishReadout(now) {
@@ -132,6 +153,7 @@ function publishReadout(now) {
     b.locked === readoutState.locked &&
     style === readoutState.style &&
     kick === readoutState.kick &&
+    !!verdict === readoutState.served &&
     Math.abs(b.confidence - readoutState.confidence) < 0.05 &&
     Math.abs((st?.confidence || 0) - readoutState.styleConfidence) < 0.05
   )
@@ -144,6 +166,7 @@ function publishReadout(now) {
   readoutState.styleConfidence = st?.confidence || 0;
   readoutState.kick = kick;
   readoutState.archetype = st?.archetype || "";
+  readoutState.served = !!verdict;
   readout.set({ ...readoutState });
 }
 
@@ -168,6 +191,9 @@ function ensureState() {
   const an = getAnalysers();
   if (!ctx || !an) return false;
   if (plans && plans.sampleRate === ctx.sampleRate) return true;
+  // The graph has just appeared, which is the first moment an AudioWorklet can
+  // be created. Take it: this is what gets the engine off rAF.
+  upgradeClock();
   const sampleRate = ctx.sampleRate;
   plans = {
     sampleRate,
@@ -189,6 +215,36 @@ function resetAnalysis() {
   classifier?.reset();
   onsetQueue.length = 0;
   prevShownIndex = -1;
+  verdict = null;
+  verdictSeeded = false;
+}
+
+// Ask for this track and the next few in one call. Done from here rather than
+// from the player because the engine is the only thing that wants them: a
+// session that never opens a visualizer never makes the request.
+function primeAround(id) {
+  const s = get(player);
+  const ids = [];
+  if (id) ids.push(id);
+  if (s && s.index >= 0)
+    for (let i = 1; i <= ANALYSIS_WINDOW; i++) {
+      const t = s.queue[s.index + i];
+      if (t?.deezer_id) ids.push(t.deezer_id);
+    }
+  primeAnalyses(ids);
+}
+
+// Adopt the served verdict as soon as it is in hand — which may be at the track
+// change, or a moment later when the request lands. Seeding the tempo is the
+// part that matters: the tracker starts locked on a figure measured over the
+// whole piece, so the first bar is already on the beat instead of the fourth.
+function adoptVerdict(id) {
+  if (verdictSeeded || !id) return;
+  const v = knownAnalysis(id);
+  if (!v) return;
+  verdict = v;
+  verdictSeeded = true;
+  if (v.bpm && beatTracker) beatTracker.seed(v.bpm, v.bpmConfidence ?? 0.9);
 }
 
 function tick(now) {
@@ -205,7 +261,11 @@ function tick(now) {
     lastTrackId = id;
     frame.trackId = id;
     resetAnalysis();
+    primeAround(id);
   }
+  // The request may land after the track started; a Map lookup a frame is
+  // nothing, and it stops once the verdict is adopted.
+  if (!verdictSeeded) adoptVerdict(id);
 
   an.lo.getFloatFrequencyData(loData);
   an.hi.getFloatFrequencyData(hiData);
@@ -225,8 +285,14 @@ function tick(now) {
   if (analysisLevel >= LEVEL.RHYTHM) {
     const b = beatTracker.process(f.flux, f.lowFlux, dt);
     projectBeat(b, now);
-    if (analysisLevel >= LEVEL.SMART)
-      frame.style = classifier.process(f, b, energyLin, now, dt);
+    if (analysisLevel >= LEVEL.SMART) {
+      const live = classifier.process(f, b, energyLin, now, dt);
+      // Where the server has measured the track, ITS verdict is the authority:
+      // it heard the whole piece, this one has heard a few seconds of it. The
+      // kick stays the live reading either way — that is a per-event property
+      // and no whole-file average can stand in for it.
+      frame.style = verdict ? merged(live, verdict) : live;
+    }
   } else if (shownBeat.locked || frame.style) {
     // Dropped out of rhythm analysis: park the grid rather than leave a stale
     // one advancing on its own, and drop a style verdict nothing is refreshing.
@@ -246,6 +312,37 @@ function tick(now) {
       /* a broken subscriber must not stop the others */
     }
   }
+}
+
+// The served verdict, wearing the shape the scenes already read.
+const mergedStyle = {
+  kick: null,
+  families: [],
+  archetypes: { sustain: 0, voice: 0, groove: 0, hard: 0, rock: 0 },
+  dominant: "",
+  dominantLabel: "",
+  archetype: "groove",
+  confidence: 0,
+  served: true,
+};
+
+function merged(live, v) {
+  mergedStyle.kick = live.kick;
+  mergedStyle.families = live.families;
+  mergedStyle.dominant = v.style || live.dominant;
+  mergedStyle.dominantLabel = v.styleLabel || live.dominantLabel;
+  mergedStyle.archetype = v.archetype || live.archetype;
+  mergedStyle.confidence = v.styleConfidence ?? live.confidence;
+  const a = v.archetypes;
+  if (a && typeof a === "object") {
+    let sum = 0;
+    for (const k in mergedStyle.archetypes) sum += +a[k] || 0;
+    for (const k in mergedStyle.archetypes)
+      mergedStyle.archetypes[k] = sum > 1e-6 ? (+a[k] || 0) / sum : live.archetypes[k];
+  } else {
+    for (const k in mergedStyle.archetypes) mergedStyle.archetypes[k] = live.archetypes[k];
+  }
+  return mergedStyle;
 }
 
 // Re-express the beat grid on the listener's timeline and release held onsets.
@@ -362,25 +459,38 @@ async function startWorkletClock(ctx) {
   }
 }
 
-async function start() {
+function start() {
   if (running) return;
   running = true;
   requestAnalyser();
   resumeAudio();
   lastT = 0;
-  // rAF carries the first frames while the worklet module compiles, so the
-  // visualizer paints immediately rather than after a round trip.
+  // rAF carries the first frames while the worklet module compiles — and, when
+  // there is no graph yet, until there is one.
   clock = startRafClock();
+  clockKind = "raf";
+  upgradeClock();
+}
+
+// Move off rAF as soon as an AudioContext exists. Idempotent and safe to call
+// from anywhere; it no-ops once the audio-thread clock is running.
+async function upgradeClock() {
+  if (!running || clockKind === "worklet" || upgrading) return;
   const ctx = getContext();
-  if (!ctx) return;
-  const w = await startWorkletClock(ctx);
-  if (!running) {
-    w?.stop();
-    return;
-  }
-  if (w) {
-    clock.stop();
+  if (!ctx) return; // ensureState calls back the moment one exists
+  upgrading = true;
+  try {
+    const w = await startWorkletClock(ctx);
+    if (!w) return;
+    if (!running || clockKind === "worklet") {
+      w.stop();
+      return;
+    }
+    clock?.stop();
     clock = w;
+    clockKind = "worklet";
+  } finally {
+    upgrading = false;
   }
 }
 
@@ -388,6 +498,7 @@ function stop() {
   running = false;
   clock?.stop();
   clock = null;
+  clockKind = "none";
   lastT = 0;
 }
 

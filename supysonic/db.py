@@ -24,6 +24,7 @@ from peewee import (
     FloatField,
     ForeignKeyField,
     IntegerField,
+    TextField,
     UUIDField,
 )
 from peewee import CompositeKey, DatabaseProxy, Model, MySQLDatabase
@@ -32,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260808"
+SCHEMA_VERSION = "20260918"
 
 
 def now():
@@ -673,6 +674,40 @@ RatingFolder = _make_rating_model(Folder)
 RatingTrack = _make_rating_model(Track)
 
 
+class TrackAnalysis(_Model):
+    """What a whole track sounds like, measured once and kept.
+
+    The web player's animation engine needs two things it cannot work out from
+    three seconds of audio: the track's TEMPO and its STYLE. Both are properties
+    of the whole piece, so both belong here rather than in a detector that has
+    to converge live while the intro plays — the client keeps doing the things
+    that genuinely are per-moment (beat phase, kicks, transients) and takes the
+    global answers from this row.
+
+    Measured once per file, exactly like the loudness: the audio does not change,
+    so neither does the answer. ``version`` is what forces a re-measure when the
+    analysis itself improves.
+    """
+
+    track = ForeignKeyField(Track, primary_key=True, backref="analysis",
+                            on_delete="CASCADE")
+    version = IntegerField(default=0)
+    analyzed = DateTimeField(default=now)
+    # Beats per minute over the whole track, and how much to trust it.
+    bpm = FloatField(null=True)
+    bpm_confidence = FloatField(default=0)
+    # Where it came from: Deezer publishes a bpm for its own catalogue, which is
+    # exact and free; anything else we measure ourselves.
+    bpm_source = CharField(16, null=True)
+    # The verdict, and the family it belongs to.
+    style = CharField(24, null=True)
+    style_confidence = FloatField(default=0)
+    archetype = CharField(16, null=True)
+    # Everything else — the descriptors, the archetype mix, the loudness — as
+    # JSON, so a later refinement adds a measurement without a migration.
+    data = TextField(null=True)
+
+
 class TrackArtist(_Model):
     """One credited artist on a track — the multi-artist ("feat.") link.
 
@@ -1099,6 +1134,7 @@ def _migration_order():
         Artist,
         Album,
         Track,
+        TrackAnalysis,  # after Track: it references it
         TrackArtist,  # after Track and Artist: it references both
         User,
         ClientPrefs,

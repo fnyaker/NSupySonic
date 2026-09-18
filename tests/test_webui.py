@@ -3160,5 +3160,231 @@ class AudioEdgesTestCase(unittest.TestCase):
             archive.ensure_archived = orig
 
 
+class TrackAnalysisTestCase(unittest.TestCase):
+    """Whole-track analysis (supysonic/deezer/analysis.py + /api/analyses).
+
+    The ffmpeg passes are not exercised here — that is what an integration run
+    is for. What is pinned is everything AROUND them: that a verdict is served
+    when there is one and plainly absent when there is not, that asking can
+    never be what starts a measurement, and that the classifier stays on its
+    simplex and puts obvious material in the obvious family.
+    """
+
+    def setUp(self):
+        self.__db = tempfile.mkstemp()
+        self.__dir = tempfile.mkdtemp()
+        self.archive = tempfile.mkdtemp()
+
+        db_path = self.__db[1]
+        cache = self.__dir
+
+        class Config(DefaultConfig):
+            TESTING = True
+
+            def __init__(self):
+                super().__init__()
+                self.BASE = dict(self.BASE, database_uri="sqlite:///" + db_path)
+                self.WEBAPP = dict(
+                    self.WEBAPP, cache_dir=cache, mount_webui=True, mount_api=True
+                )
+
+        self.app = create_application(Config())
+        UserManager.add("alice", "Alic3", admin=True)
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        release_database()
+        shutil.rmtree(self.__dir, ignore_errors=True)
+        shutil.rmtree(self.archive, ignore_errors=True)
+        os.close(self.__db[0])
+        os.remove(self.__db[1])
+
+    def _login(self):
+        return self.client.post(
+            "/api/login", json={"username": "alice", "password": "Alic3"}
+        )
+
+    def _deezer_track(self, sid="424242"):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        return library.upsert_track(raw_track(sid), root)
+
+    # -- the classifier ---------------------------------------------------
+
+    def _features(self, **kw):
+        base = dict(
+            bpm=0.0, bpm_confidence=0.0, pulse=0.0, centroid=1800.0, spread=1500.0,
+            rolloff=5000.0, flatness=0.3, flatness_hi=0.45, entropy=0.6,
+            flux_peak=2.0, lra=8.0, lufs=-12.0,
+        )
+        base.update(kw)
+        return base
+
+    def test_classify_stays_on_the_simplex(self):
+        from supysonic.deezer.analysis import ARCHETYPES, classify
+
+        _style, conf, _arch, weights = classify(self._features(bpm=128, bpm_confidence=0.9,
+                                                              pulse=0.8))
+        self.assertTrue(0 <= conf <= 1)
+        self.assertEqual(set(weights), set(ARCHETYPES))
+        self.assertAlmostEqual(sum(weights.values()), 1.0, places=3)
+
+    def test_classify_fast_squashed_and_noisy_reads_as_hard(self):
+        from supysonic.deezer.analysis import classify
+
+        style, conf, arch, weights = classify(
+            self._features(bpm=200, bpm_confidence=0.9, pulse=0.9, flatness=0.5,
+                           flatness_hi=0.7, lra=3.5, entropy=0.8, centroid=2600)
+        )
+        self.assertEqual(arch, "hard", f"got {style} ({weights})")
+        self.assertGreater(conf, 0.2)
+
+    def test_classify_tonal_dynamic_and_pulseless_reads_as_sustained(self):
+        from supysonic.deezer.analysis import classify
+
+        style, _conf, arch, weights = classify(
+            self._features(bpm=0, bpm_confidence=0.0, pulse=0.02, flatness=0.12,
+                           flatness_hi=0.2, lra=14.0, centroid=1400, flux_peak=1.4)
+        )
+        self.assertEqual(arch, "sustain", f"got {style} ({weights})")
+
+    def test_classify_survives_a_missing_measure(self):
+        """A descriptor ffmpeg did not report must not break the verdict."""
+        from supysonic.deezer.analysis import classify
+
+        broken = self._features(bpm=130, bpm_confidence=0.8, pulse=0.7)
+        del broken["rolloff"]
+        style, conf, _arch, weights = classify(broken)
+        self.assertTrue(style is None or isinstance(style, str))
+        self.assertTrue(0 <= conf <= 1)
+        if weights:
+            self.assertAlmostEqual(sum(weights.values()), 1.0, places=3)
+
+    def test_tempo_prior_is_a_plateau_not_a_bell(self):
+        """The roll-off must not quietly halve the fast genres."""
+        from supysonic.deezer.analysis import _prior
+
+        self.assertEqual(_prior(120), 1.0)
+        self.assertEqual(_prior(195), 1.0)
+        # 200 BPM must not be penalised against its own half.
+        self.assertGreaterEqual(_prior(200), _prior(100))
+        # ...but something far outside the range still is.
+        self.assertLess(_prior(400), 0.6)
+
+    # -- the endpoint ------------------------------------------------------
+
+    def test_requires_login(self):
+        self.assertEqual(self.client.get("/api/analysis/1").status_code, 401)
+        self.assertEqual(self.client.post("/api/analyses", json={"ids": []}).status_code, 401)
+
+    def test_unmeasured_track_is_plainly_absent(self):
+        self._login()
+        t = self._deezer_track()
+        rv = self.client.get(f"/api/analysis/{t.deezer_id}")
+        self.assertEqual(rv.status_code, 200)
+        self.assertFalse(rv.get_json()["ready"])
+        rv = self.client.post("/api/analyses", json={"ids": [t.deezer_id]})
+        self.assertEqual(rv.get_json()["analyses"], {})
+
+    def test_serves_a_stored_verdict(self):
+        from supysonic.db import TrackAnalysis
+
+        self._login()
+        t = self._deezer_track()
+        TrackAnalysis.create(
+            track=t, version=1, bpm=174.0, bpm_confidence=0.95, bpm_source="deezer",
+            style="frenchcore", style_confidence=0.7, archetype="hard",
+            data='{"archetypes":{"hard":0.8,"groove":0.2},"lra":3.4,"pulse":0.9}',
+        )
+        one = self.client.get(f"/api/analysis/{t.deezer_id}").get_json()
+        self.assertTrue(one["ready"])
+        self.assertEqual(one["bpm"], 174.0)
+        self.assertEqual(one["style"], "frenchcore")
+        self.assertEqual(one["styleLabel"], "Frenchcore")
+        self.assertEqual(one["archetype"], "hard")
+        self.assertEqual(one["archetypes"]["hard"], 0.8)
+        self.assertEqual(one["bpmSource"], "deezer")
+
+        batch = self.client.post(
+            "/api/analyses", json={"ids": [t.deezer_id, "999888"]}
+        ).get_json()["analyses"]
+        self.assertEqual(list(batch), [str(t.deezer_id)])
+        self.assertEqual(batch[str(t.deezer_id)]["bpm"], 174.0)
+
+    def test_batch_rejects_a_non_list(self):
+        self._login()
+        rv = self.client.post("/api/analyses", json={"ids": "nope"})
+        self.assertEqual(rv.status_code, 400)
+
+    def test_asking_never_measures(self):
+        """A request must never be what starts a three-second ffmpeg pass.
+
+        The player asks about tracks it is ABOUT to play; an answer that arrives
+        a minute later is no answer, and the request would hold a thread for the
+        whole of it.
+        """
+        from supysonic.deezer import analysis as ana
+
+        self._login()
+        t = self._deezer_track()
+        called = []
+        orig_analyze, orig_queue = ana.analyze_track, ana.queue_analysis
+        ana.analyze_track = lambda *a, **k: called.append("analyze")
+        ana.queue_analysis = lambda *a, **k: called.append("queue")
+        try:
+            self.client.get(f"/api/analysis/{t.deezer_id}")
+            self.client.post("/api/analyses", json={"ids": [t.deezer_id]})
+        finally:
+            ana.analyze_track, ana.queue_analysis = orig_analyze, orig_queue
+        self.assertEqual(called, [])
+
+    def test_analysis_skips_a_track_with_no_file(self):
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+        self.assertIsNone(ana.analyze_track(t))
+
+    def test_deezer_bpm_is_used_and_bounded(self):
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+
+        class Prov:
+            def __init__(self, bpm):
+                self.bpm = bpm
+                self.dz = self
+
+            @property
+            def api(self):
+                return self
+
+            def available(self):
+                return True
+
+            def get_track(self, sid):
+                return {"bpm": self.bpm}
+
+        self.assertEqual(ana._deezer_bpm(Prov(174), t), 174.0)
+        # Deezer reports 0 for tracks it has no figure for; that is not a tempo.
+        self.assertIsNone(ana._deezer_bpm(Prov(0), t))
+        self.assertIsNone(ana._deezer_bpm(Prov(9999), t))
+        self.assertIsNone(ana._deezer_bpm(None, t))
+
+    def test_deezer_bpm_survives_an_outage(self):
+        """A Deezer failure means "measure it yourself", never an exception."""
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+
+        class Dead:
+            dz = None
+
+            def available(self):
+                raise RuntimeError("boom")
+
+        self.assertIsNone(ana._deezer_bpm(Dead(), t))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -532,6 +532,36 @@ export function createBeatTracker() {
     return out;
   }
 
+  /**
+   * Start from a tempo somebody already measured over the whole track.
+   *
+   * This is what a served BPM buys: the search does not have to converge. The
+   * period is set, the grid is declared locked, and the only thing left to find
+   * is the PHASE — which is genuinely per-moment and stays the live tracker's
+   * job. A later estimate can still move it (the adopt rules below apply
+   * normally), so a wrong figure is corrected rather than obeyed for ever.
+   */
+  function seed(seedBpm, seedConfidence = 0.9) {
+    const b = +seedBpm;
+    if (!Number.isFinite(b) || b < MIN_BPM || b > MAX_BPM) return false;
+    period = 60 / b;
+    bpm = b;
+    confidence = Math.max(confidence, Math.min(1, +seedConfidence || 0.9));
+    locked = true;
+    // The phase is unknown until the first fold, so leave it where it is: the
+    // PLL pulls it onto the beat within a bar or two, and phaseFromFold
+    // corrects it outright at the next estimate.
+    lastEst = -1e9;
+    // Publish straight away rather than waiting for the next frame: a caller
+    // that seeds and then reads is entitled to see what it just set, and the
+    // whole point of seeding is that the answer is available immediately.
+    out.bpm = bpm;
+    out.confidence = confidence;
+    out.period = period;
+    out.locked = true;
+    return true;
+  }
+
   function reset() {
     odf.fill(0);
     odfLow.fill(0);
@@ -557,5 +587,5 @@ export function createBeatTracker() {
     sinceBeat = 0;
   }
 
-  return { process, reset, out };
+  return { process, reset, seed, out };
 }

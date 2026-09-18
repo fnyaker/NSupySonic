@@ -23,6 +23,7 @@
     vizFullBleed,
     vizScreenMode,
     vizScreenQuality,
+    ecoMode,
     current,
     playing,
     toasts,
@@ -36,6 +37,7 @@
   import { FAMILY_LIST } from "../lib/audio/style.js";
   import Visualizer from "./Visualizer.svelte";
   import Icon from "./Icon.svelte";
+  import EcoToggle from "./EcoToggle.svelte";
 
   const FPS_CHOICES = [
     { v: 30, label: "30", hint: "Le plus économe" },
@@ -46,10 +48,14 @@
 
   const KICK_LABEL = { soft: "souple", hard: "dur", industrial: "industriel" };
 
-  $: mode = effectiveMode($vizMode, $vizBeatDetect);
-  $: degraded = mode !== $vizMode;
+  $: mode = effectiveMode($vizMode, $vizBeatDetect, $ecoMode);
+  $: degraded = mode !== $vizMode && !$ecoMode;
   $: autoLabel = autoTier();
-  $: previewLive = !!$current && $playing;
+  // "Aucune" means none — including here. A preview that keeps a canvas alive
+  // to show what the user just switched OFF is exactly the kind of pointless
+  // work this setting exists to stop.
+  $: showPreview = mode !== "off";
+  $: previewLive = showPreview && !!$current && $playing;
 
   // While this page is open the engine runs its full analysis, whatever the
   // selected scene needs, so the readout below is never blank because the
@@ -59,7 +65,10 @@
   let stopProbe = null;
   $: {
     stopProbe?.();
-    stopProbe = $vizBeatDetect ? subscribeFrames(() => {}, LEVEL.SMART) : null;
+    // Not while the animations are off: running the whole engine to fill a
+    // readout nothing is driving would be the same waste from the other side.
+    stopProbe =
+      $vizBeatDetect && showPreview ? subscribeFrames(() => {}, LEVEL.SMART) : null;
   }
   onDestroy(() => stopProbe?.());
 
@@ -79,20 +88,43 @@
     l'aperçu suit en direct.
   </p>
 
-  <div class="preview" class:idle={!previewLive}>
-    <Visualizer
-      mode={mode === "off" ? "aurora" : mode}
-      quality={$vizQuality}
-      palette={$vizPalette}
-      intensity={$vizIntensity}
-      fps={$vizFps}
-      layout="full"
-    />
-    {#if !previewLive}
-      <span class="ph">Lancez un titre pour voir l'aperçu</span>
-    {:else if mode === "off"}
-      <span class="ph">Aucune animation dans le lecteur — aperçu à titre indicatif</span>
-    {/if}
+  {#if showPreview}
+    <div class="preview" class:idle={!previewLive}>
+      <Visualizer
+        {mode}
+        quality={$vizQuality}
+        palette={$vizPalette}
+        intensity={$vizIntensity}
+        fps={$vizFps}
+        layout="full"
+        paused={!previewLive}
+      />
+      {#if !previewLive}
+        <span class="ph">Lancez un titre pour voir l'aperçu</span>
+      {/if}
+    </div>
+  {:else}
+    <div class="preview none">
+      <span class="ph">
+        {$ecoMode ? "Mode éco actif : aucune animation." : "Aucune animation."}
+      </span>
+    </div>
+  {/if}
+
+  <div class="block eco-row">
+    <div class="block-head">
+      <span class="block-title">Mode éco</span>
+      <span class="block-hint muted">
+        Coupe toutes les animations d'un coup — le visualiseur, le fondu de la
+        pochette en arrière-plan et la ligne de paroles qui défile — sans perdre
+        vos réglages. Le même bouton est dans le lecteur plein écran.
+      </span>
+    </div>
+    <label class="sw">
+      <input type="checkbox" checked={$ecoMode} on:change={(e) => ecoMode.set(e.target.checked)} />
+      <span>Aucune animation sur cet appareil</span>
+      <EcoToggle size={17} />
+    </label>
   </div>
 
   <div class="block">
@@ -102,7 +134,7 @@
         « Aucune » rend le lecteur d'origine, sans canvas ni analyse.
       </span>
     </div>
-    <div class="modes">
+    <div class="modes" class:overridden={$ecoMode}>
       {#each MODES as m}
         <button class="mode" class:sel={$vizMode === m.id} on:click={() => vizMode.set(m.id)}>
           <span class="mode-t">{m.label}</span>
@@ -111,6 +143,12 @@
         </button>
       {/each}
     </div>
+    {#if $ecoMode}
+      <p class="warn">
+        <Icon name="leaf" size={14} />
+        Le mode éco est actif : ce choix est mémorisé mais rien n'est animé.
+      </p>
+    {/if}
     {#if degraded}
       <p class="warn">
         <Icon name="info" size={14} />
@@ -175,7 +213,10 @@
   <h2><Icon name="activity" size={18} /> Analyse rythmique</h2>
   <p class="sub muted">
     Tempo, grille de temps, type de kick et style. C'est ce qui permet aux animations
-    de tomber juste plutôt que de réagir après coup.
+    de tomber juste plutôt que de réagir après coup. Le tempo et le style sont
+    mesurés une fois par le serveur sur le morceau entier — l'animation est donc
+    juste dès la première mesure ; ici on ne cherche plus que la phase, le kick et
+    les frappes, qui sont les seules choses réellement instantanées.
   </p>
 
   <div class="block">
@@ -223,7 +264,7 @@
 
   <div class="readout" class:live={$vizBeatDetect && $readout.locked}>
     <div class="ro">
-      <span class="ro-k">Tempo</span>
+      <span class="ro-k">Tempo{#if $readout.served} · serveur{/if}</span>
       <span class="ro-v">{$readout.locked ? `${$readout.bpm} BPM` : "—"}</span>
       <span class="bar"><i style={`width:${Math.round($readout.confidence * 100)}%`}></i></span>
     </div>
@@ -355,6 +396,14 @@
   .preview.idle {
     opacity: 0.85;
   }
+  .preview.none {
+    aspect-ratio: auto;
+    min-height: 92px;
+    max-height: none;
+  }
+  .eco-row .sw {
+    gap: 12px;
+  }
   .ph {
     position: relative;
     z-index: 1;
@@ -382,6 +431,9 @@
   .block-hint {
     font-size: 0.78rem;
     line-height: 1.45;
+  }
+  .modes.overridden {
+    opacity: 0.5;
   }
   .modes {
     display: grid;

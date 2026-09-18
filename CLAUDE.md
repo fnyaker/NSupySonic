@@ -81,6 +81,7 @@ supysonic-cli deezer login-test                      # check the ARL works
 supysonic-cli deezer import <deezer-url|track|album|playlist <id>>
 supysonic-cli deezer sync                            # import playlists/favorites/new releases
 supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics for archived tracks
+supysonic-cli deezer analyze [--force] [--limit N]     # measure tempo + style for archived tracks
 
 # Docker (full stack: builds SPA + python image, runs entrypoint that creates admin + auto-sync)
 docker compose up --build                            # web player at :5722/app, Subsonic at :5722/rest
@@ -245,7 +246,7 @@ unreachable, and the parts that do need Deezer must fail *fast* and *without a v
 3. **`supysonic/webui/`** — the custom `/api` blueprint (`__init__.py`, all routes `@login_required`,
    numeric-id validation on stream/favorite), `share.py` (waveform peaks + full-file/ffmpeg-clip
    downloads for the SPA's share sheet, all cached), `edges.py` (where a file's audio starts and
-   stops, for the crossfade) and `spa.py`, which serves the built Svelte SPA at
+   stops, for the crossfade), `analysis.py` (serving the whole-track verdict) and `spa.py`, which serves the built Svelte SPA at
    **`/app/`** (hash-routed). Admin UI stays at `/`, Subsonic at `/rest`.
 
 **Streaming interception** lives in `supysonic/api/media.py` (`_ensure_deezer_archived`): first play
@@ -449,6 +450,39 @@ measuring the page being left.
   waiting for a CDN request to fail first is pure delay. Anything you play caches its cover
   (`playcache.cacheCoverFor`), so hi-res art works offline for everything you've listened to.
 
+**Whole-track analysis is the SERVER's job** (`supysonic/deezer/analysis.py`, served by
+`supysonic/webui/analysis.py`, consumed by `webapp/src/lib/analysis.js`). The tempo and the style
+are properties of the whole piece, and a detector working them out live spends the first fifteen
+seconds of every track converging — through the intro, which is the least representative part of it
+— and pays that cost again on every device, on every play. Same reasoning as the loudness: the audio
+does not change, so neither does the answer. Measure once, keep it in `track_analysis`, serve it.
+
+- The TEMPO is **Deezer's own** where Deezer has one: its public API publishes a `bpm` per track,
+  exact and free. Anything else (a local upload, a track with no figure) is measured from a
+  low-passed envelope — ffmpeg decimates to 1 kHz u8 and the per-frame peak is a `max`/`min` over a
+  ten-byte slice, so no audio sample is ever touched from Python.
+- The DESCRIPTORS come from ffmpeg's `aspectralstats` and `ebur128`: centroid, spread, flatness,
+  entropy, rolloff and flux per frame, plus integrated loudness and **loudness range**. LRA is the
+  single best "how squashed is this" axis there is — a limitered hardcore master sits near 3 LU, a
+  live quartet near 15 — and it replaces the client's spectral crest, whose scale could not be
+  reconciled across the two implementations. **No new Python dependency**: no numpy, no model,
+  nothing to install on a server that already has ffmpeg.
+- Everything it classifies on is **physical or scale-free** (BPM, hertz, decibels, 0..1 ratios), on
+  purpose: the client's live classifier works on its own normalized feature scales and the two must
+  not be expected to share a threshold. They are independent readings — where the served one exists
+  it is the authority, and the live one covers what has not been measured yet.
+- Event-driven like the rest: `archive._finalize_archive` queues it on a daemon thread behind a
+  one-at-a-time semaphore, so it is never why an archive, a stream or a shutdown waits.
+  `deezer analyze` is the catch-up and the way to re-measure after `ANALYSIS_VERSION` moves. The
+  endpoint **never measures** — the player asks about tracks it is *about* to play, and a request
+  that started a three-second ffmpeg pass would answer long after it mattered while holding a thread.
+
+The client takes the global answers and keeps the per-moment ones. `engine.js` primes the verdicts
+for the queue window (one call, like `/api/gains`) and **seeds the beat tracker** with the served
+BPM, so the grid starts locked and only the phase has to be found — the first bar is on the beat
+instead of the fourth. The kick, the onsets and the transients stay live: no whole-file average can
+stand in for an event.
+
 **Audio analysis** (`webapp/src/lib/audio/`) is ONE engine, shared. `engine.js` owns a single clock
 and a single pass over the analysers; every view reads the same frame object by reference, so a
 second visualizer on screen costs a function call. It is refcounted — nothing runs until a view asks
@@ -507,6 +541,35 @@ the room within a minute. The playing tab publishes its analysis frames over a B
 live viewer is also what tells the engine to keep running while the player tab is hidden. That
 window never writes the playback session back (`DISPLAY_ONLY` in `stores.js`): its snapshot is
 frozen at the moment it opened, and writing it would roll the real player's position back to then.
+
+Three things keep that link alive, and each fixes a way it used to die:
+- the engine's **upgrade to the audio-thread clock is retried**, not attempted once. An AudioWorklet
+  needs an AudioContext, and the context only exists once something wired the player's element into
+  the graph — which normally happens *after* a projector window has subscribed. Giving up on the
+  first look left the engine on rAF for the session, and rAF stops in a hidden tab: the projector
+  froze the moment the player went behind it.
+- liveness is a **transport heartbeat**, not the frames. A paused player sends no frames and is
+  still very much there, and the viewer's own ping is a `setInterval` in a window browsers throttle
+  to once a minute — so the timeout is generous (90 s), a closing window says goodbye, and a
+  re-woken one re-announces at once.
+- **more than one tab can publish.** Leaving the app open twice is ordinary, and both tabs answered
+  a projector's hello, so it showed whichever landed last — for an idle second tab, "nothing
+  playing" over the top of a tab that was playing. Every message carries its sender and the
+  projector follows ONE: it prefers a tab reporting playback and only lets another take over once
+  that one goes quiet.
+
+**Animations stop when the music does.** `Visualizer.svelte` takes a `paused` prop: it keeps drawing
+through a 600 ms fade so the scene winds down rather than freezing, then stops the loop, drops its
+engine subscription and clears the canvas. The projector learns the transport state from the
+heartbeat and does the same.
+
+**Eco mode** (`ecoMode` in stores.js, `EcoToggle.svelte`) is the switch above all of them: no
+animation anywhere on the device — the visualizer, the backdrop's crossfades and the live lyric line
+— without destroying the setup underneath, so turning it off restores exactly what was there. It
+lives in the full-screen player footers next to the quality chip: one tap away, and taking no place
+in the transport row. `effectiveMode` returns `"off"` for it, and **"off" means no canvas anywhere**,
+the settings preview included — a preview that kept a canvas alive to show what was just switched
+off would be precisely the waste the setting exists to stop.
 
 **Crossfade + silence trimming** (`components/Player.svelte`, `lib/edges.js`,
 `supysonic/webui/edges.py`). Two ideas that need each other: masters carry a beat of digital silence

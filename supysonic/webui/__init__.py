@@ -3549,4 +3549,5 @@ from . import availability  # noqa: E402,F401  isort:skip
 from . import storage  # noqa: E402,F401  isort:skip
 from . import share  # noqa: E402,F401  isort:skip
 from . import edges  # noqa: E402,F401  isort:skip
+from . import analysis  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip

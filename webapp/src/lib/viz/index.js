@@ -49,8 +49,10 @@ export const MODE_BY_ID = new Map(MODES.map((m) => [m.id, m]));
 
 // A mode that needs rhythm analysis while it is switched off would draw nothing
 // but its idle state, which looks broken. Degrade to the nearest mode that
-// works instead of showing a dead canvas.
-export function effectiveMode(mode, beatDetect) {
+// works instead of showing a dead canvas. Eco mode overrides everything: it
+// means none, and none is not a scene to degrade to a cheaper one.
+export function effectiveMode(mode, beatDetect, eco = false) {
+  if (eco) return "off";
   if (!MODE_BY_ID.has(mode)) return "bars";
   if (beatDetect) return mode;
   if (mode === "smart") return "aurora";

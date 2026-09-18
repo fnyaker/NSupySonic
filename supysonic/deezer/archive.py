@@ -165,6 +165,17 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
     track.unavailable = None
     track.save()
 
+    # Measure what the whole track sounds like — its tempo and its style — so
+    # the player's animation engine is handed them instead of spending the first
+    # fifteen seconds of every play working them out. Queued on its own daemon
+    # thread: it has no deadline and must never be why an archive waits.
+    try:
+        from . import analysis as analysis_mod
+
+        analysis_mod.queue_analysis(track, provider)
+    except Exception as exc:  # analysis is never a condition for archiving
+        logger.warning("Queueing analysis failed for %s: %s", track.path, exc)
+
     # And a metadata sidecar, so the archive describes itself: the tags cannot
     # hold Deezer ids or contributor roles, and a database restored from an old
     # backup would otherwise have no way back to them.

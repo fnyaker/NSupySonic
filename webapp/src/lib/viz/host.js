@@ -9,7 +9,7 @@
 
 import { get } from "svelte/store";
 import { subscribeFrames, LEVEL } from "../audio/engine.js";
-import { current, offlineCovers } from "../stores.js";
+import { current, offlineCovers, playing } from "../stores.js";
 import { resolveCover } from "../format.js";
 import { dominantColor } from "../color.js";
 import { api } from "../api.js";
@@ -49,13 +49,22 @@ function sendMeta() {
     .catch(() => {});
 }
 
-function attach() {
-  if (unsub) return;
-  // SMART: the projector is the one place where the full engine is always worth
-  // running — it is a dedicated screen, and the window that owns it is normally
-  // the only thing the machine is doing.
-  unsub = subscribeFrames((f) => pub.send(f), LEVEL.SMART);
-  sendMeta();
+// The engine runs for the projector only while somebody is watching AND
+// something is actually playing. A paused player keeps sending its heartbeat,
+// so the projector still knows it is there — it just has nothing to draw, and
+// analysing silence to tell it so would be pure battery.
+function syncEngine() {
+  const want = !!pub && pub.viewers > 0 && get(playing);
+  if (want && !unsub) {
+    // SMART: the projector is the one place where the full engine is always
+    // worth running — it is a dedicated screen, and the window that owns it is
+    // normally the only thing the machine is doing.
+    unsub = subscribeFrames((f) => pub.send(f), LEVEL.SMART);
+    sendMeta();
+  } else if (!want && unsub) {
+    unsub();
+    unsub = null;
+  }
 }
 
 function detach() {
@@ -66,11 +75,21 @@ function detach() {
 export function initVizHost() {
   if (pub) return;
   pub = createPublisher({
-    onViewers(n) {
-      n > 0 ? attach() : detach();
+    onViewers() {
+      syncEngine();
     },
   });
-  stopStores = [current.subscribe(sendMeta), offlineCovers.subscribe(sendMeta)];
+  stopStores = [
+    current.subscribe((t) => {
+      pub?.state(get(playing), !!t);
+      sendMeta();
+    }),
+    offlineCovers.subscribe(sendMeta),
+    playing.subscribe((p) => {
+      pub?.state(p, !!get(current));
+      syncEngine();
+    }),
+  ];
   // Viewers announce themselves with a ping; a window closed without a chance
   // to say goodbye (a crash, a killed tab) is only noticed by its pings drying
   // up, so sweep on a timer as well as on each message.

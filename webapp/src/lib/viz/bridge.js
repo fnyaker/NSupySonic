@@ -15,13 +15,33 @@
 // stops in a hidden tab and the player tab is exactly the one that ends up
 // behind the projector window. A live viewer switches the analysis engine onto
 // its audio-thread clock (see engine.js) so the feed survives being hidden.
+//
+// MORE THAN ONE TAB CAN PUBLISH. Leaving the app open in two tabs is completely
+// ordinary, and both of them answer a projector's hello — so the projector used
+// to receive two contradictory streams and show whichever landed last, which
+// for an idle second tab meant "nothing playing" over the top of a tab that was
+// very much playing. Every message therefore carries its sender, and the
+// projector FOLLOWS ONE: it prefers a tab that reports playback, keeps it while
+// its heartbeat holds, and only lets another take over once it goes quiet.
 
 import { setBackgroundAnalysis, BAND_COUNT } from "../audio/engine.js";
 
 const CHANNEL = "nsupysonic-viz";
 const PUBLISH_HZ = 45; // the projector renders at 60; 45 is indistinguishable
-const VIEWER_TIMEOUT = 6000; // a viewer that stops pinging is gone
-const PING_EVERY = 2000;
+// A viewer proves it is alive by pinging. That ping is a setInterval in a
+// window that is, by design, not the focused one — and a browser throttles
+// timers in a backgrounded tab to once a second, then to once a MINUTE after a
+// few minutes of it. So the timeout has to be generous enough to survive that:
+// the only cost of believing in a viewer that has gone is that this tab keeps
+// analysing, while the cost of dropping a live one is the projector freezing.
+// A window that closes properly says goodbye, which is the normal path out.
+const VIEWER_TIMEOUT = 90000;
+const PING_EVERY = 5000;
+// The transport heartbeat. It is what lets the projector tell "the player is
+// there and paused" from "there is no player" — without it, a pause (which
+// legitimately stops the frames) looked exactly like a disconnection.
+const HEARTBEAT_EVERY = 2000;
+const HEARTBEAT_TIMEOUT = 9000;
 
 function open() {
   try {
@@ -34,9 +54,22 @@ function open() {
 // --- the playing tab --------------------------------------------------------
 export function createPublisher({ onViewers } = {}) {
   const ch = open();
-  if (!ch) return { send() {}, meta() {}, close() {}, get viewers() { return 0; } };
+  if (!ch)
+    return {
+      send() {},
+      meta() {},
+      state() {},
+      prune() {},
+      close() {},
+      get viewers() {
+        return 0;
+      },
+    };
+  const src = Math.random().toString(36).slice(2);
   const viewers = new Map(); // id → last seen
   let announced = 0;
+  let transport = { playing: false, loaded: false };
+  let beat = null;
 
   // The host only runs the analysis engine while somebody is watching, so the
   // count crossing zero is the signal it acts on.
@@ -44,7 +77,22 @@ export function createPublisher({ onViewers } = {}) {
     if (viewers.size === announced) return;
     announced = viewers.size;
     setBackgroundAnalysis(announced > 0);
+    if (announced > 0 && !beat) beat = setInterval(sendState, HEARTBEAT_EVERY);
+    else if (!announced && beat) {
+      clearInterval(beat);
+      beat = null;
+    }
     onViewers?.(announced);
+  }
+
+  function sendState() {
+    if (!viewers.size) return;
+    ch.postMessage({
+      t: "s",
+      src,
+      playing: transport.playing,
+      loaded: transport.loaded,
+    });
   }
   let last = 0;
   let metaCache = null;
@@ -63,7 +111,10 @@ export function createPublisher({ onViewers } = {}) {
       const known = viewers.has(m.id);
       viewers.set(m.id, Date.now());
       announce();
-      if (!known && metaCache) ch.postMessage(metaCache);
+      if (!known) {
+        if (metaCache) ch.postMessage(metaCache);
+        sendState();
+      }
     } else if (m.t === "bye") {
       viewers.delete(m.id);
       announce();
@@ -86,6 +137,7 @@ export function createPublisher({ onViewers } = {}) {
       const st = frame.style;
       ch.postMessage({
         t: "f",
+        src,
         bands,
         e: [
           frame.energy.sub,
@@ -115,15 +167,24 @@ export function createPublisher({ onViewers } = {}) {
           : null,
       });
     },
+    // Transport state. Sent on every change and, while anyone is watching, as
+    // a heartbeat — it is the projector's proof that this tab is still here.
+    state(playing, loaded) {
+      const changed = transport.playing !== !!playing || transport.loaded !== !!loaded;
+      transport = { playing: !!playing, loaded: !!loaded };
+      if (changed) sendState();
+    },
     // Track identity + cover colour, resent whenever a viewer joins.
     meta(info) {
-      metaCache = { t: "m", ...info };
+      metaCache = { t: "m", src, ...info };
       ch.postMessage(metaCache);
     },
     prune,
     close() {
       viewers.clear();
       announce();
+      clearInterval(beat);
+      beat = null;
       try {
         ch.close();
       } catch {
@@ -156,19 +217,62 @@ export function createSubscriber(onFrame, onMeta, onState) {
     energy, features, beat, style: null, silent: true,
   };
   let lastAt = 0;
+  let lastBeat = 0;
   let alive = false;
+  // Which publisher we are following, and how good a claim it has: 2 playing,
+  // 1 loaded-but-paused, 0 idle. A better claim, or the current one going
+  // quiet, is what lets another tab take over.
+  let source = null;
+  let sourceRank = -1;
+  let playing = false;
+  let loaded = false;
   let pingTimer = null;
   let watchTimer = null;
+
+  function report() {
+    onState?.({ alive, playing, loaded });
+  }
 
   if (ch) {
     ch.onmessage = (e) => {
       const m = e.data;
       if (!m || m.t === "hello" || m.t === "ping" || m.t === "bye") return;
       if (m.t === "m") {
-        onMeta?.(m);
+        // Before a source is settled, take the first description offered; after
+        // that, only the tab we are following gets to name the track.
+        if (!source || m.src === source || !m.src) onMeta?.(m);
+        return;
+      }
+      if (m.t === "s") {
+        // The heartbeat, not the frames, is what "connected" means: a paused
+        // player sends no frames and is still very much there.
+        const now = performance.now() / 1000;
+        const rank = m.playing ? 2 : m.loaded ? 1 : 0;
+        const stale = now - lastBeat > HEARTBEAT_TIMEOUT / 1000;
+        if (source && m.src !== source) {
+          // Another tab. It only takes over if it has a better claim than the
+          // one we follow, or if the one we follow has gone quiet.
+          if (rank <= sourceRank && !stale) return;
+          source = m.src;
+          // The new source has not told us what it is playing yet.
+          ch.postMessage({ t: "hello", id });
+        } else if (!source) {
+          source = m.src ?? null;
+        }
+        sourceRank = rank;
+        lastBeat = now;
+        // Report only on a real change: the heartbeat itself ticks twice a
+        // second and reassigning Svelte state that often would re-render the
+        // whole overlay for nothing.
+        const changed = !alive || playing !== !!m.playing || loaded !== !!m.loaded;
+        playing = !!m.playing;
+        loaded = !!m.loaded;
+        alive = true;
+        if (changed) report();
         return;
       }
       if (m.t !== "f") return;
+      if (source && m.src && m.src !== source) return; // another tab's stream
       const now = performance.now() / 1000;
       frame.dt = lastAt ? Math.min(0.2, Math.max(0.004, now - lastAt)) : 1 / 45;
       lastAt = now;
@@ -199,21 +303,50 @@ export function createSubscriber(onFrame, onMeta, onState) {
       frame.silent = features.silent;
       if (!alive) {
         alive = true;
-        onState?.(true);
+        report();
       }
       onFrame(frame);
     };
     ch.postMessage({ t: "hello", id });
     pingTimer = setInterval(() => ch.postMessage({ t: "ping", id }), PING_EVERY);
-    // "Is anything still sending?" — the player tab can be closed at any moment
-    // and the projector must say so rather than freeze on the last frame.
+    // "Is anything still there?" — keyed off the HEARTBEAT, so a paused player
+    // stays connected. Only a player tab that has actually gone away (closed,
+    // navigated, crashed) stops sending one.
     watchTimer = setInterval(() => {
-      const stale = performance.now() / 1000 - lastAt > 2;
-      if (alive && stale) {
+      if (!alive) return;
+      if (performance.now() / 1000 - lastBeat > HEARTBEAT_TIMEOUT / 1000) {
         alive = false;
-        onState?.(false);
+        playing = false;
+        // Let go of the source too, so whichever tab speaks next is followed
+        // rather than being ignored for having a worse claim than a ghost.
+        source = null;
+        sourceRank = -1;
+        report();
       }
     }, 1000);
+    // Coming back to the foreground after the browser throttled this window's
+    // timers: re-announce at once rather than waiting out a stretched interval.
+    document.addEventListener("visibilitychange", onVisible);
+    // And leave cleanly, so the player drops us immediately instead of holding
+    // the analysis open until the timeout.
+    window.addEventListener("pagehide", sayBye);
+  }
+
+  function onVisible() {
+    if (!document.hidden) {
+      try {
+        ch?.postMessage({ t: "hello", id });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  function sayBye() {
+    try {
+      ch?.postMessage({ t: "bye", id });
+    } catch {
+      /* ignore */
+    }
   }
 
   return {
@@ -223,8 +356,10 @@ export function createSubscriber(onFrame, onMeta, onState) {
     close() {
       clearInterval(pingTimer);
       clearInterval(watchTimer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pagehide", sayBye);
+      sayBye();
       try {
-        ch?.postMessage({ t: "bye", id });
         ch?.close();
       } catch {
         /* ignore */
