@@ -1,5 +1,5 @@
 <script>
-  // Settings UI for the opt-in DSP chain (see lib/visualizer.js): volume
+  // Settings UI for the opt-in DSP chain (see lib/audio/graph.js): volume
   // normalization, bass enhancement and a 10-band equalizer. Everything writes
   // to the persisted fx.* stores, which the audio graph subscribes to live.
   import { tick } from "svelte";
@@ -10,12 +10,17 @@
     bassBoost,
     normalization,
     fxPresets,
+    crossfadeEnabled,
+    crossfadeSeconds,
+    crossfadeOnSkip,
+    trimSilence,
+    trimThresholdDb,
     saveFxPreset,
     applyFxPreset,
     deleteFxPreset,
     toasts,
   } from "../lib/stores.js";
-  import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/visualizer.js";
+  import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/audio/graph.js";
   import Icon from "./Icon.svelte";
 
   const NORM_LEVELS = [
@@ -55,6 +60,10 @@
   $: activePreset = PRESETS.find((p) => p.bands.every((v, i) => v === $eqBands[i]))?.id;
 
   $: bassPct = Math.round($bassBoost * 100);
+
+  // -- transitions -----------------------------------------------------------
+  $: fadeLabel =
+    $crossfadeSeconds <= 0 ? "enchaîné direct" : `${(+$crossfadeSeconds).toFixed(1)} s`;
 
   // -- the user's own presets ------------------------------------------------
   // A saved preset captures the whole chain (EQ + bass + normalisation), so it
@@ -260,7 +269,123 @@
   </div>
 </section>
 
+<!-- Transitions ------------------------------------------------------------
+     Crossfading needs the Web Audio graph (each track fades through its own
+     normalization gain), so it carries the same caveat as the effects above
+     and lives in the same tab. -->
+<section class="card">
+  <h2><Icon name="shuffle" size={18} /> Transitions</h2>
+  <p class="muted sub">
+    Comment un titre laisse la place au suivant. Le fondu respecte la
+    normalisation : chaque titre garde son propre niveau pendant le
+    chevauchement, aucun des deux ne saute.
+  </p>
+
+  <div class="block">
+    <button
+      class="toggle"
+      role="switch"
+      aria-checked={$crossfadeEnabled}
+      on:click={() => crossfadeEnabled.set(!$crossfadeEnabled)}
+    >
+      <span class="tg-txt">
+        <span class="tg-title">Fondu enchaîné</span>
+        <span class="tg-hint muted">
+          Les deux titres se superposent en fin de morceau. Comme les effets, cela
+          fait passer la lecture par le processeur audio.
+        </span>
+      </span>
+      <span class="sw" class:on={$crossfadeEnabled}><span class="knob"></span></span>
+    </button>
+
+    <div class="slider-row" class:dim={!$crossfadeEnabled}>
+      <span class="s-label">Durée</span>
+      <input
+        type="range"
+        min="0"
+        max="12"
+        step="0.5"
+        value={$crossfadeSeconds}
+        disabled={!$crossfadeEnabled}
+        on:input={(e) => crossfadeSeconds.set(+e.target.value)}
+        style={`--p:${($crossfadeSeconds / 12) * 100}%`}
+        aria-label="Durée du fondu"
+      />
+      <span class="s-val">{fadeLabel}</span>
+    </div>
+  </div>
+
+  <div class="block" class:dim={!$crossfadeEnabled}>
+    <button
+      class="toggle"
+      role="switch"
+      aria-checked={$crossfadeOnSkip}
+      disabled={!$crossfadeEnabled}
+      on:click={() => crossfadeOnSkip.set(!$crossfadeOnSkip)}
+    >
+      <span class="tg-txt">
+        <span class="tg-title">Adoucir les changements manuels</span>
+        <span class="tg-hint muted">
+          Un passage au titre suivant reste immédiat, mais sans la coupure sèche
+          au milieu de la forme d'onde.
+        </span>
+      </span>
+      <span class="sw" class:on={$crossfadeOnSkip}><span class="knob"></span></span>
+    </button>
+  </div>
+
+  <div class="block">
+    <button
+      class="toggle"
+      role="switch"
+      aria-checked={$trimSilence}
+      on:click={() => trimSilence.set(!$trimSilence)}
+    >
+      <span class="tg-txt">
+        <span class="tg-title">Tronquer les silences</span>
+        <span class="tg-hint muted">
+          Démarre et termine chaque titre là où le son commence et s'arrête
+          vraiment. Le serveur mesure le fichier une fois, après son archivage :
+          un titre est donc ajusté à partir de la lecture suivante.
+        </span>
+      </span>
+      <span class="sw" class:on={$trimSilence}><span class="knob"></span></span>
+    </button>
+
+    <div class="slider-row" class:dim={!$trimSilence}>
+      <span class="s-label">Seuil</span>
+      <input
+        type="range"
+        min="-70"
+        max="-25"
+        step="1"
+        value={$trimThresholdDb}
+        disabled={!$trimSilence}
+        on:input={(e) => trimThresholdDb.set(+e.target.value)}
+        style={`--p:${(($trimThresholdDb + 70) / 45) * 100}%`}
+        aria-label="Seuil de silence"
+      />
+      <span class="s-val">{$trimThresholdDb} dB</span>
+    </div>
+  </div>
+</section>
+
 <style>
+  .s-label {
+    min-width: 58px;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+  }
+  .s-val {
+    min-width: 96px;
+    text-align: right;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .dim {
+    opacity: 0.45;
+  }
   .card {
     background: var(--bg-card);
     border-radius: var(--radius);

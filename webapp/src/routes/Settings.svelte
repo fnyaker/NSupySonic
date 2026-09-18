@@ -28,6 +28,7 @@
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
+  import VisualizerSettings from "../components/VisualizerSettings.svelte";
 
   const QUALITIES = [
     { id: "FLAC", label: "FLAC", hint: "Sans perte — lourd" },
@@ -55,6 +56,7 @@
   // player; quality/storage and account sit behind their own tabs.
   const TABS = [
     { id: "fx", label: "Effets sonores" },
+    { id: "viz", label: "Animations" },
     { id: "quality", label: "Qualité sonore" },
     { id: "account", label: "Compte" },
   ];
@@ -464,6 +466,10 @@
 
 {#if tab === "fx"}
   <AudioEffects />
+{/if}
+
+{#if tab === "viz"}
+  <VisualizerSettings />
 {/if}
 
 {#if tab === "quality"}

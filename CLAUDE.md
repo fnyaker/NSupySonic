@@ -74,6 +74,7 @@ export FLASK_APP="supysonic.web:create_application()"; flask run   # backend dev
 # Web UI (Svelte SPA)
 cd webapp && npm install && npm run build            # -> supysonic/webui/dist (gitignored)
 cd webapp && npm run dev                             # hot reload; proxies /api -> localhost:5000
+cd webapp && npm test                                # node --test: the analysis DSP (no deps)
 
 # Deezer CLI
 supysonic-cli deezer login-test                      # check the ARL works
@@ -243,7 +244,8 @@ unreachable, and the parts that do need Deezer must fail *fast* and *without a v
 
 3. **`supysonic/webui/`** — the custom `/api` blueprint (`__init__.py`, all routes `@login_required`,
    numeric-id validation on stream/favorite), `share.py` (waveform peaks + full-file/ffmpeg-clip
-   downloads for the SPA's share sheet, all cached) and `spa.py`, which serves the built Svelte SPA at
+   downloads for the SPA's share sheet, all cached), `edges.py` (where a file's audio starts and
+   stops, for the crossfade) and `spa.py`, which serves the built Svelte SPA at
    **`/app/`** (hash-routed). Admin UI stays at `/`, Subsonic at `/rest`.
 
 **Streaming interception** lives in `supysonic/api/media.py` (`_ensure_deezer_archived`): first play
@@ -446,6 +448,78 @@ measuring the page being left.
   **preferred** source in `Cover.svelte`, not a fallback — it's the server's archived 1000px art, so
   waiting for a CDN request to fail first is pure delay. Anything you play caches its cover
   (`playcache.cacheCoverFor`), so hi-res art works offline for everything you've listened to.
+
+**Audio analysis** (`webapp/src/lib/audio/`) is ONE engine, shared. `engine.js` owns a single clock
+and a single pass over the analysers; every view reads the same frame object by reference, so a
+second visualizer on screen costs a function call. It is refcounted — nothing runs until a view asks
+for frames — and it runs at the shallowest level any live subscriber needs (spectrum / rhythm /
+smart). Three things in there are load-bearing:
+
+- `graph.js` is the Web Audio graph (moved from the old `lib/visualizer.js`). Its normalization gain
+  is **per source, not shared**: a crossfade has two tracks audible at once, each with its own
+  ReplayGain, and one shared node could only ever be right for one of them. A separate fade gain
+  sits after it so the two envelopes are scheduled independently.
+- Two analysers, not one. `spectrum.js` reads the low end from an 8192-point FFT (5.9 Hz bins) and
+  the rest from a 2048-point one (43 ms window), blended across 300-600 Hz, and **interpolates
+  between bins** where a log band is narrower than one. That is what fixed the old visualizer's
+  bass: a single 512-point FFT is a 93 Hz bin, so every bar below ~400 Hz floored onto the same two
+  or three bins and drew as flat groups of identical bars.
+- The clock is the **audio thread** (a tiny AudioWorklet posting every 4 render quanta), not rAF.
+  rAF stops in a hidden tab, which is the normal case for the player once the projector window is
+  in front of it. rAF is the fallback, and carries the first frames while the worklet compiles.
+
+`tempo.js` is a spectral-flux onset function on a fixed 100 Hz grid, an autocorrelation summed over
+harmonics, and a phase-locked loop. Once locked, beats are **predicted**, not detected, so a scene
+lands on the beat instead of a detector's latency after it. Three details are there because the
+tracker was wrong without them, all of them at the tempi this player exists for: the ODF is smoothed
+(~20 ms) before the autocorrelation, or a period that is not a whole number of grid slots (174 BPM
+is 34.5) loses half its correlation to its own double; every candidate is divided by the **same**
+harmonic weight, or slow candidates get a free pass because their harmonics fall off the end of the
+search range; and the octave is arbitrated by **folding the bass onset function**, because an
+offbeat hi-hat lives in the treble and cannot fool it. `webapp/test/audio.test.mjs` pins all of it
+(`npm test`, no dependency to install) — the wall-clock bug it caught would have made the tracker
+drift with the frame rate.
+
+`style.js` reads the kick's shape (attack, decay, click, grit → soft / hard / industrial) and a
+smoothed family vector (techno, hardtekk, zaag, frenchcore, uptempo, pieep, krach, rock, metal,
+strings, vocal…). It publishes TWO things for two jobs: the family, which is legible and is what the
+UI shows, and a five-way **archetype** mix (sustain / voice / groove / hard / rock), which is what
+the renderer blends on — animations can interpolate between five archetypes, not between eighteen
+genre names, and a scene that re-drew itself every time the classifier changed its mind between two
+neighbouring hardcore subgenres would be unwatchable. Nothing hard-switches: both outputs are
+weights, smoothed over seconds, and the dominant family changes with hysteresis.
+
+**Animations** (`webapp/src/lib/viz/`): a scene registry (`off`, `bars`, `pulse`, `aurora`, `smart`),
+a palette whose SOURCE the user picks (cover art / the spectrum itself / fixed schemes), and quality
+tiers that `auto`-resolve from the device and **step down on their own** when a frame overruns its
+budget. `Visualizer.svelte` hosts the canvas: `scene.update()` runs on every analysis frame (~94 Hz,
+so a beat is never missed) and `scene.draw()` on rAF under the user's frame cap — the two rates are
+separate on purpose. `smart.js` is not five visualizers with a switch; it is five layers drawn at
+the weight their archetype holds, so a track that is half sung and half instrumental looks like
+both. Réglages → Animations configures all of it around a live preview and a readout of what the
+engine currently believes.
+
+**The projector window** (`routes/Viz.svelte`, `lib/viz/bridge.js`, `lib/viz/host.js`) is the same
+SPA on `#/viz`, opened in a second tab to be dragged onto a beamer. It plays **nothing**: a second
+`<audio>` would be a second stream, a second decode and a second playhead drifting out of sync with
+the room within a minute. The playing tab publishes its analysis frames over a BroadcastChannel
+(~700 bytes at 45 Hz) and the projector renders them — one decode, one analysis, one timeline. A
+live viewer is also what tells the engine to keep running while the player tab is hidden. That
+window never writes the playback session back (`DISPLAY_ONLY` in `stores.js`): its snapshot is
+frozen at the moment it opened, and writing it would roll the real player's position back to then.
+
+**Crossfade + silence trimming** (`components/Player.svelte`, `lib/edges.js`,
+`supysonic/webui/edges.py`). Two ideas that need each other: masters carry a beat of digital silence
+at each end, and a crossfade that ignores them fades one track's silence into another's — the gap it
+was meant to remove. The server measures the bounds once per (file, threshold) with ffmpeg's
+`silencedetect` and caches them; it **never archives to answer**, so asking about the next track can
+never start a download, and a file that is not on disk simply answers `ready:false` and plays
+untrimmed. The handover happens at the **start** of the fade, not its end: the incoming element
+becomes `audio` and the queue advances there and then, so the seek bar and the lock screen name the
+track you are beginning to hear. A manual skip is not an overlap — it gets a 60 ms ramp, long enough
+to kill the click of a cut mid-waveform and short enough to be inaudible as a delay. Crossfading
+needs the Web Audio graph, so like the effects it is off by default (see the note in `graph.js`
+about a suspended AudioContext silencing a backgrounded tab).
 
 ## Database / schema
 

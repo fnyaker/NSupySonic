@@ -74,7 +74,7 @@ export const quality = persisted("player.quality", "FLAC");
 // path (no Web Audio graph), which is what preserves reliable background
 // playback on mobile. Enabling any effect routes audio through the processor.
 //
-// Ten-band graphic EQ. Frequencies are fixed (see visualizer.js EQ_FREQS);
+// Ten-band graphic EQ. Frequencies are fixed (see audio/graph.js EQ_FREQS);
 // each entry is a gain in dB in [-12, +12], 0 = flat.
 export const eqEnabled = persisted("fx.eq.enabled", false);
 export const eqBands = persisted("fx.eq.bands", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -84,6 +84,53 @@ export const bassBoost = persisted("fx.bass", 0);
 // Volume normalization strength: "off" | "low" | "medium" | "high". A
 // dynamics compressor + make-up gain that evens out loud/quiet tracks.
 export const normalization = persisted("fx.normalize", "off");
+
+// -- crossfade between tracks ------------------------------------------------
+// Off by default: crossfading needs the Web Audio graph, and the default (pure
+// element playback) is what keeps a backgrounded tab from ever being silenced
+// by a suspended AudioContext. Switching it on is an explicit choice, exactly
+// like switching on an effect.
+export const crossfadeEnabled = persisted("fade.enabled", false);
+// Overlap length in seconds. 0 means "no overlap", which is still useful with
+// silence trimming on: the next track simply starts where the audio does.
+export const crossfadeSeconds = persisted("fade.seconds", 6);
+// Also fade when the user skips by hand, not only at the natural end of a
+// track. A skip is a deliberate act, so this is a taste setting.
+export const crossfadeOnSkip = persisted("fade.onSkip", true);
+// Trim the silence at both ends of a file so the fade meets real audio. The
+// threshold is what counts as silence, in dBFS.
+export const trimSilence = persisted("fade.trim", true);
+export const trimThresholdDb = persisted("fade.trimDb", -45);
+
+// -- animations / visualizer -------------------------------------------------
+// The scene drawn in the full-screen player: "off" (the plain, original player),
+// "bars", "pulse", "aurora" or "smart" (the style-aware engine).
+export const vizMode = persisted("viz.mode", "bars");
+// Rendering effort: "auto" reads the device, the rest are explicit.
+export const vizQuality = persisted("viz.quality", "auto");
+// Where the colours come from: the cover art, the spectrum itself, or a fixed
+// scheme.
+export const vizPalette = persisted("viz.palette", "cover");
+// How far the scenes push — amplitude of motion, not brightness.
+export const vizIntensity = persisted("viz.intensity", 0.7);
+// Rhythm analysis (tempo, beat grid, kick and style detection). It costs a few
+// hundred microseconds a frame, so it is opt-out rather than always-on for
+// people who only ever want bars.
+export const vizBeatDetect = persisted("viz.beat", true);
+// Show what the engine thinks it is listening to, in the player.
+export const vizShowStyle = persisted("viz.showStyle", true);
+// Milliseconds the analysis runs AHEAD of the speakers (see lib/audio/graph.js).
+// 0 = the audio path is untouched.
+export const vizLookahead = persisted("viz.lookahead", 0);
+// Frame-rate ceiling for the scenes. 0 = whatever the display does.
+export const vizFps = persisted("viz.fps", 60);
+// Let a scene paint the whole background of the full-screen player rather than
+// only its own strip.
+export const vizFullBleed = persisted("viz.fullBleed", true);
+// The separate projector window keeps its own scene + effort, because a big
+// screen wants a different answer from a phone.
+export const vizScreenMode = persisted("viz.screen.mode", "smart");
+export const vizScreenQuality = persisted("viz.screen.quality", "high");
 
 // The user's own saved presets. A preset captures the WHOLE audio setup —
 // EQ on/off + the ten band gains, the bass lift and the normalization level —
@@ -420,6 +467,12 @@ const savedRepeat = persisted("player.repeat", "off"); // off | all | one
 // writeSession (not the `persisted` helper) so a quota failure can retry with
 // a tighter queue window instead of silently saving nothing.
 const SESSION_KEY = "player.session";
+// A window opened as the projector display (#/viz) is a SCREEN, not a player.
+// It restores the session so it can name what is playing, but it must never
+// write it back: its snapshot is frozen at the moment it opened, and writing
+// that would roll the real player's saved position back to then.
+const DISPLAY_ONLY =
+  typeof window !== "undefined" && (window.location.hash || "").startsWith("#/viz");
 // The playhead position lives in its OWN tiny key ({index, id, time}, ~60
 // bytes). During plain playback only this key is refreshed — re-serializing
 // the whole queue (potentially hundreds of KB) 30×/min just to move the
@@ -616,6 +669,7 @@ function createPlayer() {
     };
   }
   function save(s) {
+    if (DISPLAY_ONLY) return;
     // Quota blown by a huge queue: retry with a tight window around the
     // playing track so at least the position and nearby tracks survive.
     let snap = snapshot(s);
@@ -628,6 +682,7 @@ function createPlayer() {
             null, { important: true });
   }
   function savePos(s) {
+    if (DISPLAY_ONLY) return;
     lastPosAt = Date.now();
     logInfo("pos", `i=${s.index - savedOffset} id=${s.queue[s.index]?.deezer_id ?? "-"} t=${(s.currentTime || 0).toFixed(1)}`);
     writeJSON(POS_KEY, {

@@ -2933,5 +2933,232 @@ class MultiArtistTestCase(unittest.TestCase):
         self.assertEqual(_track_api(bare)["display_artist"], "Artist")
 
 
+class AudioEdgesTestCase(unittest.TestCase):
+    """Where a file's audio starts and stops (supysonic/webui/edges.py).
+
+    The detection itself is ffmpeg's; what is worth pinning here is everything
+    around it — that a missing file is an answer rather than an error, that the
+    caps keep a pathological measurement from cutting into real music, and that
+    the result is only computed once per file.
+    """
+
+    def setUp(self):
+        self.__db = tempfile.mkstemp()
+        self.__dir = tempfile.mkdtemp()
+        self.archive = tempfile.mkdtemp()
+
+        db_path = self.__db[1]
+        cache = self.__dir
+
+        class Config(DefaultConfig):
+            TESTING = True
+
+            def __init__(self):
+                super().__init__()
+                self.BASE = dict(self.BASE, database_uri="sqlite:///" + db_path)
+                self.WEBAPP = dict(
+                    self.WEBAPP, cache_dir=cache, mount_webui=True, mount_api=True
+                )
+
+        self.app = create_application(Config())
+        UserManager.add("alice", "Alic3", admin=True)
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        release_database()
+        shutil.rmtree(self.__dir, ignore_errors=True)
+        shutil.rmtree(self.archive, ignore_errors=True)
+        os.close(self.__db[0])
+        os.remove(self.__db[1])
+
+    def _login(self):
+        return self.client.post(
+            "/api/login", json={"username": "alice", "password": "Alic3"}
+        )
+
+    def _track(self, name="song.flac", write=True):
+        from supysonic.deezer import library, local
+
+        root = library.get_root_folder(self.archive)
+        d = os.path.join(self.archive, "Band", "Album")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name)
+        if write:
+            with open(path, "wb") as fh:
+                fh.write(b"audio")
+
+        class FakeTag:
+            artist = "Band"
+            albumartist = None
+            album = "Album"
+            genre = None
+            title = "Song"
+            disc = 1
+            track = 1
+            year = None
+            length = 210.0
+            bitrate = 320000
+            images = []
+
+        orig = local._load_tag
+        local._load_tag = lambda p: FakeTag() if p == path else None
+        try:
+            return local.import_local_file(path, root)
+        finally:
+            local._load_tag = orig
+
+    # -- the pure helpers ------------------------------------------------
+
+    def test_edges_from_intervals(self):
+        from supysonic.webui.edges import _edges
+
+        # Silence at the head that ends, and a silence with no end (EOF).
+        self.assertEqual(_edges([[0.0, 1.6], [4.6, None]], 7.0), (1.6, 4.6))
+        # Nothing detected: the whole file is the audio.
+        self.assertEqual(_edges([], 210.0), (0.0, 210.0))
+        # A silence that does not start at 0 is a gap inside the track, not a
+        # lead-in, and must not move the start.
+        self.assertEqual(_edges([[30.0, 32.0]], 210.0), (0.0, 210.0))
+
+    def test_edges_never_trim_more_than_the_cap(self):
+        from supysonic.webui.edges import MAX_TRIM, _edges
+
+        # A track opening on 90 s of near-silence is a hidden-track arrangement:
+        # jumping an arbitrary MAX_TRIM into it is not a trim, so it plays whole.
+        self.assertEqual(_edges([[0.0, 90.0]], 300.0), (0.0, 300.0))
+        self.assertEqual(_edges([[10.0, None]], 300.0), (0.0, 300.0))
+        # Just inside the cap, the trim stands.
+        start, end = _edges([[0.0, MAX_TRIM - 1]], 300.0)
+        self.assertEqual(start, MAX_TRIM - 1)
+        self.assertEqual(end, 300.0)
+
+    def test_edges_all_silence_is_not_a_zero_length_track(self):
+        from supysonic.webui.edges import _edges
+
+        self.assertEqual(_edges([[0.0, None]], 210.0), (0.0, 210.0))
+
+    def test_threshold_is_clamped(self):
+        from supysonic.webui.edges import (
+            DEFAULT_THRESHOLD,
+            MAX_THRESHOLD,
+            MIN_THRESHOLD,
+            _clamp_threshold,
+        )
+
+        self.assertEqual(_clamp_threshold("-45"), -45.0)
+        self.assertEqual(_clamp_threshold("-500"), MIN_THRESHOLD)
+        self.assertEqual(_clamp_threshold("0"), MAX_THRESHOLD)
+        self.assertEqual(_clamp_threshold("nonsense"), DEFAULT_THRESHOLD)
+        self.assertEqual(_clamp_threshold(None), DEFAULT_THRESHOLD)
+
+    # -- the route -------------------------------------------------------
+
+    def test_requires_login(self):
+        self.assertEqual(self.client.get("/api/audio/edges/1").status_code, 401)
+
+    def test_unknown_id_is_not_ready(self):
+        self._login()
+        rv = self.client.get("/api/audio/edges/424242")
+        self.assertEqual(rv.status_code, 200)
+        self.assertFalse(rv.get_json()["ready"])
+
+    def test_missing_file_is_not_ready(self):
+        """Never an error: the player just skips trimming for that track."""
+        self._login()
+        t = self._track()
+        os.remove(t.path)
+        rv = self.client.get(f"/api/audio/edges/{t.id}")
+        self.assertEqual(rv.status_code, 200)
+        self.assertFalse(rv.get_json()["ready"])
+
+    def test_measures_and_caches(self):
+        from supysonic.webui import edges
+
+        self._login()
+        t = self._track()
+        calls = []
+
+        def fake_detect(path, threshold):
+            calls.append((path, threshold))
+            return [[0.0, 2.5], [180.0, None]], 200.0
+
+        orig_detect, orig_have = edges._detect, edges._ffmpeg_available
+        edges._detect = fake_detect
+        edges._ffmpeg_available = lambda: True
+        try:
+            rv = self.client.get(f"/api/audio/edges/{t.id}?db=-45")
+            data = rv.get_json()
+            self.assertTrue(data["ready"])
+            self.assertEqual(data["start"], 2.5)
+            self.assertEqual(data["end"], 180.0)
+            self.assertEqual(data["duration"], 200.0)
+            self.assertEqual(data["threshold"], -45.0)
+            # Second call for the same file + threshold is served from the cache
+            # — a full decode per play would be unaffordable.
+            again = self.client.get(f"/api/audio/edges/{t.id}?db=-45").get_json()
+            self.assertEqual(again["start"], 2.5)
+            self.assertEqual(len(calls), 1)
+            # A different threshold is a different measurement.
+            self.client.get(f"/api/audio/edges/{t.id}?db=-60")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[1][1], -60.0)
+        finally:
+            edges._detect, edges._ffmpeg_available = orig_detect, orig_have
+
+    def test_detection_failure_is_not_ready(self):
+        from supysonic.webui import edges
+
+        self._login()
+        t = self._track()
+
+        def boom(path, threshold):
+            raise RuntimeError("ffmpeg exited 1")
+
+        orig_detect, orig_have = edges._detect, edges._ffmpeg_available
+        edges._detect = boom
+        edges._ffmpeg_available = lambda: True
+        try:
+            rv = self.client.get(f"/api/audio/edges/{t.id}")
+            self.assertEqual(rv.status_code, 200)
+            self.assertFalse(rv.get_json()["ready"])
+        finally:
+            edges._detect, edges._ffmpeg_available = orig_detect, orig_have
+
+    def test_without_ffmpeg_is_not_ready(self):
+        from supysonic.webui import edges
+
+        self._login()
+        t = self._track()
+        orig = edges._ffmpeg_available
+        edges._ffmpeg_available = lambda: False
+        try:
+            self.assertFalse(
+                self.client.get(f"/api/audio/edges/{t.id}").get_json()["ready"]
+            )
+        finally:
+            edges._ffmpeg_available = orig
+
+    def test_never_archives_to_answer(self):
+        """Asking about the next track must not start a download.
+
+        The player asks minutes ahead of playing something; if that triggered an
+        archive the answer would arrive long after it was needed and the request
+        would hold an HTTP thread the whole time.
+        """
+        from supysonic.deezer import archive
+
+        self._login()
+        called = []
+        orig = archive.ensure_archived
+        archive.ensure_archived = lambda *a, **k: called.append(a)
+        try:
+            rv = self.client.get("/api/audio/edges/987654")
+            self.assertEqual(rv.status_code, 200)
+            self.assertFalse(rv.get_json()["ready"])
+            self.assertEqual(called, [])
+        finally:
+            archive.ensure_archived = orig
+
+
 if __name__ == "__main__":
     unittest.main()

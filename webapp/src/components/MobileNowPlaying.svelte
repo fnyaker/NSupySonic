@@ -24,7 +24,19 @@
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createBackdrop } from "../lib/backdrop.js";
   import { api } from "../lib/api.js";
-  import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
+  import {
+    vizMode,
+    vizQuality,
+    vizPalette,
+    vizIntensity,
+    vizFps,
+    vizBeatDetect,
+    vizFullBleed,
+    vizShowStyle,
+  } from "../lib/stores.js";
+  import { effectiveMode, MODE_BY_ID } from "../lib/viz/index.js";
+  import { readout } from "../lib/audio/engine.js";
+  import Visualizer from "./Visualizer.svelte";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
@@ -42,27 +54,22 @@
     openMenu(coords, buildTrackMenu($current, go));
   }
 
-  // -- bar visualizer (same renderer as desktop) ----------------------------
-  // Only animate while the page is actually visible: on mobile, burning rAF
-  // frames behind a locked screen / backgrounded PWA wastes battery.
-  let viz;
-  let rafId = null;
-  const drawBars = createVisualizer();
-  function startViz() {
-    if (rafId || (typeof document !== "undefined" && document.hidden)) return;
-    requestAnalyser(); // wire Web Audio in now that the visualizer is on screen
-    const loop = () => {
-      rafId = requestAnimationFrame(loop);
-      drawBars(viz);
-    };
-    loop();
-  }
-  function stopViz() {
-    if (rafId) cancelAnimationFrame(rafId);
-    rafId = null;
-  }
+  // -- animation -------------------------------------------------------------
+  // The scene, its effort and its palette all come from the settings; the
+  // Visualizer component owns the canvas and the loop. `effectiveMode` is what
+  // degrades a rhythm-driven scene when the user has switched the analysis off,
+  // so the player never shows a dead canvas.
+  $: vmode = effectiveMode($vizMode, $vizBeatDetect);
+  $: fullBleed = $vizFullBleed && (MODE_BY_ID.get(vmode)?.fullBleed ?? false);
+  $: stripViz = vmode === "bars";
+  // Only claim to have recognised something once the engine is reasonably sure.
+  // A label that flickers between four genres in a bar is worse than no label.
+  $: styleLabel =
+    $vizShowStyle && vmode === "smart" && $readout.styleConfidence > 0.35
+      ? $readout.styleLabel
+      : "";
+
   function onVisibility() {
-    document.hidden ? stopViz() : startViz();
     if (document.hidden) {
       // Belt and braces for the same class of bug as onTouchCancel: not every
       // WebView build delivers a touchcancel when the app is sent to the
@@ -84,12 +91,8 @@
     tick().then(centerCurrent);
   }
   onMount(() => {
-    startViz();
     document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      stopViz();
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
+    return () => document.removeEventListener("visibilitychange", onVisibility);
   });
 
   // Blurred backdrop — crossfading layers driven by lib/backdrop.js (shared
@@ -677,9 +680,26 @@
   {/each}
   <div class="scrim"></div>
 
+  {#if fullBleed}
+    <div class="viz-full" aria-hidden="true">
+      <Visualizer
+        mode={vmode}
+        quality={$vizQuality}
+        palette={$vizPalette}
+        intensity={$vizIntensity}
+        fps={$vizFps}
+        layout="full"
+        active={$immersiveOpen}
+      />
+    </div>
+  {/if}
+
   <header>
     <button class="ic" on:click={close} aria-label="Réduire"><Icon name="chevronDown" size={26} /></button>
-    <span class="ctx">{$player.context?.kind === "flow" ? "Flow" : "En lecture"}</span>
+    <span class="ctx">
+      {$player.context?.kind === "flow" ? "Flow" : "En lecture"}
+      {#if styleLabel}<em>{styleLabel}{#if $readout.bpm} · {$readout.bpm} BPM{/if}</em>{/if}
+    </span>
     <button class="ic" on:click={() => (showQueue = true)} aria-label="File d'attente"><Icon name="queue" size={22} /></button>
   </header>
 
@@ -731,7 +751,19 @@
       <button class="sm" class:on={$player.repeat !== "off"} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
     </div>
 
-    <canvas class="viz" bind:this={viz} aria-hidden="true"></canvas>
+    {#if stripViz}
+      <div class="viz">
+        <Visualizer
+          mode="bars"
+          quality={$vizQuality}
+          palette={$vizPalette}
+          intensity={$vizIntensity}
+          fps={$vizFps}
+          layout="strip"
+          active={$immersiveOpen}
+        />
+      </div>
+    {/if}
 
     <div class="footer">
       <button class="sm more" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={22} /></button>
@@ -809,6 +841,14 @@
     justify-content: space-between;
     padding: 14px 16px;
     flex: none;
+  }
+  .ctx em {
+    display: block;
+    font-style: normal;
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.5);
+    margin-top: 2px;
   }
   .ctx {
     font-size: 0.76rem;
@@ -1032,11 +1072,17 @@
   }
 
   .viz {
-    width: 100%;
+    position: relative;
     height: 40px;
+    margin: 0 22px;
     opacity: 0.9;
-    padding: 0 22px;
-    box-sizing: border-box;
+  }
+  /* Sits above the blurred cover and its scrim, below the controls: the
+     backdrop becomes the animation instead of competing with it. */
+  .viz-full {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
   }
   .footer {
     display: flex;

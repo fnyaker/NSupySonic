@@ -88,6 +88,17 @@
   {:else if name === "close"}
     <line x1="18" y1="6" x2="6" y2="18" />
     <line x1="6" y1="6" x2="18" y2="18" />
+  {:else if name === "activity"}
+    <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+  {:else if name === "monitor"}
+    <rect x="2" y="3" width="20" height="14" rx="2" />
+    <path d="M8 21h8" />
+    <path d="M12 17v4" />
+  {:else if name === "cast"}
+    <path d="M2 16.1A5 5 0 0 1 5.9 20" />
+    <path d="M2 12.05A9 9 0 0 1 9.95 20" />
+    <path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
+    <path d="M2 20h.01" />
   {:else if name === "info"}
     <circle cx="12" cy="12" r="9" />
     <line x1="12" y1="11" x2="12" y2="16" />
@@ -105,6 +116,11 @@
     <path d="M9 21H3v-6" />
     <path d="M21 3l-7 7" />
     <path d="M3 21l7-7" />
+  {:else if name === "minimize"}
+    <path d="M21 9h-6V3" />
+    <path d="M3 15h6v6" />
+    <path d="M14 10l7-7" />
+    <path d="M10 14l-7 7" />
   {:else if name === "check"}
     <polyline points="20 6 9 17 4 12" />
   {:else if name === "cloudOff"}
