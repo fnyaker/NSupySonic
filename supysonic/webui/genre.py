@@ -335,11 +335,18 @@ def _run_extractor_test(app):
             open_connection(reuse=True)
             from ..deezer import embedding as emb
 
+            # Long enough to embed two spans, and the music this library actually
+            # plays: the first six rows of a table are a poor sample (intros,
+            # skits, a broken import) and would make the test fail for the wrong
+            # reason.
             paths = [
                 t.path
-                for t in Track.select().where(Track.last_modification > 0).limit(40)
+                for t in Track.select()
+                .where((Track.last_modification > 0) & (Track.duration >= 90))
+                .order_by(Track.play_count.desc())
+                .limit(EXTRACTOR_TEST_TRACKS)
                 if t.path
-            ][:EXTRACTOR_TEST_TRACKS]
+            ]
 
             def say(line):
                 with _extractor_lock:

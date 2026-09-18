@@ -44,6 +44,7 @@ import base64
 import logging
 import math
 import os
+import shutil
 import struct
 import subprocess
 import threading
@@ -101,8 +102,15 @@ def onnxruntime_available() -> bool:
         return False
 
 
+def ffmpeg_available() -> bool:
+    """ffmpeg is not optional here: every extractor path decodes audio with it."""
+    return shutil.which("ffmpeg") is not None
+
+
 def available() -> bool:
     """True when this server can extract embeddings at all."""
+    if not ffmpeg_available():
+        return False
     try:
         import numpy  # noqa: F401
     except Exception:
@@ -112,6 +120,8 @@ def available() -> bool:
 
 def why_unavailable() -> str | None:
     """A sentence the CLI and the API can show, or None when it works."""
+    if not ffmpeg_available():
+        return "ffmpeg is not installed (the extractor decodes audio with it)"
     try:
         import numpy  # noqa: F401
     except Exception:
@@ -698,25 +708,42 @@ def self_test(paths, progress=None):
     why = why_unavailable()
     if why:
         return {"ok": False, "reason": why}
+    # A model that loads but cannot be fed is the failure this test exists to
+    # catch — say which it is rather than "could not embed enough material".
+    load_err = session_error()
+    if load_err:
+        return {"ok": False, "reason": f"the model cannot be used: {load_err}"}
     paths = [p for p in paths if p and os.path.isfile(p)][:6]
     if len(paths) < 2:
         return {"ok": False, "reason": "need at least two archived tracks to test"}
 
     halves = []
+    first_error = None
     for p in paths:
         say(f"  {os.path.basename(p)}")
         try:
             dur = _probe_duration(p)
             if not dur or dur < 60:
+                if first_error is None:
+                    first_error = "the tracks tested are shorter than 60 s"
                 continue
             a = _embed_span(p, start=dur * 0.15, seconds=min(40, dur * 0.3))
             b = _embed_span(p, start=dur * 0.6, seconds=min(40, dur * 0.3))
-        except Exception:
+        except Exception as exc:
+            logger.warning("embedding: self-test failed on %s", p, exc_info=True)
+            if first_error is None:
+                first_error = f"{os.path.basename(p)}: {exc}"
             continue
         if a is not None and b is not None:
             halves.append((a, b))
+        elif first_error is None:
+            first_error = f"{os.path.basename(p)}: the model produced no vector"
     if len(halves) < 2:
-        return {"ok": False, "reason": "could not embed enough material to judge"}
+        return {
+            "ok": False,
+            "reason": first_error or "could not embed enough material to judge",
+            "tracks": len(halves),
+        }
 
     same = [float(np.dot(a, b)) for a, b in halves]
     other = []
