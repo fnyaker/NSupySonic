@@ -51,6 +51,7 @@
   let newColor = SWATCHES[0];
   let newArchetype = "";
   let busyTag = 0;
+  let seedingDefaults = false;
 
   // -- tagging ----------------------------------------------------------------
   let candidates = [];
@@ -151,6 +152,25 @@
       toasts.push(e?.message || "modification impossible", "error");
     } finally {
       busyTag = 0;
+    }
+  }
+
+  // The engine already knows a set of genres; add the ones this vocabulary is
+  // missing, so a deleted default can be brought back without retyping it.
+  async function addEngineGenres() {
+    seedingDefaults = true;
+    try {
+      const r = await api.genreDefaults();
+      await refresh();
+      toasts.push(
+        r.created
+          ? `${r.created} genre${r.created > 1 ? "s" : ""} ajouté${r.created > 1 ? "s" : ""}`
+          : "Les genres du moteur sont déjà tous là"
+      );
+    } catch (e) {
+      toasts.push(e?.message || "opération impossible", "error");
+    } finally {
+      seedingDefaults = false;
     }
   }
 
@@ -549,11 +569,22 @@
 
     {#if tab === "vocab"}
       <section class="card">
-        <h2><Icon name="sort" size={18} /> Vocabulaire</h2>
+        <div class="vocab-head">
+          <h2><Icon name="sort" size={18} /> Vocabulaire</h2>
+          <button
+            class="ghost small-btn"
+            on:click={addEngineGenres}
+            disabled={seedingDefaults}
+          >
+            <Icon name="refresh" size={14} />
+            {seedingDefaults ? "Ajout…" : "Genres du moteur"}
+          </button>
+        </div>
         <p class="sub muted">
           Les genres que <em>vous</em> distinguez. Le modèle n'apprendra jamais une
           nuance qui n'a pas de nom ici — et chaque genre veut au moins huit titres
-          pour valoir quelque chose.
+          pour valoir quelque chose. Les genres déjà reconnus par le moteur sont
+          pré-remplis : il ne reste qu'à confirmer.
         </p>
 
         <div class="tag-list">
@@ -1167,6 +1198,19 @@
   }
 
   /* -- vocabulary ---------------------------------------------------------- */
+  .vocab-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .vocab-head h2 {
+    margin: 0;
+  }
+  .vocab-head .small-btn {
+    margin-top: 0;
+  }
   .tag-list {
     display: flex;
     flex-direction: column;

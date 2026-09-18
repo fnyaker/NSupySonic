@@ -14,7 +14,7 @@ import unittest
 
 from supysonic import webui as _webui
 from supysonic.config import DefaultConfig
-from supysonic.db import Playlist, StarredTrack, Track, User, now, release_database
+from supysonic.db import Meta, Playlist, StarredTrack, Track, User, now, release_database
 from supysonic.managers.user import UserManager
 from supysonic.web import create_application
 
@@ -3427,6 +3427,9 @@ class GenreStudioTestCase(unittest.TestCase):
         from supysonic.deezer import genre as gen
 
         gen.invalidate()
+        # Mark the engine vocabulary as already seeded so the tests that predate
+        # it start from an empty studio. The seeding tests clear this flag.
+        Meta.create(key=gen.SEED_META_KEY, value="1")
 
     def tearDown(self):
         from supysonic.deezer import genre as gen
@@ -3489,6 +3492,9 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertEqual(
             self.client.put("/api/genre/model", json={}).status_code, 403
         )
+        self.assertEqual(
+            self.client.post("/api/genre/tags/defaults").status_code, 403
+        )
         # ...but the label list is readable, because the player shows it.
         self.assertEqual(self.client.get("/api/genre/model").status_code, 200)
         self.assertEqual(self.client.get("/api/genre/status").status_code, 200)
@@ -3520,6 +3526,57 @@ class GenreStudioTestCase(unittest.TestCase):
             self.client.patch("/api/genre/tags/99999", json={"name": "x"}).status_code,
             404,
         )
+
+    def _clear_seed_flag(self):
+        from supysonic.deezer import genre as gen
+
+        Meta.delete().where(Meta.key == gen.SEED_META_KEY).execute()
+
+    def test_the_engine_s_genres_are_seeded_on_first_visit(self):
+        from supysonic.deezer import analysis as ana
+
+        self._clear_seed_flag()
+        self._login()
+        body = self.client.get("/api/genre/status").json
+        by_name = {t["name"]: t for t in body["tags"]}
+        expected = ana.known_genres()
+        self.assertEqual(len(by_name), len(expected))
+        for label, archetype in expected:
+            self.assertIn(label, by_name)
+            self.assertEqual(by_name[label]["archetype"], archetype)
+            self.assertTrue(by_name[label]["color"])
+        # Idempotent: a second visit changes nothing.
+        again = self.client.get("/api/genre/status").json
+        self.assertEqual(len(again["tags"]), len(expected))
+
+    def test_a_deleted_seeded_genre_does_not_come_back(self):
+        self._clear_seed_flag()
+        self._login()
+        first = self.client.get("/api/genre/status").json["tags"][0]
+        self.client.delete(f"/api/genre/tags/{first['id']}")
+        names = [t["name"] for t in self.client.get("/api/genre/status").json["tags"]]
+        self.assertNotIn(first["name"], names)
+
+    def test_the_defaults_endpoint_only_adds_what_is_missing(self):
+        self._clear_seed_flag()
+        self._login()
+        first = self.client.get("/api/genre/status").json["tags"][0]
+        self.client.delete(f"/api/genre/tags/{first['id']}")
+        r = self.client.post("/api/genre/tags/defaults")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.json["created"], 1)
+        names = [t["name"] for t in self.client.get("/api/genre/status").json["tags"]]
+        self.assertIn(first["name"], names)
+        # Running it again adds nothing (and never duplicates).
+        self.assertEqual(self.client.post("/api/genre/tags/defaults").json["created"], 0)
+
+    def test_a_guest_does_not_seed_the_vocabulary(self):
+        self._clear_seed_flag()
+        self._login("bob", "B0bbb")
+        self.assertEqual(self.client.get("/api/genre/status").json["tags"], [])
+        # ...and the admin still gets them afterwards.
+        self._login()
+        self.assertTrue(self.client.get("/api/genre/status").json["tags"])
 
     def test_deleting_a_tag_takes_its_labels_with_it(self):
         from supysonic.db import TrackTag

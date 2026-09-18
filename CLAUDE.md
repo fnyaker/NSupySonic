@@ -489,6 +489,12 @@ stand in for an event.
 `webapp/src/lib/genre/`, `routes/Genres.svelte`) is the answer to "the classifier does not know MY
 genres". The heuristic above knows the styles it was written with; this teaches it yours.
 
+- **The studio opens onto the engine's own vocabulary.** The first admin visit seeds a `GenreTag`
+  per family in `analysis.FAMILIES` (label, colour, archetype), so tagging starts by CONFIRMING a
+  guess instead of typing twenty genres first. It is one-time (a `Meta` flag) and only ever adds:
+  a genre you delete stays deleted, and the *Genres du moteur* button brings back just the missing
+  ones. Only the admin seeds; a guest reading `/genre/status` writes nothing.
+
 - **The big model is FROZEN and only ever extracts.** Fine-tuning something trained on millions of
   recordings with two hundred of your own mostly destroys what it knew. So `discogs-effnet` (ONNX,
   via onnxruntime) turns a track into one 1280-d vector and nothing else, and every bit of learning

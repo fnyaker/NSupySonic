@@ -459,6 +459,15 @@ ARCHETYPES = ("sustain", "voice", "groove", "hard", "rock")
 FAMILY_LABEL = {fid: label for fid, label, _a, _w in FAMILIES}
 
 
+def known_genres():
+    """``[(label, archetype), ...]`` — the vocabulary this engine already knows.
+
+    The studio seeds its tag list from this, so the genres the heuristic can
+    already guess arrive ready to confirm instead of being retyped by hand.
+    """
+    return [(label, arch) for _fid, label, arch, _fn in FAMILIES]
+
+
 def classify(features):
     """(style, confidence, archetype, weights) from whole-file measures."""
     f = dict(features)

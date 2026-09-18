@@ -141,6 +141,12 @@ def genre_status():
     """Everything the studio needs to know before it shows anything."""
     from ..deezer import genre as gen
 
+    if _is_admin():
+        # First admin visit: hand the studio the engine's own genres as tags, so
+        # tagging starts by CONFIRMING a guess rather than typing a vocabulary.
+        # One-time — see seed_default_tags.
+        gen.seed_default_tags()
+
     head = gen.active_head()
     labelled = TrackTag.select().count()
     counts = {}
@@ -294,6 +300,20 @@ def _run_extractor_test(app):
                 close_connection()
             except Exception:
                 pass
+
+
+@webapi.route("/genre/tags/defaults", methods=["POST"])
+@login_required
+@admin_required
+def genre_tags_defaults():
+    """Fill in any engine genre the vocabulary is missing.
+
+    The same set is seeded automatically on the first admin visit; this is the
+    way back after deleting one (it only ADDS — it never edits or removes)."""
+    from ..deezer import genre as gen
+
+    created = gen.seed_default_tags(force=True)
+    return jsonify({"created": created})
 
 
 @webapi.route("/genre/tags", methods=["POST"])

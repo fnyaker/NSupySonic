@@ -220,6 +220,8 @@ export const api = {
   genreTagEdit: (id, patch) =>
     req("/genre/tags/" + id, { method: "PATCH", body: body(patch) }),
   genreTagDelete: (id) => req("/genre/tags/" + id, { method: "DELETE" }),
+  // (Re)add the engine's own genres as tags — only ever adds what is missing.
+  genreDefaults: () => req("/genre/tags/defaults", { method: "POST" }),
   genreLabel: (track, tag) =>
     req("/genre/label", { method: "POST", body: body({ track, tag }) }),
   genreCandidates: (limit = 40) => req("/genre/candidates?limit=" + limit),

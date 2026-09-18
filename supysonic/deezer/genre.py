@@ -154,3 +154,66 @@ def archetype_for(label):
         return None
     tag = GenreTag.get_or_none(GenreTag.name == label)
     return tag.archetype if tag else None
+
+
+# --- the studio's starting vocabulary ---------------------------------------
+# A fresh studio opens onto nothing, which means every genre the engine can
+# already guess has to be retyped before a single track can be confirmed. So the
+# engine's own families (deezer/analysis.py) are seeded as ready-made tags. A
+# Meta flag makes it one-time: a genre the user deliberately deletes must not
+# come back on the next page load.
+SEED_META_KEY = "genre_seeded"
+# Distinct hues, so a vocabulary seeded in one go never repeats a colour.
+DEFAULT_COLORS = [
+    "#f43f5e", "#f97316", "#eab308", "#84cc16", "#10b981", "#06b6d4",
+    "#3b82f6", "#8b5cf6", "#d946ef", "#ec4899", "#64748b", "#14b8a6",
+    "#ef4444", "#f59e0b", "#22c55e", "#0ea5e9", "#6366f1", "#a855f7",
+    "#f472b6", "#94a3b8",
+]
+
+
+def seed_default_tags(force: bool = False) -> int:
+    """Create the engine's genres as tags; returns how many were added.
+
+    Idempotent and additive: existing names are left exactly as they are (the
+    user may have recoloured or re-archetyped one), and nothing is ever edited
+    or deleted. Runs once unless `force`, which only fills in what is missing.
+    """
+    from ..db import Meta
+    from .analysis import known_genres
+
+    if not force:
+        try:
+            if Meta.get_or_none(Meta.key == SEED_META_KEY) is not None:
+                return 0
+        except Exception:
+            logger.debug("genre: could not read the seed flag", exc_info=True)
+            return 0
+
+    created = 0
+    try:
+        existing = {t.name for t in GenreTag.select(GenreTag.name)}
+        for i, (name, archetype) in enumerate(known_genres()):
+            name = str(name)[:48]
+            if name in existing:
+                continue
+            try:
+                GenreTag.create(
+                    name=name,
+                    color=DEFAULT_COLORS[i % len(DEFAULT_COLORS)],
+                    archetype=archetype,
+                )
+                existing.add(name)
+                created += 1
+            except Exception:
+                # A racing insert (two admins, two workers) is not worth failing
+                # the page over: the tag exists either way.
+                logger.warning("genre: could not seed %r", name, exc_info=True)
+    except Exception:
+        logger.warning("genre: seeding default tags failed", exc_info=True)
+
+    try:
+        Meta.get_or_create(key=SEED_META_KEY, defaults={"value": "1"})
+    except Exception:
+        logger.debug("genre: could not store the seed flag", exc_info=True)
+    return created
