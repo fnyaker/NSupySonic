@@ -604,6 +604,43 @@ const FAMILIES = [
       above(s.midRatio, 0.32, 0.25) *
       below(s.kickPulse, 0.62, 0.3),
   },
+  // --- scène / party --------------------------------------------------------
+  {
+    id: "phonk",
+    label: "Phonk",
+    a: "groove",
+    // Memphis 808: a cowbell hook over a distorted, sub-heavy half-time beat.
+    w: (s) =>
+      inRange(s.bpm, 128, 168, 14) *
+      below(s.kickPulse, 0.72, 0.3) *
+      above(s.subRatio, 0.3, 0.2) *
+      below(s.crest, 3.6, 2.5) *
+      above(s.perc, 0.4, 0.3),
+  },
+  {
+    id: "hardpingpong",
+    label: "Hard pingpong",
+    a: "hard",
+    // Hardtek ping-pong: a kick on the beat, a saw bass between them, busy.
+    w: (s) =>
+      inRange(s.bpm, 155, 200, 18) *
+      above(s.kickPulse, 0.5, 0.3) *
+      above(s.flat, 0.4, 0.22) *
+      above(s.perc, 0.55, 0.3) *
+      Math.max(s.kHard, s.kIndus * 0.7),
+  },
+  {
+    id: "germanparty",
+    label: "German party",
+    a: "hard",
+    // Party hardtekk with chanted German vocals over a hard kick.
+    w: (s) =>
+      inRange(s.bpm, 148, 185, 16) *
+      above(s.kickPulse, 0.45, 0.3) *
+      inRange(s.flat, 0.38, 0.68, 0.2) *
+      above(s.vocal, 0.28, 0.3) *
+      Math.max(s.kHard, s.kIndus * 0.7),
+  },
   {
     id: "electronic",
     label: "Électronique",

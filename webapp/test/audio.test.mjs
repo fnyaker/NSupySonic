@@ -244,6 +244,7 @@ test("the added families are all reachable", () => {
   for (const id of [
     "hardcore", "tribecore", "speedcore", "industrial", "rawstyle",
     "hardtechno", "dance", "dnb", "dubstep", "disco", "psytrance",
+    "phonk", "hardpingpong", "germanparty",
   ])
     assert.ok(ids.has(id), `${id} is missing from the client families`);
 });

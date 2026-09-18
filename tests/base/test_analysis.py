@@ -83,6 +83,17 @@ class EngineGenresTestCase(unittest.TestCase):
         self.assertEqual(arch, "groove")
         self.assertGreater(weights["groove"], weights["hard"])
 
+    def test_a_memphis_808_track_reads_as_phonk(self):
+        style, _conf, arch, _w = ana.classify(
+            feats(
+                bpm=150, bpm_confidence=0.9, pulse=0.5, centroid=1800,
+                flatness=0.5, flatness_hi=0.6, entropy=0.5, rolloff=4000,
+                lra=4.5, flux_peak=1.8,
+            )
+        )
+        self.assertEqual(style, "phonk")
+        self.assertEqual(arch, "groove")
+
     def test_a_sustained_string_section_stays_sustained(self):
         _style, _conf, arch, weights = ana.classify(
             feats(

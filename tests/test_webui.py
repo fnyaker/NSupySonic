@@ -3561,6 +3561,7 @@ class GenreStudioTestCase(unittest.TestCase):
         for label in (
             "Hardcore", "Tribe", "Speedcore", "Indus", "Rawstyle", "Hard techno",
             "Dance / EDM", "Drum & bass", "Dubstep", "Disco / funk", "Psytrance",
+            "Phonk", "Hard pingpong", "German party",
         ):
             self.assertIn(label, by_name)
         # Idempotent: a second visit changes nothing.

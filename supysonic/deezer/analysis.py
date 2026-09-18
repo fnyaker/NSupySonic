@@ -548,6 +548,18 @@ FAMILIES = [
     ("hardrock", "Hard rock", "rock", lambda f: (
         _in_range(f["bpm"], 98, 152, 18) * _above(f["flatness"], 0.4, 0.22)
         * _in_range(f["lra"], 4, 9, 3) * _below(f["pulse"], 0.6, 0.3))),
+    # --- scène / party ------------------------------------------------------
+    ("phonk", "Phonk", "groove", lambda f: (
+        _in_range(f["bpm"], 128, 168, 14) * _below(f["pulse"], 0.72, 0.3)
+        * _below(f["centroid"], 2600, 1300) * _below(f["lra"], 7, 3)
+        * _above(f["flux_peak"], 1.3, 0.6))),
+    ("hardpingpong", "Hard pingpong", "hard", lambda f: (
+        _in_range(f["bpm"], 155, 200, 18) * _above(f["pulse"], 0.5, 0.3)
+        * _above(f["flatness"], 0.4, 0.22) * _below(f["lra"], 6, 3)
+        * _above(f["flux_peak"], 1.5, 0.7))),
+    ("germanparty", "German party", "hard", lambda f: (
+        _in_range(f["bpm"], 148, 185, 16) * _above(f["pulse"], 0.45, 0.3)
+        * _in_range(f["flatness"], 0.38, 0.68, 0.2) * _below(f["lra"], 6.5, 3))),
     # The catch-all: clearly machine-made and clearly rhythmic, nothing more
     # specific fitting. Weak on purpose — it should only ever win by default.
     ("electronic", "Électronique", "groove", lambda f: (
