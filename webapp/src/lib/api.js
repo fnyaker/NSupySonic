@@ -231,6 +231,33 @@ export const api = {
     req("/genre/model", { method: "PUT", body: body(payload) }),
   genreModelDelete: () => req("/genre/model", { method: "DELETE" }),
 
+  // The frozen ONNX extractor: install the operator's own copy of the model
+  // from the browser, remove it, or run the built-in sanity check on real
+  // tracks. The upload is multipart, so it bypasses the JSON `req` helper.
+  genreExtractorUpload: async (file) => {
+    const fd = new FormData();
+    fd.append("files", file);
+    const res = await fetch(BASE + "/genre/extractor", {
+      method: "POST",
+      credentials: "include",
+      body: fd,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok)
+      throw {
+        status: res.status,
+        message:
+          data.error ||
+          (res.status === 413
+            ? "Fichier trop volumineux (limite du serveur)"
+            : "envoi impossible"),
+      };
+    return data;
+  },
+  genreExtractorDelete: () => req("/genre/extractor", { method: "DELETE" }),
+  genreExtractorTest: () => req("/genre/extractor/test", { method: "POST" }),
+  genreExtractorTestStatus: () => req("/genre/extractor/test"),
+
   // radios
   trackRadio: (id) => req("/radio/track/" + id),
   artistRadio: (id) => req("/radio/artist/" + id),

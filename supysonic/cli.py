@@ -584,9 +584,11 @@ def deezer_analyze(config, force, limit):
 def deezer_embed(config, force, limit, self_test):
     """Extract the audio embedding used by the genre tagging studio.
 
-    Needs onnxruntime and a copy of the ONNX feature extractor; point at it with
-    [deezer] embed_model, or drop it in <cache_dir>/models/. The model is a
-    third-party artefact with its own licence, so it is never downloaded for you.
+    Needs onnxruntime and a copy of the ONNX feature extractor. Import one in
+    the web UI's genre studio ("Extracteur" card) — it lands in
+    <cache_dir>/models/ — or point [deezer] embed_model at a copy of your own.
+    The model is a third-party artefact with its own licence, so it is never
+    downloaded for you.
 
     Run --self-test FIRST. A mel front-end that does not match what the model was
     trained on does not crash — it produces vectors that look healthy and mean
@@ -732,6 +734,12 @@ def _needs_database(argv) -> bool:
 
 def main():
     config = IniConfig.from_common_locations()
+    # Publish it process-wide: the embedding module looks the model up through
+    # the active config, and with no Flask app context the CLI is the only place
+    # that knows where the cache (and therefore an uploaded model) lives.
+    from . import config as config_module
+
+    config_module.current_config = config
     if not _needs_database(sys.argv[1:]):
         cli.main(obj=config)
         return

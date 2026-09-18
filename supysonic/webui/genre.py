@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 
 from uuid import UUID
 
-from flask import jsonify, request
+from flask import current_app, jsonify, request
 
-from ..db import GenreModel, GenreTag, Track, TrackTag
+from ..db import GenreModel, GenreTag, Track, TrackTag, now
 from . import _is_admin, _valid_id, admin_required, login_required, webapi
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,52 @@ CANDIDATE_SCAN_MAX = 4000
 # a memory problem.
 MODEL_MAX_BYTES = 4 * 1024 * 1024
 ARCHETYPES = ("sustain", "voice", "groove", "hard", "rock")
+
+# -- the extractor's self-test job -------------------------------------------
+# Verifying a freshly uploaded model means decoding several of the operator's
+# own tracks and comparing halves — far too slow to hold a request thread, so it
+# runs in a worker and the studio polls it, exactly like the archive sweep.
+_extractor_lock = threading.Lock()
+_extractor_job = {
+    "running": False,
+    "started": None,
+    "ok": None,
+    "result": None,
+    "progress": [],
+    "error": None,
+}
+EXTRACTOR_TEST_TRACKS = 6
+EXTRACTOR_TEST_LOG_MAX = 12
+
+
+def _extractor_status() -> dict:
+    """What the studio needs to know about the extractor."""
+    from ..deezer import embedding as emb
+
+    return {
+        "available": emb.available() and bool(emb.model_path()),
+        "reason": emb.why_unavailable(),
+        "dim": emb.EMBED_DIM,
+        "version": emb.EMBED_VERSION,
+        "onnxruntime": emb.onnxruntime_available(),
+        "model": emb.model_info(),
+        "uploadable": emb.can_write_model(),
+    }
+
+
+def _extractor_job_json() -> dict:
+    with _extractor_lock:
+        return dict(_extractor_job)
+
+
+def _reset_extractor_job() -> None:
+    """Forget a previous verdict when the model it judged is replaced or gone."""
+    with _extractor_lock:
+        if _extractor_job["running"]:
+            return
+        _extractor_job.update(
+            started=None, ok=None, result=None, progress=[], error=None
+        )
 
 
 def _resolve(ident):
@@ -89,7 +136,6 @@ def _track_json(t, prediction=None):
 @login_required
 def genre_status():
     """Everything the studio needs to know before it shows anything."""
-    from ..deezer import embedding as emb
     from ..deezer import genre as gen
 
     head = gen.active_head()
@@ -107,12 +153,7 @@ def genre_status():
     )
     return jsonify(
         {
-            "extractor": {
-                "available": emb.available() and bool(emb.model_path()),
-                "reason": emb.why_unavailable(),
-                "dim": emb.EMBED_DIM,
-                "version": emb.EMBED_VERSION,
-            },
+            "extractor": _extractor_status(),
             "tags": [_tag_json(t) for t in GenreTag.select().order_by(GenreTag.name)],
             "counts": counts,
             "labelled": labelled,
@@ -128,6 +169,128 @@ def genre_status():
             "archetypes": list(ARCHETYPES),
         }
     )
+
+
+# -- the extractor itself ---------------------------------------------------
+# The big frozen model is a third-party artefact with its own licence, so it is
+# never vendored and never fetched for you. What the studio CAN do is take a
+# copy the operator obtained themselves: upload it here and it lands in the
+# cache's models directory, where both the server and `deezer embed` find it.
+
+
+@webapi.route("/genre/extractor", methods=["POST"])
+@login_required
+@admin_required
+def genre_extractor_upload():
+    """Install an uploaded ONNX extractor (admin only, one file at a time)."""
+    from ..deezer import embedding as emb
+
+    files = request.files.getlist("files") or request.files.getlist("file")
+    if not files:
+        return jsonify({"error": "no file"}), 400
+    onnx = [f for f in files if (f.filename or "").lower().endswith(".onnx")]
+    if not onnx:
+        return jsonify({"error": "the extractor must be a .onnx file"}), 400
+    if len(onnx) > 1:
+        return jsonify({"error": "upload one .onnx file at a time"}), 400
+    path, err = emb.store_model(onnx[0].stream, onnx[0].filename)
+    if err:
+        return jsonify({"error": err}), 400
+    _reset_extractor_job()
+    logger.info("Extractor installed by %s: %s", request.webuser.name, path)
+    return jsonify({"ok": True, "extractor": _extractor_status()})
+
+
+@webapi.route("/genre/extractor", methods=["DELETE"])
+@login_required
+@admin_required
+def genre_extractor_delete():
+    from ..deezer import embedding as emb
+
+    if not emb.delete_model():
+        return jsonify({"error": "no uploaded extractor to remove"}), 404
+    _reset_extractor_job()
+    logger.info("Extractor removed by %s", request.webuser.name)
+    return jsonify({"ok": True, "extractor": _extractor_status()})
+
+
+@webapi.route("/genre/extractor/test", methods=["POST"])
+@login_required
+@admin_required
+def genre_extractor_test():
+    """Start the self-test on real tracks.
+
+    An uploaded model that merely *loads* proves nothing: the whole failure mode
+    this guards against is a front-end/model mismatch that produces healthy
+    numbers which mean nothing. Two halves of the same track must embed closer
+    together than two different tracks do."""
+    from ..deezer import embedding as emb
+
+    why = emb.why_unavailable()
+    if why:
+        return jsonify({"error": why}), 400
+    with _extractor_lock:
+        if _extractor_job["running"]:
+            return jsonify({"ok": True, "running": True})
+        _extractor_job.update(
+            running=True,
+            started=now().isoformat(),
+            ok=None,
+            result=None,
+            progress=[],
+            error=None,
+        )
+    app = current_app._get_current_object()
+    threading.Thread(
+        target=_run_extractor_test, args=(app,), name="extractor-self-test", daemon=True
+    ).start()
+    return jsonify({"ok": True, "running": True})
+
+
+@webapi.route("/genre/extractor/test")
+@login_required
+@admin_required
+def genre_extractor_test_status():
+    return jsonify(_extractor_job_json())
+
+
+def _run_extractor_test(app):
+    """Worker: embed halves of a few real tracks and judge the margin."""
+    from ..db import close_connection, open_connection
+
+    with app.app_context():
+        try:
+            open_connection(reuse=True)
+            from ..deezer import embedding as emb
+
+            paths = [
+                t.path
+                for t in Track.select().where(Track.last_modification > 0).limit(40)
+                if t.path
+            ][:EXTRACTOR_TEST_TRACKS]
+
+            def say(line):
+                with _extractor_lock:
+                    log = _extractor_job["progress"]
+                    log.append(str(line))
+                    del log[:-EXTRACTOR_TEST_LOG_MAX]
+
+            result = emb.self_test(paths, progress=say)
+            with _extractor_lock:
+                _extractor_job["ok"] = bool(result.get("ok"))
+                _extractor_job["result"] = result
+        except Exception as exc:
+            logger.warning("Extractor self-test crashed", exc_info=True)
+            with _extractor_lock:
+                _extractor_job["ok"] = False
+                _extractor_job["error"] = str(exc)
+        finally:
+            with _extractor_lock:
+                _extractor_job["running"] = False
+            try:
+                close_connection()
+            except Exception:
+                pass
 
 
 @webapi.route("/genre/tags", methods=["POST"])

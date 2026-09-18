@@ -54,6 +54,15 @@ logger = logging.getLogger(__name__)
 EMBED_VERSION = 1
 EMBED_DIM = 1280  # discogs-effnet's penultimate layer
 
+# The one export this front-end is written for. The name is fixed because the
+# mel parameters below only match this model, so a model the web UI uploads is
+# stored under exactly this name — and the operator who points `embed_model` at
+# a copy of their own can keep it wherever they like.
+MODEL_FILENAME = "discogs-effnet-bs64-1.onnx"
+# The published model is ~40 MB. A gigabyte is far past anything legitimate and
+# stops one hostile upload from filling the disk.
+MODEL_MAX_BYTES = 1024 * 1024 * 1024
+
 # --- the published MusiCNN front-end spec ----------------------------------
 SAMPLE_RATE = 16000
 FRAME_SIZE = 512
@@ -72,14 +81,22 @@ _session_failed = False
 _mel_fb = None
 
 
+def onnxruntime_available() -> bool:
+    try:
+        import onnxruntime  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
 def available() -> bool:
     """True when this server can extract embeddings at all."""
     try:
         import numpy  # noqa: F401
-        import onnxruntime  # noqa: F401
     except Exception:
         return False
-    return True
+    return onnxruntime_available()
 
 
 def why_unavailable() -> str | None:
@@ -88,13 +105,61 @@ def why_unavailable() -> str | None:
         import numpy  # noqa: F401
     except Exception:
         return "numpy is not installed"
-    try:
-        import onnxruntime  # noqa: F401
-    except Exception:
+    if not onnxruntime_available():
         return "onnxruntime is not installed (pip install 'supysonic[embedding]')"
     if not model_path():
-        return "no model file; set [deezer] embed_model or place it in the cache dir"
+        return "no model file; upload it in the genre studio or set [deezer] embed_model"
     return None
+
+
+def _config() -> dict:
+    """The active config as a plain mapping, whichever context we run in.
+
+    Under the server that is Flask's ``current_app``. Under the CLI there is no
+    app context — and without a fallback `supysonic-cli deezer embed` could
+    never see the very model the web UI just installed — so the process-wide
+    config the CLI built is used instead.
+    """
+    try:
+        from flask import current_app
+
+        cfg = current_app.config
+        if cfg:
+            return {k: cfg[k] for k in ("WEBAPP", "DEEZER") if k in cfg}
+    except Exception:
+        pass
+    try:
+        from ..config import get_current_config
+
+        conf = get_current_config()
+    except Exception:
+        return {}
+    return {
+        "WEBAPP": getattr(conf, "WEBAPP", {}) or {},
+        "DEEZER": getattr(conf, "DEEZER", {}) or {},
+    }
+
+
+def _deezer_conf() -> dict:
+    return _config().get("DEEZER", {}) or {}
+
+
+def model_dirs() -> list:
+    """Candidate ``models`` directories, most preferred first.
+
+    The web cache comes first: it is where the studio writes an upload. The
+    Deezer archive is the older documented location and stays legal — both live
+    on the persistent volume in the Docker image. Duplicates are dropped."""
+    cfg = _config()
+    conf = cfg.get("DEEZER", {}) or {}
+    webapp = cfg.get("WEBAPP", {}) or {}
+    out = []
+    bases = [webapp.get("cache_dir"), conf.get("cache_dir"), conf.get("archive_dir")]
+    for base in filter(None, bases):
+        d = os.path.join(str(base), "models")
+        if d not in out:
+            out.append(d)
+    return out
 
 
 def model_path() -> str | None:
@@ -102,23 +167,205 @@ def model_path() -> str | None:
 
     Deliberately NOT vendored in the repository and never fetched silently: the
     model is a third-party artefact with its own licence, so the operator points
-    at a copy they obtained themselves. `supysonic-cli deezer embed --help` says
-    where to get it.
+    at a copy they obtained themselves — or uploads one in the web UI, which is
+    stored under its canonical name in the cache's models directory.
     """
-    from flask import current_app
-
-    try:
-        conf = current_app.config.get("DEEZER", {})
-    except Exception:
-        conf = {}
-    explicit = conf.get("embed_model")
+    explicit = _deezer_conf().get("embed_model")
     if explicit and os.path.isfile(explicit):
         return explicit
-    for base in filter(None, [conf.get("cache_dir"), conf.get("archive_dir")]):
-        p = os.path.join(base, "models", "discogs-effnet-bs64-1.onnx")
+    dirs = model_dirs()
+    for d in dirs:
+        p = os.path.join(d, MODEL_FILENAME)
         if os.path.isfile(p):
             return p
+    # An operator who dropped a differently-named export in by hand still works;
+    # the newest one wins so a re-upload is picked up too.
+    found = []
+    for d in dirs:
+        try:
+            for name in os.listdir(d):
+                if name.lower().endswith(".onnx"):
+                    p = os.path.join(d, name)
+                    if os.path.isfile(p):
+                        found.append(p)
+        except OSError:
+            continue
+    if found:
+        return max(found, key=lambda p: os.path.getmtime(p))
     return None
+
+
+def writable_model_dir() -> str | None:
+    """The models directory the web UI can write to, creating it if needed."""
+    for d in model_dirs():
+        try:
+            os.makedirs(d, exist_ok=True)
+            if os.access(d, os.W_OK):
+                return d
+        except OSError:
+            continue
+    return None
+
+
+def can_write_model() -> bool:
+    """Whether an upload could be stored — without creating anything.
+
+    The studio's status endpoint runs this on every page load, so it must stay
+    read-only: a directory that does not exist yet is fine as long as its parent
+    is writable."""
+    for d in model_dirs():
+        if os.path.isdir(d) and os.access(d, os.W_OK):
+            return True
+    for d in model_dirs():
+        parent = os.path.dirname(d)
+        if os.path.isdir(parent) and os.access(parent, os.W_OK):
+            return True
+    return False
+
+
+def model_info() -> dict | None:
+    """What the active model is, for the studio's status card."""
+    path = model_path()
+    if not path:
+        return None
+    explicit = _deezer_conf().get("embed_model")
+    from_config = bool(
+        explicit and os.path.abspath(path) == os.path.abspath(str(explicit))
+    )
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    return {
+        "filename": os.path.basename(path),
+        "size": size,
+        "source": "config" if from_config else "models",
+    }
+
+
+def _input_fits(shape) -> bool:
+    """Whether a declared input shape can be this front-end's output.
+
+    The batch and patch axes are often symbolic; only the trailing fixed axis is
+    trusted, exactly as ``_run`` does at inference time. It is enough to reject
+    an image or text model the operator grabbed by mistake."""
+    fixed = [d for d in shape if isinstance(d, int)]
+    return not fixed or fixed[-1] == MEL_BANDS
+
+
+def validate_model(path: str):
+    """``(ok, reason)`` for a candidate extractor.
+
+    Needs onnxruntime to say anything; without it the check is skipped and
+    reported OK, because the caller could not use the model anyway and
+    ``available()`` already explains that."""
+    if not onnxruntime_available():
+        return True, None
+    try:
+        session = _make_session(path)
+    except Exception as exc:
+        logger.warning("embedding: rejecting model %s", path, exc_info=True)
+        return False, f"onnxruntime could not load this file: {exc}"
+    inputs = session.get_inputs()
+    if not inputs:
+        return False, "the model exposes no input"
+    shape = inputs[0].shape
+    if not _input_fits(shape):
+        return False, (
+            f"this model expects {shape}, but the extractor expects "
+            f"(*, {PATCH_FRAMES}, {MEL_BANDS})"
+        )
+    return True, None
+
+
+def _unlink(path) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def store_model(stream, filename: str):
+    """Stream an uploaded ``.onnx`` into the writable models dir.
+
+    Staged beside its destination and only renamed into place once it loads, so
+    a bad upload can never destroy a working extractor. Returns ``(path, error)``
+    — exactly one of which is set."""
+    if not str(filename or "").lower().endswith(".onnx"):
+        return None, "the extractor must be a .onnx file"
+    dest_dir = writable_model_dir()
+    if dest_dir is None:
+        return None, "no writable models directory is configured"
+    dest = os.path.join(dest_dir, MODEL_FILENAME)
+    # Staged in a hidden subdirectory so a half-written upload is never picked up
+    # by model discovery (which only looks at files directly in the models dir).
+    staging_dir = os.path.join(dest_dir, ".incoming")
+    try:
+        os.makedirs(staging_dir, exist_ok=True)
+    except OSError as exc:
+        return None, f"could not write the model: {exc}"
+    staging = os.path.join(staging_dir, MODEL_FILENAME)
+    total = 0
+    too_large = False
+    try:
+        with open(staging, "wb") as fp:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MODEL_MAX_BYTES:
+                    too_large = True
+                    break
+                fp.write(chunk)
+    except OSError as exc:
+        _unlink(staging)
+        return None, f"could not write the model: {exc}"
+    if too_large:
+        _unlink(staging)
+        return None, "file too large"
+    if total == 0:
+        _unlink(staging)
+        return None, "empty file"
+    ok, reason = validate_model(staging)
+    if not ok:
+        _unlink(staging)
+        return None, reason
+    try:
+        os.replace(staging, dest)
+    except OSError as exc:
+        _unlink(staging)
+        return None, f"could not write the model: {exc}"
+    reset_session()
+    return dest, None
+
+
+def delete_model() -> bool:
+    """Remove the active model, but only if it lives in a models directory the
+    web UI manages. A model named by the operator's ``embed_model`` is never
+    touched."""
+    path = model_path()
+    if not path:
+        return False
+    explicit = _deezer_conf().get("embed_model")
+    if explicit and os.path.abspath(path) == os.path.abspath(str(explicit)):
+        return False
+    real = os.path.realpath(path)
+    for d in model_dirs():
+        root = os.path.realpath(d)
+        if real == root or real.startswith(root + os.sep):
+            _unlink(real)
+            reset_session()
+            return True
+    return False
+
+
+def reset_session() -> None:
+    """Forget the loaded model so the next extraction reloads from disk."""
+    global _session, _session_failed
+    with _lock:
+        _session = None
+        _session_failed = False
 
 
 def _mel_filterbank(np):
@@ -212,6 +459,18 @@ def _log_mel(samples):
     return np.log10(10000.0 * mel + 1.0).astype(np.float32)
 
 
+def _make_session(path):
+    """A CPU, single-threaded inference session for one model file."""
+    import onnxruntime as ort
+
+    opts = ort.SessionOptions()
+    # One thread: this is background work that must never take the box away from
+    # streaming.
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    return ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
+
+
 def _load_session():
     global _session, _session_failed
     if _session is not None or _session_failed:
@@ -224,14 +483,7 @@ def _load_session():
             _session_failed = True
             return None
         try:
-            import onnxruntime as ort
-
-            opts = ort.SessionOptions()
-            # One thread: this is background work that must never take the box
-            # away from streaming.
-            opts.intra_op_num_threads = 1
-            opts.inter_op_num_threads = 1
-            _session = ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
+            _session = _make_session(path)
             logger.info(
                 "embedding model loaded: %s (inputs=%s outputs=%s)",
                 os.path.basename(path),
@@ -255,8 +507,7 @@ def _run(patches):
     inp = sess.get_inputs()[0]
     # Believe the model, not our assumption: if its declared input is not what
     # we built, say so rather than feeding it something shaped plausibly wrong.
-    want = [d for d in inp.shape if isinstance(d, int)]
-    if want and want[-2:] != [PATCH_FRAMES, MEL_BANDS] and want[-1] != MEL_BANDS:
+    if not _input_fits(inp.shape):
         raise ValueError(f"model expects {inp.shape}, front-end makes {patches.shape}")
     outs = sess.run(None, {inp.name: patches.astype(np.float32)})
     # The published model has two outputs: the 400 style activations and the

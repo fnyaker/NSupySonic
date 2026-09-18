@@ -495,8 +495,10 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   happens in a small head on top — a few hundred examples by 1280 dimensions, which trains in a
   browser tab. It is also exactly how the model's licence asks to be used: unmodified.
 - **The model is never vendored and never fetched silently.** It is a third-party artefact with its
-  own licence (CC BY-NC-ND), so the operator points `[deezer] embed_model` at a copy they obtained
-  themselves; `supysonic-cli deezer embed --help` says where. onnxruntime is an optional dependency
+  own licence (CC BY-NC-ND), so the operator supplies a copy they obtained themselves — imported
+  from the studio's **Extracteur** card (`POST /api/genre/extractor`, admin-only, stored in
+  `<cache_dir>/models/discogs-effnet-bs64-1.onnx`) or pointed at with `[deezer] embed_model`.
+  `supysonic-cli deezer embed --help` says where to get it. onnxruntime is an optional dependency
   (`pip install 'supysonic[embedding]'`, and in the Docker image): without it the module reports
   itself unavailable and the heuristic classifier keeps doing its job unchanged.
 - **The front-end is the dangerous part.** A mel-spectrogram with the wrong window, scale or
@@ -669,6 +671,7 @@ a show). Note that its circuit breaker is a process-wide singleton — reset it 
 trips it. `tests/net/` hits real services and is CI-only.
 `tests/test_webui.py::GenreStudioTestCase` covers the studio's API without onnxruntime (which is
 the normal install): the vectors it reads are written by `struct`, so the whole tagging/training/
-shipping path is exercised on a stock server. Its "a head that does not fit is refused" test
-deliberately logs a traceback — that is the refusal working.
+shipping path is exercised on a stock server. It also covers the extractor's upload/delete round
+trip and that the operator's `embed_model` is never deleted. Its "a head that does not fit is
+refused" test deliberately logs a traceback — that is the refusal working.
 Add a test alongside these when touching the proxy or `/api`.

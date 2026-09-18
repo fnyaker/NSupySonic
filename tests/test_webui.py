@@ -4,6 +4,7 @@
 # Distributed under terms of the GNU AGPLv3 license.
 
 import base64
+import io
 import os
 import shutil
 import struct
@@ -3872,9 +3873,113 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertEqual([t["name"] for t in body["tags"]], ["techno"])
         self.assertIsNone(body["model"])
         self.assertIn("available", body["extractor"])
+        self.assertIn("onnxruntime", body["extractor"])
+        self.assertIn("uploadable", body["extractor"])
         # Without onnxruntime it must say so rather than pretending.
         if not body["extractor"]["available"]:
             self.assertTrue(body["extractor"]["reason"])
+
+    # -- the extractor -----------------------------------------------------
+
+    def _upload_extractor(self, name="model.onnx", data=b"pretend-onnx"):
+        return self.client.post(
+            "/api/genre/extractor",
+            data={"files": (io.BytesIO(data), name)},
+            content_type="multipart/form-data",
+        )
+
+    def test_extractor_writes_are_the_admin_s_alone(self):
+        self._login("bob", "B0bbb")
+        self.assertEqual(self._upload_extractor().status_code, 403)
+        self.assertEqual(
+            self.client.delete("/api/genre/extractor").status_code, 403
+        )
+        self.assertEqual(
+            self.client.post("/api/genre/extractor/test").status_code, 403
+        )
+
+    def test_extractor_upload_and_delete_round_trip(self):
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        with self.app.app_context():
+            self.assertIsNone(emb.model_path())
+
+        r = self._upload_extractor()
+        self.assertEqual(r.status_code, 200, r.data)
+        body = r.json["extractor"]
+        self.assertIsNotNone(body["model"])
+        self.assertEqual(body["model"]["source"], "models")
+        with self.app.app_context():
+            path = emb.model_path()
+            self.assertIsNotNone(path)
+            self.assertEqual(os.path.basename(path), emb.MODEL_FILENAME)
+            self.assertTrue(os.path.isfile(path))
+
+        # The status endpoint the studio reads agrees.
+        status = self.client.get("/api/genre/status").json["extractor"]
+        self.assertIsNotNone(status["model"])
+        self.assertEqual(status["model"]["filename"], emb.MODEL_FILENAME)
+
+        r = self.client.delete("/api/genre/extractor")
+        self.assertEqual(r.status_code, 200, r.data)
+        with self.app.app_context():
+            self.assertIsNone(emb.model_path())
+
+    def test_extractor_upload_replaces_the_previous_one(self):
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        self.assertEqual(self._upload_extractor(data=b"first").status_code, 200)
+        with self.app.app_context():
+            first = emb.model_path()
+        self.assertEqual(self._upload_extractor(data=b"second").status_code, 200)
+        with self.app.app_context():
+            second = emb.model_path()
+            models = os.path.dirname(second)
+            onnx = [f for f in os.listdir(models) if f.endswith(".onnx")]
+        self.assertEqual(first, second)
+        self.assertEqual(len(onnx), 1)
+
+    def test_extractor_rejects_a_non_onnx_file(self):
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        r = self._upload_extractor(name="model.bin")
+        self.assertEqual(r.status_code, 400)
+        with self.app.app_context():
+            self.assertIsNone(emb.model_path())
+
+    def test_configured_model_is_never_deleted(self):
+        from supysonic.deezer import embedding as emb
+
+        cache = self.app.config["WEBAPP"]["cache_dir"]
+        path = os.path.join(cache, "my-own.onnx")
+        with open(path, "wb") as fp:
+            fp.write(b"x")
+        # Replace the section rather than mutating it: DefaultConfig.DEEZER is a
+        # class attribute shared by every config instance in the process.
+        self.app.config["DEEZER"] = dict(
+            self.app.config["DEEZER"], embed_model=path
+        )
+        self._login()
+        with self.app.app_context():
+            self.assertEqual(emb.model_path(), path)
+            info = emb.model_info()
+        self.assertEqual(info["source"], "config")
+        self.assertEqual(
+            self.client.delete("/api/genre/extractor").status_code, 404
+        )
+        self.assertTrue(os.path.isfile(path))
+
+    def test_extractor_self_test_needs_the_extractor(self):
+        self._login()
+        r = self.client.post("/api/genre/extractor/test")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("error", r.json)
+        # The poll endpoint answers a stable shape even before a run.
+        body = self.client.get("/api/genre/extractor/test").json
+        self.assertIn("running", body)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@
   import { user, toasts, player, downloadQuality } from "../lib/stores.js";
   import { decodeEmbedding, encodeHead } from "../lib/genre/train.js";
   import { train, release } from "../lib/genre/trainer.js";
+  import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
 
@@ -79,6 +80,17 @@
   let head = null;
   let sending = false;
   let trainError = "";
+
+  // -- extractor --------------------------------------------------------------
+  // Installing the frozen ONNX model is an admin, one-off act: pick the .onnx
+  // file, it goes to the server's models directory, and the built-in self-test
+  // then proves it actually measures audio instead of just loading.
+  let extUploading = false;
+  let extRemoving = false;
+  let extTesting = false;
+  let extStatus = null; // { running, ok, result, error, progress }
+  let extPoll = null;
+  let extFileInput = null;
 
   $: eligible = tags.filter((t) => (counts[t.name] || 0) >= 2);
   $: trainable = eligible.length >= 2 && labelled >= eligible.length * 3;
@@ -332,6 +344,96 @@
     }
   }
 
+  // -- extractor actions ------------------------------------------------------
+  async function onPickExtractor(ev) {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    if (!/\.onnx$/i.test(file.name)) {
+      toasts.push("Il faut un fichier .onnx", "error");
+      ev.target.value = "";
+      return;
+    }
+    extUploading = true;
+    extStatus = null;
+    stopExtPoll();
+    try {
+      const res = await api.genreExtractorUpload(file);
+      toasts.push("Extracteur installé");
+      await refresh();
+      // Straight into the check: a model that loads but measures nothing is the
+      // one failure this whole screen exists to catch. Skipped when the server
+      // lacks onnxruntime — there is nothing to measure with.
+      if (res?.extractor?.onnxruntime) await startExtractorTest();
+    } catch (e) {
+      toasts.push(e?.message || "envoi impossible", "error");
+    } finally {
+      extUploading = false;
+      if (extFileInput) extFileInput.value = "";
+    }
+  }
+
+  async function removeExtractor() {
+    if (!window.confirm("Supprimer l'extracteur importé ?")) return;
+    extRemoving = true;
+    stopExtPoll();
+    extStatus = null;
+    try {
+      await api.genreExtractorDelete();
+      toasts.push("Extracteur supprimé");
+      await refresh();
+    } catch (e) {
+      toasts.push(e?.message || "suppression impossible", "error");
+    } finally {
+      extRemoving = false;
+    }
+  }
+
+  async function startExtractorTest() {
+    extTesting = true;
+    try {
+      extStatus = await api.genreExtractorTest();
+    } catch (e) {
+      extTesting = false;
+      toasts.push(e?.message || "test impossible", "error");
+      return;
+    }
+    pollExtractorTest();
+  }
+
+  // The check runs server-side on real tracks (ffmpeg + inference), so this is
+  // a poll rather than a request that blocks: leaving the page mid-test is fine,
+  // the job keeps going and the next visit picks the verdict back up.
+  async function pollExtractorTest() {
+    stopExtPoll();
+    const tick = async () => {
+      try {
+        extStatus = await api.genreExtractorTestStatus();
+      } catch {
+        extTesting = false;
+        return;
+      }
+      if (extStatus?.running) {
+        extPoll = setTimeout(tick, 1200);
+      } else {
+        extTesting = false;
+        extPoll = null;
+        if (extStatus?.ok) toasts.push("Extracteur vérifié");
+      }
+    };
+    extPoll = setTimeout(tick, 800);
+  }
+
+  function stopExtPoll() {
+    if (extPoll) {
+      clearTimeout(extPoll);
+      extPoll = null;
+    }
+  }
+
+  function openExtractor() {
+    tab = "model";
+  }
+
   // -- keyboard ---------------------------------------------------------------
   function onKey(ev) {
     if (tab !== "tag" || !current) return;
@@ -365,9 +467,24 @@
     // that had onnxruntime is a perfectly good training set on one that does
     // not, and gating this on the extractor left that library untaggable.
     await loadCandidates();
+    if ($user?.admin) {
+      try {
+        const s = await api.genreExtractorTestStatus();
+        if (s?.running) {
+          extStatus = s;
+          extTesting = true;
+          pollExtractorTest();
+        } else if (s?.started) {
+          extStatus = s;
+        }
+      } catch {
+        /* admin-only endpoint; nothing to show for anyone else */
+      }
+    }
   });
   onDestroy(() => {
     stopPreview();
+    stopExtPoll();
     release();
   });
 
@@ -412,6 +529,11 @@
             Les empreintes déjà calculées restent utilisables : vous pouvez étiqueter
             et entraîner normalement, mais aucun nouveau titre ne sera mesuré.
           </p>
+          {#if tab !== "model"}
+            <button class="ghost small-btn" on:click={openExtractor}>
+              <Icon name="download" size={14} /> Installer l'extracteur
+            </button>
+          {/if}
         </div>
       </div>
     {/if}
@@ -516,10 +638,20 @@
               <p>Plus rien à étiqueter pour l'instant.</p>
             {:else}
               <p>Aucun titre ne porte encore d'empreinte.</p>
-              <p class="small">
-                Lancez <code>supysonic-cli deezer embed</code> sur le serveur pour
-                en calculer.
-              </p>
+              {#if !extractor.available}
+                <p class="small">
+                  Installez d'abord l'extracteur, puis lancez
+                  <code>supysonic-cli deezer embed</code> sur le serveur.
+                </p>
+                <button class="primary" on:click={openExtractor}>
+                  <Icon name="download" size={16} /> Installer l'extracteur
+                </button>
+              {:else}
+                <p class="small">
+                  Lancez <code>supysonic-cli deezer embed</code> sur le serveur pour
+                  en calculer.
+                </p>
+              {/if}
             {/if}
             <button class="ghost" on:click={loadCandidates}>
               <Icon name="refresh" size={16} /> Recharger
@@ -609,6 +741,143 @@
     {/if}
 
     {#if tab === "model"}
+      <section class="card">
+        <h2><Icon name="activity" size={18} /> Extracteur</h2>
+        <p class="sub muted">
+          Le modèle gelé qui transforme un titre en empreinte de 1280 nombres. Il a
+          sa propre licence, alors le serveur ne le télécharge jamais tout seul :
+          importez la copie que vous vous êtes procurée. Elle sert aussi bien ici
+          qu'à <code>supysonic-cli deezer embed</code>.
+        </p>
+
+        {#if !extractor.onnxruntime}
+          <div class="banner bad">
+            <Icon name="alert" size={16} />
+            <span>
+              <code>onnxruntime</code> n'est pas installé sur le serveur : le modèle ne
+              pourra pas tourner avant d'installer <code>supysonic[embedding]</code>.
+            </span>
+          </div>
+        {/if}
+
+        {#if extractor.model}
+          <div class="active">
+            <div class="ext-info">
+              <strong>{extractor.model.filename}</strong>
+              <p class="muted small">
+                {fmtBytes(extractor.model.size)} ·
+                {extractor.model.source === "config"
+                  ? "chemin défini par embed_model"
+                  : "importé sur ce serveur"}
+              </p>
+            </div>
+            <div class="ext-actions">
+              {#if extractor.uploadable}
+                <label class="ghost file-btn" class:disabled={extUploading}>
+                  <Icon name="upload" size={16} />
+                  {extUploading ? "Envoi…" : "Remplacer"}
+                  <input
+                    bind:this={extFileInput}
+                    type="file"
+                    accept=".onnx,application/octet-stream"
+                    on:change={onPickExtractor}
+                    disabled={extUploading}
+                  />
+                </label>
+              {/if}
+              {#if extractor.model.source !== "config"}
+                <button
+                  class="ghost danger"
+                  on:click={removeExtractor}
+                  disabled={extRemoving}
+                >
+                  <Icon name="trash" size={16} /> Supprimer
+                </button>
+              {/if}
+            </div>
+          </div>
+
+          {#if extractor.onnxruntime}
+            <div class="ext-test">
+              <button class="ghost" on:click={startExtractorTest} disabled={extTesting}>
+                <Icon name={extTesting ? "refresh" : "check"} size={16} />
+                {extTesting ? "Vérification…" : "Vérifier l'extracteur"}
+              </button>
+              <span class="muted small">
+                Décode quelques-uns de vos titres : deux moitiés du <em>même</em>
+                morceau doivent se ressembler plus que deux morceaux différents.
+              </span>
+            </div>
+
+            {#if extTesting && !extStatus?.result}
+              <div class="progress indet"><i></i></div>
+            {/if}
+
+            {#if extStatus?.result}
+              {@const r = extStatus.result}
+              {#if r.same_track !== undefined}
+                {#if extStatus.ok}
+                  <div class="banner ok">
+                    <Icon name="check" size={16} />
+                    <span>
+                      Vérifié sur {r.tracks} titres — même morceau {pct(r.same_track)} %,
+                      morceaux différents {pct(r.different_tracks)} %.
+                    </span>
+                  </div>
+                {:else}
+                  <div class="banner bad">
+                    <Icon name="alert" size={16} />
+                    <span>{r.reason || extStatus.error || "échec de la vérification"}</span>
+                  </div>
+                {/if}
+              {:else}
+                <div class="banner">
+                  <Icon name="info" size={16} />
+                  <span>{r.reason || "vérification impossible pour l'instant"}</span>
+                </div>
+              {/if}
+            {:else if extStatus?.error}
+              <div class="banner bad">
+                <Icon name="alert" size={16} /><span>{extStatus.error}</span>
+              </div>
+            {/if}
+
+            {#if extTesting && extStatus?.progress?.length}
+              <ul class="ext-log muted small">
+                {#each extStatus.progress.slice(-3) as line}<li>{line}</li>{/each}
+              </ul>
+            {/if}
+          {/if}
+        {:else}
+          <div class="empty-state">
+            <Icon name="upload" size={28} />
+            <p>Aucun extracteur installé.</p>
+            {#if extractor.uploadable}
+              <label class="primary big file-btn" class:disabled={extUploading}>
+                <Icon name="upload" size={16} />
+                {extUploading ? "Envoi…" : "Importer le modèle .onnx"}
+                <input
+                  bind:this={extFileInput}
+                  type="file"
+                  accept=".onnx,application/octet-stream"
+                  on:change={onPickExtractor}
+                  disabled={extUploading}
+                />
+              </label>
+              <p class="small muted">
+                Le fichier <code>discogs-effnet-bs64-1.onnx</code> de l'extracteur
+                MusiCNN. Il reste sur votre serveur.
+              </p>
+            {:else}
+              <p class="small">
+                Configurez <code>cache_dir</code> dans <code>[webapp]</code> pour
+                pouvoir importer un extracteur ici.
+              </p>
+            {/if}
+          </div>
+        {/if}
+      </section>
+
       <section class="card">
         <h2><Icon name="activity" size={18} /> Entraînement</h2>
         <p class="sub muted">
@@ -1362,6 +1631,77 @@
     border-radius: 999px;
     padding: 3px 10px;
     font-size: 0.78rem;
+  }
+
+  /* -- extractor ----------------------------------------------------------- */
+  .ext-info {
+    min-width: 0;
+  }
+  .ext-info strong {
+    overflow-wrap: anywhere;
+  }
+  .ext-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .ext-test {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+    font-size: 0.84rem;
+  }
+  .ext-test span {
+    flex: 1 1 260px;
+    line-height: 1.45;
+  }
+  .ext-log {
+    margin: 10px 0 0;
+    padding-left: 18px;
+    font-variant-numeric: tabular-nums;
+  }
+  /* A file input drawn as one of our buttons: the native control is invisible
+     and stretched over the label, so the whole button opens the picker. */
+  .file-btn {
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .file-btn input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .file-btn.disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+  .small-btn {
+    margin-top: 10px;
+    padding: 6px 11px;
+    font-size: 0.82rem;
+  }
+  .banner.ok {
+    border-color: #14532d;
+    color: #86efac;
+  }
+  .progress.indet i {
+    width: 35%;
+    animation: ext-slide 1.1s ease-in-out infinite;
+  }
+  @keyframes ext-slide {
+    0% {
+      margin-left: 0;
+    }
+    50% {
+      margin-left: 65%;
+    }
+    100% {
+      margin-left: 0;
+    }
   }
 
   /* -- buttons ------------------------------------------------------------- */
