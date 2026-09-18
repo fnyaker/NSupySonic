@@ -16,6 +16,7 @@
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { wirePreview, releasePreview, setPreviewGain } from "../lib/visualizer.js";
+  import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
   import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import { episodeMarkers, loadEpisodeMarkers } from "../lib/markers.js";
   import Cover from "./Cover.svelte";
@@ -178,25 +179,25 @@
   $: if (preview) preview.volume = $player.muted ? 0 : $player.volume;
 
   // Backfill the previewed track's ReplayGain when unknown, so normalization
-  // works on tracks whose metadata predates the gain field. Only when
-  // normalization is on; dedup per session; caches on the track object.
-  const gainTried = new Set();
+  // works on tracks whose metadata predates the gain field. Goes through the
+  // shared on-device gain cache (lib/gaincache.js), so a track previewed after
+  // it has been played costs nothing — and what is learned here is there for
+  // playback too.
   async function ensurePreviewGain(t) {
     if (!t || get(normalization) === "off" || typeof t.gain === "number") return;
-    const gid = String(t.deezer_id || "");
-    if (!/^\d+$/.test(gid) || gainTried.has(gid)) return;
-    gainTried.add(gid);
-    try {
-      const r = await api.trackGain(gid);
-      if (r && typeof r.gain === "number") {
-        t.gain = r.gain; // cache on the track object
-        // Apply only if this is still the track the sheet is showing. Ramp
-        // (snap=false) — a preview may already be audible when this lands.
-        if (t.deezer_id === id) setPreviewGain(r.gain, false);
+    const cached = knownGain(t.deezer_id);
+    if (cached !== undefined) {
+      if (typeof cached === "number") {
+        t.gain = cached;
+        if (t.deezer_id === id) setPreviewGain(cached, false);
       }
-    } catch {
-      /* leave the preview un-normalized */
+      return;
     }
+    await primeGains([t]);
+    const g = gainFor(t);
+    // Apply only if this is still the track the sheet is showing. Ramp
+    // (snap=false) — a preview may already be audible when this lands.
+    if (typeof g === "number" && t.deezer_id === id) setPreviewGain(g, false);
   }
   function onPreviewTime() {
     if (!preview) return;

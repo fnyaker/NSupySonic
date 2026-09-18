@@ -7,6 +7,7 @@ import {
   favorites,
   favTracks,
   player,
+  playlists,
   toasts,
   isAdmin,
   syncing,
@@ -32,8 +33,6 @@ export const DL_QUALITIES = [
   { id: "OPUS_128", label: "Opus 128" },
   { id: "OPUS_64", label: "Opus 64" },
 ];
-
-let playlistCache = null;
 
 // Run a manual Deezer sync end-to-end: kick off the background job, poll until
 // it finishes, then refresh the playlist/favorite caches the UI reads. Shared by
@@ -69,24 +68,94 @@ export async function runDeezerSync() {
   }
 }
 
+// The playlist list, into the shared `playlists` store. Callers that just need
+// the array still get it back; callers that need to STAY current subscribe to
+// the store instead (that is the whole point — see stores.js).
+let playlistsInFlight = null;
+
 export async function userPlaylists(force = false) {
-  if (playlistCache && !force) return playlistCache;
-  try {
-    const r = await api.myPlaylists();
-    playlistCache = r.playlists || [];
-    warmPlaylists(playlistCache);
-    return playlistCache;
-  } catch {
-    // Don't memoize a failure: caching [] here left the sidebar / picker / the
-    // library tab permanently empty after a single failed load (offline boot,
-    // server not up yet) until an unrelated edit invalidated the cache. Return
-    // an empty list WITHOUT setting the cache, so the next call refetches.
-    return playlistCache || [];
-  }
+  const cached = get(playlists);
+  if (cached && !force) return cached;
+  // Several views mount at once on a cold start; they must share one request.
+  if (playlistsInFlight && !force) return playlistsInFlight;
+  // This IS the refresh a pending invalidation was waiting for.
+  cancelPlaylistRefresh();
+  const p = api
+    .myPlaylists()
+    .then((r) => {
+      const list = r.playlists || [];
+      playlists.set(list);
+      warmPlaylists(list);
+      return list;
+    })
+    .catch(() => {
+      // Don't memoize a failure: storing [] here left the sidebar / picker / the
+      // library tab permanently empty after a single failed load (offline boot,
+      // server not up yet) until an unrelated edit invalidated the cache. Leave
+      // the store as it is, so the next call refetches.
+      return get(playlists) || [];
+    })
+    .finally(() => {
+      if (playlistsInFlight === p) playlistsInFlight = null;
+    });
+  playlistsInFlight = p;
+  return p;
+}
+
+// Something changed the playlists server-side: refetch so every mounted view
+// updates itself. Debounced, because the edit paths call this per operation
+// (adding ten tracks one by one used to mean ten refetches) and `/me/playlists`
+// counts the tracks of every playlist — it is not a free call.
+const PLAYLIST_REFRESH_DELAY = 600;
+let playlistRefreshTimer = null;
+function cancelPlaylistRefresh() {
+  clearTimeout(playlistRefreshTimer);
+  playlistRefreshTimer = null;
 }
 
 export function invalidatePlaylists() {
-  playlistCache = null;
+  cancelPlaylistRefresh();
+  playlistRefreshTimer = setTimeout(() => {
+    playlistRefreshTimer = null;
+    userPlaylists(true).catch(() => {});
+  }, PLAYLIST_REFRESH_DELAY);
+}
+
+// Merge a playlist the user just created or renamed into the store NOW. The
+// refetch above confirms it a moment later; this is what makes a playlist
+// created from the "add to playlist" sheet appear in the library and the
+// sidebar the instant it exists, instead of only after a navigation.
+export function upsertPlaylistLocal(p) {
+  if (!p || !p.id) return;
+  playlists.update((list) => {
+    const cur = list || [];
+    const i = cur.findIndex((x) => String(x.id) === String(p.id));
+    // New: the server orders by creation date, newest first — so does this.
+    if (i < 0) return [{ nb_tracks: 0, editable: true, cover: null, ...p }, ...cur];
+    const next = cur.slice();
+    next[i] = { ...cur[i], ...p };
+    return next;
+  });
+}
+
+export function removePlaylistLocal(id) {
+  if (!id) return;
+  playlists.update((list) =>
+    list ? list.filter((p) => String(p.id) !== String(id)) : list
+  );
+}
+
+// Keep a playlist's track count honest between an edit and its refetch.
+function bumpPlaylistCount(id, delta) {
+  if (!id || !delta) return;
+  playlists.update((list) => {
+    if (!list) return list;
+    const i = list.findIndex((p) => String(p.id) === String(id));
+    if (i < 0) return list;
+    const next = list.slice();
+    next[i] = { ...next[i], nb_tracks: Math.max(0, (next[i].nb_tracks || 0) + delta) };
+    return next;
+  });
 }
 
 // -- offline warming ---------------------------------------------------------
@@ -106,8 +175,8 @@ const WARM_MAX = 25;
 const WARM_START_DELAY = 10000;
 let warming = false;
 
-export async function warmPlaylists(playlists) {
-  if (warming || !Array.isArray(playlists) || !playlists.length) return;
+export async function warmPlaylists(list) {
+  if (warming || !Array.isArray(list) || !list.length) return;
   if (!get(online)) return;
   warming = true;
   try {
@@ -115,7 +184,7 @@ export async function warmPlaylists(playlists) {
     // Favourites first: it's the list people open offline most.
     const paths = [
       "/me/favorites",
-      ...playlists.slice(0, WARM_MAX).map((p) => "/playlist/" + p.id),
+      ...list.slice(0, WARM_MAX).map((p) => "/playlist/" + p.id),
     ];
     for (const path of paths) {
       if (!get(online)) break;
@@ -275,14 +344,16 @@ export async function startTrackRadio(track) {
 export function addTrackToPlaylist(playlistId, trackId, playlistTitle) {
   lastPlaylist.set({ id: String(playlistId), title: playlistTitle });
   toasts.push(`Ajouté à « ${playlistTitle} »`);
+  bumpPlaylistCount(playlistId, 1);
   return api
     .addToPlaylist(playlistId, [String(trackId)])
     .then(() => {
-      // The sidebar/menu cache shows track counts — refresh on the next read.
+      // The lists show track counts — refresh them (debounced).
       invalidatePlaylists();
       return true;
     })
     .catch(() => {
+      bumpPlaylistCount(playlistId, -1); // the optimistic count was wrong
       toasts.push(`Échec de l'ajout à « ${playlistTitle} »`, "error");
       return false;
     });

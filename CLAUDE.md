@@ -377,6 +377,22 @@ plays it unchanged). Sharing goes through `components/ShareSheet.svelte` (global
 (peaks from `/api/share/waveform`), cut server-side by `/api/share/clip` and handed to the Web Share
 API (download fallback). Podcast markers live in `lib/markers.js`.
 
+**Search leads with the titles**: the "Tout" tab is ten tracks, then a shelf of albums, then
+artists, playlists and podcasts — a search is usually for a song, and the shortlist has to be the
+first thing on screen rather than something you scroll past two shelves to reach. Each section
+carries a "Tout afficher" that switches to its own tab (the track one shows the full count).
+
+**Swipe a track row right to queue it next** (`components/TrackRow.svelte`, touch only). Same
+gesture language as the now-playing sheet: arm on touchstart, commit to an axis after ~10px, and
+leave a gesture that locks to "y" entirely to the scroller. The row slides and the strip it vacates
+on the LEFT is what shows the action — drawn there rather than behind the row, so the row needs no
+opaque background of its own and nothing has to match whatever page background (gradient header
+included) it sits on. Deliberately wordless: the strip is ~64px wide at the point it commits, and
+any honest label gets clipped to a word naming a different action ("Lire ensuite" → "Lire"); the
+toast on release says it in full. A gesture starting on a control belongs to that control, one
+starting at the very left edge is left to iOS's own back gesture, and a drag swallows the click the
+browser synthesises from it.
+
 **Back goes to the SCREEN, not the route** (`lib/nav.js`): hash routing gives real history, but the
 router destroys a page's component state on the way out and rebuilds it empty on the way in — so
 coming back from an album landed you at the top of a blank search page. Every history entry gets an
@@ -408,6 +424,24 @@ measuring the page being left.
   tracklist into the offline cache in the background, one at a time.
 - Persistent, actionable messages go through the `notices` store + `components/Notices.svelte`
   (toasts are for transient confirmations only).
+- The account's playlists live in ONE store (`stores.js#playlists`, owned by
+  `actions.js#userPlaylists`/`invalidatePlaylists`): the sidebar, the library tab and the "add to
+  playlist" sheet all paint from it, so a playlist created from a sheet that opens OVER a screen —
+  which never remounts it — is listed everywhere at once. `upsertPlaylistLocal` /
+  `removePlaylistLocal` show a create/rename/delete instantly; `invalidatePlaylists` then refetches
+  (debounced — `/me/playlists` counts every playlist's tracks, and the edit paths call it per
+  operation).
+- **ReplayGain is preloaded, never fetched from under a playing track** (`lib/gaincache.js`).
+  Normalization is STATIC — `loadTrack` picks the gain at the source handover and holds it for the
+  whole track — so a gain that lands one request later is not a refinement, it is the volume moving
+  in the middle of a song. The current track and the next `GAIN_WINDOW` are therefore primed
+  together in one call (`POST /api/gains`, DB rows first then a single `song.getListData` for the
+  rest) as soon as the queue moves, and the answers are kept on the device (IndexedDB, negatives
+  too, with a TTL), so a track played once never waits for the network again. The prefetcher and
+  the downloader prime it with the audio — what has its bytes on the device has its gain there. A
+  gain that still arrives late is applied only within `GAIN_LATE_GRACE` of the track's start;
+  past that it is cached for next time rather than jumped in. The one deliberate exception is the
+  user changing the normalization level, which may move it now.
 - Cover art: a cached blob (`offlineCovers`, keyed resolution-independently by `coverKey`) is the
   **preferred** source in `Cover.svelte`, not a fallback — it's the server's archived 1000px art, so
   waiting for a CDN request to fail first is pure delay. Anything you play caches its cover

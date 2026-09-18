@@ -6,6 +6,7 @@
   import { initConnectivity, online } from "./lib/net.js";
   import { loadOfflineIndex, loadCoverCache } from "./lib/offline.js";
   import { initPlayCache } from "./lib/playcache.js";
+  import { initGainCache } from "./lib/gaincache.js";
   import { initQueueFilter } from "./lib/playfilter.js";
   import { loadFavorites } from "./lib/actions.js";
   import { initPodcastProgress } from "./lib/podcastProgress.js";
@@ -76,7 +77,7 @@
     // The queue filter and library views read these indexes synchronously, so
     // load them BEFORE the UI mounts — otherwise an offline launch briefly sees
     // "nothing downloaded" and filters every track out. Fast: IDB metadata only.
-    await Promise.all([loadOfflineIndex(), initPlayCache()]);
+    await Promise.all([loadOfflineIndex(), initPlayCache(), initGainCache()]);
     loadCoverCache();
 
     // Airplane-mode launch: if we're offline but have a remembered session, boot

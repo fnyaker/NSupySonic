@@ -1,22 +1,20 @@
 <script>
   import { link, push } from "svelte-spa-router";
   import { location } from "../lib/router.js";
-  import { user, isAdmin, syncing } from "../lib/stores.js";
+  import { user, isAdmin, syncing, playlists } from "../lib/stores.js";
   import { api } from "../lib/api.js";
-  import { userPlaylists, invalidatePlaylists, runDeezerSync } from "../lib/actions.js";
+  import { userPlaylists, upsertPlaylistLocal, runDeezerSync } from "../lib/actions.js";
   import Icon from "./Icon.svelte";
 
   let q = "";
-  let playlists = [];
 
   // Deezer playlists belong to the account owner — guests don't see them.
-  // Refreshed on every navigation so a rename/delete/create done from a
-  // playlist page shows up here; cheap, since userPlaylists() returns its
-  // shared cache untouched unless something invalidated it.
-  $: $location, refreshPlaylists();
-  async function refreshPlaylists() {
-    if ($isAdmin) playlists = await userPlaylists();
-  }
+  // The list comes straight off the shared store, so a create / rename / delete
+  // from ANY screen (the playlist page, the "add to playlist" sheet, the
+  // library) lands here immediately — no navigation needed. The load is only
+  // kicked off once; nothing here re-reads it.
+  $: if ($isAdmin) userPlaylists();
+  $: shown = $playlists || [];
 
   function submitSearch(e) {
     e.preventDefault();
@@ -33,18 +31,21 @@
     user.set(null);
   }
 
-  // Manual "refresh from Deezer" (shared action), then refresh the sidebar list.
+  // Manual "refresh from Deezer" (shared action), then refresh the list.
   async function syncDeezer() {
-    if (await runDeezerSync()) playlists = await userPlaylists(true);
+    if (await runDeezerSync()) userPlaylists(true);
   }
 
   async function newPlaylist() {
-    const title = window.prompt("Nom de la playlist ?");
-    if (!title || !title.trim()) return;
+    const raw = window.prompt("Nom de la playlist ?");
+    const title = (raw || "").trim();
+    if (!title) return;
     try {
-      const r = await api.createPlaylist(title.trim(), []);
-      invalidatePlaylists();
-      playlists = await userPlaylists(true);
+      const r = await api.createPlaylist(title, []);
+      // Into the shared store at once, so it is already listed everywhere by
+      // the time the new playlist's page opens.
+      if (r?.id) upsertPlaylistLocal({ id: String(r.id), title, deezer_id: r.deezer_id });
+      userPlaylists(true);
       if (r.id) push("/playlist/" + r.id);
     } catch {
       /* ignore */
@@ -89,7 +90,7 @@
       </div>
     </div>
     <ul class="playlists">
-      {#each playlists as p (p.id)}
+      {#each shown as p (p.id)}
         <li><a use:link href={"/playlist/" + p.id}>{p.title}</a></li>
       {/each}
     </ul>

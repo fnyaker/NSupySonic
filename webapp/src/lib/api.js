@@ -197,6 +197,9 @@ export const api = {
   lyrics: (id) => req("/lyrics/" + id),
   // ReplayGain for volume normalization; backfilled + cached server-side.
   trackGain: (id) => req("/gain/" + id),
+  // A whole run of tracks in one call — see lib/gaincache.js.
+  trackGains: (ids) =>
+    req("/gains", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),
 
   // radios
   trackRadio: (id) => req("/radio/track/" + id),

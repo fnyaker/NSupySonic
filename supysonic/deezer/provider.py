@@ -622,6 +622,16 @@ class DeezerProvider:
     def get_track_info(self, sng_id) -> dict:
         return self.dz.gw.get_track(sng_id)
 
+    def get_tracks(self, sng_ids) -> list[dict]:
+        """Several tracks in ONE gateway call, matched by ``SNG_ID``.
+
+        Deliberately ``get_tracks_data`` and not ``gw.get_tracks``: the latter
+        maps the answer back onto the requested ids positionally and walks off
+        the end of the list the moment Deezer returns fewer rows than were asked
+        for — a single dead id is enough to cause it.
+        """
+        return self.dz.gw.get_tracks_data(sng_ids)
+
     def get_album(self, alb_id) -> dict:
         return self.dz.gw.get_album(alb_id)
 

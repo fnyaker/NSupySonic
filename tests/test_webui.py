@@ -223,6 +223,14 @@ class MockGW:
     def get_track(self, sng_id):
         return raw_track(sng_id, "A")
 
+    def get_tracks_data(self, sng_ids):
+        # Records the batch, and answers about every id but 999 — the stand-in
+        # for a track the gateway simply doesn't return (a dead id), which the
+        # caller has to survive without walking off the end of the answer.
+        self.gain_batches = getattr(self, "gain_batches", [])
+        self.gain_batches.append([str(i) for i in sng_ids])
+        return [raw_track(i, f"T{i}") for i in sng_ids if str(i) != "999"]
+
     def add_song_to_favorites(self, sng_id):
         self.fav_added.append(str(sng_id))
 
@@ -556,6 +564,50 @@ class WebUITestCase(unittest.TestCase):
         data = self.client.get("/api/gain/5").get_json()
         self.assertAlmostEqual(data["gain"], -7.0)
         self.assertIsNone(self.client.get("/api/gain/not-a-number").get_json()["gain"])
+
+    def test_track_gains_batch(self):
+        # The player asks for the gain of everything it is about to play in ONE
+        # call, BEFORE any of it starts — a gain that arrives later is a volume
+        # change in the middle of a song.
+        self._login()
+        gw = self.app.deezer.dz.gw
+        gw.gain_batches = []
+        data = self.client.post(
+            "/api/gains", json={"ids": ["5", "6", 5, "not-a-number", "999"]}
+        ).get_json()
+        self.assertAlmostEqual(data["gains"]["5"], -7.0)
+        self.assertAlmostEqual(data["gains"]["6"], -7.0)
+        # Asked about, not answered for: null, never a missing key or a 500.
+        self.assertIsNone(data["gains"]["999"])
+        self.assertNotIn("not-a-number", data["gains"])  # locals have no gain
+        # One gateway call, de-duplicated, junk filtered out.
+        self.assertEqual(len(gw.gain_batches), 1)
+        self.assertEqual(gw.gain_batches[0], ["5", "6", "999"])
+
+    def test_track_gains_batch_rejects_junk(self):
+        self._login()
+        self.assertEqual(self.client.post("/api/gains", json={}).get_json(), {"gains": {}})
+        self.assertEqual(
+            self.client.post("/api/gains", json={"ids": []}).get_json(), {"gains": {}}
+        )
+        self.assertEqual(self.client.post("/api/gains", json={"ids": "5"}).status_code, 400)
+
+    def test_track_gains_batch_prefers_the_db_row(self):
+        # A known gain is answered from the database — no Deezer call at all, so
+        # an outage costs nothing and a primed window is free.
+        from supysonic.deezer import library
+
+        self._login()
+        gw = self.app.deezer.dz.gw
+        with self.app.app_context():
+            root = library.get_root_folder(self.archive)
+            row = library.upsert_track(raw_track(5, "Known"), root, "FLAC")
+            row.gain = -3.25
+            row.save()
+        gw.gain_batches = []
+        data = self.client.post("/api/gains", json={"ids": ["5"]}).get_json()
+        self.assertAlmostEqual(data["gains"]["5"], -3.25)
+        self.assertEqual(gw.gain_batches, [])
 
     def test_browse_tracks_carry_gain(self):
         # The gain travels in the track objects the player queues, so normalization

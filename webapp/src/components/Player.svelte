@@ -37,6 +37,7 @@
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, resolveCover, coverKey, baseCover, artistLine } from "../lib/format.js";
   import { registerSource, resumeAudio, setTrackGain } from "../lib/visualizer.js";
+  import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
   import {
     getEpisodeProgress,
     saveEpisodeProgress,
@@ -581,47 +582,89 @@
     listenMark = get(player).playing ? Date.now() : 0;
   }
 
-  // Backfill a track's ReplayGain when it's unknown, so normalization works on
-  // tracks whose metadata predates the gain field. Only when normalization is
-  // on and online; the result is cached on the queue object and server-side, so
-  // this fires at most once per track. Guarded by a session-level tried-set so
-  // a track with genuinely no gain isn't refetched on every replay.
-  // Turning normalization on mid-track: backfill the current track's gain too.
-  $: if ($normalization !== "off" && $current) ensureGain($current);
-  // Preload the UPCOMING track's ReplayGain so the handover value is exact the
-  // instant it starts. Without this, a track whose gain isn't yet known plays at
-  // raw source level for a beat (loadTrack snaps to unity), then the async
-  // backfill corrects it — an audible jump right after the transition. Fetching
-  // it ahead of time (cached on the queue object) means loadTrack snaps straight
-  // to the right level. ensureGain is a no-op once known and dedups per session.
-  $: if ($normalization !== "off" && $player.index >= 0) {
-    const nx = $player.queue[$player.index + 1];
-    if (nx) ensureGain(nx);
+  // ReplayGain, preloaded — never fetched from under a playing track.
+  //
+  // Normalization is static: loadTrack picks a track's gain at the source
+  // handover and holds it for the whole track. So a gain that lands one request
+  // later isn't a refinement, it is the volume moving in the middle of a song —
+  // which is what "la normalisation s'est activée au milieu du morceau" was.
+  //
+  // Hence: the CURRENT track and the whole prefetch window are primed together,
+  // in one request (lib/gaincache.js), as soon as the queue moves — and the
+  // answers are kept on the device, so a track played once never waits for the
+  // network again. The window is the same one whose audio is prefetched: what
+  // gets its bytes cached ahead gets its gain cached ahead too.
+  //
+  // How far ahead they are primed. Independent of the audio prefetch depth on
+  // purpose: that setting is about mobile DATA, and this is one small request
+  // for the whole run — deep enough that skipping a few tracks still lands on
+  // known values.
+  const GAIN_WINDOW = 8;
+  // The player store ticks ~4x a SECOND while audio plays (position updates), so
+  // this block runs that often whatever it reads. Everything below the guard is
+  // therefore off-limits unless the window actually moved: three comparisons per
+  // tick, and real work only on a track/queue change.
+  let gainNorm = null;
+  let gainIdx = -1;
+  let gainQueue = null;
+  $: maybePrimeGains($normalization, $player.index, $player.queue);
+  function maybePrimeGains(norm, index, queue) {
+    if (norm === gainNorm && index === gainIdx && queue === gainQueue) return;
+    gainNorm = norm;
+    gainIdx = index;
+    gainQueue = queue;
+    if (norm === "off" || index < 0) return;
+    primeGains(queue.slice(index, index + 1 + GAIN_WINDOW)).catch(() => {});
   }
-  const gainTried = new Set();
+
+  // Turning normalization on — or changing its level — IS a deliberate act, so
+  // it may move the level right now, current track included, even if that means
+  // learning its gain at this moment. This is the one mid-track change the rule
+  // above doesn't apply to: the user asked for it.
+  let lastNorm = get(normalization);
+  $: onNormalizationChange($normalization);
+  async function onNormalizationChange(level) {
+    if (level === lastNorm) return;
+    lastNorm = level;
+    if (level === "off") return;
+    const cur = get(current);
+    // Already known: the visualizer's own subscription to the level re-applies
+    // it, with no help from here.
+    if (!cur || typeof gainFor(cur) === "number") return;
+    await primeGains([cur]);
+    const g = gainFor(cur);
+    if (typeof g === "number" && get(current)?.deezer_id === cur.deezer_id)
+      setTrackGain(g, false);
+  }
+
+  // How long after a track starts a freshly-learned gain may still be applied to
+  // it. Inside this window the track has barely begun (and is often still
+  // buffering), so landing the correct level reads as part of the start; past
+  // it, it would be an audible jump, and we'd rather this one play un-normalized
+  // and be right the next time — the value is cached either way.
+  const GAIN_LATE_GRACE = 2;
   async function ensureGain(track) {
-    if (get(normalization) === "off") return;
+    if (get(normalization) === "off" || !track) return;
     if (typeof track.gain === "number") return;
-    const id = String(track.deezer_id || "");
-    if (!/^\d+$/.test(id) || gainTried.has(id) || !get(online)) return;
-    gainTried.add(id);
-    try {
-      const r = await api.trackGain(id);
-      if (r && typeof r.gain === "number") {
-        track.gain = r.gain; // cache on the queue object
-        // Apply live only if this track is the one currently AUDIBLE — not while
-        // a track change is mid-load (loadingTrack), where the outgoing track is
-        // still playing and the incoming source hasn't been swapped in yet.
-        // loadTrack's own setTrackGain at the handover will pick up the value we
-        // just cached, so the gain still lands exactly when this track starts.
-        // This applies to the track that's ALREADY audible, so ramp (snap=false)
-        // — snapping it would click mid-playback.
-        if (!loadingTrack && get(current)?.deezer_id === track.deezer_id)
-          setTrackGain(r.gain, false);
-      }
-    } catch {
-      /* leave it un-normalized */
+    const cached = knownGain(track.deezer_id);
+    if (typeof cached === "number") {
+      track.gain = cached;
+      return;
     }
+    if (cached === null || !get(online)) return; // known to have none
+    await primeGains([track]);
+    const g = gainFor(track);
+    if (typeof g !== "number") return;
+    // Apply live only if this track is the one currently AUDIBLE — not while a
+    // track change is mid-load (loadingTrack), where the outgoing track is still
+    // playing and the incoming source hasn't been swapped in yet — and only if
+    // it has only just started (see GAIN_LATE_GRACE). loadTrack's own
+    // setTrackGain at the handover picks up the value we just cached, so a gain
+    // that arrives while the next track is still loading still lands exactly
+    // when that track starts.
+    if (loadingTrack || get(current)?.deezer_id !== track.deezer_id) return;
+    if ((audio?.currentTime || 0) > GAIN_LATE_GRACE) return;
+    setTrackGain(g, false); // already audible: ramp, don't click
   }
 
   // Podcast resume: remember the playhead of the current episode so it can be
@@ -834,7 +877,7 @@
     // the prefetch cache. track.gain is preloaded for upcoming tracks (see the
     // reactive below), so the snapped value is already the correct one, with no
     // unity-then-correct jump. No-op unless normalization is on.
-    setTrackGain(track.gain);
+    setTrackGain(gainFor(track));
     if (src.blob) touch(track.deezer_id); // bump LRU recency
 
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
