@@ -33,10 +33,12 @@
     vizBeatDetect,
     vizFullBleed,
     vizShowStyle,
+    ecoMode,
   } from "../lib/stores.js";
   import { effectiveMode, MODE_BY_ID } from "../lib/viz/index.js";
   import { readout } from "../lib/audio/engine.js";
   import Visualizer from "./Visualizer.svelte";
+  import EcoToggle from "./EcoToggle.svelte";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
@@ -59,7 +61,7 @@
   // Visualizer component owns the canvas and the loop. `effectiveMode` is what
   // degrades a rhythm-driven scene when the user has switched the analysis off,
   // so the player never shows a dead canvas.
-  $: vmode = effectiveMode($vizMode, $vizBeatDetect);
+  $: vmode = effectiveMode($vizMode, $vizBeatDetect, $ecoMode);
   $: fullBleed = $vizFullBleed && (MODE_BY_ID.get(vmode)?.fullBleed ?? false);
   $: stripViz = vmode === "bars";
   // Only claim to have recognised something once the engine is reasonably sure.
@@ -675,9 +677,15 @@
   on:touchcancel={onTouchCancel}
   transition:fade={{ duration: 140 }}
 >
-  {#each $bg as layer (layer.id)}
-    <div class="bg" style={`background-image:${cssUrl(layer.src)}`} in:fade={{ duration: 350 }}></div>
-  {/each}
+  {#if $ecoMode}
+    {#if $bg.length}
+      <div class="bg" style={`background-image:${cssUrl($bg[$bg.length - 1].src)}`}></div>
+    {/if}
+  {:else}
+    {#each $bg as layer (layer.id)}
+      <div class="bg" style={`background-image:${cssUrl(layer.src)}`} in:fade={{ duration: 350 }}></div>
+    {/each}
+  {/if}
   <div class="scrim"></div>
 
   {#if fullBleed}
@@ -690,6 +698,7 @@
         fps={$vizFps}
         layout="full"
         active={$immersiveOpen}
+        paused={!$playing}
       />
     </div>
   {/if}
@@ -705,7 +714,7 @@
 
   <div class="body">
     <div class="cur-lyric" aria-hidden="true">
-      {#if $currentLyricLine}
+      {#if $currentLyricLine && !$ecoMode}
         {#key $currentLyricLine}
           <span in:fade={{ duration: 220 }}>{$currentLyricLine}</span>
         {/key}
@@ -761,6 +770,7 @@
           fps={$vizFps}
           layout="strip"
           active={$immersiveOpen}
+          paused={!$playing}
         />
       </div>
     {/if}
@@ -778,6 +788,7 @@
       {/if}
       <button class="sm" on:click={() => openShare($current)} aria-label="Partager"><Icon name="share" size={20} /></button>
       <span class="grow"></span>
+      <EcoToggle />
       <QualityMenu />
     </div>
   </div>

@@ -30,6 +30,10 @@
   export let fps = 60;
   export let layout = "strip"; // bars: "strip" (centred) | "full" (grounded)
   export let active = true;
+  // Playback stopped. The scene rides out a short fade and then stops entirely
+  // — no rendering, no analysis — rather than sitting frozen on its last frame,
+  // which is both ugly and a needless drain while nothing is playing.
+  export let paused = false;
   // The projector window is fed by the bridge instead of subscribing to the
   // engine itself (there is no audio in that tab to analyse).
   export let external = false;
@@ -50,6 +54,10 @@
   let cssH = 0;
   let lastPaint = 0;
   let reduced = false;
+  let dimmed = false;
+  let idle = false;
+  let idleTimer = null;
+  const FADE_MS = 600;
 
   // A 4K projector at devicePixelRatio 2 is 33 million pixels a frame; nothing
   // draws that in 16 ms and nobody can see the difference on a beamer. Cap the
@@ -94,7 +102,17 @@
     scene?.resize(w, h, preset);
   }
 
+  function startLoop() {
+    if (!raf) raf = requestAnimationFrame(paint);
+  }
+  function stopLoop() {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+  }
+
   function paint(now) {
+    raf = 0;
+    if (idle) return;
     raf = requestAnimationFrame(paint);
     if (!scene || !g || !cssW) return;
     if (fps > 0) {
@@ -116,7 +134,7 @@
   }
 
   function attach() {
-    if (unsub || external || !active || mode === "off") return;
+    if (unsub || idle || external || !active || mode === "off") return;
     unsub = subscribeFrames((f) => {
       pal.update(f, f.dt);
       scene?.update(f, f.dt);
@@ -125,6 +143,31 @@
   function detach() {
     unsub?.();
     unsub = null;
+  }
+
+  // Keep drawing through the fade so the scene winds down instead of freezing,
+  // then stop everything once it is invisible.
+  function applyPaused(p, a) {
+    clearTimeout(idleTimer);
+    if (p || !a) {
+      dimmed = true;
+      idleTimer = setTimeout(goIdle, FADE_MS + 80);
+    } else {
+      dimmed = false;
+      if (idle) {
+        idle = false;
+        startLoop();
+      }
+      attach();
+    }
+  }
+  function goIdle() {
+    idle = true;
+    detach();
+    stopLoop();
+    // Leave nothing behind: a resume fades IN over a blank canvas rather than
+    // over the last frame of the previous session.
+    if (g && cssW) g.clearRect(0, 0, cssW, cssH);
   }
 
   onMount(() => {
@@ -140,7 +183,7 @@
     sizeCanvas();
     ro = new ResizeObserver(sizeCanvas);
     ro.observe(box);
-    raf = requestAnimationFrame(paint);
+    startLoop();
     return () => {
       mq.removeEventListener("change", onMq);
     };
@@ -148,7 +191,8 @@
 
   onDestroy(() => {
     detach();
-    cancelAnimationFrame(raf);
+    clearTimeout(idleTimer);
+    stopLoop();
     ro?.disconnect();
   });
 
@@ -180,8 +224,7 @@
   }
   $: scene?.setOptions?.({ intensity, reducedMotion: reduced });
   $: pal.setMode(palette);
-  $: if (!active) detach();
-  else attach();
+  $: applyPaused(paused, active);
 
   // Cover colour. The projector is handed one over the bridge (the playing tab
   // has it cached already); everywhere else we resolve it from the track.
@@ -201,7 +244,7 @@
 </script>
 
 <div class="viz-host" bind:this={box} class:hidden={mode === "off"}>
-  <canvas bind:this={canvas} aria-hidden="true"></canvas>
+  <canvas bind:this={canvas} class:dim={dimmed} aria-hidden="true"></canvas>
 </div>
 
 <style>
@@ -218,5 +261,15 @@
     display: block;
     width: 100%;
     height: 100%;
+    opacity: 1;
+    transition: opacity 0.6s ease;
+  }
+  canvas.dim {
+    opacity: 0;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    canvas {
+      transition-duration: 0.2s;
+    }
   }
 </style>

@@ -103,6 +103,15 @@ export const trimSilence = persisted("fade.trim", true);
 export const trimThresholdDb = persisted("fade.trimDb", -45);
 
 // -- animations / visualizer -------------------------------------------------
+// Eco mode: NO animation anywhere in the app. Not a smaller one, not a slower
+// one — none. It is a per-device switch (a phone on 8% battery, a laptop on a
+// train) that sits above every other animation setting without destroying it,
+// so turning it off again restores exactly the setup that was there before.
+// It also stops the decorative work that is not the visualizer: the blurred
+// backdrop's crossfades and the live lyric line, both of which tick for the
+// whole length of a track for no functional reason.
+export const ecoMode = persisted("viz.eco", false);
+
 // The scene drawn in the full-screen player: "off" (the plain, original player),
 // "bars", "pulse", "aurora" or "smart" (the style-aware engine).
 export const vizMode = persisted("viz.mode", "bars");

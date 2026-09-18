@@ -74,13 +74,16 @@ export FLASK_APP="supysonic.web:create_application()"; flask run   # backend dev
 # Web UI (Svelte SPA)
 cd webapp && npm install && npm run build            # -> supysonic/webui/dist (gitignored)
 cd webapp && npm run dev                             # hot reload; proxies /api -> localhost:5000
-cd webapp && npm test                                # node --test: the analysis DSP (no deps)
+cd webapp && npm test                                # node --test: the analysis DSP + the genre trainers (no deps)
 
 # Deezer CLI
 supysonic-cli deezer login-test                      # check the ARL works
 supysonic-cli deezer import <deezer-url|track|album|playlist <id>>
 supysonic-cli deezer sync                            # import playlists/favorites/new releases
 supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics for archived tracks
+supysonic-cli deezer analyze [--force] [--limit N]     # measure tempo + style for archived tracks
+supysonic-cli deezer embed [--force] [--limit N]       # extract genre embeddings (needs onnxruntime)
+supysonic-cli deezer embed --self-test                 # check the mel front-end without a reference
 
 # Docker (full stack: builds SPA + python image, runs entrypoint that creates admin + auto-sync)
 docker compose up --build                            # web player at :5722/app, Subsonic at :5722/rest
@@ -245,7 +248,7 @@ unreachable, and the parts that do need Deezer must fail *fast* and *without a v
 3. **`supysonic/webui/`** — the custom `/api` blueprint (`__init__.py`, all routes `@login_required`,
    numeric-id validation on stream/favorite), `share.py` (waveform peaks + full-file/ffmpeg-clip
    downloads for the SPA's share sheet, all cached), `edges.py` (where a file's audio starts and
-   stops, for the crossfade) and `spa.py`, which serves the built Svelte SPA at
+   stops, for the crossfade), `analysis.py` (serving the whole-track verdict) and `spa.py`, which serves the built Svelte SPA at
    **`/app/`** (hash-routed). Admin UI stays at `/`, Subsonic at `/rest`.
 
 **Streaming interception** lives in `supysonic/api/media.py` (`_ensure_deezer_archived`): first play
@@ -449,6 +452,94 @@ measuring the page being left.
   waiting for a CDN request to fail first is pure delay. Anything you play caches its cover
   (`playcache.cacheCoverFor`), so hi-res art works offline for everything you've listened to.
 
+**Whole-track analysis is the SERVER's job** (`supysonic/deezer/analysis.py`, served by
+`supysonic/webui/analysis.py`, consumed by `webapp/src/lib/analysis.js`). The tempo and the style
+are properties of the whole piece, and a detector working them out live spends the first fifteen
+seconds of every track converging — through the intro, which is the least representative part of it
+— and pays that cost again on every device, on every play. Same reasoning as the loudness: the audio
+does not change, so neither does the answer. Measure once, keep it in `track_analysis`, serve it.
+
+- The TEMPO is **Deezer's own** where Deezer has one: its public API publishes a `bpm` per track,
+  exact and free. Anything else (a local upload, a track with no figure) is measured from a
+  low-passed envelope — ffmpeg decimates to 1 kHz u8 and the per-frame peak is a `max`/`min` over a
+  ten-byte slice, so no audio sample is ever touched from Python.
+- The DESCRIPTORS come from ffmpeg's `aspectralstats` and `ebur128`: centroid, spread, flatness,
+  entropy, rolloff and flux per frame, plus integrated loudness and **loudness range**. LRA is the
+  single best "how squashed is this" axis there is — a limitered hardcore master sits near 3 LU, a
+  live quartet near 15 — and it replaces the client's spectral crest, whose scale could not be
+  reconciled across the two implementations. **No new Python dependency**: no numpy, no model,
+  nothing to install on a server that already has ffmpeg.
+- Everything it classifies on is **physical or scale-free** (BPM, hertz, decibels, 0..1 ratios), on
+  purpose: the client's live classifier works on its own normalized feature scales and the two must
+  not be expected to share a threshold. They are independent readings — where the served one exists
+  it is the authority, and the live one covers what has not been measured yet.
+- Event-driven like the rest: `archive._finalize_archive` queues it on a daemon thread behind a
+  one-at-a-time semaphore, so it is never why an archive, a stream or a shutdown waits.
+  `deezer analyze` is the catch-up and the way to re-measure after `ANALYSIS_VERSION` moves. The
+  endpoint **never measures** — the player asks about tracks it is *about* to play, and a request
+  that started a three-second ffmpeg pass would answer long after it mattered while holding a thread.
+
+The client takes the global answers and keeps the per-moment ones. `engine.js` primes the verdicts
+for the queue window (one call, like `/api/gains`) and **seeds the beat tracker** with the served
+BPM, so the grid starts locked and only the phase has to be found — the first bar is on the beat
+instead of the fourth. The kick, the onsets and the transients stay live: no whole-file average can
+stand in for an event.
+
+**The genre studio** (`supysonic/deezer/embedding.py` + `genre.py`, `supysonic/webui/genre.py`,
+`webapp/src/lib/genre/`, `routes/Genres.svelte`) is the answer to "the classifier does not know MY
+genres". The heuristic above knows the styles it was written with; this teaches it yours.
+
+- **The big model is FROZEN and only ever extracts.** Fine-tuning something trained on millions of
+  recordings with two hundred of your own mostly destroys what it knew. So `discogs-effnet` (ONNX,
+  via onnxruntime) turns a track into one 1280-d vector and nothing else, and every bit of learning
+  happens in a small head on top — a few hundred examples by 1280 dimensions, which trains in a
+  browser tab. It is also exactly how the model's licence asks to be used: unmodified.
+- **The model is never vendored and never fetched silently.** It is a third-party artefact with its
+  own licence (CC BY-NC-ND), so the operator points `[deezer] embed_model` at a copy they obtained
+  themselves; `supysonic-cli deezer embed --help` says where. onnxruntime is an optional dependency
+  (`pip install 'supysonic[embedding]'`, and in the Docker image): without it the module reports
+  itself unavailable and the heuristic classifier keeps doing its job unchanged.
+- **The front-end is the dangerous part.** A mel-spectrogram with the wrong window, scale or
+  normalization yields vectors that look perfectly healthy and mean nothing. The parameters are the
+  published MusiCNN ones (16 kHz mono, 512-sample Hann, hop 256, 96 Slaney mel bands,
+  `log10(10000·x + 1)`, 128-frame patches), and since "looks healthy but is wrong" is the failure
+  mode, `deezer embed --self-test` checks it without a reference implementation: two halves of the
+  SAME track must embed closer to each other than to other tracks.
+- **Extracting needs the optional dependency; USING what was extracted must not.** `load_embedding`,
+  `save_embedding` and `encode_embedding` are plain `struct` ("e" is float16), and `genre.predict`
+  is plain Python. An archive copied from a server that had onnxruntime is a perfectly good training
+  set on one that does not — and that is also why the studio's candidate list is never gated on the
+  extractor.
+- **Training is the browser's job, in a Worker** (`lib/genre/trainer.js` → `worker.js`). Seconds of
+  solid arithmetic on the main thread is not a progress bar, it is a freeze. Two trainers:
+  `train.js` is a linear softmax head (a second, the right default), `deep.js` is an MLP on a
+  committed WebAssembly kernel (`wasm/kernel.c`, `build.sh`, ~4 KB) for the genres a plane cannot
+  separate — hardtekk against frenchcore, zaag against uptempo. Measured against the identical loops
+  in JavaScript, the kernel's `fwd` is 8× and `accum_outer` 12×. The `.wasm` is committed on purpose:
+  no toolchain is needed to build this repository.
+- The linear trainer's **random projection is decided by the score**, not assumed: it is free on
+  clustered data (1.000 at 4× the speed) and costly on marginal data, so it trains projected and
+  re-runs at full width when balanced accuracy comes back under 0.8. The deep trainer keeps the same
+  code path but defaults it OFF — measured, projecting to 384 cost ten points (0.890 against 0.998)
+  to save five seconds, and five seconds is not worth ten points on the one path that exists
+  *because* the accuracy was not enough.
+- **The CSP had to be widened by exactly one token.** `script-src 'self' 'wasm-unsafe-eval'` permits
+  WebAssembly compilation and nothing else — not `eval()`, not `new Function`, not inline script.
+  Without it `WebAssembly.instantiate` is refused outright and deep training cannot run at all.
+- **One tag per track, admin-only, one model.** A track labelled both frenchcore and uptempo teaches
+  the head that the two describe the same sound; a track that genuinely sits between them is better
+  left out. And two users disagreeing about what hardtekk is would train the single shared model
+  against itself.
+- The studio ships the head as base64 float16 (`encodeHead`: `W, b` for a linear head, `W1, b1, W2,
+  b2` for an MLP) and `PUT /api/genre/model` **refuses a head it cannot read back** — it stores,
+  re-reads, and deletes the row if the weights do not match the labels and dim given. A model stored
+  but unusable would silently do nothing for ever.
+- Tagging is **confirming, not typing**: every candidate arrives with the current model's guess,
+  ordered by play count (the labels that matter are on the music this library actually plays), the
+  keyboard is the interface (`1`…`9` choose, `↵` confirms, `→` skips, `espace` previews) and the
+  preview jumps a third of the way into the track — nobody judges a genre from the intro. The button
+  is in Réglages → Animations → Analyse rythmique.
+
 **Audio analysis** (`webapp/src/lib/audio/`) is ONE engine, shared. `engine.js` owns a single clock
 and a single pass over the analysers; every view reads the same frame object by reference, so a
 second visualizer on screen costs a function call. It is refcounted — nothing runs until a view asks
@@ -508,6 +599,35 @@ live viewer is also what tells the engine to keep running while the player tab i
 window never writes the playback session back (`DISPLAY_ONLY` in `stores.js`): its snapshot is
 frozen at the moment it opened, and writing it would roll the real player's position back to then.
 
+Three things keep that link alive, and each fixes a way it used to die:
+- the engine's **upgrade to the audio-thread clock is retried**, not attempted once. An AudioWorklet
+  needs an AudioContext, and the context only exists once something wired the player's element into
+  the graph — which normally happens *after* a projector window has subscribed. Giving up on the
+  first look left the engine on rAF for the session, and rAF stops in a hidden tab: the projector
+  froze the moment the player went behind it.
+- liveness is a **transport heartbeat**, not the frames. A paused player sends no frames and is
+  still very much there, and the viewer's own ping is a `setInterval` in a window browsers throttle
+  to once a minute — so the timeout is generous (90 s), a closing window says goodbye, and a
+  re-woken one re-announces at once.
+- **more than one tab can publish.** Leaving the app open twice is ordinary, and both tabs answered
+  a projector's hello, so it showed whichever landed last — for an idle second tab, "nothing
+  playing" over the top of a tab that was playing. Every message carries its sender and the
+  projector follows ONE: it prefers a tab reporting playback and only lets another take over once
+  that one goes quiet.
+
+**Animations stop when the music does.** `Visualizer.svelte` takes a `paused` prop: it keeps drawing
+through a 600 ms fade so the scene winds down rather than freezing, then stops the loop, drops its
+engine subscription and clears the canvas. The projector learns the transport state from the
+heartbeat and does the same.
+
+**Eco mode** (`ecoMode` in stores.js, `EcoToggle.svelte`) is the switch above all of them: no
+animation anywhere on the device — the visualizer, the backdrop's crossfades and the live lyric line
+— without destroying the setup underneath, so turning it off restores exactly what was there. It
+lives in the full-screen player footers next to the quality chip: one tap away, and taking no place
+in the transport row. `effectiveMode` returns `"off"` for it, and **"off" means no canvas anywhere**,
+the settings preview included — a preview that kept a canvas alive to show what was just switched
+off would be precisely the waste the setting exists to stop.
+
 **Crossfade + silence trimming** (`components/Player.svelte`, `lib/edges.js`,
 `supysonic/webui/edges.py`). Two ideas that need each other: masters carry a beat of digital silence
 at each end, and a crossfade that ignores them fades one track's silence into another's — the gap it
@@ -523,7 +643,7 @@ about a suspended AudioContext silencing a backgrounded tab).
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260807`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260919`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported.
 
@@ -547,4 +667,8 @@ adapter that times out / answers garbage, pinning the rules above: the breaker o
 costing sockets, retries stay inside their budget, and no transport failure ever condemns a track or
 a show). Note that its circuit breaker is a process-wide singleton — reset it in `setUp` when a test
 trips it. `tests/net/` hits real services and is CI-only.
+`tests/test_webui.py::GenreStudioTestCase` covers the studio's API without onnxruntime (which is
+the normal install): the vectors it reads are written by `struct`, so the whole tagging/training/
+shipping path is exercised on a stock server. Its "a head that does not fit is refused" test
+deliberately logs a traceback — that is the refusal working.
 Add a test alongside these when touching the proxy or `/api`.

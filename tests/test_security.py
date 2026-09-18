@@ -378,6 +378,19 @@ class WebHardeningTestCase(unittest.TestCase):
         self.assertNotIn("img-src 'self' data: https:;", csp)
         self.assertIn("Permissions-Policy", headers)
 
+    def test_csp_allows_wasm_but_not_eval(self):
+        """The genre studio's training kernel needs WebAssembly.
+
+        'wasm-unsafe-eval' buys exactly that and nothing else; the day someone
+        reaches for the broader 'unsafe-eval' to fix a build, this fails.
+        """
+        csp = self.client.get("/user/login").headers["Content-Security-Policy"]
+        self.assertIn("'wasm-unsafe-eval'", csp)
+        self.assertNotIn("'unsafe-eval';", csp)
+        self.assertNotIn("'unsafe-eval' ", csp)
+        # Inline script stays refused too — the SPA is external bundles only.
+        self.assertNotIn("script-src 'self' 'unsafe-inline'", csp)
+
     # -- NS-02: CSRF and GET mutations ------------------------------------
 
     def _frontend_login(self):

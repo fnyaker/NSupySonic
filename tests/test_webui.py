@@ -3,8 +3,10 @@
 #
 # Distributed under terms of the GNU AGPLv3 license.
 
+import base64
 import os
 import shutil
+import struct
 import tempfile
 import time
 import unittest
@@ -3158,6 +3160,721 @@ class AudioEdgesTestCase(unittest.TestCase):
             self.assertEqual(called, [])
         finally:
             archive.ensure_archived = orig
+
+
+class TrackAnalysisTestCase(unittest.TestCase):
+    """Whole-track analysis (supysonic/deezer/analysis.py + /api/analyses).
+
+    The ffmpeg passes are not exercised here — that is what an integration run
+    is for. What is pinned is everything AROUND them: that a verdict is served
+    when there is one and plainly absent when there is not, that asking can
+    never be what starts a measurement, and that the classifier stays on its
+    simplex and puts obvious material in the obvious family.
+    """
+
+    def setUp(self):
+        self.__db = tempfile.mkstemp()
+        self.__dir = tempfile.mkdtemp()
+        self.archive = tempfile.mkdtemp()
+
+        db_path = self.__db[1]
+        cache = self.__dir
+
+        class Config(DefaultConfig):
+            TESTING = True
+
+            def __init__(self):
+                super().__init__()
+                self.BASE = dict(self.BASE, database_uri="sqlite:///" + db_path)
+                self.WEBAPP = dict(
+                    self.WEBAPP, cache_dir=cache, mount_webui=True, mount_api=True
+                )
+
+        self.app = create_application(Config())
+        UserManager.add("alice", "Alic3", admin=True)
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        release_database()
+        shutil.rmtree(self.__dir, ignore_errors=True)
+        shutil.rmtree(self.archive, ignore_errors=True)
+        os.close(self.__db[0])
+        os.remove(self.__db[1])
+
+    def _login(self):
+        return self.client.post(
+            "/api/login", json={"username": "alice", "password": "Alic3"}
+        )
+
+    def _deezer_track(self, sid="424242"):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        return library.upsert_track(raw_track(sid), root)
+
+    # -- the classifier ---------------------------------------------------
+
+    def _features(self, **kw):
+        base = dict(
+            bpm=0.0, bpm_confidence=0.0, pulse=0.0, centroid=1800.0, spread=1500.0,
+            rolloff=5000.0, flatness=0.3, flatness_hi=0.45, entropy=0.6,
+            flux_peak=2.0, lra=8.0, lufs=-12.0,
+        )
+        base.update(kw)
+        return base
+
+    def test_classify_stays_on_the_simplex(self):
+        from supysonic.deezer.analysis import ARCHETYPES, classify
+
+        _style, conf, _arch, weights = classify(self._features(bpm=128, bpm_confidence=0.9,
+                                                              pulse=0.8))
+        self.assertTrue(0 <= conf <= 1)
+        self.assertEqual(set(weights), set(ARCHETYPES))
+        self.assertAlmostEqual(sum(weights.values()), 1.0, places=3)
+
+    def test_classify_fast_squashed_and_noisy_reads_as_hard(self):
+        from supysonic.deezer.analysis import classify
+
+        style, conf, arch, weights = classify(
+            self._features(bpm=200, bpm_confidence=0.9, pulse=0.9, flatness=0.5,
+                           flatness_hi=0.7, lra=3.5, entropy=0.8, centroid=2600)
+        )
+        self.assertEqual(arch, "hard", f"got {style} ({weights})")
+        self.assertGreater(conf, 0.2)
+
+    def test_classify_tonal_dynamic_and_pulseless_reads_as_sustained(self):
+        from supysonic.deezer.analysis import classify
+
+        style, _conf, arch, weights = classify(
+            self._features(bpm=0, bpm_confidence=0.0, pulse=0.02, flatness=0.12,
+                           flatness_hi=0.2, lra=14.0, centroid=1400, flux_peak=1.4)
+        )
+        self.assertEqual(arch, "sustain", f"got {style} ({weights})")
+
+    def test_classify_survives_a_missing_measure(self):
+        """A descriptor ffmpeg did not report must not break the verdict."""
+        from supysonic.deezer.analysis import classify
+
+        broken = self._features(bpm=130, bpm_confidence=0.8, pulse=0.7)
+        del broken["rolloff"]
+        style, conf, _arch, weights = classify(broken)
+        self.assertTrue(style is None or isinstance(style, str))
+        self.assertTrue(0 <= conf <= 1)
+        if weights:
+            self.assertAlmostEqual(sum(weights.values()), 1.0, places=3)
+
+    def test_tempo_prior_is_a_plateau_not_a_bell(self):
+        """The roll-off must not quietly halve the fast genres."""
+        from supysonic.deezer.analysis import _prior
+
+        self.assertEqual(_prior(120), 1.0)
+        self.assertEqual(_prior(195), 1.0)
+        # 200 BPM must not be penalised against its own half.
+        self.assertGreaterEqual(_prior(200), _prior(100))
+        # ...but something far outside the range still is.
+        self.assertLess(_prior(400), 0.6)
+
+    # -- the endpoint ------------------------------------------------------
+
+    def test_requires_login(self):
+        self.assertEqual(self.client.get("/api/analysis/1").status_code, 401)
+        self.assertEqual(self.client.post("/api/analyses", json={"ids": []}).status_code, 401)
+
+    def test_unmeasured_track_is_plainly_absent(self):
+        self._login()
+        t = self._deezer_track()
+        rv = self.client.get(f"/api/analysis/{t.deezer_id}")
+        self.assertEqual(rv.status_code, 200)
+        self.assertFalse(rv.get_json()["ready"])
+        rv = self.client.post("/api/analyses", json={"ids": [t.deezer_id]})
+        self.assertEqual(rv.get_json()["analyses"], {})
+
+    def test_serves_a_stored_verdict(self):
+        from supysonic.db import TrackAnalysis
+
+        self._login()
+        t = self._deezer_track()
+        TrackAnalysis.create(
+            track=t, version=1, bpm=174.0, bpm_confidence=0.95, bpm_source="deezer",
+            style="frenchcore", style_confidence=0.7, archetype="hard",
+            data='{"archetypes":{"hard":0.8,"groove":0.2},"lra":3.4,"pulse":0.9}',
+        )
+        one = self.client.get(f"/api/analysis/{t.deezer_id}").get_json()
+        self.assertTrue(one["ready"])
+        self.assertEqual(one["bpm"], 174.0)
+        self.assertEqual(one["style"], "frenchcore")
+        self.assertEqual(one["styleLabel"], "Frenchcore")
+        self.assertEqual(one["archetype"], "hard")
+        self.assertEqual(one["archetypes"]["hard"], 0.8)
+        self.assertEqual(one["bpmSource"], "deezer")
+
+        batch = self.client.post(
+            "/api/analyses", json={"ids": [t.deezer_id, "999888"]}
+        ).get_json()["analyses"]
+        self.assertEqual(list(batch), [str(t.deezer_id)])
+        self.assertEqual(batch[str(t.deezer_id)]["bpm"], 174.0)
+
+    def test_batch_rejects_a_non_list(self):
+        self._login()
+        rv = self.client.post("/api/analyses", json={"ids": "nope"})
+        self.assertEqual(rv.status_code, 400)
+
+    def test_asking_never_measures(self):
+        """A request must never be what starts a three-second ffmpeg pass.
+
+        The player asks about tracks it is ABOUT to play; an answer that arrives
+        a minute later is no answer, and the request would hold a thread for the
+        whole of it.
+        """
+        from supysonic.deezer import analysis as ana
+
+        self._login()
+        t = self._deezer_track()
+        called = []
+        orig_analyze, orig_queue = ana.analyze_track, ana.queue_analysis
+        ana.analyze_track = lambda *a, **k: called.append("analyze")
+        ana.queue_analysis = lambda *a, **k: called.append("queue")
+        try:
+            self.client.get(f"/api/analysis/{t.deezer_id}")
+            self.client.post("/api/analyses", json={"ids": [t.deezer_id]})
+        finally:
+            ana.analyze_track, ana.queue_analysis = orig_analyze, orig_queue
+        self.assertEqual(called, [])
+
+    def test_analysis_skips_a_track_with_no_file(self):
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+        self.assertIsNone(ana.analyze_track(t))
+
+    def test_deezer_bpm_is_used_and_bounded(self):
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+
+        class Prov:
+            def __init__(self, bpm):
+                self.bpm = bpm
+                self.dz = self
+
+            @property
+            def api(self):
+                return self
+
+            def available(self):
+                return True
+
+            def get_track(self, sid):
+                return {"bpm": self.bpm}
+
+        self.assertEqual(ana._deezer_bpm(Prov(174), t), 174.0)
+        # Deezer reports 0 for tracks it has no figure for; that is not a tempo.
+        self.assertIsNone(ana._deezer_bpm(Prov(0), t))
+        self.assertIsNone(ana._deezer_bpm(Prov(9999), t))
+        self.assertIsNone(ana._deezer_bpm(None, t))
+
+    def test_deezer_bpm_survives_an_outage(self):
+        """A Deezer failure means "measure it yourself", never an exception."""
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+
+        class Dead:
+            dz = None
+
+            def available(self):
+                raise RuntimeError("boom")
+
+        self.assertIsNone(ana._deezer_bpm(Dead(), t))
+
+
+class GenreStudioTestCase(unittest.TestCase):
+    """The tagging studio's API (supysonic/webui/genre.py + deezer/genre.py).
+
+    The extractor itself is not exercised — it needs onnxruntime and a
+    third-party model this repository deliberately does not ship. What is pinned
+    is everything the studio actually depends on: that writes are the admin's
+    alone, that a vector can be read back WITHOUT the optional dependency that
+    produced it, that asking for vectors can never start an extraction, and
+    above all that a head the browser trained arrives and evaluates to the same
+    answer here — an encoding that drifts by one offset would not fail, it would
+    quietly classify everything wrong.
+    """
+
+    def setUp(self):
+        self.__db = tempfile.mkstemp()
+        self.__dir = tempfile.mkdtemp()
+        self.archive = tempfile.mkdtemp()
+
+        db_path = self.__db[1]
+        cache = self.__dir
+
+        class Config(DefaultConfig):
+            TESTING = True
+
+            def __init__(self):
+                super().__init__()
+                self.BASE = dict(self.BASE, database_uri="sqlite:///" + db_path)
+                self.WEBAPP = dict(
+                    self.WEBAPP, cache_dir=cache, mount_webui=True, mount_api=True
+                )
+
+        self.app = create_application(Config())
+        UserManager.add("alice", "Alic3", admin=True)
+        UserManager.add("bob", "B0bbb", admin=False)
+        self.client = self.app.test_client()
+        from supysonic.deezer import genre as gen
+
+        gen.invalidate()
+
+    def tearDown(self):
+        from supysonic.deezer import genre as gen
+
+        gen.invalidate()
+        release_database()
+        shutil.rmtree(self.__dir, ignore_errors=True)
+        shutil.rmtree(self.archive, ignore_errors=True)
+        os.close(self.__db[0])
+        os.remove(self.__db[1])
+
+    def _login(self, who="alice", pw="Alic3"):
+        return self.client.post("/api/login", json={"username": who, "password": pw})
+
+    def _track(self, sid="424242", archived=True):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        t = library.upsert_track(raw_track(sid, title="T" + sid), root)
+        if archived:
+            # The studio only ever sees archived rows; last_modification is what
+            # marks one as being on disk.
+            t.last_modification = 1
+            t.play_count = int(sid) % 97
+            t.save()
+        return t
+
+    def _tag(self, name, archetype=None):
+        r = self.client.post(
+            "/api/genre/tags", json={"name": name, "archetype": archetype}
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.json
+
+    def _store_embedding(self, track, vec):
+        from supysonic.deezer import embedding as emb
+
+        os.makedirs(os.path.dirname(track.path), exist_ok=True)
+        with open(track.path, "wb") as fp:
+            fp.write(b"\0")
+        self.assertTrue(emb.save_embedding(track, vec))
+
+    # -- access ------------------------------------------------------------
+
+    def test_requires_login(self):
+        for path in ("/api/genre/status", "/api/genre/candidates", "/api/genre/model"):
+            self.assertEqual(self.client.get(path).status_code, 401, path)
+        self.assertEqual(
+            self.client.post("/api/genre/tags", json={"name": "x"}).status_code, 401
+        )
+
+    def test_writes_are_the_admin_s_alone(self):
+        """One library, one model: two people tagging it would train it against
+        itself."""
+        self._login("bob", "B0bbb")
+        self.assertEqual(
+            self.client.post("/api/genre/tags", json={"name": "zaag"}).status_code, 403
+        )
+        self.assertEqual(self.client.get("/api/genre/candidates").status_code, 403)
+        self.assertEqual(
+            self.client.put("/api/genre/model", json={}).status_code, 403
+        )
+        # ...but the label list is readable, because the player shows it.
+        self.assertEqual(self.client.get("/api/genre/model").status_code, 200)
+        self.assertEqual(self.client.get("/api/genre/status").status_code, 200)
+
+    # -- the vocabulary ----------------------------------------------------
+
+    def test_tag_crud(self):
+        self._login()
+        tag = self._tag("hardtekk", "hard")
+        self.assertEqual(tag["name"], "hardtekk")
+        self.assertEqual(tag["archetype"], "hard")
+        # Creating the same name again is idempotent, not a duplicate.
+        self.assertEqual(self._tag("hardtekk")["id"], tag["id"])
+
+        r = self.client.patch(
+            f"/api/genre/tags/{tag['id']}", json={"name": "hardtekk DE", "color": "#f00"}
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json["name"], "hardtekk DE")
+        self.assertEqual(r.json["color"], "#f00")
+
+        self.assertEqual(
+            self.client.patch(
+                f"/api/genre/tags/{tag['id']}", json={"archetype": "banana"}
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.patch("/api/genre/tags/99999", json={"name": "x"}).status_code,
+            404,
+        )
+
+    def test_deleting_a_tag_takes_its_labels_with_it(self):
+        from supysonic.db import TrackTag
+
+        self._login()
+        tag = self._tag("zaag")
+        track = self._track("1001")
+        self.client.post(
+            "/api/genre/label", json={"track": track.deezer_id, "tag": tag["id"]}
+        )
+        self.assertEqual(TrackTag.select().count(), 1)
+        self.assertEqual(
+            self.client.delete(f"/api/genre/tags/{tag['id']}").status_code, 200
+        )
+        self.assertEqual(TrackTag.select().count(), 0)
+
+    # -- labelling ---------------------------------------------------------
+
+    def test_one_tag_per_track(self):
+        """Re-labelling REPLACES. A track that is two genres at once teaches the
+        head that the two describe the same sound."""
+        from supysonic.db import TrackTag
+
+        self._login()
+        a = self._tag("frenchcore")
+        b = self._tag("uptempo")
+        track = self._track("1002")
+        for tag in (a, b):
+            r = self.client.post(
+                "/api/genre/label", json={"track": track.deezer_id, "tag": tag["id"]}
+            )
+            self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(TrackTag.select().count(), 1)
+        self.assertEqual(TrackTag.get().tag.name, "uptempo")
+
+        # An explicit null clears it.
+        r = self.client.post(
+            "/api/genre/label", json={"track": track.deezer_id, "tag": None}
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.json["tag"])
+        self.assertEqual(TrackTag.select().count(), 0)
+
+    def test_labelling_rejects_what_it_cannot_resolve(self):
+        self._login()
+        tag = self._tag("krach")
+        track = self._track("1003")
+        self.assertEqual(
+            self.client.post(
+                "/api/genre/label", json={"track": "999999999", "tag": tag["id"]}
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/genre/label", json={"track": track.deezer_id, "tag": 99999}
+            ).status_code,
+            404,
+        )
+        # A path-shaped id must not resolve to anything either.
+        self.assertEqual(
+            self.client.post(
+                "/api/genre/label", json={"track": "../../etc/passwd", "tag": tag["id"]}
+            ).status_code,
+            404,
+        )
+
+    # -- vectors -----------------------------------------------------------
+
+    def test_a_vector_reads_back_without_the_extractor(self):
+        """The optional dependency EXTRACTS; it must not be needed to READ.
+
+        An archive copied from a server that had onnxruntime is still a perfectly
+        good training set on one that does not.
+        """
+        from supysonic.deezer import embedding as emb
+
+        track = self._track("1004")
+        vec = [((i % 19) - 9) / 9 for i in range(emb.EMBED_DIM)]
+        self._store_embedding(track, vec)
+        back = emb.load_embedding(track)
+        self.assertIsNotNone(back)
+        self.assertEqual(len(back), emb.EMBED_DIM)
+        for got, want in zip(back, vec):
+            self.assertAlmostEqual(got, want, places=2)
+
+    def test_a_truncated_sidecar_is_no_vector_at_all(self):
+        from supysonic.deezer import embedding as emb
+
+        track = self._track("1005")
+        self._store_embedding(track, [0.5] * emb.EMBED_DIM)
+        with open(emb.sidecar_path(track), "wb") as fp:
+            fp.write(b"\x00\x3c" * 12)
+        self.assertIsNone(emb.load_embedding(track))
+
+    def test_embeddings_endpoint_never_extracts(self):
+        """It hands over what is already measured, and nothing else. A call that
+        could start forty ffmpeg passes would answer tomorrow."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        have = self._track("1006")
+        missing = self._track("1007")
+        self._store_embedding(have, [0.25] * emb.EMBED_DIM)
+        r = self.client.post(
+            "/api/genre/embeddings",
+            json={"ids": [have.deezer_id, missing.deezer_id, "nonsense"]},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(list(r.json["embeddings"]), [have.deezer_id])
+        self.assertIsNone(emb.load_embedding(missing))
+
+    def test_embeddings_batch_is_capped(self):
+        from supysonic.webui.genre import EMBED_BATCH_MAX
+
+        self._login()
+        r = self.client.post(
+            "/api/genre/embeddings", json={"ids": [str(i) for i in range(500)]}
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertLessEqual(len(r.json["embeddings"]), EMBED_BATCH_MAX)
+        self.assertEqual(
+            self.client.post(
+                "/api/genre/embeddings", json={"ids": "not-a-list"}
+            ).status_code,
+            400,
+        )
+
+    def test_a_malformed_id_never_reaches_the_database(self):
+        """On Postgres a bad UUID in a WHERE is a DataError that poisons the
+        whole transaction, not a query that returns nothing. SQLite is forgiving
+        enough to hide that, so the guard is pinned here rather than trusted."""
+        from supysonic.webui.genre import _resolve
+
+        self._login()
+        for bad in ("", "not-a-uuid", "../../etc/passwd", "'; DROP TABLE track;--",
+                    "9" * 400, None, {"a": 1}):
+            self.assertIsNone(_resolve(bad), bad)
+        # A well-formed but unknown UUID is simply absent, not an error.
+        self.assertIsNone(_resolve("00000000-0000-0000-0000-000000000000"))
+        # ...and a real one still resolves, both ways round.
+        track = self._track("1011")
+        self.assertEqual(_resolve(track.deezer_id).id, track.id)
+        self.assertEqual(_resolve(str(track.id)).id, track.id)
+
+    def test_candidates_are_bounded(self):
+        """Whether a track has a vector is a file on disk, so every row looked
+        at costs a stat. The scan must stop on its own."""
+        from supysonic.webui import genre as gweb
+
+        self._login()
+        self._track("1012")
+        body = self.client.get("/api/genre/candidates").json
+        self.assertIn("labelled", body)
+        self.assertIn("truncated", body)
+        self.assertFalse(body["truncated"])
+        self.assertGreater(gweb.CANDIDATE_SCAN_MAX, gweb.CANDIDATE_MAX)
+
+    def test_candidates_skip_what_is_already_labelled(self):
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        tag = self._tag("pieep")
+        a = self._track("1008")
+        b = self._track("1009")
+        for t in (a, b):
+            self._store_embedding(t, [0.1] * emb.EMBED_DIM)
+        ids = {c["deezer_id"] for c in self.client.get("/api/genre/candidates").json["candidates"]}
+        self.assertEqual(ids, {a.deezer_id, b.deezer_id})
+        self.client.post("/api/genre/label", json={"track": a.deezer_id, "tag": tag["id"]})
+        ids = {c["deezer_id"] for c in self.client.get("/api/genre/candidates").json["candidates"]}
+        self.assertEqual(ids, {b.deezer_id})
+
+    # -- the head ----------------------------------------------------------
+
+    @staticmethod
+    def _encode(values):
+        """What the browser's encodeHead() produces: flat float16, base64."""
+        return base64.b64encode(
+            struct.pack(f"<{len(values)}e", *[float(v) for v in values])
+        ).decode("ascii")
+
+    def _put_linear(self, labels, rows, biases, dim):
+        flat = [v for row in rows for v in row] + list(biases)
+        return self.client.put(
+            "/api/genre/model",
+            json={
+                "labels": labels,
+                "weights": self._encode(flat),
+                "dim": dim,
+                "kind": "linear",
+                "metrics": {"balanced": 0.9},
+            },
+        )
+
+    def test_a_linear_head_round_trips_and_classifies(self):
+        """The browser trains it, the server must reach the same verdict."""
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        dim = 4
+        # Two genres, each recognising one axis.
+        r = self._put_linear(
+            ["techno", "zaag"], [[4, 0, 0, 0], [0, 4, 0, 0]], [0, 0], dim
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        gen.invalidate()
+        self.assertEqual(gen.predict([1, 0, 0, 0])[0], "techno")
+        self.assertEqual(gen.predict([0, 1, 0, 0])[0], "zaag")
+        label, conf, dist = gen.predict([1, 0, 0, 0])
+        self.assertGreater(conf, 0.9)
+        self.assertAlmostEqual(sum(dist.values()), 1.0, places=3)
+        # A vector of the wrong width is not a guess, it is a mistake.
+        self.assertIsNone(gen.predict([1, 0, 0]))
+
+    def test_an_mlp_head_round_trips_and_its_relu_fires(self):
+        """An MLP is the same wire format with two more blocks; the relu has to
+        be real, or the hidden layer is just another linear map."""
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        dim, hidden = 2, 2
+        # Hidden unit 0 fires on +x, unit 1 on -x. Only a relu can tell those
+        # apart with a single output weight each.
+        w1 = [[3, 0], [-3, 0]]
+        b1 = [0, 0]
+        w2 = [[2, 0], [0, 2]]
+        b2 = [0, 0]
+        flat = (
+            [v for row in w1 for v in row] + b1 + [v for row in w2 for v in row] + b2
+        )
+        r = self.client.put(
+            "/api/genre/model",
+            json={
+                "labels": ["up", "down"],
+                "weights": self._encode(flat),
+                "dim": dim,
+                "kind": "mlp",
+                "hidden": hidden,
+            },
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        gen.invalidate()
+        self.assertEqual(gen.predict([1, 0])[0], "up")
+        self.assertEqual(gen.predict([-1, 0])[0], "down")
+
+    def test_a_head_that_does_not_fit_is_refused_and_not_stored(self):
+        """Weights, labels and dim must agree. A head stored but unreadable
+        would silently do nothing for ever."""
+        from supysonic.db import GenreModel
+
+        self._login()
+        # One value short of 2x4 + 2.
+        r = self.client.put(
+            "/api/genre/model",
+            json={
+                "labels": ["a", "b"],
+                "weights": self._encode([1] * 9),
+                "dim": 4,
+                "kind": "linear",
+            },
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(GenreModel.select().count(), 0)
+
+    def test_the_head_endpoint_validates_its_input(self):
+        self._login()
+        bad = [
+            {"labels": ["only-one"], "weights": self._encode([1]), "dim": 1},
+            {"labels": ["a", "b"], "weights": "", "dim": 4},
+            {"labels": ["a", "b"], "weights": self._encode([1] * 10), "dim": 0},
+            {"labels": ["a", "b"], "weights": self._encode([1] * 10), "dim": 99999},
+            {
+                "labels": ["a", "b"],
+                "weights": self._encode([1] * 10),
+                "dim": 4,
+                "kind": "transformer",
+            },
+            {
+                "labels": ["a", "b"],
+                "weights": self._encode([1] * 10),
+                "dim": 4,
+                "kind": "mlp",
+                "hidden": 0,
+            },
+        ]
+        for payload in bad:
+            r = self.client.put("/api/genre/model", json=payload)
+            self.assertEqual(r.status_code, 400, payload)
+
+    def test_an_oversized_head_is_refused_before_it_is_parsed(self):
+        from supysonic.webui.genre import MODEL_MAX_BYTES
+
+        self._login()
+        r = self.client.put(
+            "/api/genre/model",
+            json={
+                "labels": ["a", "b"],
+                "weights": "A" * (MODEL_MAX_BYTES + 4),
+                "dim": 4,
+            },
+        )
+        self.assertEqual(r.status_code, 413)
+
+    def test_a_new_head_retires_the_old_one(self):
+        from supysonic.db import GenreModel
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        self._put_linear(["a", "b"], [[1, 0], [0, 1]], [0, 0], 2)
+        self._put_linear(["c", "d"], [[1, 0], [0, 1]], [0, 0], 2)
+        self.assertEqual(GenreModel.select().where(GenreModel.active == True).count(), 1)  # noqa: E712
+        gen.invalidate()
+        self.assertEqual(gen.active_head()["labels"], ["c", "d"])
+
+        self.assertEqual(self.client.delete("/api/genre/model").status_code, 200)
+        gen.invalidate()
+        self.assertIsNone(gen.active_head())
+        self.assertFalse(self.client.get("/api/genre/model").json["ready"])
+
+    def test_predict_is_none_without_a_model(self):
+        """No head is not an error — the heuristic classifier keeps its job."""
+        from supysonic.deezer import genre as gen
+
+        self.assertIsNone(gen.active_head())
+        self.assertIsNone(gen.predict([1, 2, 3]))
+
+    def test_archetype_comes_from_the_user_s_own_tag(self):
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        self._tag("brutal death", "rock")
+        self.assertEqual(gen.archetype_for("brutal death"), "rock")
+        self.assertIsNone(gen.archetype_for("a genre nobody named"))
+        self.assertIsNone(gen.archetype_for(None))
+
+    def test_status_reports_what_the_studio_needs(self):
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        self._tag("techno", "groove")
+        track = self._track("1010")
+        self._store_embedding(track, [0.3] * emb.EMBED_DIM)
+        self.client.post(
+            "/api/genre/label",
+            json={"track": track.deezer_id, "tag": self._tag("techno")["id"]},
+        )
+        body = self.client.get("/api/genre/status").json
+        self.assertEqual(body["labelled"], 1)
+        self.assertEqual(body["counts"]["techno"], 1)
+        self.assertEqual([t["name"] for t in body["tags"]], ["techno"])
+        self.assertIsNone(body["model"])
+        self.assertIn("available", body["extractor"])
+        # Without onnxruntime it must say so rather than pretending.
+        if not body["extractor"]["available"]:
+            self.assertTrue(body["extractor"]["reason"])
 
 
 if __name__ == "__main__":

@@ -260,3 +260,48 @@ test("a sustained, tonal, tempo-less signal reads as sustained", () => {
     `sustain only reached ${out.archetypes.sustain.toFixed(2)} (${out.dominant})`
   );
 });
+
+test("a served tempo starts the tracker locked instead of hunting", () => {
+  // The whole point of measuring the tempo on the server: the first bar is
+  // already on the beat, rather than the fourth.
+  const seeded = createBeatTracker();
+  assert.equal(seeded.seed(174, 0.95), true);
+  assert.equal(seeded.out.locked ?? true, true);
+
+  const cold = createBeatTracker();
+  const dt = 1 / 90;
+  const period = 60 / 174;
+  let next = 0.4;
+  let coldLockedAt = null;
+  let seededLockedAt = null;
+  for (let t = 0; t < 12; t += dt) {
+    let flux = Math.random() * 0.03;
+    if (t >= next) {
+      flux += 1;
+      next += period;
+    }
+    const a = seeded.process(flux, flux, dt);
+    const b = cold.process(flux, flux, dt);
+    if (seededLockedAt === null && a.locked && Math.abs(a.bpm - 174) < 12)
+      seededLockedAt = t;
+    if (coldLockedAt === null && b.locked && Math.abs(b.bpm - 174) < 12) coldLockedAt = t;
+  }
+  assert.ok(seededLockedAt !== null, "the seeded tracker never reported the tempo");
+  assert.ok(
+    seededLockedAt < 0.2,
+    `seeded tracker took ${seededLockedAt?.toFixed(2)}s to report its tempo`
+  );
+  assert.ok(
+    coldLockedAt === null || seededLockedAt < coldLockedAt,
+    `seeding did not help (${seededLockedAt} vs ${coldLockedAt})`
+  );
+});
+
+test("a seed outside the searchable range is refused", () => {
+  const tr = createBeatTracker();
+  assert.equal(tr.seed(0), false);
+  assert.equal(tr.seed(12), false);
+  assert.equal(tr.seed(900), false);
+  assert.equal(tr.seed(NaN), false);
+  assert.equal(tr.out.locked, false);
+});

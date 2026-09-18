@@ -39,6 +39,7 @@
   import Podcasts from "./routes/Podcasts.svelte";
   import Show from "./routes/Show.svelte";
   import Settings from "./routes/Settings.svelte";
+  import Genres from "./routes/Genres.svelte";
   import Viz from "./routes/Viz.svelte";
 
   const routes = {
@@ -53,6 +54,7 @@
     "/podcasts": Podcasts,
     "/podcast/:id": Show,
     "/settings": Settings,
+    "/genres": Genres,
   };
 
   // The projector window is a SCREEN, not a second copy of the app: no sidebar,
