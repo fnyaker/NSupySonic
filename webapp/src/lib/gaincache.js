@@ -2,7 +2,7 @@
 //
 // Volume normalization is STATIC: the player picks a track's gain at the
 // instant its source is swapped in and holds it for the whole track (see
-// lib/visualizer.js). A gain that arrives one request LATER is therefore not a
+// lib/audio/graph.js). A gain that arrives one request LATER is therefore not a
 // late refinement — it is the volume changing in the middle of a song, which is
 // exactly the artefact this module exists to remove.
 //

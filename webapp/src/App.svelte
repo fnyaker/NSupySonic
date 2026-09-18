@@ -13,6 +13,8 @@
   import { initVersionWatch } from "./lib/appversion.js";
   import { initNav } from "./lib/nav.js";
   import { initDeezerHealth } from "./lib/deezerhealth.js";
+  import { initVizHost } from "./lib/viz/host.js";
+  import { location } from "./lib/router.js";
   import Sidebar from "./components/Sidebar.svelte";
   import BackButton from "./components/BackButton.svelte";
   import MobileNav from "./components/MobileNav.svelte";
@@ -37,6 +39,7 @@
   import Podcasts from "./routes/Podcasts.svelte";
   import Show from "./routes/Show.svelte";
   import Settings from "./routes/Settings.svelte";
+  import Viz from "./routes/Viz.svelte";
 
   const routes = {
     "/": Home,
@@ -51,6 +54,13 @@
     "/podcast/:id": Show,
     "/settings": Settings,
   };
+
+  // The projector window is a SCREEN, not a second copy of the app: no sidebar,
+  // no nav, and above all no <Player> — a second player would be a second
+  // stream, a second decode and a second playhead drifting out of sync with the
+  // room. It renders on its own, outside the layout, and is fed by the playing
+  // tab over a BroadcastChannel.
+  $: isDisplay = $location === "/viz";
 
   const SAVED_USER = "auth.user";
   function savedUser() {
@@ -74,6 +84,10 @@
     // the Android shell, is there a newer APK?) Both are fire-and-forget and
     // never block the boot.
     initVersionWatch();
+    // Idle until a projector window announces itself; see lib/viz/host.js.
+    // Not in the projector window itself: it has no audio to analyse, so a
+    // publisher there could only ever answer another display with silence.
+    if (!isDisplay) initVizHost();
     // The queue filter and library views read these indexes synchronously, so
     // load them BEFORE the UI mounts — otherwise an offline launch briefly sees
     // "nothing downloaded" and filters every track out. Fast: IDB metadata only.
@@ -189,7 +203,9 @@
 
 <svelte:window on:keydown={onKey} />
 
-{#if !$authChecked}
+{#if isDisplay}
+  <Viz />
+{:else if !$authChecked}
   <div class="loading">…</div>
 {:else if !$user}
   <Login />

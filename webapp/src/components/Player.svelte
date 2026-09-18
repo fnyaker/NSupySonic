@@ -22,6 +22,11 @@
     setPlaybackStatus,
     normalization,
     openShare,
+    crossfadeEnabled,
+    crossfadeSeconds,
+    crossfadeOnSkip,
+    trimSilence,
+    trimThresholdDb,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
   import { online } from "../lib/net.js";
@@ -36,7 +41,17 @@
   } from "../lib/playcache.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { duration as fmtDuration, resolveCover, coverKey, baseCover, artistLine } from "../lib/format.js";
-  import { registerSource, resumeAudio, setTrackGain } from "../lib/visualizer.js";
+  import {
+    registerSource,
+    resumeAudio,
+    setTrackGain,
+    setElementGain,
+    fadeElement,
+    setFade,
+    canCrossfade,
+    wireAudio,
+  } from "../lib/audio/graph.js";
+  import { primeEdges, knownEdges } from "../lib/edges.js";
   import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
   import {
     getEpisodeProgress,
@@ -105,6 +120,7 @@
   onDestroy(() => {
     savePodcastProgress(true);
     stopWatchdog();
+    cancelCrossfade(false);
     cancelRecovery();
     cancelSwitch();
     cancelPauseMirror();
@@ -706,6 +722,8 @@
   $: if (audio && !$current && curId !== null) teardownAudio();
 
   function teardownAudio() {
+    cancelCrossfade(false);
+    trimmedId = null;
     cancelRecovery();
     cancelSwitch();
     cancelSeekChase();
@@ -762,6 +780,7 @@
     $current.deezer_id === curId &&
     $quality !== curQ &&
     !switching &&
+    !xfade && // mid-crossfade both elements are in use; apply it on the next load
     !curIsBlob // a downloaded track is a fixed-quality blob; ignore quality changes
   )
     switchQuality($quality);
@@ -806,6 +825,11 @@
 
   async function loadTrack(track) {
     const firstLoad = curId === null;
+    // A crossfade in flight is for a track that is no longer where we are
+    // going. Do not restore the outgoing element's level: it is about to be
+    // given a new source anyway, and the skip ramp below owns it from here.
+    cancelCrossfade(false);
+    trimmedId = null;
     logInfo("load", `${track.podcast ? "episode" : "track"} ${track.deezer_id} "${track.title}"`
       + (firstLoad ? " (first load after restore)" : ""), null, { important: firstLoad });
     // Where to (re)start this track:
@@ -819,6 +843,13 @@
       if (p && !p.done && p.t > 1) resumeAt = p.t;
     } else if (firstLoad && $player.currentTime > 1) {
       resumeAt = $player.currentTime;
+    }
+    // Skip the file's leading silence, when the server has measured it and the
+    // user asked for it. Only past a quarter of a second: below that the seek
+    // costs more than the silence it saves.
+    if (!resumeAt) {
+      const e = edgesFor(track);
+      if (e && e.start > 0.25) resumeAt = e.start;
     }
     curId = track.deezer_id;
     curQ = get(quality);
@@ -847,7 +878,18 @@
     loadingTrack = true;
     player.setProgress(resumeAt, track.duration || 0);
 
-    const src = await resolveSource(track.deezer_id, curQ);
+    // A manual skip cuts hard by default. With the crossfade on, soften it:
+    // a ramp short enough to be inaudible as a delay, long enough to kill the
+    // click of a cut mid-waveform. Deliberately NOT an overlap — a skip is
+    // meant to be immediate; the overlap is for the end of a track.
+    const soften =
+      !firstLoad && get(crossfadeEnabled) && get(crossfadeOnSkip) && get(player).playing;
+    const srcPromise = resolveSource(track.deezer_id, curQ);
+    if (soften) {
+      fadeElement(audio, 0, SKIP_FADE);
+      await new Promise((r) => setTimeout(r, SKIP_FADE * 1000));
+    }
+    const src = await srcPromise;
     // A newer load may have superseded us while reading the blob from IndexedDB.
     if (curId !== track.deezer_id) {
       if (src.blob) {
@@ -867,6 +909,16 @@
     audio.preload = firstLoad && !get(player).playing ? "none" : "auto";
     audio.src = src.url;
     audio.load();
+    // The element is silent from here until it buffers, so the fade gain can be
+    // set without a click: a softened skip rises over the same short ramp it
+    // fell on, anything else simply goes back to unity (a cancelled crossfade
+    // may have left it ducked).
+    if (soften) {
+      setFade(audio, 0);
+      fadeElement(audio, 1, SKIP_FADE);
+    } else {
+      setFade(audio, 1);
+    }
     loadingTrack = false; // new source attached — accept its timeupdates again
     // The outgoing audio is silenced the instant its src is reassigned above, so
     // flip the normalization gain to THIS track's value now — synced to the
@@ -888,6 +940,11 @@
     flushListen(track.deezer_id);
     pushRecent(track);
     updateMediaSession(track);
+    // Measure this track and the next one. The next one is the point: a
+    // crossfade needs its bounds before it starts, and the server only measures
+    // what is already archived — so a track is trimmed from the play AFTER the
+    // one that archived it, never on first contact.
+    primeEdgesAround(track);
     // Keep this track's artwork on the device (best effort, tiny, evictable):
     // what you have played should still show its real pochette offline.
     cacheCoverFor(track).catch(() => {});
@@ -896,6 +953,8 @@
   // Restart the already-loaded track from the top (same deezer id, new queue
   // slot or a deliberate "restart"). Avoids a full reload of the element.
   function restartCurrent() {
+    cancelCrossfade();
+    trimmedId = null;
     curSeq = get(player).seq;
     lastKnownTime = 0;
     hadProgress = false;
@@ -1002,6 +1061,9 @@
 
   function performSeek(t) {
     if (!audio || !curId) return;
+    // The end of the track is no longer where the fade assumed it was.
+    cancelCrossfade();
+    trimmedId = null;
     const dur = get(player).duration;
     t = Math.max(0, dur ? Math.min(t, Math.max(0, dur - 0.2)) : t);
     cancelSeekChase(); // a new seek supersedes a chase in progress
@@ -1231,6 +1293,10 @@
       if (recovering) cancelRecovery();
       if (switching) cancelSwitch();
       if (chasing) cancelSeekChase();
+      // A fade runs on the audio clock, which does not stop with the element:
+      // leaving one in flight would keep ramping a track nobody can hear and
+      // hand over to the next one while paused.
+      if (xfade) cancelCrossfade();
       if (!audio.paused) audio.pause();
       stuckSince = 0; // a deliberate pause is never a wedge
       stuckNudges = 0;
@@ -1243,7 +1309,13 @@
       startPlayback("transport");
     }
   }
-  $: if (audio) audio.volume = $player.muted ? 0 : $player.volume;
+  $: if (audio) {
+    const v = $player.muted ? 0 : $player.volume;
+    audio.volume = v;
+    // The outgoing element of a crossfade is still audible: a volume change
+    // mid-fade has to reach it too, or the two tracks drift apart in level.
+    if (xfade?.old) xfade.old.volume = v;
+  }
 
   // Keep the OS media notification's transport state in sync (play/pause glyph).
   // Guarded on an actual change: this reactive block re-runs on EVERY store tick
@@ -1288,6 +1360,26 @@
     player.setProgress(audio.currentTime, d);
     updateBuffered();
     savePodcastProgress(); // throttled; no-op for non-podcast tracks
+    maybeCrossfade();
+    maybeTrimEnding(d);
+  }
+
+  // Trailing silence with no crossfade to hide it: end the track where its
+  // audio ends rather than playing out the file's tail. Guarded by the id it
+  // fired for, because `ended` advances the queue asynchronously and four
+  // timeupdates a second would otherwise advance it four times.
+  function maybeTrimEnding(d) {
+    if (xfade || !get(trimSilence) || trimmedId === curId) return;
+    if (loadingTrack || chasing || switching) return;
+    if (!$current || $current.podcast || !get(player).playing) return;
+    const end = audioEndsAt();
+    // Only when there is something to trim: `audioEndsAt` falls back to the
+    // full duration whenever bounds are unknown, and cutting at the duration
+    // would just race the element's own `ended`.
+    if (!end || !d || end > d - 0.2) return;
+    if (audio.currentTime < end - 0.05) return;
+    trimmedId = curId;
+    onEnded({ target: audio });
   }
 
   // Publish how far we've buffered ahead of the playhead so the seek bars can
@@ -1353,9 +1445,364 @@
     }
   }
 
+
+  // -- crossfade + silence trimming -----------------------------------------
+  //
+  // Two separate ideas that happen to need each other:
+  //
+  //  - TRIMMING asks the server where a file's audio actually starts and stops
+  //    (supysonic/webui/edges.py) and plays only that. Masters routinely carry
+  //    a beat of digital silence at each end, and a crossfade that ignores them
+  //    blends one track's silence into the next one's — which is the gap it was
+  //    supposed to remove.
+  //  - CROSSFADING overlaps the two tracks on the player's two <audio>
+  //    elements, each through its OWN normalization gain in the Web Audio graph
+  //    so the overlap respects each track's ReplayGain instead of stepping one
+  //    of them. That per-source gain is why the graph had to change at all.
+  //
+  // The handover happens at the START of the fade, not at its end: the incoming
+  // element becomes `audio` and the queue advances there and then, so the seek
+  // bar, the media notification and the lock screen all name the track you are
+  // beginning to hear rather than the one fading out. The outgoing element is
+  // only stopped when its ramp reaches zero.
+  //
+  // Everything here is best-effort and reversible. No trim is known for a track
+  // until the server has measured it (which it only does once the file is
+  // archived), and a crossfade that cannot be prepared in time is simply
+  // dropped — the ordinary `ended` path then advances the queue exactly as it
+  // always did.
+  const XFADE_MAX = 12; // beyond this it stops being a crossfade
+  // Prepare the incoming element this long before the fade, so it has buffered
+  // enough to start without a hole.
+  const XFADE_PRELOAD = 4;
+  // A manual skip is meant to be immediate, so it gets a ramp short enough to
+  // be inaudible as a delay and long enough to kill the click of a cut
+  // mid-waveform. It is not an overlap.
+  const SKIP_FADE = 0.06;
+
+  let xfade = null;
+  // The track we have already stopped for a trimmed ending, so the four
+  // timeupdates a second between that and the next track's load can't advance
+  // the queue four times.
+  let trimmedId = null;
+
+  function fadeSeconds() {
+    return Math.max(0, Math.min(XFADE_MAX, +get(crossfadeSeconds) || 0));
+  }
+
+  // The bounds of the audio inside a track's file, when we know them and the
+  // user asked for them. Podcasts are excluded deliberately: a spoken intro
+  // that opens quietly is not silence to be cut, and an episode is not
+  // something to blend into whatever follows it.
+  function edgesFor(track) {
+    if (!track || track.podcast || !get(trimSilence)) return null;
+    return knownEdges(track.deezer_id, get(trimThresholdDb));
+  }
+
+  // Measure this track and the one after it. The next one is the point: its
+  // bounds have to be in hand BEFORE the crossfade into it starts, and the
+  // server only measures files it has already archived — so a track is trimmed
+  // from the play after the one that archived it, never on first contact.
+  function primeEdgesAround(track) {
+    if (!get(trimSilence)) return;
+    const db = get(trimThresholdDb);
+    if (track && !track.podcast) primeEdges(track.deezer_id, db);
+    const n = peekNext(get(player));
+    if (n && !n.podcast) primeEdges(n.deezer_id, db);
+  }
+
+  // Where the CURRENT track's audio stops, in element time.
+  function audioEndsAt() {
+    const d =
+      audio.duration && isFinite(audio.duration) ? audio.duration : $current?.duration || 0;
+    if (!d) return 0;
+    const e = edgesFor($current);
+    // Guard against bounds measured on a different file than the one playing
+    // (a re-archive, a stale cache): anything outside the element's own
+    // duration is not describing this audio.
+    return e && e.end > 0 && e.end <= d + 0.5 ? Math.min(e.end, d) : d;
+  }
+
+  // Mirrors player.next()'s own rule, so what we preload is what it will pick.
+  function peekNext(s) {
+    if (s.index < s.queue.length - 1) return s.queue[s.index + 1];
+    if (s.repeat === "all" && s.queue.length) return s.queue[0];
+    return null;
+  }
+
+  function maybeCrossfade() {
+    if (xfade || !get(crossfadeEnabled)) return;
+    if (switching || chasing || loadingTrack || recovering) return;
+    const cur = $current;
+    if (!cur || cur.podcast) return;
+    const s = get(player);
+    if (!s.playing || s.repeat === "one") return;
+    const next = peekNext(s);
+    if (!next || next.podcast) return;
+    const end = audioEndsAt();
+    if (!end) return;
+    const fade = fadeSeconds();
+    const remain = end - audio.currentTime;
+    if (remain <= 0 || remain > fade + XFADE_PRELOAD) return;
+    armCrossfade(next, fade, Math.max(0, remain - fade));
+  }
+
+  async function armCrossfade(track, fade, delay) {
+    const incoming = els.find((e) => e !== audio);
+    if (!incoming) return;
+    // The idle element has usually never been wired: crossfading is the one
+    // case that needs a source node on an element that is not playing yet.
+    wireAudio(incoming);
+    // No Web Audio at all (an old engine, a blocked context): there is nothing
+    // to blend through. The trimmed ending below still applies.
+    if (!canCrossfade(audio, incoming)) return;
+
+    const mine = {
+      el: incoming,
+      track,
+      fade,
+      phase: "arming",
+      old: null,
+      oldBlobUrl: null,
+      startTimer: null,
+      endTimer: null,
+      giveUp: null,
+      onMeta: null,
+      onReady: null,
+      startAt: 0,
+      blobUrl: null,
+      isBlob: false,
+      q: get(quality),
+    };
+    xfade = mine;
+
+    const src = await resolveSource(track.deezer_id, mine.q);
+    if (xfade !== mine) {
+      // Cancelled while we were reading the blob out of IndexedDB.
+      if (src.blob) {
+        try {
+          URL.revokeObjectURL(src.url);
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+    mine.blobUrl = src.blob ? src.url : null;
+    mine.isBlob = src.blob;
+    incoming.preload = "auto";
+    incoming.src = src.url;
+    incoming.load();
+    incoming.volume = audio.volume;
+    incoming.muted = audio.muted;
+    setFade(incoming, 0); // silent until the ramp starts
+    // Its OWN ReplayGain, snapped before its first audible sample. This is the
+    // whole reason the graph carries a gain per source: during the overlap both
+    // tracks are audible and one shared value could only be right for one.
+    setElementGain(incoming, gainFor(track));
+    const e = edgesFor(track);
+    mine.startAt = e && e.start > 0.25 ? e.start : 0;
+    if (mine.startAt) {
+      const onMeta = () => {
+        try {
+          incoming.currentTime = mine.startAt;
+        } catch {
+          /* not seekable yet — beginCrossfade tries again */
+        }
+      };
+      incoming.addEventListener("loadedmetadata", onMeta);
+      mine.onMeta = onMeta;
+    }
+    mine.startTimer = setTimeout(beginCrossfade, Math.max(0, delay * 1000));
+  }
+
+  function beginCrossfade() {
+    const x = xfade;
+    if (!x || x.phase !== "arming") return;
+    const el = x.el;
+    if (el.readyState < 2) {
+      // Not buffered yet. Wait for it, but not past the end of the outgoing
+      // track: a crossfade that cannot start in time is dropped, and the
+      // ordinary end-of-track path takes over. That is never worse than
+      // holding a silent gap open.
+      if (!x.giveUp) {
+        const onReady = () => beginCrossfade();
+        el.addEventListener("canplay", onReady);
+        x.onReady = onReady;
+        x.giveUp = setTimeout(() => cancelCrossfade(), (x.fade + 1) * 1000);
+      }
+      return;
+    }
+    clearTimeout(x.giveUp);
+    x.giveUp = null;
+    if (x.onReady) {
+      el.removeEventListener("canplay", x.onReady);
+      x.onReady = null;
+    }
+    if (x.onMeta) {
+      el.removeEventListener("loadedmetadata", x.onMeta);
+      x.onMeta = null;
+    }
+    // The queue may have moved under us while we preloaded (a track removed, a
+    // reorder). Blending into something that is no longer next would be worse
+    // than not blending at all.
+    if (peekNext(get(player))?.deezer_id !== x.track.deezer_id) {
+      cancelCrossfade();
+      return;
+    }
+    if (x.startAt && Math.abs(el.currentTime - x.startAt) > 0.15) {
+      try {
+        el.currentTime = x.startAt;
+      } catch {
+        /* play it from the top rather than not at all */
+      }
+    }
+    x.phase = "fading";
+    const old = audio;
+    x.old = old;
+    el.play().catch(() => cancelCrossfade());
+    fadeElement(el, 1, x.fade);
+    fadeElement(old, 0, x.fade);
+    adoptIncoming(x);
+    x.endTimer = setTimeout(finishCrossfade, x.fade * 1000);
+  }
+
+  // Make the incoming element the current one and advance the queue to match,
+  // at the MOMENT THE FADE STARTS. Everything the UI shows — the seek bar, the
+  // title, the media notification — then names the track you are beginning to
+  // hear.
+  function adoptIncoming(x) {
+    const el = x.el;
+    audio = el;
+    curId = x.track.deezer_id;
+    curQ = x.q;
+    curIsBlob = x.isBlob;
+    // The outgoing element is still playing its blob, so its URL must outlive
+    // the fade — `curBlobUrl` is adopted here without revoking the old one, and
+    // finishCrossfade revokes it once the element has actually stopped.
+    x.oldBlobUrl = curBlobUrl;
+    curBlobUrl = x.blobUrl;
+    lastKnownTime = el.currentTime;
+    hadProgress = true;
+    loadingTrack = false;
+    recoverAttempts = 0;
+    stuckSince = 0;
+    stuckNudges = 0;
+    netWaiting = false;
+    buffered.set(0);
+    cancelRecovery();
+    cancelPendingSeek();
+    cancelPauseMirror();
+
+    player.next();
+    // Adopt the store's new sequence BEFORE the reactive block runs, so it sees
+    // an element already loaded with this track and leaves it alone instead of
+    // reloading it from the top.
+    curSeq = get(player).seq;
+    const landed = get(current);
+    if (landed?.deezer_id !== x.track.deezer_id) {
+      // The queue changed between the check in beginCrossfade and here. Let the
+      // normal path load whatever is actually current — a hard cut, but right.
+      cancelCrossfade();
+      curId = null;
+      return;
+    }
+    registerSource(el);
+    resumeAudio();
+    setTrackGain(gainFor(x.track));
+    player.setProgress(el.currentTime, x.track.duration || 0);
+    setPlaybackStatus("idle");
+    if (x.isBlob) touch(x.track.deezer_id);
+    flushListen(x.track.deezer_id);
+    pushRecent(x.track);
+    updateMediaSession(x.track);
+    primeEdgesAround(x.track);
+    trimmedId = null;
+    cacheCoverFor(x.track).catch(() => {});
+  }
+
+  // The ramp has reached zero: stop the outgoing element and release it.
+  function finishCrossfade() {
+    const x = xfade;
+    if (!x || x.phase !== "fading") return;
+    xfade = null;
+    clearTimeout(x.endTimer);
+    stopElement(x.old);
+    setFade(x.old, 1); // ready for its next turn as the incoming element
+    if (x.oldBlobUrl && x.oldBlobUrl !== curBlobUrl) {
+      try {
+        URL.revokeObjectURL(x.oldBlobUrl);
+      } catch {
+        /* ignore */
+      }
+    }
+    setFade(audio, 1);
+  }
+
+  function stopElement(el) {
+    if (!el) return;
+    try {
+      el.pause();
+      el.removeAttribute("src");
+      el.load();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Drop whatever is in flight. Before the handover this reverts to the
+  // outgoing track; after it, the incoming track is already the current one, so
+  // the only thing left to do is end the ramp now instead of later.
+  function cancelCrossfade(restore = true) {
+    const x = xfade;
+    if (!x) return;
+    xfade = null;
+    clearTimeout(x.startTimer);
+    clearTimeout(x.endTimer);
+    clearTimeout(x.giveUp);
+    if (x.onMeta) x.el.removeEventListener("loadedmetadata", x.onMeta);
+    if (x.onReady) x.el.removeEventListener("canplay", x.onReady);
+
+    if (x.phase === "fading") {
+      stopElement(x.old);
+      setFade(x.old, 1);
+      if (x.oldBlobUrl && x.oldBlobUrl !== curBlobUrl) {
+        try {
+          URL.revokeObjectURL(x.oldBlobUrl);
+        } catch {
+          /* ignore */
+        }
+      }
+      setFade(audio, 1);
+      return;
+    }
+
+    stopElement(x.el);
+    setFade(x.el, 1);
+    if (x.blobUrl) {
+      try {
+        URL.revokeObjectURL(x.blobUrl);
+      } catch {
+        /* ignore */
+      }
+    }
+    // Bring the track that is still playing back to full. Ramped, because the
+    // fade may already have ducked it — and it keeps playing either way, so a
+    // snap here would be an audible step.
+    if (restore) fadeElement(audio, 1, 0.25);
+  }
+
   async function onEnded(e) {
     logInfo("audio", "ended", null, { important: true });
+    // Mid-crossfade the outgoing element reaches its own end while still
+    // ramping down. That is expected and harmless: its ramp finishes on its
+    // timer, and the queue has already advanced. Acting on it here would
+    // advance it a second time.
+    if (xfade && xfade.phase === "fading" && e && e.target === xfade.old) return;
     if (e && e.target !== audio) return; // ignore the idle/preloading element
+    // A track ending while a crossfade is still being prepared means the
+    // preload lost the race. Drop it and advance normally.
+    if (xfade) cancelCrossfade();
     // A track change is mid-flight: this `ended` comes from the OUTGOING source
     // finishing during the load gap — acting on it would double-advance.
     if (loadingTrack) return;

@@ -201,6 +201,11 @@ export const api = {
   trackGains: (ids) =>
     req("/gains", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),
 
+  // Where the audio actually starts and stops inside the archived file, for
+  // the crossfade's silence trimming. Answers {ready:false} rather than an
+  // error when the file isn't archived — see supysonic/webui/edges.py.
+  audioEdges: (id, db) => req("/audio/edges/" + id + "?db=" + encodeURIComponent(db)),
+
   // radios
   trackRadio: (id) => req("/radio/track/" + id),
   artistRadio: (id) => req("/radio/artist/" + id),

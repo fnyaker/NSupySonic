@@ -36,7 +36,19 @@
   );
   // The cover glow reuses the last *decoded* backdrop (never a loading URL).
   $: glowSrc = $bg.length ? $bg[$bg.length - 1].src : "";
-  import { createVisualizer, requestAnalyser } from "../lib/visualizer.js";
+  import {
+    vizMode,
+    vizQuality,
+    vizPalette,
+    vizIntensity,
+    vizFps,
+    vizBeatDetect,
+    vizFullBleed,
+    vizShowStyle,
+  } from "../lib/stores.js";
+  import { effectiveMode, MODE_BY_ID } from "../lib/viz/index.js";
+  import { readout } from "../lib/audio/engine.js";
+  import Visualizer from "./Visualizer.svelte";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
@@ -93,35 +105,19 @@
     seekTo.set(t);
   }
 
-  // -- bar visualizer --------------------------------------------------------
-  let canvas;
-  let rafId = null;
-  const drawBars = createVisualizer();
+  // -- animation -------------------------------------------------------------
+  // Settings own the scene, its effort and its palette; Visualizer.svelte owns
+  // the canvas and the loop. `effectiveMode` degrades a rhythm-driven scene
+  // when the analysis is switched off, so nothing ever renders as a dead canvas.
+  $: vmode = effectiveMode($vizMode, $vizBeatDetect);
+  $: fullBleed = $vizFullBleed && (MODE_BY_ID.get(vmode)?.fullBleed ?? false);
+  $: stripViz = vmode === "bars";
+  $: styleLabel =
+    $vizShowStyle && vmode === "smart" && $readout.styleConfidence > 0.35
+      ? $readout.styleLabel
+      : "";
 
-  function draw() {
-    rafId = requestAnimationFrame(draw);
-    drawBars(canvas);
-  }
-  function start() {
-    if (rafId || (typeof document !== "undefined" && document.hidden)) return;
-    requestAnalyser(); // wire Web Audio in now that the visualizer is on screen
-    draw();
-  }
-  function stop() {
-    if (rafId) cancelAnimationFrame(rafId);
-    rafId = null;
-  }
-  function onVisibility() {
-    document.hidden ? stop() : start();
-  }
-  $: if ($immersiveOpen) start();
-  else stop();
-  if (typeof document !== "undefined")
-    document.addEventListener("visibilitychange", onVisibility);
   onDestroy(() => {
-    stop();
-    if (typeof document !== "undefined")
-      document.removeEventListener("visibilitychange", onVisibility);
     bg.destroy();
   });
 </script>
@@ -132,9 +128,26 @@
   {/each}
   <div class="scrim"></div>
 
+  {#if fullBleed}
+    <div class="viz-full" aria-hidden="true">
+      <Visualizer
+        mode={vmode}
+        quality={$vizQuality}
+        palette={$vizPalette}
+        intensity={$vizIntensity}
+        fps={$vizFps}
+        layout="full"
+        active={$immersiveOpen}
+      />
+    </div>
+  {/if}
+
   <header>
     <button class="ic" on:click={close} aria-label="Réduire"><Icon name="chevronDown" size={26} /></button>
-    <span class="ctx">{$player.context?.kind === "flow" ? "Flow" : "En lecture"}</span>
+    <span class="ctx">
+      {$player.context?.kind === "flow" ? "Flow" : "En lecture"}
+      {#if styleLabel}<em>{styleLabel}{#if $readout.bpm} · {$readout.bpm} BPM{/if}</em>{/if}
+    </span>
     <span class="spacer"></span>
   </header>
 
@@ -184,7 +197,19 @@
         <button class="sm" class:on={$player.repeat !== "off"} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
       </div>
 
-      <canvas class="viz" bind:this={canvas} aria-hidden="true"></canvas>
+      {#if stripViz}
+        <div class="viz">
+          <Visualizer
+            mode="bars"
+            quality={$vizQuality}
+            palette={$vizPalette}
+            intensity={$vizIntensity}
+            fps={$vizFps}
+            layout="strip"
+            active={$immersiveOpen}
+          />
+        </div>
+      {/if}
 
       <div class="footer">
         <div class="left">
@@ -275,6 +300,14 @@
     align-items: center;
     justify-content: space-between;
     padding: 16px 20px;
+  }
+  .ctx em {
+    display: block;
+    font-style: normal;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.5);
+    margin-top: 2px;
   }
   .ctx {
     font-size: 0.8rem;
@@ -490,9 +523,17 @@
   }
 
   .viz {
+    position: relative;
     width: 100%;
     height: 48px;
     opacity: 0.9;
+  }
+  /* Above the blurred cover and its scrim, below the stage: the backdrop
+     becomes the animation instead of competing with it. */
+  .viz-full {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
   }
 
   .footer {

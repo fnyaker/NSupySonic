@@ -15,7 +15,7 @@
     normalization,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
-  import { wirePreview, releasePreview, setPreviewGain } from "../lib/visualizer.js";
+  import { wirePreview, releasePreview, setPreviewGain } from "../lib/audio/graph.js";
   import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
   import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import { episodeMarkers, loadEpisodeMarkers } from "../lib/markers.js";
