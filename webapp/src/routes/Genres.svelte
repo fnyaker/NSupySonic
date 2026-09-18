@@ -93,6 +93,16 @@
   let extPoll = null;
   let extFileInput = null;
 
+  // -- embedding backfill -----------------------------------------------------
+  // Measuring the whole library is minutes to hours of ffmpeg + inference, so it
+  // runs server-side and this only polls the counters.
+  let embed = null; // { running, total, scanned, done, skipped, failed, error }
+  let embedPoll = null;
+  $: embedPct =
+    embed && embed.total
+      ? Math.min(100, Math.round((embed.scanned / embed.total) * 100))
+      : 0;
+
   $: eligible = tags.filter((t) => (counts[t.name] || 0) >= 2);
   $: trainable = eligible.length >= 2 && labelled >= eligible.length * 3;
   $: thin = tags.filter((t) => (counts[t.name] || 0) > 0 && (counts[t.name] || 0) < 8);
@@ -454,6 +464,51 @@
     tab = "model";
   }
 
+  // -- embedding backfill -----------------------------------------------------
+  async function startEmbed() {
+    try {
+      embed = await api.genreEmbed();
+    } catch (e) {
+      toasts.push(e?.message || "lancement impossible", "error");
+      return;
+    }
+    pollEmbed();
+  }
+
+  async function pollEmbed() {
+    stopEmbedPoll();
+    const tick = async () => {
+      try {
+        embed = await api.genreEmbedStatus();
+      } catch {
+        embedPoll = null;
+        return;
+      }
+      if (embed?.running) {
+        embedPoll = setTimeout(tick, 1000);
+        return;
+      }
+      embedPoll = null;
+      if (embed?.error) {
+        toasts.push("Calcul interrompu", "error");
+      } else {
+        const n = embed?.done || 0;
+        toasts.push(`${n} empreinte${n > 1 ? "s" : ""} calculée${n > 1 ? "s" : ""}`);
+      }
+      // Newly measured tracks can now be tagged.
+      await refresh();
+      await loadCandidates();
+    };
+    embedPoll = setTimeout(tick, 700);
+  }
+
+  function stopEmbedPoll() {
+    if (embedPoll) {
+      clearTimeout(embedPoll);
+      embedPoll = null;
+    }
+  }
+
   // -- keyboard ---------------------------------------------------------------
   function onKey(ev) {
     if (tab !== "tag" || !current) return;
@@ -500,11 +555,21 @@
       } catch {
         /* admin-only endpoint; nothing to show for anyone else */
       }
+      // A backfill started before a reload keeps running server-side: pick its
+      // progress back up instead of pretending nothing is happening.
+      try {
+        const e = await api.genreEmbedStatus();
+        embed = e;
+        if (e?.running) pollEmbed();
+      } catch {
+        /* admin-only endpoint */
+      }
     }
   });
   onDestroy(() => {
     stopPreview();
     stopExtPoll();
+    stopEmbedPoll();
     release();
   });
 
@@ -658,6 +723,36 @@
           </div>
         </div>
 
+        {#if extractor.available}
+          <div class="embed-bar" class:running={embed?.running}>
+            {#if embed?.running}
+              <div class="progress"><i style={`width:${embedPct}%`}></i></div>
+              <div class="embed-stats muted small">
+                <span>{embed.scanned}/{embed.total || "?"} analysés</span>
+                <span class="sep">·</span>
+                <span><strong>{embed.done}</strong> calculées</span>
+                {#if embed.failed}
+                  <span class="sep">·</span>
+                  <span class="bad">{embed.failed} en échec</span>
+                {/if}
+              </div>
+            {:else}
+              <button class="ghost" on:click={startEmbed}>
+                <Icon name="activity" size={16} /> Calculer les empreintes
+              </button>
+              <span class="muted small">
+                Mesure les titres qui n'en ont pas encore — l'entraînement ne voit
+                que ce qui a été mesuré.
+              </span>
+            {/if}
+          </div>
+          {#if embed?.error}
+            <div class="banner bad">
+              <Icon name="alert" size={16} /><span>{embed.error}</span>
+            </div>
+          {/if}
+        {/if}
+
         {#if !tags.length}
           <p class="muted empty">
             Créez d'abord quelques genres dans l'onglet « Genres ».
@@ -671,16 +766,16 @@
               <p>Aucun titre ne porte encore d'empreinte.</p>
               {#if !extractor.available}
                 <p class="small">
-                  Installez d'abord l'extracteur, puis lancez
-                  <code>supysonic-cli deezer embed</code> sur le serveur.
+                  Installez d'abord l'extracteur, puis lancez le calcul des
+                  empreintes.
                 </p>
                 <button class="primary" on:click={openExtractor}>
                   <Icon name="download" size={16} /> Installer l'extracteur
                 </button>
               {:else}
                 <p class="small">
-                  Lancez <code>supysonic-cli deezer embed</code> sur le serveur pour
-                  en calculer.
+                  Lancez « Calculer les empreintes » ci-dessus : le studio ne peut
+                  entraîner que sur les titres déjà mesurés.
                 </p>
               {/if}
             {/if}
@@ -1298,6 +1393,35 @@
   }
 
   /* -- tagging ------------------------------------------------------------- */
+  .embed-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    background: var(--surface-2, #1b1d21);
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    font-size: 0.84rem;
+  }
+  .embed-bar .progress {
+    flex: 1 1 180px;
+    margin: 0;
+  }
+  .embed-bar.running {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .embed-stats {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .embed-stats .sep {
+    margin: 0;
+  }
   .tag-head {
     display: flex;
     justify-content: space-between;

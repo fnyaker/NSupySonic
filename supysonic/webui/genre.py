@@ -94,6 +94,63 @@ def _reset_extractor_job() -> None:
         )
 
 
+# -- the embedding backfill job ----------------------------------------------
+# The slow one: every archived track without a vector is decoded and run through
+# the model — minutes on a small library, hours on a large one. So it is a
+# worker the studio polls, exactly like the extractor's self-test and the
+# archive sweep, and for the same reason: a request must never be what starts a
+# long decode, because the answer would arrive long after it mattered while
+# holding a thread.
+_embed_lock = threading.Lock()
+_embed_job = {
+    "running": False,
+    "started": None,
+    "finished": None,
+    "force": False,
+    "total": 0,
+    "scanned": 0,
+    "done": 0,
+    "skipped": 0,
+    "failed": 0,
+    "error": None,
+}
+
+
+def _embed_job_json() -> dict:
+    with _embed_lock:
+        return dict(_embed_job)
+
+
+def _run_embed(app, force):
+    """Worker: measure every archived track that still lacks a vector."""
+    from ..db import close_connection, open_connection
+    from ..deezer.analysis import backfill_embeddings
+
+    with app.app_context():
+        try:
+            open_connection(reuse=True)
+
+            def on_stats(stats):
+                with _embed_lock:
+                    _embed_job.update(stats)
+
+            stats = backfill_embeddings(force=force, on_stats=on_stats)
+            with _embed_lock:
+                _embed_job.update(stats)
+        except Exception as exc:
+            logger.warning("Embedding backfill crashed", exc_info=True)
+            with _embed_lock:
+                _embed_job["error"] = str(exc)
+        finally:
+            with _embed_lock:
+                _embed_job["running"] = False
+                _embed_job["finished"] = now().isoformat()
+            try:
+                close_connection()
+            except Exception:
+                pass
+
+
 def _resolve(ident):
     """A Track from either a Deezer numeric id or a local UUID."""
     from ..deezer import ids as dz_ids
@@ -300,6 +357,51 @@ def _run_extractor_test(app):
                 close_connection()
             except Exception:
                 pass
+
+
+@webapi.route("/genre/embed", methods=["POST"])
+@login_required
+@admin_required
+def genre_embed_start():
+    """Measure every archived track that has no embedding yet.
+
+    Admin-only and idempotent: tracks that already have a vector are skipped, so
+    pressing the button again only picks up what has been archived since. The
+    work runs in a worker and the studio polls ``/genre/embed``."""
+    from ..deezer import embedding as emb
+
+    why = emb.why_unavailable()
+    if why:
+        return jsonify({"error": why}), 400
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get("force") or request.args.get("force"))
+    with _embed_lock:
+        if _embed_job["running"]:
+            return jsonify({"ok": True, **_embed_job})
+        _embed_job.update(
+            running=True,
+            started=now().isoformat(),
+            finished=None,
+            force=force,
+            total=Track.select().where(Track.last_modification > 0).count(),
+            scanned=0,
+            done=0,
+            skipped=0,
+            failed=0,
+            error=None,
+        )
+    app = current_app._get_current_object()
+    threading.Thread(
+        target=_run_embed, args=(app, force), name="genre-embed", daemon=True
+    ).start()
+    return jsonify({"ok": True, **_embed_job_json()})
+
+
+@webapi.route("/genre/embed")
+@login_required
+@admin_required
+def genre_embed_status():
+    return jsonify(_embed_job_json())
 
 
 @webapi.route("/genre/tags/defaults", methods=["POST"])

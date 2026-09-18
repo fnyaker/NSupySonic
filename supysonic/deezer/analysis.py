@@ -725,16 +725,20 @@ def backfill(provider=None, force=False, limit=None, progress=None):
     return stats
 
 
-def backfill_embeddings(force=False, limit=None, progress=None):
+def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None):
     """Extract the frozen vector for every archived track that lacks one.
 
     Separate from `backfill` because it has a different cost profile and a
     different prerequisite: it needs onnxruntime and the model file, and it is
     the slow one. Running it is how a library becomes taggable.
+
+    `on_stats` is called after every track with the running counters, so the web
+    UI can show progress without this function knowing anything about it.
     """
     from . import embedding as emb
 
     say = progress or (lambda *_: None)
+    report = on_stats or (lambda *_: None)
     why = emb.why_unavailable()
     if why:
         say(f"Extractor unavailable: {why}")
@@ -747,15 +751,19 @@ def backfill_embeddings(force=False, limit=None, progress=None):
         stats["scanned"] += 1
         if not track.path or not os.path.isfile(track.path):
             stats["skipped"] += 1
+            report(stats)
             continue
         if not force and emb.load_embedding(track) is not None:
             stats["skipped"] += 1
+            report(stats)
             continue
         vec = emb.embed_file(track.path)
         if vec is None or not emb.save_embedding(track, vec):
             stats["failed"] += 1
+            report(stats)
             continue
         stats["done"] += 1
         if stats["done"] % 20 == 0:
             say(f"  {stats['done']} embedded...")
+        report(stats)
     return stats

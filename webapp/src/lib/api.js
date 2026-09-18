@@ -260,6 +260,12 @@ export const api = {
   genreExtractorTest: () => req("/genre/extractor/test", { method: "POST" }),
   genreExtractorTestStatus: () => req("/genre/extractor/test"),
 
+  // The slow one: measure every archived track that has no embedding yet, in a
+  // server-side worker the studio polls. Admin-only.
+  genreEmbed: (force = false) =>
+    req("/genre/embed" + (force ? "?force=1" : ""), { method: "POST" }),
+  genreEmbedStatus: () => req("/genre/embed"),
+
   // radios
   trackRadio: (id) => req("/radio/track/" + id),
   artistRadio: (id) => req("/radio/artist/" + id),

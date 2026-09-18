@@ -3425,8 +3425,20 @@ class GenreStudioTestCase(unittest.TestCase):
         UserManager.add("bob", "B0bbb", admin=False)
         self.client = self.app.test_client()
         from supysonic.deezer import genre as gen
+        from supysonic.webui import genre as wg
 
         gen.invalidate()
+        # Job state is module-global: reset it so tests never inherit a run.
+        with wg._embed_lock:
+            wg._embed_job.update(
+                running=False, started=None, finished=None, force=False,
+                total=0, scanned=0, done=0, skipped=0, failed=0, error=None,
+            )
+        with wg._extractor_lock:
+            wg._extractor_job.update(
+                running=False, started=None, ok=None, result=None,
+                progress=[], error=None,
+            )
         # Mark the engine vocabulary as already seeded so the tests that predate
         # it start from an empty studio. The seeding tests clear this flag.
         Meta.create(key=gen.SEED_META_KEY, value="1")
@@ -4054,6 +4066,63 @@ class GenreStudioTestCase(unittest.TestCase):
         # The poll endpoint answers a stable shape even before a run.
         body = self.client.get("/api/genre/extractor/test").json
         self.assertIn("running", body)
+
+    # -- the embedding backfill --------------------------------------------
+
+    def test_embed_endpoints_are_the_admin_s_alone(self):
+        self._login("bob", "B0bbb")
+        self.assertEqual(self.client.post("/api/genre/embed").status_code, 403)
+        self.assertEqual(self.client.get("/api/genre/embed").status_code, 403)
+
+    def test_embed_refuses_without_the_extractor(self):
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        if emb.why_unavailable():
+            r = self.client.post("/api/genre/embed")
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("error", r.json)
+        # The status endpoint always answers a stable shape.
+        body = self.client.get("/api/genre/embed").json
+        self.assertIn("running", body)
+        self.assertIn("total", body)
+        self.assertIn("done", body)
+
+    def test_the_embed_worker_reports_progress_and_finishes(self):
+        """The job is a worker, not a request: it must fill the counters as it
+        goes and always come back to not-running, even on failure."""
+        from supysonic.deezer import analysis as ana
+        from supysonic.webui import genre as wg
+
+        self._login()
+
+        def fake_backfill(force=False, on_stats=None):
+            stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0}
+            for _ in range(3):
+                stats["scanned"] += 1
+                stats["done"] += 1
+                if on_stats:
+                    on_stats(stats)
+            return stats
+
+        original = ana.backfill_embeddings
+        ana.backfill_embeddings = fake_backfill
+        try:
+            with wg._embed_lock:
+                wg._embed_job.update(
+                    running=True, started=now().isoformat(), total=3,
+                    scanned=0, done=0, skipped=0, failed=0, error=None,
+                )
+            wg._run_embed(self.app, False)
+        finally:
+            ana.backfill_embeddings = original
+
+        job = self.client.get("/api/genre/embed").json
+        self.assertFalse(job["running"])
+        self.assertEqual(job["done"], 3)
+        self.assertEqual(job["scanned"], 3)
+        self.assertIsNotNone(job["finished"])
+        self.assertIsNone(job["error"])
 
 
 if __name__ == "__main__":

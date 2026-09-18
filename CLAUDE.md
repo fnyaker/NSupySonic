@@ -494,7 +494,11 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   guess instead of typing twenty genres first. It is one-time (a `Meta` flag) and only ever adds:
   a genre you delete stays deleted, and the *Genres du moteur* button brings back just the missing
   ones. Only the admin seeds; a guest reading `/genre/status` writes nothing.
-
+- **Measuring the library is a button, not a shell.** The Étiquetage tab starts the very backfill
+  the CLI runs (`POST /genre/embed`, admin-only, worker + poll): every archived track without a
+  vector is decoded once, so pressing it again only picks up what has been archived since. The
+  counters stream back as it goes — it is minutes to hours of work and must never hold a request.
+  `backfill_embeddings(on_stats=…)` is the one implementation, shared with `deezer embed`.
 - **The big model is FROZEN and only ever extracts.** Fine-tuning something trained on millions of
   recordings with two hundred of your own mostly destroys what it knew. So `discogs-effnet` (ONNX,
   via onnxruntime) turns a track into one 1280-d vector and nothing else, and every bit of learning
