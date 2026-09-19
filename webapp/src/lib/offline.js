@@ -161,6 +161,41 @@ async function cacheCover(coverUrl, deezerId) {
   }
 }
 
+// Drop a DOCUMENT-cover blob that turned out not to decode (see the sibling in
+// playcache.js): a stored blob that won't decode must not be re-offered forever.
+export async function forgetDownloadedCover(coverUrl) {
+  if (!coverUrl) return false;
+  const key = coverKey(coverUrl);
+  try {
+    const db = await openDB();
+    // Canonical key again: the row is stored under the 500px URL while a caller
+    // may hold the 1000px one.
+    const t = tx(db, "covers", "readwrite");
+    const store = t.objectStore("covers");
+    for (const row of await reqp(store.getAll())) {
+      if (coverKey(row.url) === key) store.delete(row.url);
+    }
+    await done(t);
+  } catch {
+    /* best effort */
+  }
+  let had = false;
+  offlineCovers.update((m) => {
+    const n = { ...m };
+    if (n[key]) {
+      had = true;
+      try {
+        URL.revokeObjectURL(n[key]);
+      } catch {
+        /* ignore */
+      }
+      delete n[key];
+    }
+    return n;
+  });
+  return had;
+}
+
 // Drop a cover blob + its object URL if no remaining download still uses it.
 async function gcCover(coverUrl) {
   if (!coverUrl) return;

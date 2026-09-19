@@ -346,6 +346,12 @@ def prototype_predict(vec):
     normalisation, and the angle is the part that carries the genre. The
     similarity is returned raw (roughly 0.5-0.95 in practice) rather than dressed
     up as a probability it does not mean.
+
+    A prototype is only compared with a vector of the SAME width. `_labelled_rows`
+    keeps the table on the current width, but `vec` comes from a sidecar that may
+    still be a v1 one (1280) while the centroids are v2 (2560) — two different
+    feature spaces, and indexing one with the other's length is how this endpoint
+    used to answer 500. Such a track is given no opinion rather than a wrong one.
     """
     if vec is None:
         return None
@@ -355,11 +361,14 @@ def prototype_predict(vec):
     u = _unit(list(vec))
     if u is None:
         return None
+    width = len(u)
     best = None
     for name, row in table.items():
         c = row["centroid"]
+        if len(c) != width:
+            continue
         s = 0.0
-        for i in range(len(c)):
+        for i in range(width):
             s += c[i] * u[i]
         if best is None or s > best[1]:
             best = (name, s)
