@@ -205,6 +205,10 @@ export const api = {
   // file — see supysonic/deezer/analysis.py and lib/analysis.js.
   trackAnalyses: (ids) =>
     req("/analyses", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),
+  // The same verdict for ONE track, plus `pending` when the server has just put
+  // it on its own background queue. Used after a tag, to pick the new verdict up
+  // without waiting for the next play.
+  trackAnalysis: (id) => req("/analysis/" + encodeURIComponent(id)),
 
   // (Re)measure the whole library server-side — tempo, style, embeddings — with
   // a chosen parallelism. Admin-only; the studio polls the job.
@@ -230,7 +234,8 @@ export const api = {
   genreDefaults: () => req("/genre/tags/defaults", { method: "POST" }),
   genreLabel: (track, tag) =>
     req("/genre/label", { method: "POST", body: body({ track, tag }) }),
-  genreCandidates: (limit = 40) => req("/genre/candidates?limit=" + limit),
+  genreCandidates: (limit = 40, sort = null) =>
+    req("/genre/candidates?limit=" + limit + (sort ? "&sort=" + sort : "")),
   genreLabelled: () => req("/genre/labelled"),
   genreEmbeddings: (ids) =>
     req("/genre/embeddings", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),

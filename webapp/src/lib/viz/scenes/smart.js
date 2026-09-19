@@ -195,7 +195,10 @@ function grooveLayer(preset) {
       // the motion IS the beat rather than a continuous spin that happens to
       // be the right speed.
       rot = (beat.beatIndex % n) * (TAU / n) - snap * (TAU / n);
-      kick = envelope(kick, clamp((frame.features.lowFlux || 0) * 8, 0, 1), dt, 0.008, 0.2);
+      // The magnitude-domain kick, not the whitened bass flux: same evidence the
+      // beat tracker now folds, and the same reason it is better here — it is
+      // scaled to the track rather than to whatever the loudest moment of it was.
+      kick = envelope(kick, clamp((frame.features.kick || 0) * 1.15, 0, 1), dt, 0.006, 0.16);
       bassPump = envelope(
         bassPump,
         clamp((frame.bands[3] + frame.bands[8]) * 0.6, 0, 1),
@@ -210,10 +213,12 @@ function grooveLayer(preset) {
       const R = Math.min(w, h) * 0.3;
       g.globalCompositeOperation = "lighter";
 
-      // Kick flash.
+      // Kick flash. Bright and wide — this is the layer's whole reason to exist,
+      // and a hit that only tints 6% of the screen is a hit nobody sees.
       if (kick > 0.01) {
-        const gr = g.createRadialGradient(cx, cy, 0, cx, cy, R * (1.1 + kick * 0.8));
-        gr.addColorStop(0, hsl(pal.low, pal.sat, 0.6, 0.3 * kick * weight * preset.glow));
+        const gr = g.createRadialGradient(cx, cy, 0, cx, cy, R * (1.1 + kick * 1.3));
+        gr.addColorStop(0, hsl(pal.low, pal.sat, 0.62, 0.55 * kick * weight * preset.glow));
+        gr.addColorStop(0.5, hsl(pal.low + 15, pal.sat, 0.55, 0.2 * kick * weight * preset.glow));
         gr.addColorStop(1, hsl(pal.low, pal.sat, 0.5, 0));
         g.fillStyle = gr;
         g.fillRect(0, 0, w, h);
@@ -271,18 +276,30 @@ function hardLayer(preset, opts) {
   let strobe = 0;
   let saw = 0;
   let style = "";
+  let lastKick = 0;
 
   return {
     update(frame, dt) {
       const k = frame.style?.kick;
       style = frame.style?.dominant || "";
       const beat = frame.beat;
-      if (k?.hit || (beat.beat && beat.locked)) {
+      // Three sources, in descending order of how much they know. The style
+      // classifier's kick carries its CHARACTER (soft vs industrial) and drives
+      // the tint. A locked beat grid gives a hit on every predicted beat even if
+      // the classifier is quiet. The raw detector covers the third case — a
+      // track with neither a classified kick nor a lock yet, which used to mean
+      // this entire layer sat still for the first bars of a rap track.
+      const det = frame.features.kick || 0;
+      const detHit = det > 0.42 && det > lastKick + 0.15;
+      lastKick = det;
+      if (k?.hit || (beat.beat && beat.locked) || detHit) {
         let slot = waves.find((x) => x.age < 0) || waves.reduce((a, b) => (a.age > b.age ? a : b));
         slot.age = 0;
         slot.life = 0.32 + (k?.decay || 0.1);
-        slot.p = clamp(0.45 + (k?.strength || 0.4) * 0.8, 0, 1.4);
-        slot.tint = k?.type || "hard";
+        slot.p = k?.hit
+          ? clamp(0.45 + (k?.strength || 0.4) * 0.8, 0, 1.4)
+          : clamp(0.4 + det * 0.8, 0, 1.4);
+        slot.tint = k?.hit ? k.type || "hard" : "hard";
       }
       for (const wv of waves) {
         if (wv.age < 0) continue;
@@ -364,15 +381,15 @@ function hardLayer(preset, opts) {
         const t = wv.age / wv.life;
         const tint = KICK_TINT[wv.tint] || KICK_TINT.hard;
         const rad = R * (0.05 + t * 1.25);
-        const a = (1 - t) * (1 - t) * wv.p * 0.95 * weight * preset.glow;
+        const a = (1 - t) * (1 - t) * wv.p * 1.15 * weight * preset.glow;
         if (a < 0.004) continue;
         g.strokeStyle = hsl(
           pal.low + tint.dh,
           clamp(pal.sat + tint.ds, 0, 1),
-          clamp(0.58 + tint.dl, 0, 0.95),
+          clamp(0.62 + tint.dl, 0, 0.98),
           a
         );
-        g.lineWidth = Math.max(2, R * 0.075 * (1 - t) * wv.p);
+        g.lineWidth = Math.max(2.5, R * 0.1 * (1 - t) * wv.p);
         g.beginPath();
         g.arc(cx, cy, rad, 0, TAU);
         g.stroke();

@@ -448,7 +448,11 @@ export function createBeatTracker() {
   /**
    * Feed one analysis frame.
    * @param {number} flux      whitened full-band spectral flux
-   * @param {number} lowFlux   whitened sub+bass flux (the kick)
+   * @param {number} lowFlux   kick evidence: whitened sub+bass flux with the
+   *                           magnitude-domain kick transient mixed in. See
+   *                           features.js — the whitened part alone goes blind
+   *                           on a track whose low end never stops (an 808 under
+   *                           rap), which is the case the mix fixes.
    * @param {number} dt        seconds since the previous frame
    */
   function process(flux, lowFlux, dt) {
@@ -587,5 +591,15 @@ export function createBeatTracker() {
     sinceBeat = 0;
   }
 
-  return { process, reset, seed, out };
+  /**
+   * Whether the grid is currently saying something. The engine uses this to
+   * decide whether a served tempo is worth seeding: before a lock there is
+   * nothing to disturb, after one the live figure is already a measurement of
+   * the same thing and re-seeding would only make the animation jump.
+   */
+  function isLocked() {
+    return locked;
+  }
+
+  return { process, reset, seed, isLocked, out };
 }

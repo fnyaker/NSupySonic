@@ -12,7 +12,11 @@
 //   flux                  positive spectral change: the onset detection
 //                         function the beat tracker runs on.
 //   lowFlux               the same, restricted to sub+bass, which is what a
-//                         kick actually is.
+//                         kick actually is. Body plus, when a body is present,
+//                         the beater's click — see below.
+//   kick                  lowFlux normalised against its own recent peak, so it
+//                         reads the same on a quiet master as on a loud one.
+//                         This is what the scenes draw.
 //   centroid              brightness. Separates a cello from a hi-hat pattern.
 //   flatness              tonal (low) vs noisy/distorted (high). This is the
 //                         single most useful axis for telling a string section
@@ -31,6 +35,14 @@
 const LN10_20 = Math.LN10 / 20;
 const dbToMag = (db) => Math.exp(db * LN10_20);
 
+// Mean magnitude over a bin range — one pass, no allocation, same as the band
+// sums above but usable from anywhere in the frame.
+function bandMean(mag, lo, hi) {
+  let s = 0;
+  for (let i = lo; i <= hi; i++) s += mag[i];
+  return s / Math.max(1, hi - lo + 1);
+}
+
 export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
   const nHi = fftHi / 2;
   const nyquist = sampleRate / 2;
@@ -44,7 +56,9 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
   // Bin ranges used by the sums below.
   const b = (hz) => Math.max(0, Math.min(nHi - 1, Math.round(hz / hzPerBin)));
   const LOW0 = b(25);
-  const LOW1 = b(180); // kick territory
+  const LOW1 = b(180); // kick territory: an 808's sub through a hardstyle punch
+  const CLICK0 = b(1500); // the beater's click on a sampled kick
+  const CLICK1 = b(7000);
   const MIDF0 = b(180);
   const MIDF1 = b(2000); // snares, claps, guitars, most of a voice
   const HIF0 = b(2000); // hats, cymbals, "pieep" leads, sibilance
@@ -56,6 +70,13 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
   let midFast = 0;
   let midSlow = 0;
   let modAvg = 0;
+  // Kick detection, in the MAGNITUDE domain. See the "kick" note above.
+  let kickFast = 0; // the kick band, fast attack
+  let kickSlow = 0; // ...and what it has been doing lately
+  let clickFast = 0; // the click band, fast attack
+  let clickSlow = 0;
+  let kickRef = 0; // running strength of a "typical" kick, for normalisation
+  let kickPrimed = false; // envelopes anchored on the first frame, not on zero
   // Smoothed outputs. Most consumers want a stable reading, not a raw frame.
   let sLevel = 0;
   let sCentroid = 0;
@@ -72,6 +93,7 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     lowFlux: 0,
     midFlux: 0,
     highFlux: 0,
+    kick: 0, // 0..1, how hard the kick is hitting right now
     centroid: 0, // Hz
     centroidN: 0, // 0..1, log-mapped over 40 Hz..16 kHz
     flatness: 0, // 0..1
@@ -143,6 +165,82 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     out.lowFlux = lowFlux / Math.max(1, LOW1 - LOW0 + 1);
     out.midFlux = midFlux / Math.max(1, MIDF1 - MIDF0);
     out.highFlux = highFlux / Math.max(1, TOP - HIF0 + 1);
+
+    // --- the kick, in the magnitude domain -----------------------------------
+    //
+    // Whitened flux is the right signal for the BEAT TRACKER — it is a
+    // difference between two frames, and the beat is where the differences are
+    // — but it makes a poor KICK DETECTOR for three concrete reasons:
+    //
+    //  - it is a first-order difference, and the analyser window (2048 samples,
+    //    ~42 ms) spreads a kick's attack over several frames. A 50 Hz kick does
+    //    not even complete three cycles in that window, so what should be one
+    //    onset arrives as a gentle rise over two or three frames, and the flux
+    //    per frame is a fraction of the band's level.
+    //  - the whitening denominator is a running max with a half-life measured in
+    //    tens of seconds. After the loudest passage of a track, every bin in the
+    //    kick band is compressed toward that old maximum, and a later kick that
+    //    is still perfectly audible moves the ratio by very little.
+    //  - being a difference, its scale is arbitrary: a scene reading it has to
+    //    pick a magic multiplier and hopes it holds across a library whose
+    //    masters differ by 12 dB.
+    //
+    // So the kick is read from the raw magnitudes instead, as the ratio between
+    // a FAST and a SLOW envelope of the kick band. A sustained note — the 808
+    // under a rap track, the bassline under a techno one — drives both envelopes
+    // to the same place whatever its level, so the ratio sits at 1 and nothing
+    // fires. A kick on top of it lifts the fast envelope and leaves the slow one
+    // behind, and that transient is the hit. The reading is a dimensionless
+    // ratio, so it means the same thing on a loud master and a quiet one, which
+    // is what makes it usable across a whole library.
+    const kickLo = Math.max(1e-9, bandMean(mag, LOW0, LOW1));
+    const clickLo = Math.max(1e-9, bandMean(mag, CLICK0, CLICK1));
+    // ~3 ms attack (the fastest a kick's leading edge moves), ~90 ms release —
+    // faster than any sustained bass note can be, slower than the noise between
+    // samples of one. `dt` is clamped because a stalled tab hands us a giant
+    // step, and an envelope that jumps to the new level on one frame measures
+    // nothing.
+    const dtc = Math.min(Math.max(dt, 1 / 400), 0.02);
+    const kAtk = 1 - Math.exp(-dtc / 0.003);
+    const kRel = 1 - Math.exp(-dtc / 0.09);
+    if (!kickPrimed) {
+      // Start the envelopes AT the level of the first frame. Starting them at
+      // zero would make the very first frame of any track a rise from nothing,
+      // which is a kick that never happened — and a scene told to flash on it
+      // flashes once per track for no reason.
+      kickPrimed = true;
+      kickFast = kickSlow = kickLo;
+      clickFast = clickSlow = clickLo;
+    }
+    kickFast += (kickLo - kickFast) * kAtk;
+    kickSlow += (kickLo - kickSlow) * kRel;
+    clickFast += (clickLo - clickFast) * kAtk;
+    clickSlow += (clickLo - clickSlow) * kRel;
+
+    // Body and click are not rivals: a rap kick is pure body, a hardstyle kick
+    // is a click wired to a punch. Either can carry a hit, so the detector
+    // takes the stronger of the two and the beat tracker gets both.
+    const bodyRise = kickSlow > 1e-9 ? kickFast / kickSlow - 1 : 0;
+    const clickRise = clickSlow > 1e-9 ? clickFast / clickSlow - 1 : 0;
+    const rise = Math.max(bodyRise, clickRise * 0.6);
+    const lowKick = Math.max(bodyRise, 0);
+    // How large the rise is compared to the rises this track usually produces.
+    // A ratio is scale-free, so a quiet kick on a quiet master has to move as
+    // far to fire as a loud one — which is exactly what makes this usable
+    // across a library instead of only on the loudest records.
+    kickRef = Math.max(rise, kickRef * 0.995);
+    const norm = kickRef > 0.02 ? rise / kickRef : 0;
+    const kickNow = Math.max(0, Math.min(1, norm * 1.35));
+    // Fast attack, slow release: an onset is one frame, and a scene that reads
+    // this on a single frame flickers. Held long enough to be a visible pulse.
+    out.kick = kickNow > out.kick ? kickNow : out.kick * Math.max(0, 1 - dtc / 0.16);
+    // The beat tracker wants the same evidence in the shape it already consumes:
+    // a signal whose peaks sit where the kicks are, pre-whitened, so nothing
+    // downstream has to change. It straddles the whitening boundary on purpose —
+    // raw for the bass, whitened for the click — which is the split that makes
+    // it work on both techno and rap: each half carries the half of the kick the
+    // other one's normalisation has trouble with.
+    out.lowFlux = lowFlux / Math.max(1, LOW1 - LOW0 + 1) + 0.09 * lowKick;
 
     // Centroid and spread over the whole usable spectrum.
     let wsum = 0;
@@ -225,6 +323,9 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     prev.fill(0);
     peakEnv.fill(1e-4);
     midFast = midSlow = modAvg = 0;
+    kickFast = kickSlow = clickFast = clickSlow = kickRef = 0;
+    kickPrimed = false;
+    out.kick = 0;
     sLevel = sCentroid = sFlatness = sPerc = sRolloff = 0;
   }
 

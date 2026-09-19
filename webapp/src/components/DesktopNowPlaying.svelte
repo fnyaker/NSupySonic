@@ -15,6 +15,8 @@
     openMenu,
     offlineCovers,
     openShare,
+    isAdmin,
+    openGenreTag,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { addMarkerAt } from "../lib/markers.js";
@@ -157,7 +159,21 @@
       {$player.context?.kind === "flow" ? "Flow" : "En lecture"}
       {#if styleLabel}<em>{styleLabel}{#if $readout.bpm} · {$readout.bpm} BPM{/if}</em>{/if}
     </span>
-    <span class="spacer"></span>
+    <span class="right">
+      {#if $isAdmin && ($current?.deezer_id || $current?.id)}
+        <!-- Deliberately quiet: a small, dim tag in the corner the empty spacer
+             used to hold, only for the admin. Tagging is what you do when you
+             notice a wrong genre mid-listen, not a call to action — so it stays
+             out of the way, and the header stays symmetric around the title. -->
+        <button
+          class="ic tag"
+          on:click={() => openGenreTag($current)}
+          title="Étiqueter le genre de ce titre"
+          aria-label="Étiqueter le genre">
+          <Icon name="tag" size={19} />
+        </button>
+      {/if}
+    </span>
   </header>
 
   <div class="stage">
@@ -326,13 +342,26 @@
     text-transform: uppercase;
     color: rgba(255, 255, 255, 0.7);
   }
-  .spacer {
+  /* Balances the close button on the other side, whether or not the tag button
+     is in it, so the header stays symmetric around the context label. */
+  .right {
     width: 26px;
+    display: grid;
+    place-items: center;
   }
   .ic {
     color: rgba(255, 255, 255, 0.85);
     display: grid;
     place-items: center;
+  }
+  /* The tag button is deliberately almost invisible until you look for it: it
+     must not compete with the artwork, and it is only ever used by the admin. */
+  .ic.tag {
+    color: rgba(255, 255, 255, 0.45);
+    width: 26px;
+  }
+  .ic.tag:hover {
+    color: var(--accent);
   }
 
   .stage {

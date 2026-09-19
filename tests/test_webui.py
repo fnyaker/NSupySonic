@@ -19,6 +19,20 @@ from supysonic.managers.user import UserManager
 from supysonic.web import create_application
 
 
+def _numpy():
+    """numpy, or None.
+
+    It is not a dependency of the server: it arrives with the optional
+    embedding extra, alongside onnxruntime. The tests that need it say so and
+    skip rather than failing a stock checkout.
+    """
+    try:
+        import numpy
+    except Exception:
+        return None
+    return numpy
+
+
 def raw_track(sid, title="T", art=("1", "Artist"), alb=("10", "Album"), pic="md5c"):
     return {
         "SNG_ID": str(sid),
@@ -3320,27 +3334,117 @@ class TrackAnalysisTestCase(unittest.TestCase):
         rv = self.client.post("/api/analyses", json={"ids": "nope"})
         self.assertEqual(rv.status_code, 400)
 
-    def test_asking_never_measures(self):
-        """A request must never be what starts a three-second ffmpeg pass.
+    def test_asking_never_waits_on_a_measurement(self):
+        """A request must never be what runs a three-second ffmpeg pass.
 
         The player asks about tracks it is ABOUT to play; an answer that arrives
         a minute later is no answer, and the request would hold a thread for the
-        whole of it.
+        whole of it. Queuing one on a background thread is fine and is the point
+        of `pending` — but `analyze_track` itself is never called on the request
+        thread, and with nothing to gain by measuring (no head, no extractor) it
+        is not queued at all.
         """
+        import supysonic.webui.analysis as web_ana  # noqa: F401
         from supysonic.deezer import analysis as ana
 
         self._login()
         t = self._deezer_track()
         called = []
         orig_analyze, orig_queue = ana.analyze_track, ana.queue_analysis
+        orig_req = ana.request_analysis
         ana.analyze_track = lambda *a, **k: called.append("analyze")
         ana.queue_analysis = lambda *a, **k: called.append("queue")
+        # "Nothing to gain by measuring" — the server says so, and no job is
+        # started. `analyze_track` is the one thing that must never run here.
+        ana.request_analysis = lambda *a, **k: False
         try:
             self.client.get(f"/api/analysis/{t.deezer_id}")
-            self.client.post("/api/analyses", json={"ids": [t.deezer_id]})
+            body = self.client.post(
+                "/api/analyses", json={"ids": [t.deezer_id]}
+            ).json
         finally:
             ana.analyze_track, ana.queue_analysis = orig_analyze, orig_queue
+            ana.request_analysis = orig_req
         self.assertEqual(called, [])
+        self.assertEqual(body["pending"], [])
+
+    def test_a_measurable_track_is_queued_and_named_pending(self):
+        """The server says "ask again", without measuring during the request."""
+        from supysonic.deezer import analysis as ana
+
+        self._login()
+        t = self._deezer_track()
+        asked = []
+        orig_req = ana.request_analysis
+        ana.request_analysis = lambda *a, **k: (asked.append(a[0]) or True)
+        try:
+            body = self.client.post(
+                "/api/analyses", json={"ids": [t.deezer_id]}
+            ).json
+        finally:
+            ana.request_analysis = orig_req
+        self.assertNotIn(t.deezer_id, body["analyses"])
+        self.assertEqual(body["pending"], [t.deezer_id])
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(str(asked[0].deezer_id), str(t.deezer_id))
+
+    def test_request_analysis_refuses_without_a_way_to_reach_a_verdict(self):
+        """A job that could produce nothing is not started: no head, no model,
+        nothing to gain — and the client is not told to wait for it."""
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+        t.path = __file__
+        orig_can, orig_ff = ana._can_measure, ana.ffmpeg_available
+        ana.ffmpeg_available = lambda: True
+        ana._can_measure = lambda: False
+        try:
+            self.assertFalse(ana.request_analysis(t))
+        finally:
+            ana._can_measure, ana.ffmpeg_available = orig_can, orig_ff
+
+    def test_request_analysis_dedupes_and_reports_acceptance(self):
+        """Two asks while the first is in flight start ONE job, and both are
+        told yes — the client's second poll is not a reason to redo the work."""
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+        t.path = __file__
+        started = []
+        orig_can = ana._can_measure
+        orig_thread = ana.threading.Thread
+        orig_queue = ana.queue_analysis
+        orig_ff = ana.ffmpeg_available
+
+        class FakeThread:
+            def __init__(self, *a, **k):
+                started.append(k.get("name"))
+
+            def start(self):
+                pass
+
+        # The real queue_analysis marks the id in flight (that is what makes the
+        # dedupe work) and starts a worker thread; this keeps both, minus the job.
+        def fake_queue(track, provider=None):
+            ana._inflight.add(str(track.id))
+            FakeThread(name="dz-analysis").start()
+
+        ana.ffmpeg_available = lambda: True
+        ana._can_measure = lambda: True
+        ana.queue_analysis = fake_queue
+        ana.threading.Thread = FakeThread
+        try:
+            self.assertTrue(ana.request_analysis(t))
+            self.assertEqual(len(started), 1)
+            self.assertIn(str(t.id), ana._inflight)
+            # Second ask while the first is in flight: accepted, not doubled.
+            self.assertTrue(ana.request_analysis(t))
+            self.assertEqual(len(started), 1)
+        finally:
+            ana._can_measure, ana.ffmpeg_available = orig_can, orig_ff
+            ana.threading.Thread = orig_thread
+            ana.queue_analysis = orig_queue
+            ana._inflight.discard(str(t.id))
 
     def test_analysis_skips_a_track_with_no_file(self):
         from supysonic.deezer import analysis as ana
@@ -3522,6 +3626,10 @@ class GenreStudioTestCase(unittest.TestCase):
         from supysonic.webui import genre as wg
 
         gen.invalidate()
+        # The prototype is cached module-globally too, and it reads embeddings
+        # off disk — so a cache left over from another test's database would be
+        # read back against THIS one's tracks.
+        gen.invalidate_centroids()
         # Job state is module-global: reset it so tests never inherit a run.
         with wg._embed_lock:
             wg._embed_job.update(
@@ -3541,6 +3649,7 @@ class GenreStudioTestCase(unittest.TestCase):
         from supysonic.deezer import genre as gen
 
         gen.invalidate()
+        gen.invalidate_centroids()
         release_database()
         shutil.rmtree(self.__dir, ignore_errors=True)
         shutil.rmtree(self.archive, ignore_errors=True)
@@ -3747,6 +3856,85 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertIsNone(r.json["tag"])
         self.assertEqual(TrackTag.select().count(), 0)
 
+    def test_a_manual_tag_outranks_the_measured_genre(self):
+        """The tag button's whole point: an instant, correct genre.
+
+        A hand-applied label is the only signal here that is not a guess, so it
+        is served even when nothing has measured the track — the player gets the
+        right genre at the first request rather than after the next backfill.
+        """
+        from supysonic.deezer import analysis as ana
+
+        self._login()
+        tag = self._tag("techno", "groove")
+        track = self._track("1020")
+        self.client.post(
+            "/api/genre/label", json={"track": track.deezer_id, "tag": tag["id"]}
+        )
+        body = self.client.post(
+            "/api/analyses", json={"ids": [track.deezer_id]}
+        ).json
+        got = body["analyses"][track.deezer_id]
+        self.assertEqual(got["style"], "techno")
+        self.assertEqual(got["styleSource"], "tag")
+        self.assertEqual(got["archetype"], "groove")
+        # Nothing has measured it, so there is no tempo to claim...
+        self.assertIsNone(got["bpm"])
+        self.assertFalse(got["analysed"])
+        # ...and nothing is queued for it either: the answer is already here.
+        self.assertEqual(body["pending"], [])
+
+    def test_a_tag_also_wins_inside_the_stored_verdict(self):
+        """Tagging a track rewrites the verdict the analysis stores, so the two
+        paths never disagree about the same track."""
+        from supysonic.db import TrackAnalysis
+        from supysonic.deezer import analysis as ana
+
+        self._login()
+        tag = self._tag("tekk", "hard")
+        track = self._track("1021", archived=True)
+        # The fixture writes a stub file, not audio; the passes are faked.
+        os.makedirs(os.path.dirname(track.path), exist_ok=True)
+        with open(track.path, "wb") as fp:
+            fp.write(b"audio")
+        feats = dict(
+            bpm=0.0, bpm_confidence=0.0, pulse=0.0, centroid=1800.0, spread=1500.0,
+            rolloff=5000.0, flatness=0.3, flatness_hi=0.45, entropy=0.6,
+            flux_peak=2.0, lra=8.0, lufs=-12.0,
+        )
+        orig_ff = ana.ffmpeg_available
+        orig_meas = ana._measure_tempo
+        orig_spec = ana._spectral
+        ana.ffmpeg_available = lambda: True
+        ana._measure_tempo = lambda path: (174.0, 0.9, 0.8)
+        ana._spectral = lambda path: dict(feats)
+        try:
+            ana.analyze_track(track)
+            row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+            self.assertIsNotNone(row)
+            self.assertNotEqual(row.style, "tekk")
+
+            self.client.post(
+                "/api/genre/label", json={"track": track.deezer_id, "tag": tag["id"]}
+            )
+            ana.analyze_track(track, force=True)
+            row = TrackAnalysis.get(TrackAnalysis.track == track)
+            self.assertEqual(row.style, "tekk")
+            self.assertEqual(row.style_confidence, 1.0)
+            self.assertEqual(row.archetype, "hard")
+
+            # Clearing the tag lets the measurement speak again.
+            self.client.post(
+                "/api/genre/label", json={"track": track.deezer_id, "tag": None}
+            )
+            ana.analyze_track(track, force=True)
+            row = TrackAnalysis.get(TrackAnalysis.track == track)
+            self.assertNotEqual(row.style, "tekk")
+        finally:
+            ana.ffmpeg_available = orig_ff
+            ana._measure_tempo = orig_meas
+            ana._spectral = orig_spec
+
     def test_labelling_rejects_what_it_cannot_resolve(self):
         self._login()
         tag = self._tag("krach")
@@ -3772,6 +3960,96 @@ class GenreStudioTestCase(unittest.TestCase):
         )
 
     # -- vectors -----------------------------------------------------------
+
+    def test_a_v1_vector_still_reads_back(self):
+        """A mean-only sidecar from before the aggregation changed is readable.
+
+        The archive is the user's; changing how NEW vectors are built must not
+        turn an old one into an unreadable file. It is simply not what a current
+        head expects, which `vector_is_current` is what says.
+        """
+        from supysonic.deezer import embedding as emb
+
+        track = self._track("1030")
+        os.makedirs(os.path.dirname(track.path), exist_ok=True)
+        legacy = [((i % 13) - 6) / 6 for i in range(emb.LEGACY_EMBED_DIM)]
+        with open(emb.sidecar_path(track), "wb") as fp:
+            fp.write(emb._pack_f16(legacy))
+        back = emb.load_embedding(track)
+        self.assertEqual(len(back), emb.LEGACY_EMBED_DIM)
+        self.assertFalse(emb.vector_is_current(back))
+        self.assertEqual(emb.embedding_version(track), 1)
+
+        # A v2 one is the current width, and says so.
+        self.assertTrue(emb.save_embedding(track, [0.1] * emb.EMBED_DIM))
+        self.assertEqual(emb.embedding_version(track), 2)
+        self.assertTrue(emb.vector_is_current(emb.load_embedding(track)))
+        # Nothing else is a vector at all.
+        with open(emb.sidecar_path(track), "wb") as fp:
+            fp.write(b"\x00" * 64)
+        self.assertIsNone(emb.load_embedding(track))
+        self.assertEqual(emb.embedding_version(track), 0)
+
+    def test_a_v1_vector_is_not_offered_as_training_data(self):
+        """A head is trained on ONE flat matrix. Mixing a 1280-wide row into a
+        2560-wide set would misalign every column after the first half and
+        silently train on noise — so the stale row is counted, not padded."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        fresh = self._track("1031")
+        legacy = self._track("1032")
+        self._store_embedding(fresh, [0.2] * emb.EMBED_DIM)
+        os.makedirs(os.path.dirname(legacy.path), exist_ok=True)
+        with open(emb.sidecar_path(legacy), "wb") as fp:
+            fp.write(emb._pack_f16([0.2] * emb.LEGACY_EMBED_DIM))
+        body = self.client.post(
+            "/api/genre/embeddings", json={"ids": [fresh.deezer_id, legacy.deezer_id]}
+        ).json
+        self.assertEqual(list(body["embeddings"]), [fresh.deezer_id])
+        self.assertEqual(body["stale"], 1)
+        self.assertEqual(body["dim"], emb.EMBED_DIM)
+
+    def test_the_aggregation_keeps_the_spread_it_was_given(self):
+        """mean + std, and NOT mean alone: two tracks with the same average
+        patch but a different spread must not come out identical."""
+        numpy = _numpy()
+        if numpy is None:
+            self.skipTest("numpy is not installed (it comes with the extractor)")
+        from supysonic.deezer import embedding as emb
+
+        dim = emb.MODEL_DIM
+        steady = emb._aggregate(
+            numpy.stack([numpy.ones(dim), numpy.ones(dim), numpy.ones(dim)])
+        )
+        wild = emb._aggregate(
+            numpy.stack([
+                numpy.ones(dim),
+                numpy.r_[numpy.ones(dim // 2), -numpy.ones(dim - dim // 2)],
+                numpy.r_[numpy.ones(dim // 2), -numpy.ones(dim - dim // 2)],
+            ])
+        )
+        self.assertEqual(len(steady), emb.EMBED_DIM)
+        # The second half IS the standard deviation: zero for a track that never
+        # moves, and clearly not zero for one that does.
+        self.assertLess(float(numpy.linalg.norm(steady[dim:])), 1e-6)
+        self.assertGreater(float(numpy.linalg.norm(wild[dim:])), 0.1)
+        self.assertLess(float(numpy.dot(steady, wild)), 0.99)
+
+    def test_the_aggregation_is_a_unit_vector(self):
+        """Everything downstream is a dot product, so the stored vector has to
+        be on the unit sphere whichever way the patches went."""
+        numpy = _numpy()
+        if numpy is None:
+            self.skipTest("numpy is not installed (it comes with the extractor)")
+        from supysonic.deezer import embedding as emb
+
+        rng = numpy.random.default_rng(7)
+        for n in (1, 2, 60):
+            v = emb._aggregate(
+                rng.standard_normal((n, emb.MODEL_DIM)).astype(numpy.float32)
+            )
+            self.assertAlmostEqual(float(numpy.linalg.norm(v)), 1.0, places=5)
 
     def test_a_vector_reads_back_without_the_extractor(self):
         """The optional dependency EXTRACTS; it must not be needed to READ.
@@ -3877,7 +4155,214 @@ class GenreStudioTestCase(unittest.TestCase):
         ids = {c["deezer_id"] for c in self.client.get("/api/genre/candidates").json["candidates"]}
         self.assertEqual(ids, {b.deezer_id})
 
+    # -- the prototype classifier ------------------------------------------
+
+    def test_prototype_names_the_nearest_labelled_genre(self):
+        """With no head at all, a single label per genre is enough to say
+        something — which is the whole reason the prototype exists."""
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        tek = self._tag("techno")
+        rap = self._tag("rap")
+        a = self._track("2001")
+        b = self._track("2002")
+        # Two clearly different directions, so "nearest" is not a coin toss.
+        self._store_embedding(a, self._vec(emb.EMBED_DIM, 0, 1.0))
+        self._store_embedding(b, self._vec(emb.EMBED_DIM, 1, 1.0))
+        self.client.post("/api/genre/label", json={"track": a.deezer_id, "tag": tek["id"]})
+        self.client.post("/api/genre/label", json={"track": b.deezer_id, "tag": rap["id"]})
+
+        self.assertEqual(gen.prototype_predict(self._vec(emb.EMBED_DIM, 0, 1.0))[0], "techno")
+        self.assertEqual(gen.prototype_predict(self._vec(emb.EMBED_DIM, 1, 1.0))[0], "rap")
+
+    def test_prototype_says_nothing_before_anything_is_labelled(self):
+        """None, not a guess: a studio with no labels has no opinion, and an
+        empty prototype must not be confused with one that happens to be far."""
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        self.assertIsNone(gen.centroids())
+        self.assertIsNone(gen.prototype_predict([0.5] * 1280))
+
+    def test_prototype_ignores_magnitude(self):
+        """Two copies of the same direction are the same genre whether they are
+        loud or quiet — the embedding's length is not the signal."""
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        tag = self._tag("hardtekk")
+        a = self._track("2011")
+        self._store_embedding(a, self._vec(emb.EMBED_DIM, 3, 0.01))
+        self.client.post("/api/genre/label", json={"track": a.deezer_id, "tag": tag["id"]})
+
+        # Same direction, a hundred times larger: still the same genre.
+        label, sim = gen.prototype_predict(self._vec(emb.EMBED_DIM, 3, 1.0))
+        self.assertEqual(label, "hardtekk")
+        self.assertAlmostEqual(sim, 1.0, places=3)
+
+    def test_a_second_label_on_a_genre_moves_its_prototype(self):
+        """The cache keys on the labelled SET. Adding a second track under a
+        genre that already exists changes no name, so a name-only key would
+        serve a stale centroid — the bug this pins."""
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        tag = self._tag("techno")
+        a = self._track("2031")
+        b = self._track("2032")
+        self._store_embedding(a, self._vec(emb.EMBED_DIM, 0, 1.0))
+        self.client.post("/api/genre/label", json={"track": a.deezer_id, "tag": tag["id"]})
+        gen.invalidate_centroids()
+        first = gen.centroids()["techno"]["centroid"]
+        self.assertEqual(first[0], 1.0)
+
+        # A second techno on another axis must pull the prototype towards it.
+        self._store_embedding(b, self._vec(emb.EMBED_DIM, 1, 1.0))
+        self.client.post("/api/genre/label", json={"track": b.deezer_id, "tag": tag["id"]})
+        gen.invalidate_centroids()
+        second = gen.centroids()["techno"]["centroid"]
+        self.assertEqual(gen.centroids()["techno"]["n"], 2)
+        self.assertLess(second[0], first[0])
+        self.assertGreater(second[1], 0.0)
+
+    def test_prototype_is_offered_but_never_relabels_a_track(self):
+        """The prototype has no confidence to gate on, so the analysis must not
+        use it. With no head to speak, the track keeps its measured style."""
+        from supysonic.deezer import analysis as an
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+        from supysonic.db import TrackAnalysis
+        import json as _json
+
+        self._login()
+        tag = self._tag("frenchcore")
+        a = self._track("2021")
+        b = self._track("2022")
+        self._store_embedding(a, self._vec(emb.EMBED_DIM, 0, 1.0))
+        self._store_embedding(b, self._vec(emb.EMBED_DIM, 0, 1.0))
+        self.client.post("/api/genre/label", json={"track": a.deezer_id, "tag": tag["id"]})
+
+        # b is unlabelled and is the nearest thing to the frenchcore prototype.
+        self.assertEqual(
+            gen.prototype_predict(self._vec(emb.EMBED_DIM, 0, 1.0))[0], "frenchcore"
+        )
+        # ...and yet, with no head loaded, the served payload must not call it
+        # frenchcore: only a tag or a gated head may name a genre.
+        row = TrackAnalysis(track=b, version=an.ANALYSIS_VERSION)
+        row.style = "unknown"
+        row.style_confidence = 0.0
+        row.data = _json.dumps({"source": "heuristic", "style": "unknown"})
+        row.save()
+        payload = an.payload_for(row, None)
+        self.assertNotEqual(payload.get("style"), "frenchcore")
+
+    # -- ordering the queue -------------------------------------------------
+
+    def test_uncertainty_ordering_prefers_the_undecided_tracks(self):
+        """The active-learning claim, pinned: a track the head cannot decide
+        comes before one it is sure of, even when the sure one is played more."""
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        # A head that likes axis 0 for "techno" and axis 1 for "rap".
+        self._head(("techno", "rap"), emb.EMBED_DIM)
+        # Certain: straight down axis 0, a big lead for techno.
+        sure = self._track("3001")
+        # Torn: equal on both axes, so the top two probabilities are ~equal and
+        # the margin is ~0. This is the example worth labelling.
+        torn = self._track("3002")
+        self._store_embedding(sure, self._vec(emb.EMBED_DIM, 0, 1.0))
+        torn_vec = self._vec(emb.EMBED_DIM, 0, 1.0)
+        torn_vec[1] = 1.0
+        self._store_embedding(torn, torn_vec)
+        # The SURE track is the most played, so the play-count order would put it
+        # first. Only the uncertainty order can rank the torn one ahead.
+        sure.play_count = 50
+        sure.save()
+        torn.play_count = 1
+        torn.save()
+        gen.invalidate()
+
+        body = self.client.get("/api/genre/candidates?sort=active").json
+        self.assertEqual(body["sort"], "active")
+        rows = {c["deezer_id"]: c for c in body["candidates"]}
+        self.assertGreater(rows["3002"]["uncertainty"], rows["3001"]["uncertainty"])
+        # Torn comes first despite being twenty-five times less played.
+        self.assertEqual(body["candidates"][0]["deezer_id"], "3002")
+
+    def test_uncertainty_is_reported_on_every_candidate(self):
+        """The studio's readout reads this field, so it must always be there —
+        including when there is no head, where nothing is decided yet."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        for i in range(3):
+            t = self._track(str(3200 + i))
+            self._store_embedding(t, [0.2] * emb.EMBED_DIM)
+        body = self.client.get("/api/genre/candidates?sort=active").json
+        for c in body["candidates"]:
+            self.assertIn("uncertainty", c)
+            self.assertIsInstance(c["uncertainty"], float)
+
+    def test_default_order_is_still_by_plays(self):
+        """The new ordering is opt-in: an existing studio's queue must not
+        silently reorder under it."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        a = self._track("3011")
+        self._store_embedding(a, [0.1] * emb.EMBED_DIM)
+        body = self.client.get("/api/genre/candidates").json
+        self.assertEqual(body["sort"], "plays")
+
+    def test_active_order_is_drawn_from_a_wider_window(self):
+        """An uncertainty ranking over the top of the play-count order would
+        only ever re-rank the music that least needs tagging."""
+        from supysonic.webui import genre as gweb
+
+        self.assertGreater(gweb.CANDIDATE_SCAN_ACTIVE, gweb.CANDIDATE_SCAN_MAX)
+
+    def test_uncertainty_order_keeps_a_random_reserve(self):
+        """Uncertainty alone walks the same borderline cluster for ever; the
+        reserve is what keeps the studio looking at genres it has not seen."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        for i in range(20):
+            t = self._track(str(3100 + i))
+            self._store_embedding(t, [0.1] * emb.EMBED_DIM)
+        body = self.client.get("/api/genre/candidates?limit=10&sort=active").json
+        self.assertEqual(len(body["candidates"]), 10)
+        # The reserve is a fifth of the page, so the tail must not be simply the
+        # most-uncertain ten: some rows have to come from beyond the cut.
+        ids = [c["deezer_id"] for c in body["candidates"]]
+        self.assertEqual(len(set(ids)), 10)
+
     # -- the head ----------------------------------------------------------
+
+    @staticmethod
+    def _vec(dim, axis, scale=1.0):
+        """A one-hot embedding on `axis`, scaled. Simple enough that "nearest
+        prototype" and "which axis the head likes" are not a matter of opinion."""
+        out = [0.0] * dim
+        out[axis] = scale
+        return out
+
+    def _head(self, labels, dim):
+        """A head that recognises one axis per label, and is SURE of it."""
+        rows = []
+        for i in range(len(labels)):
+            row = [0.0] * dim
+            row[i % dim] = 4.0
+            rows.append(row)
+        r = self._put_linear(labels, rows, [0.0] * len(labels), dim)
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.json
 
     @staticmethod
     def _encode(values):
@@ -3913,11 +4398,76 @@ class GenreStudioTestCase(unittest.TestCase):
         gen.invalidate()
         self.assertEqual(gen.predict([1, 0, 0, 0])[0], "techno")
         self.assertEqual(gen.predict([0, 1, 0, 0])[0], "zaag")
-        label, conf, dist = gen.predict([1, 0, 0, 0])
+        label, conf, dist, margin = gen.predict([1, 0, 0, 0])
         self.assertGreater(conf, 0.9)
         self.assertAlmostEqual(sum(dist.values()), 1.0, places=3)
+        # The margin is what separates "this is that genre" from "this is one of
+        # two": on a head that is sure, it is nearly the confidence itself.
+        self.assertGreater(margin, 0.8)
+        # A tie is the case the margin exists for: the head is 0.5 confident and
+        # has decided nothing. A threshold on confidence alone would act on it.
+        tie = gen.predict([0.5, 0.5, 0, 0])
+        self.assertAlmostEqual(tie[1], 0.5, places=2)
+        self.assertAlmostEqual(tie[3], 0.0, places=2)
         # A vector of the wrong width is not a guess, it is a mistake.
         self.assertIsNone(gen.predict([1, 0, 0]))
+
+    def test_a_temperature_from_the_metrics_flattens_the_confidence(self):
+        """The studio fits a temperature on held-out folds and ships it in the
+        metrics. The server must apply it, because the number it feeds the gate
+        is the whole reason the scalar exists — and it must NOT change which
+        label wins, which is the safety argument for applying it at all."""
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        dim = 4
+        # A head that is very sure of "techno" on the first axis.
+        labels, weights, biases = ["techno", "zaag"], [[4, 0, 0, 0], [0, 4, 0, 0]], [0, 0]
+        base = {
+            "labels": labels,
+            "weights": self._encode([v for r in weights for v in r] + biases),
+            "dim": dim,
+            "kind": "linear",
+        }
+        r = self.client.put("/api/genre/model", json={**base, "metrics": {"balanced": 0.9}})
+        self.assertEqual(r.status_code, 200, r.data)
+        gen.invalidate()
+        hot_label, hot_conf, _dist, _margin = gen.predict([1, 0, 0, 0])
+
+        # The same weights, now carrying a fitted temperature of 4.
+        r = self.client.put(
+            "/api/genre/model",
+            json={**base, "metrics": {"balanced": 0.9, "temperature": 4.0}},
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        gen.invalidate()
+        cool_label, cool_conf, dist, margin = gen.predict([1, 0, 0, 0])
+
+        # Same verdict, quieter claim — which is the point of the scalar.
+        self.assertEqual(cool_label, hot_label)
+        self.assertLess(cool_conf, hot_conf)
+        self.assertAlmostEqual(sum(dist.values()), 1.0, places=3)
+        self.assertLess(margin, 0.5)
+
+    def test_an_absurd_temperature_is_ignored_rather_than_obeyed(self):
+        """A hand-written or corrupted metrics blob must not be able to make
+        the head report anything it likes. Outside the sane range, T is 1."""
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        dim = 2
+        base = {
+            "labels": ["a", "b"],
+            "weights": self._encode([2, 0, 0, 2, 0, 0]),
+            "dim": dim,
+            "kind": "linear",
+        }
+        r = self.client.put("/api/genre/model", json={**base, "metrics": {"temperature": 1e9}})
+        self.assertEqual(r.status_code, 200, r.data)
+        gen.invalidate()
+        # Unflattened, an argmax of 2-vs-0 is essentially certain.
+        _label, conf, _dist, _margin = gen.predict([1, 0])
+        self.assertGreater(conf, 0.8)
 
     def test_an_mlp_head_round_trips_and_its_relu_fires(self):
         """An MLP is the same wire format with two more blocks; the relu has to

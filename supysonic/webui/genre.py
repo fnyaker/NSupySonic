@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random as _random
 import threading
 
 from uuid import UUID
@@ -38,6 +39,11 @@ CANDIDATE_MAX = 100
 # that a normal library fills the page on the first pass, small enough that a
 # pathological one cannot turn the request into a table scan.
 CANDIDATE_SCAN_MAX = 4000
+# The window the uncertainty ranking looks at. Wider on purpose: the most
+# INFORMATIVE examples are not the most PLAYED ones, so a ranking drawn from the
+# top of the play-count order would only ever re-rank the music that least needs
+# tagging. Still bounded — this is a scroll position, not a table walk.
+CANDIDATE_SCAN_ACTIVE = 12000
 # A head for a 1280-d extractor and fifty genres is ~130 KB of base64. A big
 # two-layer MLP (2x512) is ~2.5 MB. Eight megabytes is far past anything
 # legitimate and stops a bad request from being a memory problem.
@@ -195,6 +201,9 @@ def _track_json(t, prediction=None):
     if prediction:
         out["predicted"] = prediction[0]
         out["confidence"] = prediction[1]
+        # top1 − top2: what tells "this is that genre" from "this is somewhere
+        # between three". The studio can show it, and the analysis gates on it.
+        out["margin"] = prediction[3] if len(prediction) > 3 else None
     return out
 
 
@@ -495,6 +504,9 @@ def genre_label():
     TrackTag.delete().where(TrackTag.track == track).execute()
     raw = data.get("tag")
     if raw in (None, "", 0):
+        # The prototype is a running average over the labelled set, so a label
+        # removed has to leave it, not linger for the length of a TTL.
+        _forget_centroids()
         return jsonify({"track": str(track.id), "tag": None})
     tag = GenreTag.get_or_none(GenreTag.id == raw) or GenreTag.get_or_none(
         GenreTag.name == str(raw)
@@ -502,7 +514,20 @@ def genre_label():
     if tag is None:
         return jsonify({"error": "unknown tag"}), 404
     TrackTag.create(track=track, tag=tag)
+    # This one label just moved a genre's prototype, and the very next page the
+    # admin sees is the candidate list — showing them a prediction that ignores
+    # the label they just applied would be worse than showing none.
+    _forget_centroids()
     return jsonify({"track": str(track.id), "tag": _tag_json(tag)})
+
+
+def _forget_centroids():
+    from ..deezer import genre as gen
+
+    try:
+        gen.invalidate_centroids()
+    except Exception:
+        logger.debug("genre: could not drop the prototype cache", exc_info=True)
 
 
 @webapi.route("/genre/candidates")
@@ -511,10 +536,24 @@ def genre_label():
 def genre_candidates():
     """Tracks worth tagging next, with what the model currently thinks.
 
-    Ordered by play count: the labels that matter most are the ones on music
-    this library actually listens to. Each row carries the model's current guess
-    so tagging is mostly CONFIRMING — which is the difference between labelling
-    two hundred tracks and giving up after twenty.
+    Ordered by play count by default: the labels that matter most are the ones on
+    music this library actually listens to. Each row carries the model's current
+    guess so tagging is mostly CONFIRMING — which is the difference between
+    labelling two hundred tracks and giving up after twenty.
+
+    ``?sort=active`` orders by UNCERTAINTY instead, which is the active-learning
+    argument: an example the model is already sure about teaches it almost
+    nothing, however often it has been played, so a labelling budget spent on the
+    most-played tracks first is a budget spent on the easiest ones. The score is
+    ``(1 - margin) * sqrt(1 + play_count)`` rather than margin alone — a pure
+    uncertainty ranking would walk straight past the music that matters to this
+    library, and the square root keeps familiarity in the ranking without letting
+    one heavily-played weak case monopolise the top.
+
+    Both orders keep a small RANDOM reserve at the end. Uncertainty sampling on
+    its own interrogates the same borderline cluster for ever and never looks at
+    a genre it has not seen; the reserve is the documented cold-start fix, and it
+    is taken from the same bounded scan so it costs nothing extra.
     """
     from ..deezer import embedding as emb
     from ..deezer import genre as gen
@@ -523,6 +562,13 @@ def genre_candidates():
         limit = max(1, min(CANDIDATE_MAX, int(request.args.get("limit", 40))))
     except (TypeError, ValueError):
         limit = 40
+    by_uncertainty = str(request.args.get("sort") or "") in ("active", "uncertainty")
+    # The scan window is the whole cost of this endpoint when a head exists: each
+    # row is looked at, and a prediction is a dot product over 1280 floats. A
+    # larger pool is what makes an uncertainty ranking mean anything — the best
+    # fifty examples are not in the first four hundred by play count — so the
+    # window is wider than the default path needs, and never unbounded.
+    scan = CANDIDATE_SCAN_ACTIVE if by_uncertainty else CANDIDATE_SCAN_MAX
     labelled = {tt.track_id for tt in TrackTag.select(TrackTag.track)}
     rows = []
     scanned = 0
@@ -534,25 +580,65 @@ def genre_candidates():
         # so filling the list costs one stat per row looked at. Without a cap, a
         # library whose vectors are still being extracted — every library on its
         # first day — pays a full table walk on every request.
-        .limit(CANDIDATE_SCAN_MAX)
+        .limit(scan)
     )
     for track in query:
-        if len(rows) >= limit:
-            break
         scanned += 1
         if track.id in labelled:
             continue
         vec = emb.load_embedding(track)
         if vec is None:
             continue
-        rows.append(_track_json(track, gen.predict(vec)))
+        guess = gen.predict(vec)
+        row = _track_json(track, guess)
+        # The head is only one of two opinions once labels exist. The prototype
+        # needs no training, so it is the only one with something to say while a
+        # genre is still one or two examples old — see deezer/genre.py.
+        proto = gen.prototype_predict(vec)
+        if proto:
+            row["prototype"] = {"label": proto[0], "similarity": proto[1]}
+        if guess:
+            # top1 − top2 already says how decided the head is.
+            margin = guess[3] if len(guess) > 3 else 1.0
+            row["uncertainty"] = round(max(0.0, 1.0 - margin), 4)
+        else:
+            # No head: nothing is "decided", so everything is equally worth a
+            # look and play count is free to break the tie.
+            row["uncertainty"] = 1.0
+        rows.append(row)
+
+    truncated = len(rows) > limit
+    if not by_uncertainty:
+        rows = rows[:limit]
+    else:
+        import math as _math
+
+        # A random reserve, drawn from the rows we already have, so the studio
+        # keeps some coverage of genres the head is confident it has never seen.
+        reserve = max(1, limit // 5)
+        scored = sorted(
+            rows,
+            key=lambda r: (r.get("uncertainty") or 0.0)
+            * _math.sqrt(1 + (r.get("play_count") or 0)),
+            reverse=True,
+        )
+        head_rows = scored[: max(0, limit - reserve)]
+        rest = scored[len(head_rows) :]
+        # Fisher-Yates over the remainder, so the reserve is genuinely random
+        # rather than "the least-played of the uncertain".
+        for i in range(len(rest) - 1, 0, -1):
+            j = int(_math.floor((i + 1) * _random.random()))
+            rest[i], rest[j] = rest[j], rest[i]
+        rows = head_rows + rest[:reserve]
+
     return jsonify(
         {
             "candidates": rows,
             "labelled": len(labelled),
+            "sort": "active" if by_uncertainty else "plays",
             # True when the scan stopped on its own cap rather than on the list
             # being full: there may be more, we just did not look further.
-            "truncated": scanned >= CANDIDATE_SCAN_MAX and len(rows) < limit,
+            "truncated": scanned >= scan and truncated,
         }
     )
 
@@ -586,6 +672,13 @@ def genre_embeddings():
     Only tracks that already HAVE a vector: this endpoint never extracts. The
     studio asks for hundreds at once and an answer that had to decode hundreds
     of files would arrive tomorrow.
+
+    Only vectors at the CURRENT width are served, and the rest are counted in
+    ``stale``. A head is trained on one flat matrix: mixing v1 (mean-only) and
+    v2 (mean+std) rows would misalign every column after the first 1280 and
+    silently train on noise. A stale row is a row whose extractor has not been
+    re-run since the aggregation changed, which the studio already offers as a
+    button — so the honest answer is "not yet", not a padded vector.
     """
     from ..deezer import embedding as emb
 
@@ -594,14 +687,19 @@ def genre_embeddings():
     if not isinstance(raw, list):
         return jsonify({"error": "ids must be a list"}), 400
     out = {}
+    stale = 0
     for ident in list(dict.fromkeys(str(x) for x in raw))[:EMBED_BATCH_MAX]:
         track = _resolve(ident)
         if track is None:
             continue
         vec = emb.load_embedding(track)
-        if vec is not None:
-            out[ident] = emb.encode_embedding(vec)
-    return jsonify({"embeddings": out, "dim": emb.EMBED_DIM})
+        if vec is None:
+            continue
+        if len(vec) != emb.EMBED_DIM:
+            stale += 1
+            continue
+        out[ident] = emb.encode_embedding(vec)
+    return jsonify({"embeddings": out, "dim": emb.EMBED_DIM, "stale": stale})
 
 
 @webapi.route("/genre/model", methods=["GET", "PUT", "DELETE"])

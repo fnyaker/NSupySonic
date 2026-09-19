@@ -400,6 +400,19 @@ export function closeReplace() {
   replaceSheet.set(null);
 }
 
+// -- genre tag sheet ---------------------------------------------------------
+// { track } | null — the genre this track IS, applied from inside the player.
+// The studio is where a tagging pass happens; this is the other half of it, the
+// moment you are already listening and know the answer. Admin-only in effect
+// (the writes behind it are), and mounted once in App.svelte like the rest.
+export const genreTagSheet = writable(null);
+export function openGenreTag(track) {
+  if (track && (track.deezer_id || track.id)) genreTagSheet.set({ track });
+}
+export function closeGenreTag() {
+  genreTagSheet.set(null);
+}
+
 // -- export sheet ------------------------------------------------------------
 // { kind: "playlist" | "album" | "favorites", id, title } | null — pick a format
 // and download the whole thing as a ZIP. Mounted once in App.svelte.

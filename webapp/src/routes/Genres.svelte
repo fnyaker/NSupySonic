@@ -59,6 +59,11 @@
   let tagging = false;
   let noMore = false;
   let candidatesLoaded = false;
+  // Which order the studio walks the library in. "plays" is the original and
+  // stays the default; "active" asks the server for the tracks the head is least
+  // sure about, which is the active-learning argument — see the candidates
+  // endpoint. Neither is wrong, so it is the user's switch to flip.
+  let candidateSort = "plays";
   $: current = candidates[cursor] || null;
   $: tags = status?.tags || [];
   $: counts = status?.counts || {};
@@ -172,7 +177,7 @@
     if (tagging) return;
     tagging = true;
     try {
-      const res = await api.genreCandidates(40);
+      const res = await api.genreCandidates(40, candidateSort === "active" ? "active" : null);
       candidates = res.candidates || [];
       cursor = 0;
       noMore = candidates.length === 0;
@@ -182,6 +187,15 @@
     } finally {
       tagging = false;
     }
+  }
+
+  // Switching the order re-fetches rather than re-sorts what is in hand: the
+  // uncertain tracks are drawn from a much wider window of the library, so the
+  // list is a different set of tracks and not the same ones rearranged.
+  function switchSort(mode) {
+    if (mode === candidateSort) return;
+    candidateSort = mode;
+    loadCandidates();
   }
 
   // -- vocabulary actions -----------------------------------------------------
@@ -894,6 +908,31 @@
           </div>
         </div>
 
+        <!-- The order switch. It is the one control that changes what labelling
+             is worth, so it sits above the card rather than buried: "les plus
+             écoutés" improves the model on the music you actually play, "les
+             plus incertains" improves it fastest overall. Neither dominates,
+             which is why it is a choice and not a default of ours. -->
+        <div class="sortbar" role="tablist" aria-label="Ordre des titres à étiqueter">
+          <button
+            class:on={candidateSort === "plays"}
+            role="tab"
+            aria-selected={candidateSort === "plays"}
+            on:click={() => switchSort("plays")}
+          >Les plus écoutés</button>
+          <button
+            class:on={candidateSort === "active"}
+            role="tab"
+            aria-selected={candidateSort === "active"}
+            on:click={() => switchSort("active")}
+          >Les plus incertains</button>
+          <span class="hint muted small">
+            {candidateSort === "active"
+              ? "les titres où le modèle hésite : chaque étiquette lui apprend le plus"
+              : "le modèle s'améliore d'abord sur ce que tu écoutes vraiment"}
+          </span>
+        </div>
+
         {#if extractor.available}
           <div class="embed-bar" class:running={embed?.running}>
             {#if embed?.running}
@@ -1044,10 +1083,32 @@
                   <span class="guess-bar">
                     <i style={`width:${pct(current.confidence)}%`}></i>
                   </span>
+                  {#if current.uncertainty !== undefined && current.uncertainty !== null}
+                    <span class="guess-sub">
+                      {#if current.uncertainty >= 0.6}
+                        La tête hésite — étiqueter ce titre lui apprend beaucoup.
+                      {:else if current.uncertainty <= 0.15}
+                        La tête est sûre. Confirmer est surtout une vérification.
+                      {:else}
+                        Hésitation moyenne.
+                      {/if}
+                    </span>
+                  {/if}
                 </div>
               {:else}
                 <p class="muted small guess-none">
                   Aucun modèle ne s'est encore prononcé sur ce titre.
+                </p>
+              {/if}
+              {#if current.prototype}
+                <!-- The prototype exists precisely when the head has nothing
+                     useful to say. Shown as a second opinion, never as the
+                     proposition: it has no confidence to gate on, so it is
+                     allowed to suggest and not allowed to decide. -->
+                <p class="proto">
+                  <Icon name="tag" size={13} />
+                  Plus proche genre étiqueté : <b>{current.prototype.label}</b>
+                  <span class="muted">({pct(current.prototype.similarity)} % de ressemblance)</span>
                 </p>
               {/if}
             </div>
@@ -1358,6 +1419,27 @@
                   validation croisée {head.metrics.folds} plis · {head.metrics.examples} titres
                 </span>
               </div>
+              {#if head.metrics.temperature && Math.abs(head.metrics.temperature - 1) > 0.03}
+                <div class="score">
+                  <span class="k">Calibration</span>
+                  <span class="v">×{head.metrics.temperature.toFixed(2)}</span>
+                  <span class="muted small">
+                    {head.metrics.temperature > 1
+                      ? "le modèle était trop sûr de lui : ses confiances sont ramenées à ce qu'elles valent avant que le serveur ne s'en serve"
+                      : "le modèle était trop timide : ses confiances sont relevées"}
+                  </span>
+                </div>
+              {/if}
+              {#if head.metrics.bagged}
+                <div class="score">
+                  <span class="k">Bagging</span>
+                  <span class="v">{head.metrics.bagged} têtes</span>
+                  <span class="muted small">
+                    plusieurs entraînements moyennés, pour que la note ne dépende pas
+                    du hasard des lots
+                  </span>
+                </div>
+              {/if}
             </div>
 
             <table class="per-class">
@@ -1398,6 +1480,33 @@
                   {/each}
                 {/each}
               </div>
+              {#if head.metrics.confusions?.length}
+                <!-- The same matrix, read out as pairs, because the useful part
+                     of an audit is the sentence you get out of it. It is
+                     deliberately worded as a question rather than a verdict:
+                     the model cannot tell two genres that sound alike from one
+                     genre that was labelled two ways, and only you know which
+                     of those you are looking at. -->
+                <div class="pairs">
+                  <h4>Ce que le modèle confond</h4>
+                  <ul>
+                    {#each head.metrics.confusions.slice(0, 6) as c}
+                      <li class:heavy={c.share >= 0.3}>
+                        <b>{c.from}</b> → <b>{c.to}</b>
+                        <span class="muted small">
+                          {c.count} titre{c.count > 1 ? "s" : ""} ({pct(c.share)} % de « {c.from} »)
+                        </span>
+                      </li>
+                    {/each}
+                  </ul>
+                  <p class="muted small">
+                    Deux genres qui se confondent sont soit deux sons vraiment
+                    proches — l'étiquetage est bon, la frontière est difficile —
+                    soit un seul genre que tu as nommé de deux façons. Le modèle
+                    ne peut pas trancher entre les deux ; toi, si.
+                  </p>
+                </div>
+              {/if}
             </div>
 
             {#if head.skipped}
@@ -1951,6 +2060,88 @@
   }
   .guess-none {
     margin-top: 12px;
+  }
+  /* The order switch, above the tagging card. Quiet by default so it does not
+     read as a call to action; the chosen side carries the accent. */
+  .sortbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 14px;
+  }
+  .sortbar button {
+    background: none;
+    border: 1px solid var(--border, #2a2d33);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 12.5px;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.72;
+  }
+  .sortbar button:hover {
+    opacity: 1;
+  }
+  .sortbar button.on {
+    opacity: 1;
+    border-color: var(--accent, #22d3ee);
+    color: var(--accent, #22d3ee);
+  }
+  .sortbar .hint {
+    flex: 1 1 200px;
+    min-width: 0;
+  }
+  /* The uncertainty readout. Deliberately one quiet line rather than a badge:
+     it is a hint about what to do next, not a score to chase. */
+  .guess-sub {
+    display: block;
+    margin-top: 6px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    opacity: 0.72;
+  }
+  /* The prototype's second opinion. Visually subordinate to the proposition —
+     smaller, indented, no colour — because it is the weaker of the two claims
+     and must not read like a competing verdict. */
+  .proto {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0 0;
+    font-size: 12px;
+    opacity: 0.8;
+  }
+  .proto b {
+    font-weight: 600;
+  }
+
+  /* The confused pairs, below the matrix that produced them. */
+  .pairs {
+    margin-top: 14px;
+  }
+  .pairs h4 {
+    margin: 0 0 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    opacity: 0.85;
+  }
+  .pairs ul {
+    margin: 0 0 8px;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .pairs li {
+    font-size: 12.5px;
+    padding: 2px 0;
+  }
+  /* A pair that eats a third of a genre is the one worth acting on, so it gets
+     the weight; anything below that is noise the user can ignore. */
+  .pairs li.heavy {
+    font-weight: 600;
   }
 
   .choices {

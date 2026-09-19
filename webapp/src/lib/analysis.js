@@ -8,9 +8,18 @@
 // part of the track. With a served BPM the beat tracker starts locked and only
 // has to find the phase.
 //
-// Everything here is best-effort. A track nobody has measured yet simply has no
-// entry, and the live detector carries it exactly as it did before — so this is
-// an accelerator, never a dependency.
+// Sometimes the answer does not exist YET. When the server has a way to reach
+// one — a trained genre head, or the extractor plus a head on top of it — it
+// measures the track in the background and tells us which ids to come back for
+// (`pending`). Those ids are polled here for a while, and the moment a verdict
+// lands it is written to the same cache as any other, so the player swaps to
+// the served genre mid-track instead of carrying its live guess to the end.
+// This is what makes the tag button pay off immediately: labelling a track
+// gives it a verdict with no measurement at all.
+//
+// Everything here is best-effort. A track nobody has measured, and nobody can
+// measure, simply has no entry, and the live detector carries it exactly as it
+// did before — so this is an accelerator, never a dependency.
 
 import { api } from "./api.js";
 
@@ -20,6 +29,15 @@ const mem = new Map(); // id -> verdict | null (null = asked, nothing there)
 const pending = new Set();
 let dirty = false;
 let flushTimer = null;
+
+// A track the server has put on ITS queue is worth a few more questions: the
+// measurement is one ffmpeg pass plus one model run, so seconds, not minutes.
+// Polled on a widening interval and then given up on — a server that is busy,
+// or that died mid-job, must not keep a player asking forever.
+const POLL_DELAYS = [1500, 3000, 6000, 12000, 25000];
+const awaiting = new Map(); // id -> attempt count
+let pollTimer = null;
+const listeners = new Set();
 
 function load() {
   try {
@@ -63,6 +81,99 @@ export function knownAnalysis(id) {
 }
 
 /**
+ * Subscribe to verdicts that arrive LATE. Returns an unsubscribe function.
+ *
+ * The engine seeds a verdict once, at the track change. A verdict that lands
+ * afterwards — because the server had to measure it first — would otherwise be
+ * missed until the NEXT play, which is exactly the case the tag button and the
+ * background analysis create. Listeners are what let the player adopt it now.
+ */
+export function onAnalysis(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+function announce(id, verdict) {
+  for (const fn of listeners) {
+    try {
+      fn(id, verdict);
+    } catch {
+      /* a broken listener must not stop the others */
+    }
+  }
+}
+
+function store(id, verdict) {
+  const had = mem.get(id) || null;
+  mem.set(id, verdict || null);
+  schedule();
+  // A miss is not an event: it is the absence of one, and it is remembered so
+  // the same track is not re-asked on every play.
+  if (verdict && JSON.stringify(had) !== JSON.stringify(verdict))
+    announce(id, verdict);
+}
+
+/** Come back for these in a moment; the server has them on its queue. */
+function watch(ids) {
+  let grew = false;
+  for (const id of ids || []) {
+    const key = String(id);
+    if (mem.get(key)) continue;
+    if (!awaiting.has(key)) {
+      awaiting.set(key, 0);
+      grew = true;
+    }
+  }
+  if (grew) armPoll();
+}
+
+function armPoll() {
+  if (pollTimer !== null || !awaiting.size) return;
+  pollTimer = setTimeout(pollDue, POLL_DELAYS[0]);
+}
+
+function pollDue() {
+  pollTimer = null;
+  const ids = [...awaiting.keys()];
+  if (!ids.length) return;
+  api
+    .trackAnalyses(ids)
+    .then((r) => {
+      const got = (r && r.analyses) || {};
+      // Back into `awaiting` only if the server still says it is working on it.
+      const still = new Set((r && r.pending) || []);
+      for (const id of ids) {
+        if (got[id]) {
+          store(id, got[id]);
+          awaiting.delete(id);
+          continue;
+        }
+        const n = (awaiting.get(id) || 0) + 1;
+        if (n > POLL_DELAYS.length || (still.size && !still.has(id))) {
+          // Either we have asked enough, or the server has stopped working on
+          // it — an unmeasurable track, or a job that died. Leave the miss in
+          // the cache and stop asking; the live detector carries it.
+          awaiting.delete(id);
+          mem.set(id, null);
+        } else {
+          awaiting.set(id, n);
+        }
+      }
+    })
+    .catch(() => {
+      /* an outage is not a reason to hammer: keep the queue, try again later */
+    })
+    .finally(() => {
+      schedule();
+      if (awaiting.size) {
+        let max = 0;
+        for (const n of awaiting.values()) if (n > max) max = n;
+        pollTimer = setTimeout(pollDue, POLL_DELAYS[Math.min(max, POLL_DELAYS.length - 1)]);
+      }
+    });
+}
+
+/**
  * Ask for a run of tracks in one call, skipping the ones already answered.
  * Fire-and-forget: answers land in the cache for `knownAnalysis` to find.
  */
@@ -88,9 +199,11 @@ export function primeAnalyses(ids) {
         // must not be re-asked on every play. A reload picks it up once the
         // server has caught up, which is the right cadence for something that
         // only changes when the archive does.
-        mem.set(id, got[id] || null);
+        store(id, got[id] || null);
       }
-      schedule();
+      // ...unless the server has just started measuring it, in which case the
+      // answer is a moment away and we should be there to catch it.
+      watch(r && r.pending);
     })
     .catch(() => {
       for (const id of want) pending.delete(id);
@@ -98,6 +211,17 @@ export function primeAnalyses(ids) {
     .finally(() => {
       for (const id of want) pending.delete(id);
     });
+}
+
+/**
+ * Record a verdict a caller obtained itself (the tag picker writes one), so the
+ * player uses it at once instead of waiting for the next play to notice.
+ */
+export function putAnalysis(id, verdict) {
+  if (!id) return;
+  pending.delete(String(id));
+  awaiting.delete(String(id));
+  store(String(id), verdict || null);
 }
 
 if (typeof window !== "undefined") window.addEventListener("pagehide", flush);

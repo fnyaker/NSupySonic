@@ -21,6 +21,11 @@
 // code path that exists BECAUSE the accuracy was not good enough, five seconds
 // is not worth ten points. It stays available for very large label sets.
 
+// The temperature fit is shared with the linear trainer rather than duplicated:
+// the calibration argument is identical for an MLP and a linear head, and two
+// copies of a formula are two places for it to drift.
+import { fitTemperature } from "./train.js";
+
 const ALIGN = 16;
 
 export const DEEP_DEFAULTS = {
@@ -349,6 +354,10 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
 
   const confusion = Array.from({ length: C }, () => new Int32Array(C));
   const scratch = new Float32Array(C);
+  // Held-out logits for the temperature fit. predictNet leaves them in
+  // `scratch` after it picks the argmax, so nothing extra has to be computed.
+  const held = [];
+  const heldY = [];
   let correct = 0;
   let total = 0;
   for (let f = 0; f < folds; f++) {
@@ -368,8 +377,12 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
       confusion[y[i]][got]++;
       if (got === y[i]) correct++;
       total++;
+      held.push(Array.from(scratch));
+      heldY.push(y[i]);
     }
   }
+
+  const temperature = fitTemperature(held, heldY, C);
 
   report("deep", 0.85);
   await yieldToUI();
@@ -437,6 +450,7 @@ export async function trainDeep(data, wasm, onProgress, options = {}) {
       projected: useProj ? k : 0,
       accuracy: total ? +(correct / total).toFixed(3) : 0,
       balanced: +balanced.toFixed(3),
+      temperature,
       perClass,
       confusion: confusion.map((r) => Array.from(r)),
     },

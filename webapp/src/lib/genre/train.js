@@ -32,11 +32,73 @@ export const DEFAULTS = {
   // Train in a randomly projected space when the embedding is wide (see
   // project() below). 0 disables it.
   proj: 256,
+  // Members averaged into the shipped head. See bagCount().
+  bag: 3,
 };
 
 // A cross-validated balanced accuracy below this is weak enough that the
 // projection is worth ruling out as the cause — see the end of trainHead.
 const RETRY_BELOW = 0.8;
+
+// How many members the bagged head averages, in the cross-validation and in the
+// final fit.
+//
+// Deliberately small, and the cost is the reason rather than the benefit. Every
+// member is a full Adam run over every fold, and this trainer yields to the UI
+// between folds so the page keeps painting — with three members a five-fold run
+// is fifteen fits, and the studio's progress bar goes from a couple of seconds
+// to most of ten. That is the whole budget.
+//
+// Three and not one: the objective is convex and the members share their
+// initialisation, so the only thing being averaged away is the batch order, and
+// most of what that noise contributes is gone by the second member. Five would
+// be defensible and two would be nearly as good; three is where the curve is
+// already flat. Below a handful of examples a bag is not worth the arithmetic,
+// so it collapses to a single fit.
+export const BAG_DEFAULT = 3;
+const BAG_MIN_EXAMPLES = 12;
+
+function bagCount(opt, C, n) {
+  const want = Math.max(1, Math.min(8, opt.bag ?? BAG_DEFAULT));
+  if (want <= 1) return 1;
+  // Fewer than a few examples per class: the folds are already a coin toss and
+  // three near-identical fits add nothing but time.
+  if (n < Math.max(BAG_MIN_EXAMPLES, C * 3)) return 1;
+  return want;
+}
+
+/**
+ * A copy of X with gaussian noise added to every row.
+ *
+ * OFF by default, and that is the decision rather than the starting point.
+ * Adding noise to the inputs is a cheap regulariser and it sometimes helps — but
+ * it helps the model that was TRAINED ON NOISY DATA, and what ships here is a
+ * head evaluated on clean embeddings by a server that knows nothing about any of
+ * this. There is no augmentation at inference, so noise can just as easily teach
+ * the head to lean on a direction the real vector will not have. It is a bet
+ * that has to be won on the held-out score, not a free win, so it stays behind
+ * an explicit `noise` option and the studio does not set it.
+ *
+ * `sigma` is a fraction of the embedding's scale rather than an absolute amount,
+ * so the same option means the same thing whatever the extractor's output range
+ * is. It is added to the TRAINING rows only: the fold's held-out rows and the
+ * server's real vectors stay clean, so what the score measures is still the
+ * model that ships, evaluated on the data it will actually see.
+ */
+function noisify(X, n, d, sigma, seed) {
+  const rand = rng(seed);
+  const out = new Float32Array(X.length);
+  out.set(X);
+  for (let i = 0; i < n; i++) {
+    const off = i * d;
+    for (let j = 0; j < d; j++) {
+      const u = Math.max(1e-12, rand());
+      const v = rand();
+      out[off + j] += Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) * sigma;
+    }
+  }
+  return out;
+}
 
 // A fixed-stream PRNG, so a training run is reproducible while it lasts.
 function rng(seed) {
@@ -100,14 +162,20 @@ function unproject(W, P, C, k, d) {
   return out;
 }
 
-function softmaxInto(out, x, W, b, d, C, off) {
-  let top = -Infinity;
+function logitsInto(out, x, W, b, d, C, off) {
   for (let c = 0; c < C; c++) {
     let acc = b[c];
     const row = c * d;
     for (let i = 0; i < d; i++) acc += W[row + i] * x[off + i];
     out[c] = acc;
-    if (acc > top) top = acc;
+  }
+}
+
+function softmaxInto(out, x, W, b, d, C, off) {
+  logitsInto(out, x, W, b, d, C, off);
+  let top = -Infinity;
+  for (let c = 0; c < C; c++) {
+    if (out[c] > top) top = out[c];
   }
   let sum = 0;
   for (let c = 0; c < C; c++) {
@@ -116,6 +184,51 @@ function softmaxInto(out, x, W, b, d, C, off) {
   }
   const inv = 1 / (sum || 1);
   for (let c = 0; c < C; c++) out[c] *= inv;
+}
+
+/**
+ * Fit one scalar temperature on held-out logits, by minimum NLL.
+ *
+ * A softmax trained on a few hundred examples is over-confident as a rule —
+ * measured on this data, a head that is right about 70% of the time reports
+ * 0.9+. That matters here and not in a benchmark, because the server gates on
+ * THAT number before it lets the head relabel a track: an over-confident head
+ * gets its wrong calls acted on. Dividing every logit by one fitted constant
+ * re-scales the confidence without changing a single argmax, so the labels the
+ * studio already shows do not move and only the ones the gate would accept do.
+ *
+ * A coarse grid, not a solver: the objective is unimodal in log T and the
+ * grid is 40 evaluations of a handful of exponentials. Precision past the grid
+ * step would be fitting noise on this many examples.
+ *
+ * @param {Float32Array[]} held  held-out logit vectors, one per test example
+ * @param {Int32Array} labels    the true class of each, same order
+ * @param {number} C             class count
+ * @returns {number} the fitted T, clamped to [0.5, 4] and rounded
+ */
+export function fitTemperature(held, labels, C) {
+  if (!held.length || C < 2) return 1;
+  let bestT = 1;
+  let best = Infinity;
+  for (let step = -20; step <= 20; step++) {
+    const T = Math.pow(2, step / 20); // 0.5 .. 4, a factor of 2^(1/20) apart
+    let nll = 0;
+    for (let e = 0; e < held.length; e++) {
+      const logits = held[e];
+      const y = labels[e];
+      let top = -Infinity;
+      for (let c = 0; c < C; c++) if (logits[c] / T > top) top = logits[c] / T;
+      let sum = 0;
+      for (let c = 0; c < C; c++) sum += Math.exp(logits[c] / T - top);
+      const p = Math.exp(logits[y] / T - top) / (sum || 1);
+      nll -= Math.log(Math.max(p, 1e-12));
+    }
+    if (nll < best) {
+      best = nll;
+      bestT = T;
+    }
+  }
+  return +bestT.toFixed(3);
 }
 
 /**
@@ -249,9 +362,24 @@ export async function trainHead(data, onProgress, options = {}) {
       ? project(X, n, d, projDim, (Math.random() * 0xffffffff) >>> 0)
       : { Z: X, P: null };
     const dim = useProj ? projDim : d;
+    // If the caller asked for noise, add it AFTER the projection decision and to
+    // whatever space we ended up in. A projected row is still a row of real
+    // numbers, and the regularising effect is about the model seeing slightly
+    // different examples, not about which basis they are expressed in.
+    const sigma = Math.max(0, Number(opt.noise) || 0);
+    const Ztr = sigma > 0 ? noisify(Z, n, dim, sigma, (Math.random() * 0xffffffff) >>> 0) : Z;
 
     const confusion = Array.from({ length: C }, () => new Int32Array(C));
     const p = new Float32Array(C);
+    const raw = new Float32Array(C);
+    // Held-out LOGITS and their true classes, kept so a temperature can be
+    // fitted on them once the folds are done. Raw logits, not the softmax: the
+    // fitted constant divides logits, and a row of already-squashed
+    // probabilities cannot be un-squashed. Held out is the other half of the
+    // point — a temperature fitted on the training rows would be fitted on the
+    // inflation itself and would come back as 1.
+    const held = [];
+    const heldY = [];
     let correct = 0;
     let total = 0;
     for (let f = 0; f < folds; f++) {
@@ -266,28 +394,85 @@ export async function trainHead(data, onProgress, options = {}) {
       const Xf = new Float32Array(trainIdx.length * dim);
       const yf = new Int32Array(trainIdx.length);
       trainIdx.forEach((src, k) => {
-        Xf.set(Z.subarray(src * dim, src * dim + dim), k * dim);
+        Xf.set(Ztr.subarray(src * dim, src * dim + dim), k * dim);
         yf[k] = y[src];
       });
-      const order = new Int32Array(trainIdx.length);
-      for (let i = 0; i < order.length; i++) order[i] = i;
-      const m = fit(Xf, yf, trainIdx.length, dim, C, opt, order);
-      for (const i of testIdx) {
-        const got = predictIndex(Z, i * dim, m.W, m.b, dim, C, p);
+
+      // BAGS, averaged in logit space. What this buys, precisely: the weights
+      // start at zero and the only randomness left is the batch order, so a bag
+      // is the same model that used to be trained, run again with a different
+      // shuffle. Averaging a few of those averages out the part of the result
+      // that was the shuffle.
+      //
+      // What it does NOT buy: re-sampling the DATA would give genuinely
+      // different models, and is the version the literature means by bagging —
+      // but for a convex objective on a few hundred examples it also means each
+      // bag is missing some of the eleven zaag tracks, and the class-balanced
+      // weighting exists precisely because those are the examples that matter.
+      // Starving them to decorrelate an ensemble is a bad trade here. So this is
+      // a variance reduction over optimisation noise and nothing more, and the
+      // honest expectation is a small gain, not the usual ensemble jump.
+      const bag = bagCount(opt, C, trainIdx.length);
+      const accv = new Float32Array(testIdx.length * C);
+      for (let b = 0; b < bag; b++) {
+        const order = new Int32Array(trainIdx.length);
+        for (let i = 0; i < order.length; i++) order[i] = i;
+        const m = fit(Xf, yf, trainIdx.length, dim, C, opt, order);
+        for (let t = 0; t < testIdx.length; t++) {
+          const i = testIdx[t];
+          logitsInto(raw, Z, m.W, m.b, dim, C, i * dim);
+          const o = t * C;
+          for (let c = 0; c < C; c++) accv[o + c] += raw[c];
+        }
+      }
+      for (let t = 0; t < testIdx.length; t++) {
+        const i = testIdx[t];
+        const o = t * C;
+        // The held-out verdict is the BAG's, never one member's: a
+        // cross-validated score is only honest if what is scored is what ships,
+        // and what ships is the average.
+        let top = -Infinity;
+        let got = 0;
+        for (let c = 0; c < C; c++) {
+          const v = accv[o + c];
+          if (v > top) {
+            top = v;
+            got = c;
+          }
+        }
         confusion[y[i]][got]++;
         if (got === y[i]) correct++;
         total++;
+        held.push(Array.from(accv.subarray(o, o + C)));
+        heldY.push(y[i]);
       }
     }
 
+    const temperature = fitTemperature(held, heldY, C);
+
     report(label, 0.85);
     await yieldToUI();
+    // The shipped head is the bagged average, for the same reason the score is:
+    // the number the user reads and the model they end up with have to be the
+    // same object, or the studio is reporting on something that does not exist.
+    const bag = bagCount(opt, C, n);
     const order = new Int32Array(n);
     for (let i = 0; i < n; i++) order[i] = i;
-    const final = fit(Z, y, n, dim, C, opt, order);
+    const Wd = new Float32Array(C * dim);
+    const bd = new Float32Array(C);
+    for (let b = 0; b < bag; b++) {
+      const m = fit(Ztr, y, n, dim, C, opt, order);
+      for (let i = 0; i < Wd.length; i++) Wd[i] += m.W[i];
+      for (let c = 0; c < C; c++) bd[c] += m.b[c];
+    }
+    const invBag = 1 / bag;
+    for (let i = 0; i < Wd.length; i++) Wd[i] *= invBag;
+    for (let c = 0; c < C; c++) bd[c] *= invBag;
     // Fold the projection into the weights: what leaves here is always a plain
-    // head over the original embedding, whatever was done to train it.
-    const W = useProj ? unproject(final.W, P, C, dim, d) : final.W;
+    // head over the original embedding, whatever was done to train it. Unfolding
+    // is linear, so it commutes with the average above — no need to undo each
+    // member separately.
+    const W = useProj ? unproject(Wd, P, C, dim, d) : Wd;
 
     // Per-class recall is what actually tells the user where to tag more: a
     // genre the model never gets right is a genre with too few examples.
@@ -310,6 +495,35 @@ export async function trainHead(data, onProgress, options = {}) {
     const scored = perClass.filter((c) => c.examples);
     const balanced = scored.reduce((a, c) => a + c.recall, 0) / (scored.length || 1);
 
+    // The pairs the model mixes up, read straight off the matrix that was
+    // already computed. There is no taxonomy to declare: the confusion IS the
+    // hierarchy, measured on this library's own labels rather than assumed from
+    // a genre list nobody here uses.
+    //
+    // It is worth surfacing for a reason that is not about the model at all. Two
+    // labels that the model keeps swapping are either two genres that genuinely
+    // sound alike — in which case the tags are fine and the boundary is hard —
+    // or ONE genre that has been labelled inconsistently, in which case the fix
+    // is in the vocabulary and not in the training. The studio cannot tell those
+    // apart on the user's behalf, but it can show them the pair and let the
+    // human, who knows what they meant, decide.
+    const confusions = [];
+    for (let a = 0; a < C; a++) {
+      for (let b = 0; b < C; b++) {
+        if (a === b || !confusion[a][b]) continue;
+        confusions.push({
+          from: labels[a],
+          to: labels[b],
+          count: confusion[a][b],
+          // Share of this genre's examples that went to the other label, which
+          // is the number that says "this is systematic" rather than one stray
+          // track.
+          share: byClass[a].length ? +(confusion[a][b] / byClass[a].length).toFixed(3) : 0,
+        });
+      }
+    }
+    confusions.sort((x, y) => y.count - x.count);
+
     return {
       // Named rather than assumed: encodeHead's layout and the server's reader
       // both branch on this, and a head that arrived without it would be
@@ -318,15 +532,19 @@ export async function trainHead(data, onProgress, options = {}) {
       labels,
       dim: d,
       W,
-      b: final.b,
+      b: bd,
       metrics: {
         examples: n,
         classes: C,
         folds,
         projected: useProj ? projDim : 0,
+        bagged: bag > 1 ? bag : 0,
+        noise: Math.max(0, Number(opt.noise) || 0),
         accuracy: total ? +(correct / total).toFixed(3) : 0,
         balanced: +balanced.toFixed(3),
+        temperature,
         perClass,
+        confusions,
         confusion: confusion.map((r) => Array.from(r)),
       },
     };

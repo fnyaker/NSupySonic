@@ -6,11 +6,21 @@
 """Serving the whole-track analysis (tempo + style) to the player.
 
 The measurement itself lives in ``supysonic/deezer/analysis.py``; this is only
-the way out. It reads and never computes: a request must never be what starts a
-three-second ffmpeg pass, because the player asks about tracks it is *about* to
-play and an answer that arrives a minute later is no answer at all. Anything not
-yet measured comes back as a plain absence, and the client falls back to its own
-live detector — which is exactly what it did before this existed.
+the way out. A request must never be what *waits* on a three-second ffmpeg pass,
+because the player asks about tracks it is *about* to play and an answer that
+arrives a minute later is no answer at all.
+
+But an unmeasured track is not a dead end either. When the server has a way to
+reach a verdict — the operator's own trained head, or the frozen extractor plus
+a head trained on it — the request puts the track on the BACKGROUND queue and
+returns straight away, naming it in ``pending``. The client keeps its own live
+reading in the meantime, polls for the ids it was told about, and swaps to the
+served genre the moment it lands. That is the difference between "we know the
+genre" and "we will know it shortly", and both are useful.
+
+Anything the server genuinely cannot measure comes back as a plain absence, and
+the client falls back to its own live detector — which is exactly what it did
+before this existed.
 
 Batched like ``/api/gains`` and for the same reason: the player wants the whole
 run it is about to play, in one call, before any of it starts.
@@ -30,6 +40,11 @@ logger = logging.getLogger(__name__)
 
 ANALYSIS_BATCH_MAX = 100
 ANALYSIS_WORKERS_MAX = 8
+# How many unmeasured tracks ONE request may put on the background queue. The
+# player asks about the run it is about to play, so a handful is all a real
+# window needs; the cap is what keeps a request for a thousand ids from turning
+# into a thousand decode jobs.
+ANALYSIS_QUEUE_MAX = 3
 # The admin's parallelism choice lives in the Meta KV table, like the upload
 # quota: it is a server-wide cost, not a per-request one.
 _WORKERS_META_KEY = "analysis_workers"
@@ -167,7 +182,14 @@ def analysis_backfill_status():
 
 
 def _rows_for(ids):
-    """{universal id -> payload} for the ids that have a stored verdict."""
+    """{universal id -> payload} for the ids that have a verdict to serve.
+
+    A track the user tagged by hand is served even when nothing has measured it:
+    the label IS a verdict, and it outranks anything the measurement would have
+    said. That is the whole point of the tag button — the player gets the right
+    genre immediately, not after the next backfill.
+    """
+    from ..db import GenreTag, TrackTag
     from ..deezer import analysis as ana
     from ..deezer import ids as dz_ids
 
@@ -189,32 +211,109 @@ def _rows_for(ids):
         .join(Track)
         .where(TrackAnalysis.track.in_(list(keys)))
     )
+    tagged = {}
+    tags = (
+        TrackTag.select(TrackTag, GenreTag)
+        .join(GenreTag)
+        .where(TrackTag.track.in_(list(keys)))
+    )
+    for t in tags:
+        tagged.setdefault(t.track_id, t.tag)
+    seen = set()
     for row in rows:
         ident = keys.get(row.track.id)
         if ident is None:
             continue
-        out[ident] = ana.payload_for(row)
+        seen.add(row.track.id)
+        out[ident] = ana.payload_for(row, tag=tagged.get(row.track.id))
+    # A tag with no measurement at all still has an answer to give.
+    for track_id, tag in tagged.items():
+        if track_id in seen:
+            continue
+        ident = keys.get(track_id)
+        if ident is not None:
+            out[ident] = ana.payload_for(None, tag=tag)
     return out
+
+
+def _missing(ids, found):
+    """The ids we have nothing to say about — one lookup, then queued.
+
+    Deliberately does NOT queue here: this is the pure half, so the single-track
+    and batch paths agree on what "missing" means before either of them decides
+    to spend the box's CPU on it.
+    """
+    return [i for i in ids if i not in found]
+
+
+def _queue_missing(ids, limit=ANALYSIS_QUEUE_MAX):
+    """Ask the background job to measure the first few of these, and say which.
+
+    Never blocks: `request_analysis` starts a daemon thread and returns. The ids
+    it accepted come back as `pending`, and the client polls for them. The list
+    is taken in the order the caller sent them — play order — so the track that
+    is about to play is the one measured first.
+    """
+    from ..deezer import analysis as ana
+    from ..deezer import ids as dz_ids
+
+    accepted = []
+    if not ids:
+        return accepted
+    provider = getattr(current_app, "deezer", None)
+    for ident in ids:
+        if len(accepted) >= limit:
+            break
+        try:
+            track_id = dz_ids.track_uuid(ident)
+        except Exception:
+            continue
+        track = Track.get_or_none(Track.id == track_id)
+        if track is None or not _may_access_track(track):
+            continue
+        try:
+            if ana.request_analysis(track, provider):
+                accepted.append(ident)
+        except Exception:
+            logger.debug("analysis: could not queue %s", ident, exc_info=True)
+    return accepted
 
 
 @webapi.route("/analysis/<mid>")
 @login_required
 def track_analysis(mid):
-    """The verdict for one track, or ``{"ready": false}``."""
+    """The verdict for one track, or ``{"ready": false}``.
+
+    When there is nothing to serve and the server CAN measure, the measurement
+    is put on the background queue and the id comes back in ``pending``: the
+    client polls, and adopts the genre the moment it exists instead of carrying
+    its own guess for the rest of the track. The request itself never waits on
+    it — see the module docstring.
+    """
+    from ..db import GenreTag, TrackTag
     from ..deezer import analysis as ana
 
-    row = None
     if _valid_id(mid):
         found = _rows_for([str(mid)])
         if found:
             return jsonify({"ready": True, **found[str(mid)]})
-    else:
-        track = Track.get_or_none(Track.id == mid)
-        if track is not None and _may_access_track(track):
-            row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
-    if row is None:
+        pending = _queue_missing([str(mid)])
+        return jsonify({"ready": False, "pending": pending})
+    track = Track.get_or_none(Track.id == mid)
+    if track is None or not _may_access_track(track):
         return jsonify({"ready": False})
-    return jsonify({"ready": True, **ana.payload_for(row)})
+    row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+    tag = (
+        TrackTag.select(TrackTag, GenreTag)
+        .join(GenreTag)
+        .where(TrackTag.track == track)
+        .first()
+    )
+    tag = tag.tag if tag is not None else None
+    if row is not None or tag is not None:
+        return jsonify({"ready": True, **ana.payload_for(row, tag=tag)})
+    pending = [str(mid)] if ana.request_analysis(track) else []
+    return jsonify({"ready": False, "pending": pending})
 
 
 @webapi.route("/analyses", methods=["POST"])
@@ -226,4 +325,8 @@ def track_analyses():
     if not isinstance(raw, list):
         return jsonify({"error": "ids must be a list"}), 400
     ids = list(dict.fromkeys(str(x) for x in raw if _valid_id(x)))[:ANALYSIS_BATCH_MAX]
-    return jsonify({"analyses": _rows_for(ids)})
+    found = _rows_for(ids)
+    # Only the tracks the player is about to reach, and only while the server
+    # has a way to reach a verdict. `pending` is the client's to-do list.
+    pending = _queue_missing(_missing(ids, found))
+    return jsonify({"analyses": found, "pending": pending})
