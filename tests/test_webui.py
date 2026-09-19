@@ -3411,16 +3411,18 @@ class TrackAnalysisTestCase(unittest.TestCase):
     def test_backfill_runs_several_workers(self):
         """The parallel loop: several tracks analysed at once, each thread using
         the database on its own."""
+        from supysonic.db import Track
         from supysonic.deezer import analysis as ana
 
         for i in range(3):
-            p = os.path.join(self.archive, f"t{i}.flac")
-            with open(p, "wb") as fp:
-                fp.write(b"x")
             t = self._deezer_track(str(500 + i))
-            t.path = p
             t.last_modification = 1
             t.save()
+        # The query must see them before the loop; if it does not, the failure is
+        # in the fixture, not in the parallelism.
+        self.assertEqual(
+            Track.select().where(Track.last_modification > 0).count(), 3
+        )
 
         seen = []
 
@@ -3428,14 +3430,18 @@ class TrackAnalysisTestCase(unittest.TestCase):
             seen.append(str(track.id))
             return object()  # a truthy "row"
 
-        original = ana.analyze_track
+        original_analyze = ana.analyze_track
+        original_isfile = ana.os.path.isfile
         ana.analyze_track = fake_analyze
+        ana.os.path.isfile = lambda p: True  # the fixture has no real audio
         try:
             stats = ana.backfill(workers=2)
         finally:
-            ana.analyze_track = original
-        self.assertEqual(stats["done"], 3)
-        self.assertEqual(len(seen), 3)
+            ana.analyze_track = original_analyze
+            ana.os.path.isfile = original_isfile
+        self.assertEqual(stats["scanned"], 3, stats)
+        self.assertEqual(stats["done"], 3, stats)
+        self.assertEqual(len(seen), 3, stats)
         self.assertIsNone(stats["error"])
 
     def test_the_analysis_worker_reports_progress_and_finishes(self):
