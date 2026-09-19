@@ -4203,6 +4203,58 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertEqual(label, "hardtekk")
         self.assertAlmostEqual(sim, 1.0, places=3)
 
+    def test_a_v1_vector_is_never_compared_to_a_v2_centroid(self):
+        """The regression that 500'd the studio: prototype_predict walked the
+        centroid and indexed the query vector with its length. A v1 sidecar is a
+        legitimate return from load_embedding, so the two widths really do meet.
+        The answer is "no opinion", not a crash and not a silent mis-index."""
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        tag = self._tag("techno")
+        a = self._track("2051")
+        self._store_embedding(a, self._vec(emb.EMBED_DIM, 0, 1.0))
+        self.client.post("/api/genre/label", json={"track": a.deezer_id, "tag": tag["id"]})
+        gen.invalidate_centroids()
+
+        # Same genre, but a v1-width query: not comparable, so None.
+        self.assertIsNone(gen.prototype_predict(self._vec(emb.LEGACY_EMBED_DIM, 0, 1.0)))
+        # The matching width still answers.
+        label, sim = gen.prototype_predict(self._vec(emb.EMBED_DIM, 0, 1.0))
+        self.assertEqual(label, "techno")
+        self.assertAlmostEqual(sim, 1.0, places=3)
+
+    def test_a_v1_candidate_does_not_break_the_candidates_endpoint(self):
+        """The end-to-end version of the crash: a library whose sidecars have not
+        all been re-extracted yet still has v1-width vectors, and those meet a
+        v2 centroid table. This request used to answer 500."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        tag = self._tag("techno")
+        labelled_v2 = self._track("2061")
+        v1_candidate = self._track("2062")
+        self._store_embedding(labelled_v2, self._vec(emb.EMBED_DIM, 0, 1.0))
+        self._store_embedding(v1_candidate, self._vec(emb.LEGACY_EMBED_DIM, 1, 1.0))
+        self.client.post(
+            "/api/genre/label",
+            json={"track": labelled_v2.deezer_id, "tag": tag["id"]},
+        )
+
+        for url in (
+            "/api/genre/candidates?limit=40",
+            "/api/genre/candidates?limit=40&sort=active",
+        ):
+            r = self.client.get(url)
+            self.assertEqual(r.status_code, 200, (url, r.data[:400]))
+            self.assertTrue(r.json["candidates"], url)
+            # The v1 candidate has no same-width prototype to be scored against,
+            # so it carries none — but it is still offered for tagging.
+            legacy = [c for c in r.json["candidates"] if c["deezer_id"] == v1_candidate.deezer_id]
+            self.assertEqual(len(legacy), 1, url)
+            self.assertNotIn("prototype", legacy[0])
+
     def test_a_second_label_on_a_genre_moves_its_prototype(self):
         """The cache keys on the labelled SET. Adding a second track under a
         genre that already exists changes no name, so a name-only key would
