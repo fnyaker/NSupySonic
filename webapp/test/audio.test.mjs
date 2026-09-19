@@ -102,6 +102,90 @@ test("energy bands read the register they name", () => {
   assert.equal(names[top], "high");
 });
 
+// Synthesise the low end of a track as a series of spectra: a sustained bass
+// note at `bassDb`, plus a kick that pulses for a few frames every beat.
+function kickTrain({ bpm, seconds, dt = 1 / 90, bassDb = FLOOR, click = false }) {
+  const n = FFT_HI / 2;
+  const hzPerBin = SR / 2 / n;
+  const at = (hz) => Math.round(hz / hzPerBin);
+  const lo = at(30);
+  const hi = at(150);
+  const c0 = at(1500);
+  const c1 = at(7000);
+  const period = 60 / bpm;
+  const specs = [];
+  let next = 0.3;
+  let since = -1;
+  for (let t = 0; t < seconds; t += dt) {
+    if (t >= next) {
+      since = 0;
+      next += period;
+    } else if (since >= 0) {
+      since += dt;
+    }
+    const a = new Float32Array(n).fill(FLOOR);
+    // The sustained note under everything: whatever the kick does, this never
+    // moves — which is exactly the case the whitened flux is blind to.
+    if (bassDb > FLOOR) for (let i = lo; i <= hi; i++) a[i] = bassDb;
+    // A kick's body: a short punch, decayed over ~120 ms.
+    if (since >= 0 && since < 0.12) {
+      const env = 14 - since * 90;
+      for (let i = lo; i <= hi; i++) a[i] = Math.max(a[i], bassDb + env);
+    }
+    // A hardstyle kick's click sits far above the body.
+    if (click && since >= 0 && since < 0.02) {
+      for (let i = c0; i <= c1; i++) a[i] = Math.max(a[i], -30);
+    }
+    specs.push(a);
+  }
+  return specs;
+}
+
+function kickReadings(specs) {
+  const fx = createFeatureExtractor({ sampleRate: SR, fftHi: FFT_HI, floorDb: FLOOR });
+  const out = { peak: 0, floor: 1, lowPeak: 0 };
+  const lows = [];
+  for (const s of specs) {
+    const f = fx.process(s, 1 / 90);
+    if (f.kick > out.peak) out.peak = f.kick;
+    if (f.kick < out.floor) out.floor = f.kick;
+    lows.push(f.lowFlux);
+  }
+  // How far the kick onset function stands above its own average: the contrast
+  // the beat tracker's fold actually gets to work with.
+  const mean = lows.reduce((a, b) => a + b, 0) / lows.length;
+  out.lowPeak = Math.max(...lows) / Math.max(1e-9, mean);
+  return out;
+}
+
+test("a kick reads as a hit with no bass under it (techno)", () => {
+  const r = kickReadings(kickTrain({ bpm: 140, seconds: 8, click: true }));
+  assert.ok(r.peak > 0.6, `techno kick only reached ${r.peak.toFixed(2)}`);
+  assert.ok(r.floor < 0.12, `techno kick never rests (floor ${r.floor.toFixed(2)})`);
+  assert.ok(r.lowPeak > 2, `techno kick contrast only ${r.lowPeak.toFixed(1)}x`);
+});
+
+test("a kick still reads as a hit over a sustained 808 (rap)", () => {
+  // The case the whitened flux alone is bad at: a 50 Hz note that never stops,
+  // with the kick landing on top of it. The kick has to be visible as a
+  // TRANSIENT, not as a level, or nothing about it can be detected.
+  const r = kickReadings(kickTrain({ bpm: 90, seconds: 8, bassDb: -26 }));
+  assert.ok(r.peak > 0.4, `rap kick only reached ${r.peak.toFixed(2)} over the 808`);
+  assert.ok(r.floor < 0.15, `the 808 alone reads as a kick (floor ${r.floor.toFixed(2)})`);
+  assert.ok(r.lowPeak > 2, `rap kick contrast only ${r.lowPeak.toFixed(1)}x`);
+});
+
+test("a sustained 808 with no kick does not read as a kick", () => {
+  const n = FFT_HI / 2;
+  const hzPerBin = SR / 2 / n;
+  const flat = new Float32Array(n);
+  for (let i = Math.round(30 / hzPerBin); i <= Math.round(150 / hzPerBin); i++) flat[i] = -26;
+  const fx = createFeatureExtractor({ sampleRate: SR, fftHi: FFT_HI, floorDb: FLOOR });
+  let peak = 0;
+  for (let i = 0; i < 500; i++) peak = Math.max(peak, fx.process(flat, 1 / 90).kick);
+  assert.ok(peak < 0.25, `a steady note read ${peak.toFixed(2)} as a kick`);
+});
+
 test("features separate a tone from noise", () => {
   const nyq = SR / 2;
   const n = FFT_HI / 2;

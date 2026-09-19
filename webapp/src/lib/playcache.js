@@ -19,6 +19,7 @@ import {
 } from "./stores.js";
 import { isDownloaded } from "./offline.js";
 import { primeGain } from "./gaincache.js";
+import { primeAnalyses } from "./analysis.js";
 
 const DB_NAME = "nsupy-playcache";
 const DB_VERSION = 1;
@@ -145,6 +146,14 @@ export async function prefetchTrack(track, quality) {
     // The gain belongs with the audio: a track whose bytes are on the device
     // must never have to ask the network how loud it is when it starts.
     primeGain(track).catch(() => {});
+    // The verdict belongs with them too. Caching a track is the earliest moment
+    // we know it is coming, so this is where the server gets the most warning
+    // to measure it: by the time it plays, the genre and the tempo are already
+    // in hand and the animation starts on the right foot instead of guessing
+    // for a bar. Asking for the whole prefetch run here also queues anything
+    // the server can measure but has not, which is what makes a cached track
+    // arrive with a genre even on the very first play.
+    primeAnalyses([id]);
     await enforce(get(playCacheLimit));
   } catch {
     /* network/decoding hiccup — a missed prefetch is harmless */

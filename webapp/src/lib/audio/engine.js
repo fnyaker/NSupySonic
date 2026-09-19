@@ -40,7 +40,7 @@
 
 import { get, writable } from "svelte/store";
 import { current, player } from "../stores.js";
-import { knownAnalysis, primeAnalyses } from "../analysis.js";
+import { knownAnalysis, onAnalysis, primeAnalyses } from "../analysis.js";
 import {
   getAnalysers,
   getContext,
@@ -238,14 +238,33 @@ function primeAround(id) {
 // change, or a moment later when the request lands. Seeding the tempo is the
 // part that matters: the tracker starts locked on a figure measured over the
 // whole piece, so the first bar is already on the beat instead of the fourth.
-function adoptVerdict(id) {
-  if (verdictSeeded || !id) return;
+//
+// `id` is explicit rather than read from the store because a late listener runs
+// after the fact: it adopts the verdict for the track it was told about, and
+// only while that track is still the one playing — a verdict arriving after a
+// skip is a verdict for a track nobody is hearing. `late` is the case the
+// listener exists for: the verdict did not exist at the track change, so the
+// live reading has had the stage to itself and has to give it up now. It also
+// means the grid may already be locked on the live figure, and re-seeding a
+// locked grid mid-track would make the animation jump for no accuracy gain.
+function adoptVerdict(id, late = false) {
+  if (!id) return;
+  if (!late && verdictSeeded) return;
+  if (late && get(current)?.deezer_id !== id) return;
   const v = knownAnalysis(id);
   if (!v) return;
   verdict = v;
   verdictSeeded = true;
-  if (v.bpm && beatTracker) beatTracker.seed(v.bpm, v.bpmConfidence ?? 0.9);
+  if (v.bpm && beatTracker && !beatTracker.isLocked())
+    beatTracker.seed(v.bpm, v.bpmConfidence ?? 0.9);
 }
+
+// A verdict that lands late — the server had to measure the track first, or an
+// admin just tagged it — is applied to the running track instead of waiting for
+// the next play. This is the whole point of the `pending` handshake.
+onAnalysis((id, v) => {
+  if (v) adoptVerdict(id, true);
+});
 
 function tick(now) {
   const an = getAnalysers();

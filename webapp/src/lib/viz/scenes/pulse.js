@@ -12,7 +12,10 @@
 //    bass and the air move independently.
 //  - the RINGS. One expanding ring per beat, a wider and brighter one on the
 //    downbeat. With the beat grid locked these are PREDICTED, so they land on
-//    the beat rather than after it.
+//    the beat rather than after it. A separate, much brighter shockwave fires
+//    on the KICK itself — detected rather than predicted, so it also shows up
+//    on a track with no lock, and it is what makes the kick read as a hit
+//    instead of as one more thing happening on the beat.
 //
 // Everything is drawn additively over a translucent wash rather than a clear,
 // which gives motion trails for free — far cheaper than any blur.
@@ -21,14 +24,20 @@ import { approach, clamp, envelope, hsl } from "../util.js";
 
 const BANDS = ["sub", "bass", "lowMid", "mid", "high", "air"];
 const MAX_RINGS = 12;
+// A kick shockwave lives here, separately from the beat rings: its colours and
+// widths belong to the kick, not to the beat grid, and in "spectrum" mode the
+// palette has already spent the beat rings' hues.
+const MAX_WAVES = 6;
 
 export function createPulseScene(opts = {}) {
   const preset = opts.preset;
   const band = new Float32Array(BANDS.length);
   const rings = [];
   for (let i = 0; i < MAX_RINGS; i++) rings.push({ age: -1, life: 1, power: 0, down: false });
+  const waves = [];
+  for (let i = 0; i < MAX_WAVES; i++) waves.push({ age: -1, life: 1, power: 0 });
   let level = 0;
-  let punch = 0;
+  let kick = 0;
   let spin = 0;
 
   function spawn(power, down) {
@@ -42,6 +51,21 @@ export function createPulseScene(opts = {}) {
     slot.life = down ? 1.5 : 1.1;
     slot.power = power;
     slot.down = down;
+  }
+
+  // A detected kick. Unlike the beat rings this fires whenever the transient is
+  // there, locked or not, and it is deliberately scarce — MAX_WAVES means a
+  // dense passage keeps only the strongest few rather than turning the screen
+  // into soup.
+  function spawnWave(power) {
+    let slot = waves.find((r) => r.age < 0);
+    if (!slot) {
+      slot = waves.reduce((a, b) => (a.power > b.power ? b : a));
+    }
+    if (slot.age >= 0 && slot.power > power) return; // don't displace a bigger hit
+    slot.age = 0;
+    slot.life = 0.38;
+    slot.power = power;
   }
 
   function resize() {}
@@ -59,7 +83,16 @@ export function createPulseScene(opts = {}) {
       band[i] = envelope(band[i], Math.pow(share, 0.75), dt, 0.03, 0.22);
     }
     level = approach(level, f ? f.level : 0, 0.12, dt);
-    punch = envelope(punch, f ? clamp(f.lowFlux * 9, 0, 1) : 0, dt, 0.012, 0.26);
+    // The kick, from the magnitude-domain detector. `lowFlux` was the old
+    // source here and it is still mixed into the ODF the beat tracker folds,
+    // but as a DRAWING signal it is noise-sensitive and its scale depends on the
+    // master, which is why the field used to pulse hard on some tracks and not
+    // at all on others.
+    const kickIn = f ? f.kick : 0;
+    // Rising edge, with the floor high enough that the detector's own wobble on
+    // a sustained bass does not spawn a wave every frame.
+    if (kickIn > 0.38 && kickIn > kick + 0.12) spawnWave(kickIn);
+    kick = envelope(kick, kickIn, dt, 0.006, 0.13);
 
     // The field turns at the tempo: one full rotation every eight bars.
     const barLen = beat.locked ? beat.period * beat.beatsPerBar : 3;
@@ -72,6 +105,11 @@ export function createPulseScene(opts = {}) {
       if (r.age < 0) continue;
       r.age += dt;
       if (r.age > r.life) r.age = -1;
+    }
+    for (const wv of waves) {
+      if (wv.age < 0) continue;
+      wv.age += dt;
+      if (wv.age > wv.life) wv.age = -1;
     }
   }
 
@@ -89,9 +127,9 @@ export function createPulseScene(opts = {}) {
     g.globalCompositeOperation = "lighter";
 
     // The field.
-    const fieldR = R * (0.5 + level * 0.5 + punch * 0.12);
+    const fieldR = R * (0.5 + level * 0.5 + kick * 0.3);
     const field = g.createRadialGradient(cx, cy, 0, cx, cy, Math.max(1, fieldR));
-    field.addColorStop(0, hsl(pal.hue, pal.sat, 0.5, 0.22 * preset.glow * (0.4 + level)));
+    field.addColorStop(0, hsl(pal.hue, pal.sat, 0.5, 0.22 * preset.glow * (0.4 + level + kick * 0.5)));
     field.addColorStop(0.55, hsl(pal.hue + 22, pal.sat, 0.4, 0.14 * preset.glow));
     field.addColorStop(1, hsl(pal.hue + 40, pal.sat, 0.3, 0));
     g.fillStyle = field;
@@ -133,6 +171,39 @@ export function createPulseScene(opts = {}) {
       g.beginPath();
       g.arc(cx, cy, rad, 0, Math.PI * 2);
       g.stroke();
+    }
+
+    // The kick shockwaves, drawn over the rings. A ring says "a beat happened";
+    // this says "something hit", which is not the same statement and does not
+    // read the same. It travels faster, dies sooner, and is bright enough to be
+    // unmistakable at a glance — plus a filled disc that collapses inward, so
+    // the hit has a body and not only an expanding edge.
+    for (const wv of waves) {
+      if (wv.age < 0) continue;
+      const t = wv.age / wv.life;
+      const p = wv.power;
+      const rad = R * (0.05 + t * 1.05);
+      const alpha = (1 - t) * (1 - t) * p * 0.75 * preset.glow;
+      if (alpha < 0.005) continue;
+      g.strokeStyle = hsl(pal.low, pal.sat * 0.9, 0.8, alpha);
+      g.lineWidth = Math.max(1, (7 - t * 5) * (0.6 + p));
+      g.beginPath();
+      g.arc(cx, cy, rad, 0, Math.PI * 2);
+      g.stroke();
+
+      // The core flash: bright on the hit, gone within a fifth of the wave's
+      // life, so it reads as an impact rather than a glow.
+      const core = Math.max(0, 1 - t * 5);
+      if (core > 0.01) {
+        const cr = R * 0.34 * (0.5 + p * 0.8) * (0.7 + t * 1.4);
+        const cg = g.createRadialGradient(cx, cy, 0, cx, cy, Math.max(1, cr));
+        cg.addColorStop(0, hsl(pal.low + 12, pal.sat, 0.92, core * 0.42 * p * preset.glow));
+        cg.addColorStop(1, hsl(pal.low, pal.sat, 0.6, 0));
+        g.fillStyle = cg;
+        g.beginPath();
+        g.arc(cx, cy, cr, 0, Math.PI * 2);
+        g.fill();
+      }
     }
 
     g.globalCompositeOperation = "source-over";

@@ -53,7 +53,7 @@ import time
 
 from concurrent.futures import ThreadPoolExecutor
 
-from ..db import Track, TrackAnalysis, now
+from ..db import GenreTag, Track, TrackAnalysis, now
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,22 @@ FFMPEG_TIMEOUT = 300
 # How sure a trained head has to be before it overrides the rules. Below this
 # the track is simply unlike anything it was taught, and a confident-sounding
 # wrong label is worse than the honest general answer.
+#
+# The number this is compared against is the head's POST-temperature
+# confidence, not its raw softmax: the studio fits a temperature on held-out
+# folds and the server divides the logits by it before the softmax (see
+# deezer/genre.py). That is deliberate and it is what makes this threshold
+# mean the same thing for a head trained today and one trained after another
+# ten tags — an uncalibrated softmax on a few hundred examples drifts upward as
+# the model fits harder, and a fixed threshold would quietly accept more of its
+# mistakes over time.
 MODEL_MIN_CONFIDENCE = 0.45
+# ...and it must also be clear of the runner-up by this much. A head that puts
+# 0.6 on "uptempo" and 0.55 on "frenchcore" has not decided anything; one that
+# puts 0.5 and 0.02 has. Requiring both is what stops a confident-sounding wrong
+# label from the top-probability threshold alone, and it is cheap — the
+# probabilities are already computed.
+MODEL_MIN_MARGIN = 0.12
 # Analysis is background work with no deadline: one at a time keeps it from
 # competing with streaming for the box.
 _slot = threading.BoundedSemaphore(1)
@@ -690,21 +705,35 @@ def analyze_track(track: Track, provider=None, force: bool = False):
     style, style_conf, arch, weights = classify(feats)
     source = "heuristic"
     model_dist = None
-    # A head trained on the user's OWN vocabulary outranks the heuristic, and
-    # should: the rules below encode what genres tend to look like in general,
-    # while the head was taught what they look like in THIS library. It only
-    # speaks when it is reasonably sure, so an unfamiliar track still falls
-    # through to the rules rather than being forced into the nearest label.
-    if vec is not None:
+    # A label the user applied by hand is the strongest signal there is, and the
+    # ONLY one that is not a guess: it is a person saying what this track is. It
+    # is applied before the head, so tagging a track also makes it a better
+    # training example rather than being argued with by the model it trained.
+    tag = manual_tag(track)
+    if tag is not None:
+        style = tag.name
+        style_conf = 1.0
+        source = "tag"
+        if tag.archetype in ARCHETYPES:
+            arch = tag.archetype
+    # Failing that, a head trained on the user's OWN vocabulary outranks the
+    # heuristic, and should: the rules below encode what genres tend to look
+    # like in general, while the head was taught what they look like in THIS
+    # library. It only speaks when it is reasonably sure, so an unfamiliar track
+    # still falls through to the rules rather than being forced into the nearest
+    # label.
+    elif vec is not None:
         try:
             from . import genre as gen
 
             guess = gen.predict(vec)
-            if guess and guess[1] >= MODEL_MIN_CONFIDENCE:
-                style, style_conf = guess[0], guess[1]
-                arch = gen.archetype_for(guess[0]) or arch
-                source = "model"
-                model_dist = guess[2]
+            if guess:
+                label, conf, dist, margin = guess
+                if conf >= MODEL_MIN_CONFIDENCE and margin >= MODEL_MIN_MARGIN:
+                    style, style_conf = label, conf
+                    arch = gen.archetype_for(label) or arch
+                    source = "model"
+                    model_dist = dist
         except Exception:
             logger.warning("analysis: genre head failed for %s", track.path, exc_info=True)
 
@@ -742,10 +771,35 @@ def analyze_track(track: Track, provider=None, force: bool = False):
     return row
 
 
-def payload_for(row):
-    """What the API serves for one track."""
-    if row is None:
+def payload_for(row, tag=None):
+    """What the API serves for one track.
+
+    ``tag`` is the track's manual label, when it has one. A hand-applied genre
+    outranks anything a head or the rules produced — the user said so — so it is
+    served in place of the measured style rather than next to it, and its label
+    is the tag's own name (a label the user invented has no entry in
+    ``FAMILY_LABEL``).
+    """
+    if row is None and tag is None:
         return None
+    if tag is not None:
+        return {
+            "bpm": row.bpm if row is not None else None,
+            "bpmConfidence": row.bpm_confidence if row is not None else 0,
+            "bpmSource": row.bpm_source if row is not None else None,
+            "style": tag.name,
+            "styleLabel": tag.name,
+            "styleConfidence": 1.0,
+            "archetype": tag.archetype,
+            "archetypes": {},
+            "styleSource": "tag",
+            "embedded": False,
+            "pulse": 0,
+            "lufs": None,
+            "lra": None,
+            "version": row.version if row is not None else 0,
+            "analysed": row is not None,
+        }
     try:
         data = json.loads(row.data) if row.data else {}
     except (TypeError, ValueError):
@@ -766,7 +820,72 @@ def payload_for(row):
         "lufs": data.get("lufs"),
         "lra": data.get("lra"),
         "version": row.version,
+        "analysed": True,
     }
+
+
+def manual_tag(track):
+    """The track's hand-applied genre, or None.
+
+    One tag per track (see webui/genre.py::genre_label), so this is a single
+    row rather than a list to arbitrate.
+    """
+    if track is None:
+        return None
+    try:
+        from ..db import TrackTag
+
+        row = (
+            TrackTag.select(TrackTag, GenreTag)
+            .join(GenreTag)
+            .where(TrackTag.track == track)
+            .first()
+        )
+        return row.tag if row is not None else None
+    except Exception:
+        logger.debug("analysis: could not read the manual tag", exc_info=True)
+        return None
+
+
+def request_analysis(track: Track, provider=None) -> bool:
+    """Queue a measurement because a CLIENT asked, rather than the archiver.
+
+    Same daemon-thread-and-semaphore job as ``queue_analysis``, but gated on
+    something the archiver's call site does not need to care about: there has to
+    be a way to reach a verdict. Without a trained head there is no genre to
+    gain — the rules only ever name the broad families the browser already
+    computes live — but a tempo is still worth having, so the bar is "a head is
+    loaded OR the extractor is usable".
+
+    Returns whether the job was accepted, so the caller can tell the client to
+    come back for the answer. A refused request is not an error: it means this
+    server has nothing to add, and the client keeps its own reading.
+    """
+    if track is None or not ffmpeg_available():
+        return False
+    if not track.path or not os.path.isfile(track.path):
+        return False
+    if not _can_measure():
+        return False
+    key = str(track.id)
+    with _inflight_lock:
+        if key in _inflight:
+            return True
+    queue_analysis(track, provider)
+    with _inflight_lock:
+        return key in _inflight
+
+
+def _can_measure() -> bool:
+    try:
+        from . import embedding as emb
+        from . import genre as gen
+
+        if gen.active_head() is not None:
+            return True
+        return emb.available() and bool(emb.model_path())
+    except Exception:
+        return False
 
 
 def queue_analysis(track: Track, provider=None):
@@ -915,10 +1034,12 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None):
             stats["skipped"] += 1
             report(stats)
             continue
-        if not force and emb.load_embedding(track) is not None:
-            stats["skipped"] += 1
-            report(stats)
-            continue
+        if not force:
+            have = emb.load_embedding(track)
+            if emb.vector_is_current(have):
+                stats["skipped"] += 1
+                report(stats)
+                continue
         vec, reason = emb.embed_file_verbose(track.path)
         if vec is None or not emb.save_embedding(track, vec):
             stats["failed"] += 1

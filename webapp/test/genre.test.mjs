@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { trainHead, encodeHead, decodeEmbedding } from "../src/lib/genre/train.js";
+import { trainHead, encodeHead, decodeEmbedding, fitTemperature } from "../src/lib/genre/train.js";
 import { trainDeep, loadKernel } from "../src/lib/genre/deep.js";
 
 const KERNEL = readFileSync(
@@ -323,4 +323,126 @@ test("progress is reported monotonically and ends at one", async () => {
   for (let i = 1; i < seen.length; i++)
     assert.ok(seen[i] >= seen[i - 1], `progress went ${seen[i - 1]} -> ${seen[i]}`);
   assert.equal(seen[seen.length - 1], 1);
+});
+
+// --- temperature calibration -------------------------------------------------
+
+test("a temperature of one leaves an already-honest head alone", () => {
+  // A head that means what it says: on 75% of the held-out set its top logit
+  // really is the truth, and its margin encodes exactly that (sigmoid(1.0986)
+  // = 0.75). A calibrated head like this needs no rescaling, so the fit must
+  // land on 1 rather than nudging it.
+  const held = [];
+  const y = [];
+  const M = Math.log(3);
+  for (let i = 0; i < 100; i++) {
+    const right = i % 4 !== 0; // 75 of 100
+    held.push(right ? Float32Array.from([M, 0]) : Float32Array.from([0, M]));
+    y.push(0);
+  }
+  const T = fitTemperature(held, Int32Array.from(y), 2);
+  assert.ok(T > 0.85 && T < 1.2, `T was ${T}`);
+});
+
+test("an over-confident head is flattened, and its argmax never moves", () => {
+  // The head says 0.999 for a class it is right about half the time — the
+  // situation the gate in analysis.py has to survive.
+  const held = [];
+  const y = [];
+  for (let i = 0; i < 40; i++) {
+    const right = i % 2 === 0;
+    // Right answers get a huge margin, wrong ones a small one.
+    held.push(right ? Float32Array.from([12, 0]) : Float32Array.from([0, 9]));
+    y.push(0);
+  }
+  const T = fitTemperature(held, Int32Array.from(y), 2);
+  assert.ok(T > 1.4, `an over-confident head should want T > 1, got ${T}`);
+
+  // The evidence that it cannot change a decision: whatever T is, the larger
+  // logit stays larger. That is the entire safety argument for shipping this.
+  for (const logits of held) {
+    const a = logits[0] / T;
+    const b = logits[1] / T;
+    assert.equal(a > b, logits[0] > logits[1]);
+  }
+});
+
+test("a confidently wrong head is pushed back toward the centre", () => {
+  // Wrong half the time with a huge margin: exactly when a gate must be told
+  // to distrust the number it is reading.
+  const held = [];
+  const y = [];
+  for (let i = 0; i < 30; i++) {
+    held.push(Float32Array.from([5, -5]));
+    y.push(i % 2); // wrong half the time
+  }
+  const T = fitTemperature(held, Int32Array.from(y), 2);
+  assert.ok(T > 1.2, `T was ${T}`);
+});
+
+test("both trainers carry a temperature the server will accept", async () => {
+  const data = clusters(3, 12, 64, 0.1, 77);
+  const head = await trainHead(data, null, {});
+  const T = head.metrics.temperature;
+  assert.equal(typeof T, "number");
+  assert.ok(T >= 0.5 && T <= 4, `T out of range: ${T}`);
+  const deep = await trainDeep(data, KERNEL, null, { epochs: 4, folds: 2, hidden: 8 });
+  assert.ok(
+    deep.metrics.temperature >= 0.5 && deep.metrics.temperature <= 4,
+    `deep T out of range: ${deep.metrics.temperature}`
+  );
+});
+
+// --- bagging, augmentation, and the confusion audit ---------------------------
+
+test("a bagged head over several shuffles still ships a usable model", async () => {
+  // The shipped weights are the MEAN of the bag, so the encoding has to survive
+  // a width that is an average rather than a single fit — an off-by-one there
+  // would not throw, it would classify everything wrong.
+  const data = clusters(3, 14, 48, 0.1, 91);
+  const head = await trainHead(data, null, {});
+  assert.ok(head.metrics.bagged >= 2, `bag was ${head.metrics.bagged}`);
+  assert.equal(head.W.length, head.labels.length * head.dim);
+  assert.equal(head.b.length, head.labels.length);
+  assert.ok(head.metrics.balanced >= 0.8, `balanced ${head.metrics.balanced}`);
+});
+
+test("a bag of one is allowed", async () => {
+  const data = clusters(3, 14, 48, 0.1, 92);
+  const head = await trainHead(data, null, { bag: 1 });
+  assert.equal(head.metrics.bagged, 0);
+  assert.equal(head.W.length, head.labels.length * head.dim);
+});
+
+test("no noise is added unless it was asked for", async () => {
+  // The augmenter must be INERT by default: it is a bet that has to be won on
+  // the held-out score, not a change that rides along with the feature.
+  const data = clusters(3, 14, 48, 0.1, 93);
+  assert.equal((await trainHead(data, null, { bag: 1 })).metrics.noise, 0);
+  assert.equal((await trainHead(data, null, { bag: 1, noise: 0 })).metrics.noise, 0);
+});
+
+test("the confused pairs are read off the matrix, not invented", async () => {
+  // The pairs must agree with the matrix they claim to summarise, entry for
+  // entry — a summary that drifts from its source is worse than none.
+  const data = clusters(3, 16, 32, 0.05, 94);
+  const head = await trainHead(data, null, { bag: 1 });
+  const m = head.metrics;
+  assert.ok(Array.isArray(m.confusions));
+  let total = 0;
+  for (const c of m.confusions) {
+    const i = head.labels.indexOf(c.from);
+    const j = head.labels.indexOf(c.to);
+    assert.ok(i >= 0 && j >= 0);
+    assert.equal(m.confusion[i][j], c.count);
+    total += c.count;
+  }
+  let offDiag = 0;
+  for (let i = 0; i < m.confusion.length; i++)
+    for (let j = 0; j < m.confusion.length; j++)
+      if (i !== j) offDiag += m.confusion[i][j];
+  assert.equal(total, offDiag);
+  // Sorted worst first, so the studio can take the head of the list.
+  for (let k = 1; k < m.confusions.length; k++)
+    assert.ok(m.confusions[k - 1].count >= m.confusions[k].count);
 });

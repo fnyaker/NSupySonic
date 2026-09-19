@@ -151,7 +151,7 @@ export function createPublisher({ onViewers } = {}) {
         // feature object would triple the payload for fields nothing draws.
         f: f
           ? [f.level, f.flux, f.lowFlux, f.midFlux, f.highFlux, f.centroidN, f.flatness,
-             f.percussivity, f.vocalMod, f.crest, f.silent ? 1 : 0]
+             f.percussivity, f.vocalMod, f.crest, f.silent ? 1 : 0, f.kick]
           : null,
         b: [b.bpm, b.confidence, b.phase, b.beat ? 1 : 0, b.beatIndex, b.barPos,
             b.beatsPerBar, b.downbeat ? 1 : 0, b.onset, b.kickPulse, b.period,
@@ -203,7 +203,7 @@ export function createSubscriber(onFrame, onMeta, onState) {
   const energy = { sub: 0, bass: 0, lowMid: 0, mid: 0, high: 0, air: 0 };
   const features = {
     level: 0, flux: 0, lowFlux: 0, midFlux: 0, highFlux: 0, centroidN: 0,
-    flatness: 0, percussivity: 0, vocalMod: 0, crest: 0, silent: true,
+    flatness: 0, percussivity: 0, vocalMod: 0, crest: 0, silent: true, kick: 0,
   };
   const beat = {
     bpm: 0, confidence: 0, phase: 0, beat: false, beatIndex: 0, barPos: 0,
@@ -286,7 +286,7 @@ export function createSubscriber(onFrame, onMeta, onState) {
         features.level = a[0]; features.flux = a[1]; features.lowFlux = a[2];
         features.midFlux = a[3]; features.highFlux = a[4]; features.centroidN = a[5];
         features.flatness = a[6]; features.percussivity = a[7]; features.vocalMod = a[8];
-        features.crest = a[9]; features.silent = !!a[10];
+        features.crest = a[9]; features.silent = !!a[10]; features.kick = a[11] || 0;
       }
       const b = m.b;
       beat.bpm = b[0]; beat.confidence = b[1]; beat.phase = b[2]; beat.beat = !!b[3];

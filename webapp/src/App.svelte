@@ -26,6 +26,7 @@
   import PlaylistPicker from "./components/PlaylistPicker.svelte";
   import ShareSheet from "./components/ShareSheet.svelte";
   import ReplaceSheet from "./components/ReplaceSheet.svelte";
+  import GenreTagSheet from "./components/GenreTagSheet.svelte";
   import ExportSheet from "./components/ExportSheet.svelte";
   import NetworkIndicator from "./components/NetworkIndicator.svelte";
   import Login from "./routes/Login.svelte";
@@ -232,6 +233,7 @@
 <PlaylistPicker />
 <ShareSheet />
 <ReplaceSheet />
+<GenreTagSheet />
 <ExportSheet />
 <NetworkIndicator />
 

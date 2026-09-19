@@ -52,8 +52,22 @@ import threading
 logger = logging.getLogger(__name__)
 
 # Bump when the extractor changes in a way that invalidates stored vectors.
-EMBED_VERSION = 1
-EMBED_DIM = 1280  # discogs-effnet's penultimate layer
+EMBED_VERSION = 2
+# discogs-effnet's penultimate layer, i.e. what ONE patch of the model emits.
+MODEL_DIM = 1280
+# What we STORE: the mean AND the standard deviation over the track's patches,
+# concatenated. Mean alone throws away how much the track moves — a three-chord
+# loop and a genre-hopping mashup can share a mean — and the standard deviation
+# is the half that tells them apart. This is the aggregation the model's own
+# authors publish (mean + std through time), and the one the music auto-tagging
+# literature measures as a straight accuracy gain over the mean on a frozen
+# extractor. Nothing downstream needed to learn it: the head simply sees 2560
+# numbers instead of 1280.
+EMBED_DIM = MODEL_DIM * 2
+# What a v1 sidecar holds (the mean alone). Kept readable rather than deleted:
+# a library extracted before this change must keep working on a server that can
+# no longer extract, exactly like the v1 -> v2 story everywhere else here.
+LEGACY_EMBED_DIM = MODEL_DIM
 
 # The one export this front-end is written for. It must be the DYNAMIC-batch
 # ONNX, not the "-bs64" one: the latter declares a fixed batch of 64, while the
@@ -81,8 +95,10 @@ MEL_BANDS = 96
 PATCH_FRAMES = 128  # ~2.05 s per patch, the model's input length
 # How many patches to embed, spread over the track. The whole point is a summary
 # of the piece, and forty patches is two minutes of audio sampled across it —
-# well past the point where the mean stops moving.
-MAX_PATCHES = 40
+# well past the point where the mean stops moving. The standard deviation needs
+# a few more samples than the mean to settle, which is the other reason this is
+# not smaller.
+MAX_PATCHES = 60
 FFMPEG_TIMEOUT = 300
 
 _lock = threading.Lock()
@@ -543,7 +559,12 @@ def session_error() -> str | None:
 
 
 def _run(patches):
-    """(patches, 128, 96) → the model's embedding output, meaned over patches."""
+    """(patches, 128, 96) → every patch's penultimate embedding, one row each.
+
+    The aggregation over patches happens in `_aggregate`, not here: the mean
+    alone is no longer the whole answer, and keeping this at "what the model
+    said about each patch" keeps the two responsibilities separate.
+    """
     import numpy as np
 
     sess = _load_session()
@@ -557,16 +578,42 @@ def _run(patches):
         raise ValueError(f"{problem} (front-end makes {patches.shape})")
     outs = sess.run(None, {inp.name: patches.astype(np.float32)})
     # The published model has two outputs: the 400 style activations and the
-    # penultimate embedding. Take whichever is EMBED_DIM wide; with a single
+    # penultimate embedding. Take whichever is MODEL_DIM wide; with a single
     # output, take it.
     pick = None
     for o in outs:
-        if o.ndim == 2 and o.shape[1] == EMBED_DIM:
+        if o.ndim == 2 and o.shape[1] == MODEL_DIM:
             pick = o
             break
     if pick is None:
-        pick = outs[-1]
-    vec = pick.mean(axis=0)
+        pick = outs[-1] if outs[-1].ndim == 2 else outs[-1].reshape(1, -1)
+    return pick.astype(np.float32)
+
+
+def _aggregate(rows):
+    """Per-patch embeddings (n, 1280) → ONE stored vector (2560,).
+
+    The mean and the standard deviation over the track, concatenated, exactly
+    as the model's authors publish it. Each patch is L2-normalized first, so a
+    loud patch does not outvote a quiet one (this is a summary of what the
+    music IS, not of how loud the master is), then each half is normalized
+    before the two are joined, so neither half can dominate the dot product a
+    linear head performs.
+    """
+    import numpy as np
+
+    x = np.asarray(rows, dtype=np.float32)
+    if x.ndim == 1:
+        x = x.reshape(1, -1)
+    norms = np.linalg.norm(x, axis=1, keepdims=True)
+    x = x / np.maximum(norms, 1e-9)
+    mean = x.mean(axis=0)
+    std = x.std(axis=0) if x.shape[0] > 1 else np.zeros_like(mean)
+    for half in (mean, std):
+        n = float(np.linalg.norm(half))
+        if n > 1e-9:
+            half /= n
+    vec = np.concatenate([mean, std]).astype(np.float32)
     norm = float(np.linalg.norm(vec))
     return (vec / norm) if norm > 1e-9 else vec
 
@@ -604,13 +651,13 @@ def embed_file_verbose(path):
     idx = [int(round(i * (total - 1) / max(1, take - 1))) for i in range(take)]
     patches = np.stack([mel[j * PATCH_FRAMES : (j + 1) * PATCH_FRAMES] for j in idx])
     try:
-        vec = _run(patches)
+        rows = _run(patches)
     except Exception as exc:
         logger.warning("embedding: inference failed for %s", path, exc_info=True)
         return None, f"inference: {exc}"
-    if vec is None:
+    if rows is None:
         return None, session_error() or "no model session"
-    return vec.astype("float32"), None
+    return _aggregate(rows).astype("float32"), None
 
 
 # --- storage ----------------------------------------------------------------
@@ -655,6 +702,13 @@ def load_embedding(track):
 
     A list, not an array: `genre.predict` works on plain floats and this is the
     only thing that reads it.
+
+    The DIMENSION is the version. A v2 sidecar is 2·MODEL_DIM wide (mean and
+    standard deviation); a v1 one, written before that change, is MODEL_DIM
+    wide and still reads back — it is a perfectly good training row, it is just
+    not what a v2-trained head expects. Callers that need a head to read it
+    already check the width (`genre.predict` returns None on a mismatch), so a
+    stale vector degrades to "no prediction" rather than to a wrong one.
     """
     p = sidecar_path(track)
     if not p or not os.path.isfile(p):
@@ -662,11 +716,38 @@ def load_embedding(track):
     try:
         with open(p, "rb") as fp:
             raw = fp.read()
-        if len(raw) != EMBED_DIM * 2:
+        dim = len(raw) // 2
+        if dim * 2 != len(raw) or dim not in (EMBED_DIM, LEGACY_EMBED_DIM):
             return None
-        return list(struct.unpack(f"<{EMBED_DIM}e", raw))
+        return list(struct.unpack(f"<{dim}e", raw))
     except Exception:
         return None
+
+
+def embedding_version(track) -> int:
+    """1 for a mean-only sidecar, 2 for the mean+std one, 0 for none.
+
+    Read from the file's own width rather than a header byte: the sidecar is a
+    raw float16 blob on purpose (see the module docstring), and a 1280-float
+    file could only ever have been written by v1.
+    """
+    p = sidecar_path(track)
+    if not p or not os.path.isfile(p):
+        return 0
+    try:
+        size = os.path.getsize(p)
+    except OSError:
+        return 0
+    if size == EMBED_DIM * 2:
+        return 2
+    if size == LEGACY_EMBED_DIM * 2:
+        return 1
+    return 0
+
+
+def vector_is_current(vec) -> bool:
+    """Whether a vector is the width the current extractor produces."""
+    return vec is not None and len(vec) == EMBED_DIM
 
 
 def encode_embedding(vec) -> str | None:
@@ -680,13 +761,25 @@ def encode_embedding(vec) -> str | None:
 
 
 def ensure_embedding(track):
-    """The stored vector, computing and saving it if it is not there yet."""
+    """The stored vector, computing and saving it if it is not there yet.
+
+    A v1 (mean-only) sidecar is treated as absent and re-extracted, when the
+    extractor is available: the vector is still readable, but a head trained on
+    v2 vectors cannot use it, so leaving it would silently stop predicting.
+    Without the extractor it is returned as it is — a library extracted on a
+    server that no longer has onnxruntime keeps working exactly as before.
+    """
     vec = load_embedding(track)
-    if vec is not None:
+    if vec is not None and vector_is_current(vec):
         return vec
-    vec = embed_file(track.path) if track and track.path else None
-    if vec is not None:
-        save_embedding(track, vec)
+    if vec is not None and not available():
+        return vec
+    if not track or not track.path:
+        return vec
+    new = embed_file(track.path)
+    if new is not None:
+        save_embedding(track, new)
+        return new
     return vec
 
 
@@ -791,4 +884,5 @@ def _embed_span(path, start, seconds):
     if total < 1:
         return None
     patches = np.stack([mel[i * PATCH_FRAMES : (i + 1) * PATCH_FRAMES] for i in range(total)])
-    return _run(patches)
+    rows = _run(patches)
+    return None if rows is None else _aggregate(rows)

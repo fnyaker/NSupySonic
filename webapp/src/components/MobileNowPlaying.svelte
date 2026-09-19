@@ -17,6 +17,8 @@
     openMenu,
     offlineCovers,
     openShare,
+    isAdmin,
+    openGenreTag,
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { addMarkerAt } from "../lib/markers.js";
@@ -744,6 +746,15 @@
       <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
         <Icon name={fav ? "heartFilled" : "heart"} size={24} />
       </button>
+      {#if $isAdmin && ($current.deezer_id || $current.id)}
+        <!-- Deliberately quiet, and next to the heart rather than in the header
+             where it would fight the queue button for the thumb: tagging is
+             something you reach for when the genre is wrong, not a call to
+             action. -->
+        <button class="fav tag" on:click={() => openGenreTag($current)} aria-label="Étiqueter le genre">
+          <Icon name="tag" size={22} />
+        </button>
+      {/if}
     </div>
 
     <div class="seek">
@@ -997,6 +1008,14 @@
   }
   .fav.on {
     color: var(--accent-2);
+  }
+  /* Dimmer than the heart: present for the admin, invisible to everyone else's
+     attention. */
+  .fav.tag {
+    color: rgba(255, 255, 255, 0.4);
+  }
+  .fav.tag:hover {
+    color: var(--accent);
   }
 
   .seek {
