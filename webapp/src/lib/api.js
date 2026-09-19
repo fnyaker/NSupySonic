@@ -206,6 +206,12 @@ export const api = {
   trackAnalyses: (ids) =>
     req("/analyses", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),
 
+  // (Re)measure the whole library server-side — tempo, style, embeddings — with
+  // a chosen parallelism. Admin-only; the studio polls the job.
+  analysisBackfill: (force, workers) =>
+    req("/analysis/backfill", { method: "POST", body: body({ force, workers }) }),
+  analysisBackfillStatus: () => req("/analysis/backfill"),
+
   // Where the audio actually starts and stops inside the archived file, for
   // the crossfade's silence trimming. Answers {ready:false} rather than an
   // error when the file isn't archived — see supysonic/webui/edges.py.

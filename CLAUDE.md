@@ -81,7 +81,7 @@ supysonic-cli deezer login-test                      # check the ARL works
 supysonic-cli deezer import <deezer-url|track|album|playlist <id>>
 supysonic-cli deezer sync                            # import playlists/favorites/new releases
 supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics for archived tracks
-supysonic-cli deezer analyze [--force] [--limit N]     # measure tempo + style for archived tracks
+supysonic-cli deezer analyze [--force] [--limit N] [--workers N]  # measure tempo + style for archived tracks
 supysonic-cli deezer embed [--force] [--limit N]       # extract genre embeddings (needs onnxruntime)
 supysonic-cli deezer embed --self-test                 # check the mel front-end without a reference
 
@@ -478,6 +478,12 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   `deezer analyze` is the catch-up and the way to re-measure after `ANALYSIS_VERSION` moves. The
   endpoint **never measures** — the player asks about tracks it is *about* to play, and a request
   that started a three-second ffmpeg pass would answer long after it mattered while holding a thread.
+- **The catch-up is a button too, with a chosen parallelism.** The Étiquetage tab starts the same
+  `backfill` the CLI runs (`POST /api/analysis/backfill`, admin-only, worker + poll), with a
+  **Reclasser tout** toggle (`force`) and a **Parallèle** count (1-8, persisted in `Meta`). Above one
+  worker the Deezer bpm lookup is skipped on purpose — its session is not meant to be hammered from
+  several threads — and the tempo is measured from the files. Each pool thread takes and returns its
+  own peewee connection; the work is ffmpeg, so the box bounds it, not Python.
 
 The client takes the global answers and keeps the per-moment ones. `engine.js` primes the verdicts
 for the queue window (one call, like `/api/gains`) and **seeds the beat tracker** with the served

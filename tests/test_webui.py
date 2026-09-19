@@ -3388,6 +3388,91 @@ class TrackAnalysisTestCase(unittest.TestCase):
 
         self.assertIsNone(ana._deezer_bpm(Dead(), t))
 
+    # -- the backfill job --------------------------------------------------
+
+    def test_analysis_backfill_requires_login(self):
+        self.assertEqual(self.client.get("/api/analysis/backfill").status_code, 401)
+        self.assertEqual(
+            self.client.post("/api/analysis/backfill", json={}).status_code, 401
+        )
+
+    def test_analysis_workers_are_clamped_and_persisted(self):
+        from supysonic.webui import analysis as wa
+
+        self._login()
+        self.assertEqual(wa._workers(), 1)
+        self.assertEqual(wa._set_workers(99), wa.ANALYSIS_WORKERS_MAX)
+        self.assertEqual(wa._workers(), wa.ANALYSIS_WORKERS_MAX)
+        self.assertEqual(wa._set_workers(0), 1)
+        body = self.client.get("/api/analysis/backfill").json
+        self.assertEqual(body["workers"], 1)
+        self.assertIn("running", body)
+
+    def test_backfill_runs_several_workers(self):
+        """The parallel loop: several tracks analysed at once, each thread using
+        the database on its own."""
+        from supysonic.deezer import analysis as ana
+
+        for i in range(3):
+            p = os.path.join(self.archive, f"t{i}.flac")
+            with open(p, "wb") as fp:
+                fp.write(b"x")
+            t = self._deezer_track(str(500 + i))
+            t.path = p
+            t.last_modification = 1
+            t.save()
+
+        seen = []
+
+        def fake_analyze(track, provider=None, force=False):
+            seen.append(str(track.id))
+            return object()  # a truthy "row"
+
+        original = ana.analyze_track
+        ana.analyze_track = fake_analyze
+        try:
+            stats = ana.backfill(workers=2)
+        finally:
+            ana.analyze_track = original
+        self.assertEqual(stats["done"], 3)
+        self.assertEqual(len(seen), 3)
+        self.assertIsNone(stats["error"])
+
+    def test_the_analysis_worker_reports_progress_and_finishes(self):
+        from supysonic.deezer import analysis as ana
+        from supysonic.webui import analysis as wa
+
+        self._login()
+
+        def fake_backfill(provider=None, force=False, limit=None, workers=1, on_stats=None):
+            stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None}
+            for _ in range(3):
+                stats["scanned"] += 1
+                stats["done"] += 1
+                if on_stats:
+                    on_stats(stats)
+            return stats
+
+        original = ana.backfill
+        ana.backfill = fake_backfill
+        try:
+            with wa._analysis_lock:
+                wa._analysis_job.update(
+                    running=True, started=now().isoformat(), total=3,
+                    scanned=0, done=0, skipped=0, failed=0, error=None,
+                    force=False, workers=2,
+                )
+            wa._run_analysis(self.app, False, 2, None)
+        finally:
+            ana.backfill = original
+
+        job = self.client.get("/api/analysis/backfill").json
+        self.assertFalse(job["running"])
+        self.assertEqual(job["done"], 3)
+        self.assertEqual(job["scanned"], 3)
+        self.assertIsNotNone(job["finished"])
+        self.assertIsNone(job["error"])
+
 
 class GenreStudioTestCase(unittest.TestCase):
     """The tagging studio's API (supysonic/webui/genre.py + deezer/genre.py).

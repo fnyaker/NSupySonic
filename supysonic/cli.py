@@ -549,14 +549,25 @@ def deezer_lyrics(config, overwrite, limit):
 @deezer.command("analyze")
 @click.option("--force", is_flag=True, help="Re-measure even tracks that already have a verdict.")
 @click.option("--limit", type=int, default=None, help="Stop after N measured tracks.")
+@click.option(
+    "--workers",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Analyse this many tracks at once (1-16).",
+)
 @click.pass_obj
-def deezer_analyze(config, force, limit):
+def deezer_analyze(config, force, limit, workers):
     """Measure tempo and style for every archived track that lacks them.
 
     The player is handed these instead of working them out live from the first
     seconds of each track. Normally this happens on its own the moment a track
     is archived; this is the catch-up for tracks that predate it, and the way to
     re-measure everything after the analysis itself improves.
+
+    With --workers above 1 the Deezer bpm lookup is skipped (its session is not
+    meant to be hammered from several threads) and the tempo is measured from
+    the files instead.
     """
     from .deezer import get_provider
     from .deezer.analysis import backfill
@@ -569,7 +580,9 @@ def deezer_analyze(config, force, limit):
         click.echo("Deezer proxy disabled; measuring tempo from the files.")
 
     click.echo("Analysing archived tracks...")
-    stats = backfill(provider, force=force, limit=limit, progress=click.echo)
+    stats = backfill(
+        provider, force=force, limit=limit, progress=click.echo, workers=workers
+    )
     click.echo(
         "Done. analysed={done} skipped={skipped} failed={failed} "
         "(scanned {scanned}).".format(**stats)

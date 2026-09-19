@@ -51,6 +51,8 @@ import subprocess
 import threading
 import time
 
+from concurrent.futures import ThreadPoolExecutor
+
 from ..db import Track, TrackAnalysis, now
 
 logger = logging.getLogger(__name__)
@@ -796,43 +798,86 @@ def queue_analysis(track: Track, provider=None):
     threading.Thread(target=run, name="dz-analysis", daemon=True).start()
 
 
-def backfill(provider=None, force=False, limit=None, progress=None):
+def backfill(provider=None, force=False, limit=None, progress=None, on_stats=None,
+             workers=1):
     """Measure every archived track that has no current verdict.
 
     The safety net for what the archive event cannot see: tracks archived before
     this existed, and anything measured by an older version of the analysis.
-    Synchronous and one at a time on purpose — this is a maintenance command,
-    not something that should ever compete with playback for the box.
+
+    `workers` runs that many tracks at once. Each one is one to three ffmpeg
+    passes plus (optionally) the extractor, so it is the box's CPU and disk that
+    bound it, not Python; 1 is the old one-at-a-time behaviour. Above one the
+    Deezer client is left out on purpose — its session is not meant to be
+    hammered from several threads, and a locally measured tempo is a fine
+    substitute. `on_stats` reports the running counters after every track.
     """
     say = progress or (lambda *_: None)
+    report = on_stats or (lambda *_: None)
     if not ffmpeg_available():
         say("ffmpeg not found; nothing to do.")
-        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0}
+        return {
+            "scanned": 0, "done": 0, "skipped": 0, "failed": 0,
+            "error": "ffmpeg is not installed (analysis decodes audio with it)",
+        }
+    workers = max(1, min(int(workers or 1), 16))
+    if workers > 1:
+        provider = None
 
-    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0}
-    query = Track.select().where(Track.last_modification > 0).order_by(Track.created)
-    for track in query:
-        if limit is not None and stats["done"] >= limit:
-            break
-        stats["scanned"] += 1
+    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None}
+    lock = threading.Lock()
+
+    def work(track):
+        with lock:
+            if limit is not None and stats["done"] >= limit:
+                return
+            stats["scanned"] += 1
         if not track.path or not os.path.isfile(track.path):
-            stats["skipped"] += 1
-            continue
+            with lock:
+                stats["skipped"] += 1
+                report(stats)
+            return
         existing = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
         if existing and not force and existing.version >= ANALYSIS_VERSION:
-            stats["skipped"] += 1
-            continue
+            with lock:
+                stats["skipped"] += 1
+                report(stats)
+            return
         try:
             row = analyze_track(track, provider, force=force)
         except Exception:
             logger.warning("analysis: failed for %s", track.path, exc_info=True)
             row = None
-        if row is None:
-            stats["failed"] += 1
-            continue
-        stats["done"] += 1
-        if stats["done"] % 25 == 0:
-            say(f"  {stats['done']} analysed...")
+        with lock:
+            if row is None:
+                stats["failed"] += 1
+                if stats["error"] is None:
+                    stats["error"] = f"{os.path.basename(track.path)}: analysis failed"
+            else:
+                stats["done"] += 1
+                if stats["done"] % 25 == 0:
+                    say(f"  {stats['done']} analysed...")
+            report(stats)
+
+    query = list(Track.select().where(Track.last_modification > 0).order_by(Track.created))
+    if workers == 1:
+        for track in query:
+            work(track)
+    else:
+        from ..db import close_connection, open_connection
+
+        def guarded(track):
+            # Peewee connections are thread-local, and the pool's threads are not
+            # the caller's: each one takes its own and gives it back, or the run
+            # leaks a connection per worker.
+            open_connection(reuse=True)
+            try:
+                work(track)
+            finally:
+                close_connection()
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dz-analyze") as ex:
+            list(ex.map(guarded, query))
     return stats
 
 

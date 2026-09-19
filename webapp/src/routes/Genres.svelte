@@ -141,6 +141,18 @@
       ? Math.min(100, Math.round((embed.scanned / embed.total) * 100))
       : 0;
 
+  // -- analysis backfill ------------------------------------------------------
+  // Tempo + style (+ embeddings) for the whole library, with a chosen
+  // parallelism. Same worker-and-poll shape as the embed run.
+  let analysis = null; // { running, total, scanned, done, skipped, failed, error }
+  let analysisPoll = null;
+  let analysisWorkers = 2;
+  let analysisForce = false;
+  $: analysisPct =
+    analysis && analysis.total
+      ? Math.min(100, Math.round((analysis.scanned / analysis.total) * 100))
+      : 0;
+
   $: eligible = tags.filter((t) => (counts[t.name] || 0) >= 2);
   $: trainable = eligible.length >= 2 && labelled >= eligible.length * 3;
   $: thin = tags.filter((t) => (counts[t.name] || 0) > 0 && (counts[t.name] || 0) < 8);
@@ -606,6 +618,50 @@
     }
   }
 
+  // -- analysis backfill ------------------------------------------------------
+  async function startAnalysis() {
+    try {
+      analysis = await api.analysisBackfill(analysisForce, analysisWorkers);
+    } catch (e) {
+      toasts.push(e?.message || "lancement impossible", "error");
+      return;
+    }
+    pollAnalysis();
+  }
+
+  async function pollAnalysis() {
+    stopAnalysisPoll();
+    const tick = async () => {
+      try {
+        analysis = await api.analysisBackfillStatus();
+      } catch {
+        analysisPoll = null;
+        return;
+      }
+      if (analysis?.running) {
+        analysisPoll = setTimeout(tick, 1000);
+        return;
+      }
+      analysisPoll = null;
+      if (analysis?.error) {
+        toasts.push(analysis.error, "error");
+      } else {
+        const n = analysis?.done || 0;
+        toasts.push(`${n} titre${n > 1 ? "s" : ""} analysé${n > 1 ? "s" : ""}`);
+      }
+      await refresh();
+      await loadCandidates();
+    };
+    analysisPoll = setTimeout(tick, 700);
+  }
+
+  function stopAnalysisPoll() {
+    if (analysisPoll) {
+      clearTimeout(analysisPoll);
+      analysisPoll = null;
+    }
+  }
+
   // -- keyboard ---------------------------------------------------------------
   function onKey(ev) {
     if (tab !== "tag" || !current) return;
@@ -661,12 +717,21 @@
       } catch {
         /* admin-only endpoint */
       }
+      try {
+        const a = await api.analysisBackfillStatus();
+        analysis = a;
+        if (a?.workers) analysisWorkers = a.workers;
+        if (a?.running) pollAnalysis();
+      } catch {
+        /* admin-only endpoint */
+      }
     }
   });
   onDestroy(() => {
     stopPreview();
     stopExtPoll();
     stopEmbedPoll();
+    stopAnalysisPoll();
     release();
   });
 
@@ -873,6 +938,51 @@
               <Icon name="alert" size={16} /><span>{embed.error}</span>
             </div>
           {/if}
+        {/if}
+
+        <div class="analysis-bar" class:running={analysis?.running}>
+          {#if analysis?.running}
+            <div class="progress"><i style={`width:${analysisPct}%`}></i></div>
+            <div class="embed-stats muted small">
+              <span>{analysis.scanned}/{analysis.total || "?"} analysés</span>
+              <span class="sep">·</span>
+              <span><strong>{analysis.done}</strong> à jour</span>
+              {#if analysis.failed}
+                <span class="sep">·</span>
+                <span class="bad">{analysis.failed} en échec</span>
+              {/if}
+              <span class="sep">·</span>
+              <span>{analysis.workers} en parallèle</span>
+            </div>
+          {:else}
+            <button class="ghost" on:click={startAnalysis}>
+              <Icon name="activity" size={16} /> Analyser les sons
+            </button>
+            <label class="inline-field">
+              Parallèle
+              <input type="number" min="1" max="8" bind:value={analysisWorkers} />
+            </label>
+            <label class="inline-check">
+              <input type="checkbox" bind:checked={analysisForce} />
+              Reclasser tout
+            </label>
+            {#if analysis && (analysis.done || analysis.failed)}
+              <span class="muted small">
+                Dernier passage : <strong>{analysis.done}</strong> analysé{analysis.done > 1 ? "s" : ""}{#if analysis.failed},
+                  <span class="bad">{analysis.failed} en échec</span>{/if}
+              </span>
+            {:else}
+              <span class="muted small">
+                Tempo + style (+ empreintes). « Reclasser tout » remesure même ce qui
+                a déjà un verdict.
+              </span>
+            {/if}
+          {/if}
+        </div>
+        {#if analysis?.error}
+          <div class="banner bad">
+            <Icon name="alert" size={16} /><span>{analysis.error}</span>
+          </div>
         {/if}
 
         {#if !tags.length}
@@ -1564,7 +1674,8 @@
   }
 
   /* -- tagging ------------------------------------------------------------- */
-  .embed-bar {
+  .embed-bar,
+  .analysis-bar {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1575,14 +1686,36 @@
     margin-bottom: 14px;
     font-size: 0.84rem;
   }
-  .embed-bar .progress {
+  .embed-bar .progress,
+  .analysis-bar .progress {
     flex: 1 1 180px;
     margin: 0;
   }
-  .embed-bar.running {
+  .embed-bar.running,
+  .analysis-bar.running {
     display: grid;
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+  .inline-field,
+  .inline-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim, #9aa0a6);
+    white-space: nowrap;
+  }
+  .inline-field input[type="number"] {
+    width: 54px;
+    background: var(--surface, #141517);
+    border: 1px solid var(--border, #2a2d33);
+    border-radius: 8px;
+    color: inherit;
+    font: inherit;
+    padding: 4px 6px;
+  }
+  .inline-check input {
+    accent-color: var(--accent, #22d3ee);
   }
   .embed-stats {
     display: flex;

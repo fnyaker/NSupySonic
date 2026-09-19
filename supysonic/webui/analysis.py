@@ -19,15 +19,151 @@ run it is about to play, in one call, before any of it starts.
 from __future__ import annotations
 
 import logging
+import threading
 
-from flask import jsonify, request
+from flask import current_app, jsonify, request
 
-from ..db import Track, TrackAnalysis
-from . import _may_access_track, _valid_id, login_required, webapi
+from ..db import Meta, Track, TrackAnalysis, now
+from . import _may_access_track, _valid_id, admin_required, login_required, webapi
 
 logger = logging.getLogger(__name__)
 
 ANALYSIS_BATCH_MAX = 100
+ANALYSIS_WORKERS_MAX = 8
+# The admin's parallelism choice lives in the Meta KV table, like the upload
+# quota: it is a server-wide cost, not a per-request one.
+_WORKERS_META_KEY = "analysis_workers"
+
+
+def _workers() -> int:
+    row = Meta.get_or_none(Meta.key == _WORKERS_META_KEY)
+    if row is not None:
+        try:
+            return max(1, min(ANALYSIS_WORKERS_MAX, int(row.value)))
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def _set_workers(value: int) -> int:
+    value = max(1, min(ANALYSIS_WORKERS_MAX, int(value)))
+    row = Meta.get_or_none(Meta.key == _WORKERS_META_KEY)
+    if row is None:
+        Meta.create(key=_WORKERS_META_KEY, value=str(value))
+    else:
+        row.value = str(value)
+        row.save()
+    return value
+
+
+# -- the analysis backfill job -----------------------------------------------
+# Tempo + style (+ the embedding, when the extractor is there) for the whole
+# library, run in a worker the studio polls. `workers` runs that many tracks at
+# once — the work is ffmpeg, so the box bounds it, not Python.
+_analysis_lock = threading.Lock()
+_analysis_job = {
+    "running": False,
+    "started": None,
+    "finished": None,
+    "force": False,
+    "workers": 1,
+    "total": 0,
+    "scanned": 0,
+    "done": 0,
+    "skipped": 0,
+    "failed": 0,
+    "error": None,
+}
+
+
+def _analysis_job_json() -> dict:
+    with _analysis_lock:
+        return dict(_analysis_job)
+
+
+def _run_analysis(app, force, workers, limit):
+    from ..db import close_connection, open_connection
+    from ..deezer.analysis import backfill
+
+    with app.app_context():
+        try:
+            open_connection(reuse=True)
+
+            def on_stats(stats):
+                with _analysis_lock:
+                    _analysis_job.update(stats)
+
+            provider = getattr(app, "deezer", None)
+            stats = backfill(
+                provider=provider,
+                force=force,
+                limit=limit,
+                workers=workers,
+                on_stats=on_stats,
+            )
+            with _analysis_lock:
+                _analysis_job.update(stats)
+        except Exception as exc:
+            logger.warning("Analysis backfill crashed", exc_info=True)
+            with _analysis_lock:
+                _analysis_job["error"] = str(exc)
+        finally:
+            with _analysis_lock:
+                _analysis_job["running"] = False
+                _analysis_job["finished"] = now().isoformat()
+            try:
+                close_connection()
+            except Exception:
+                pass
+
+
+@webapi.route("/analysis/backfill", methods=["POST"])
+@login_required
+@admin_required
+def analysis_backfill_start():
+    """(Re)measure the library: tempo, style, and the embedding when possible."""
+    from ..deezer.analysis import ffmpeg_available
+
+    if not ffmpeg_available():
+        return jsonify({"error": "ffmpeg n'est pas installé sur le serveur"}), 400
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get("force"))
+    try:
+        workers = int(data.get("workers") or _workers())
+    except (TypeError, ValueError):
+        workers = _workers()
+    workers = _set_workers(workers)
+    with _analysis_lock:
+        if _analysis_job["running"]:
+            return jsonify({"ok": True, **_analysis_job})
+        _analysis_job.update(
+            running=True,
+            started=now().isoformat(),
+            finished=None,
+            force=force,
+            workers=workers,
+            total=Track.select().where(Track.last_modification > 0).count(),
+            scanned=0,
+            done=0,
+            skipped=0,
+            failed=0,
+            error=None,
+        )
+    app = current_app._get_current_object()
+    threading.Thread(
+        target=_run_analysis,
+        args=(app, force, workers, None),
+        name="analysis-backfill",
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True, **_analysis_job_json()})
+
+
+@webapi.route("/analysis/backfill")
+@login_required
+@admin_required
+def analysis_backfill_status():
+    return jsonify({"workers": _workers(), **_analysis_job_json()})
 
 
 def _rows_for(ids):
