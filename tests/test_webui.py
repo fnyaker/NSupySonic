@@ -3432,13 +3432,16 @@ class TrackAnalysisTestCase(unittest.TestCase):
 
         original_analyze = ana.analyze_track
         original_isfile = ana.os.path.isfile
+        original_ffmpeg = ana.ffmpeg_available
         ana.analyze_track = fake_analyze
         ana.os.path.isfile = lambda p: True  # the fixture has no real audio
+        ana.ffmpeg_available = lambda: True  # CI has no ffmpeg either
         try:
             stats = ana.backfill(workers=2)
         finally:
             ana.analyze_track = original_analyze
             ana.os.path.isfile = original_isfile
+            ana.ffmpeg_available = original_ffmpeg
         self.assertEqual(stats["scanned"], 3, stats)
         self.assertEqual(stats["done"], 3, stats)
         self.assertEqual(len(seen), 3, stats)
