@@ -418,3 +418,77 @@ test("a seed outside the searchable range is refused", () => {
   assert.equal(tr.seed(NaN), false);
   assert.equal(tr.out.locked, false);
 });
+
+// -- fade automation --------------------------------------------------------
+//
+// An AudioParam mock that enforces the spec rule the real engine enforces:
+// setValueCurveAtTime(T, D) throws NotSupportedError if ANY automation method
+// is called at a time inside [T, T+D), and cancelScheduledValues(t) removes
+// only the events whose time is >= t. Modeling both is what makes these tests
+// mean something — a mock that accepted everything would have passed against
+// the bug.
+function mockParam(value = 1) {
+  const events = [];
+  const inLiveCurve = (t) =>
+    events.some((e) => e.type === "curve" && t >= e.t && t < e.t + e.d);
+  return {
+    get value() {
+      return value;
+    },
+    events,
+    setValueAtTime(v, t) {
+      if (inLiveCurve(t))
+        throw new DOMException("setValueAtTime overlaps", "NotSupportedError");
+      value = v;
+      events.push({ type: "set", v, t });
+      return this;
+    },
+    setValueCurveAtTime(c, t, d) {
+      if (inLiveCurve(t) || events.some((e) => e.t > t && e.t < t + d))
+        throw new DOMException("setValueCurveAtTime overlaps", "NotSupportedError");
+      value = c[c.length - 1];
+      events.push({ type: "curve", c, t, d });
+      return this;
+    },
+    cancelScheduledValues(t) {
+      for (let i = events.length - 1; i >= 0; i--) if (events[i].t >= t) events.splice(i, 1);
+      return this;
+    },
+  };
+}
+
+test("interrupting a fade mid-curve re-arms instead of throwing", async () => {
+  const { fadeParam } = await import("../src/lib/audio/graph.js");
+  const p = mockParam(1);
+  // A six-second crossfade is in flight.
+  fadeParam(p, 1, 0, 0, 6);
+  assert.equal(p.events.filter((e) => e.type === "curve").length, 1);
+  // Now the user skips: a new fade must start while the first one is still
+  // running. This is the exact sequence that produced the
+  // `NotSupportedError: setValueCurveAtTime ... overlaps` seen in the log.
+  assert.doesNotThrow(() => fadeParam(p, p.value, 1, 1, 0.06));
+  const curves = p.events.filter((e) => e.type === "curve");
+  assert.equal(curves.length, 1, "the old curve must be gone, the new one live");
+  assert.equal(curves[0].t, 1);
+});
+
+test("a fade interrupted at its very start does not throw either", async () => {
+  const { fadeParam } = await import("../src/lib/audio/graph.js");
+  const p = mockParam(1);
+  fadeParam(p, 1, 0, 0, 4);
+  // Same instant: t is inside [0, 4), and the old curve's event time is < t, so
+  // cancelScheduledValues(t) alone would leave it in place and the re-arm would
+  // throw. This is the case the fix exists for.
+  assert.doesNotThrow(() => fadeParam(p, p.value, 0.5, 0, 3));
+  assert.equal(p.events.filter((e) => e.type === "curve").length, 1);
+});
+
+test("the fade still lands on its end value", async () => {
+  const { fadeParam } = await import("../src/lib/audio/graph.js");
+  const p = mockParam(1);
+  fadeParam(p, 1, 0, 0, 2);
+  const c = p.events.find((e) => e.type === "curve");
+  assert.equal(c.c[c.c.length - 1], 0, "a fade to 0 must reach 0");
+  fadeParam(p, 0, 1, 5, 0); // instantaneous (a skip's hard cut path)
+  assert.equal(p.events.at(-1).v, 1);
+});

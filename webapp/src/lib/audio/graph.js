@@ -157,24 +157,67 @@ function effectsOn() {
 // The furthest the analysis can run ahead of the speakers (ms).
 export const LOOKAHEAD_MAX = 300;
 
+// The interval of the setValueCurveAtTime we last scheduled on a param.
+//
+// This exists because of a spec rule with teeth: setValueCurveAtTime(T, D)
+// THROWS NotSupportedError when any automation method is called at a time
+// inside [T, T+D). And cancelScheduledValues(t) only drops events whose time is
+// at or after `t` — a curve that started BEFORE `t` has an event time before
+// `t`, so it survives the cancel with its interval still straddling `t`.
+// Scheduling the next fade at `t` then lands inside the live curve and throws.
+// Remembering where the curve starts is what lets us cancel it for real.
+const runningCurves = new WeakMap();
+
 // Cancel whatever automation is scheduled on a param and hold it where it
-// audibly IS. cancelScheduledValues alone is not enough: per spec it only drops
-// events whose time is at or after the cancel time, so a setValueCurveAtTime
-// already running (a crossfade in flight) would keep running to its end.
-// cancelAndHoldAtTime is the call that stops it; older engines lack it, and
-// there writing the current value back is the closest equivalent.
+// audibly IS. cancelScheduledValues alone is not enough: per spec it misses a
+// setValueCurveAtTime already running (a crossfade in flight), which would keep
+// running to its end. cancelAndHoldAtTime is the call that stops it; older
+// engines lack it, and there the curve has to be cancelled from its own start.
 function holdParam(param, t) {
   if (typeof param.cancelAndHoldAtTime === "function") {
     try {
       param.cancelAndHoldAtTime(t);
+      runningCurves.delete(param);
       return;
     } catch {
       /* fall through */
     }
   }
   const v = param.value;
-  param.cancelScheduledValues(t);
+  const curve = runningCurves.get(param);
+  // Cancel from the curve's start, not from `t`: only a cancel time at or
+  // before the curve's event time actually removes it. This is the whole reason
+  // interrupting a fade used to throw instead of re-arming.
+  const from = curve && curve.start <= t && t < curve.end ? curve.start : t;
+  param.cancelScheduledValues(from);
   param.setValueAtTime(v, t);
+  runningCurves.delete(param);
+}
+
+// Schedule the equal-power ramp on a gain param and remember its interval.
+function scheduleFadeCurve(param, from, to, t, seconds) {
+  try {
+    param.setValueCurveAtTime(equalPowerCurve(from, to), t, seconds);
+    runningCurves.set(param, { start: t, end: t + seconds });
+  } catch {
+    // A scheduling quirk must never cost the fade — or the track. Land the end
+    // value instead and forget the curve; the gain is still correct, just not
+    // curved.
+    param.setValueAtTime(to, t);
+    runningCurves.delete(param);
+  }
+}
+
+// Re-arm one gain param: hold where it is, then ramp to `to`. Exported so the
+// interruption path can be driven from Node with a spec-faithful mock param.
+export function fadeParam(param, from, to, t, seconds) {
+  holdParam(param, t);
+  if (seconds <= 0.01) {
+    param.setValueAtTime(to, t);
+    return;
+  }
+  param.setValueAtTime(from, t);
+  scheduleFadeCurve(param, from, to, t, seconds);
 }
 
 // Build the shared graph once. Returns false if Web Audio is unavailable.
@@ -384,19 +427,12 @@ function equalPowerCurve(from, to) {
 export function fadeElement(el, to, seconds) {
   const strip = strips.get(el);
   if (!ctx || !strip) return false;
-  const t = ctx.currentTime;
   const g = strip.fade.gain;
-  // Read where the envelope actually is before cancelling, so interrupting a
+  // Read where the envelope actually IS before cancelling, so interrupting a
   // fade continues from the audible value instead of jumping to the last value
   // that was *scheduled*.
   const from = g.value;
-  holdParam(g, t);
-  if (seconds <= 0.01) {
-    g.setValueAtTime(to, t);
-    return true;
-  }
-  g.setValueAtTime(from, t);
-  g.setValueCurveAtTime(equalPowerCurve(from, to), t, seconds);
+  fadeParam(g, from, to, ctx.currentTime, seconds);
   return true;
 }
 

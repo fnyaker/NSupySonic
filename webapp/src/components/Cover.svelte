@@ -5,6 +5,8 @@
   import { offlineCovers } from "../lib/stores.js";
   import { online } from "../lib/net.js";
   import { api } from "../lib/api.js";
+  import { forgetCachedCover } from "../lib/playcache.js";
+  import { forgetDownloadedCover } from "../lib/offline.js";
   export let src = null;
   export let alt = "";
   export let round = false;
@@ -204,6 +206,16 @@
       // eviction): fall through to the network sources instead of a placeholder.
       blobFailed = true;
       loaded = false;
+      // And DROP it, so the next launch (and the next track that shares this
+      // album art) fetches fresh bytes. The flag above is per-component and
+      // resets on every src change — on its own it would leave the bad blob
+      // being re-served forever, which is exactly what repeated `img failed
+      // from blob:` lines for the same art across sessions were.
+      const url = src;
+      Promise.resolve()
+        .then(() => forgetCachedCover(url))
+        .then((mine) => (mine ? null : forgetDownloadedCover(url)))
+        .catch(() => {});
       if (src && baseCover(src) !== src) preloadHi(src);
     } else if (hiUrl) {
       hiUrl = null;

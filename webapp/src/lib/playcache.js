@@ -266,6 +266,51 @@ export async function enforce(limit) {
   }
 }
 
+// Drop a cover blob that turned out not to DECODE, so a later session re-fetches
+// it instead of re-serving the same bad bytes.
+//
+// Without this, one corrupt write (a truncated download, a quota eviction that
+// left a partial blob) is permanent: the UI notices the failure with an
+// in-memory flag that resets on every re-render, so the broken blob is handed
+// back on every cover change, every playback and every launch. Deleting it is
+// what turns a permanently artless album into one that fixes itself.
+export async function forgetCachedCover(coverUrl) {
+  if (!coverUrl) return false;
+  const key = coverKey(coverUrl);
+  let owned = false;
+  try {
+    const db = await openDB();
+    // Match by the RESOLUTION-INDEPENDENT key: the row was stored under the
+    // 500px URL the lists use, while the full-screen views ask for 1000px — the
+    // exact string would never match, and the bad blob would survive.
+    const t = tx(db, "covers", "readwrite");
+    const store = t.objectStore("covers");
+    for (const row of await reqp(store.getAll())) {
+      if (coverKey(row.url) === key) store.delete(row.url);
+    }
+    await done(t);
+  } catch {
+    /* best effort — the in-memory flag still gets the caller past it */
+  }
+  if (ownedCovers.has(key)) {
+    owned = true;
+    ownedCovers.delete(key);
+  }
+  offlineCovers.update((m) => {
+    const n = { ...m };
+    if (n[key]) {
+      try {
+        URL.revokeObjectURL(n[key]);
+      } catch {
+        /* ignore */
+      }
+      delete n[key];
+    }
+    return n;
+  });
+  return owned;
+}
+
 async function evictEntry(e) {
   const db = await openDB();
   if (e.kind === "audio") {
