@@ -28,6 +28,11 @@ workers = int(os.environ.get("GUNICORN_WORKERS", "1"))
 threads = int(os.environ.get("GUNICORN_THREADS", "16"))
 timeout = int(os.environ.get("GUNICORN_TIMEOUT", "120"))
 
+# Publish the RESOLVED count, so the app's background-request reservation sizes
+# itself against the pool that actually exists rather than against a default it
+# guessed. The workers inherit this environment.
+os.environ["GUNICORN_THREADS"] = str(threads)
+
 # Worker recycling is OFF by default, and that is deliberate rather than an
 # oversight. The library-wide analysis and the archive sweep run on threads
 # INSIDE the worker and take hours; recycling after N requests killed them

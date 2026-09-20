@@ -88,7 +88,7 @@ def _thread_budget() -> int:
                 return n
         except (TypeError, ValueError):
             continue
-    return 8
+    return 16  # the gunicorn config's own default
 
 
 def _default_background_slots() -> int:

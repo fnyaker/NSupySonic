@@ -74,7 +74,7 @@ export FLASK_APP="supysonic.web:create_application()"; flask run   # backend dev
 # Web UI (Svelte SPA)
 cd webapp && npm install && npm run build            # -> supysonic/webui/dist (gitignored)
 cd webapp && npm run dev                             # hot reload; proxies /api -> localhost:5000
-cd webapp && npm test                                # node --test: the analysis DSP + the genre trainers (no deps)
+cd webapp && npm test                                # node --test: the analysis DSP, the genre trainers, the cover loader (no deps)
 
 # Deezer CLI
 supysonic-cli deezer login-test                      # check the ARL works
@@ -319,13 +319,47 @@ that outlives the session.
   Subsonic's `createPlaylist`/`updatePlaylist`);
 - *subscribing to a show* (`/api/podcasts` POST → `backfill.archive_show`, every episode).
 
-Everything goes through the bounded background download queue (`prefetch.download_ids` /
-`download_episode_ids`) and is fail-soft: archiving is a *consequence* of the action, never a
-condition for it. Rows already on disk are filtered out first, so re-starring a big library costs
+Everything goes through the bounded, **priority-ordered** background download queue
+(`prefetch.download_ids` / `download_episode_ids`, see the priority section below) and is fail-soft:
+archiving is a *consequence* of the action, never a condition for it. Rows already on disk are filtered out first, so re-starring a big library costs
 nothing. A discography is bigger than the queue, so `backfill._queue_all` waits for room
 (`QUEUE_RETRY_DELAY`) instead of dropping the overflow — it gives up only if `archive_library` is
 switched off under it. **Do not add a periodic archive loop** — the app knows the instant it
 happens, so re-asking on a timer is work for nothing.
+
+**A person waiting in front of the app outranks every background job**
+(`supysonic/deezer/workload.py`, `webapp/src/lib/ladder.js`, `webapp/src/lib/coverqueue.js`). That
+rule needs a mechanism per kind of contention, and all of them exist because the app once queued a
+user's own requests for thirty seconds behind work they never asked for:
+
+- **Request threads.** The server answers from one worker × 16 threads, and a first play of a Deezer
+  track holds one of them for as long as the FLAC takes. The client PREFETCHES through the same
+  route, so a handful of prefetches took the whole pool. A request nobody is looking at says so
+  (`X-NS-Background: 1`, or `?bg=1`) and is held to a quarter of the pool; over that it is
+  **refused** (503 + `Retry-After`), never queued — a background request that waits is still holding
+  the thread it was meant not to hold, and the client reads the refusal as "not cached yet". A
+  background `/api/stream` of a not-yet-archived track never downloads inline at all: it queues the
+  archive at prefetch priority and answers at once.
+- **Download slots.** `workload.Priority` orders one queue serving three urgencies — `USER` (0),
+  `PREFETCH` (5), `BULK` (9, the default). The client says **why** it wants a track (`why` on
+  `/api/download`), never how urgent it is, and an unknown reason is bulk, so nothing can claim the
+  front by accident. Bulk workers also `quiet_wait` while a foreground archive is in flight (one
+  link, one Deezer session, one disk head).
+- **CPU.** `workload.renice` puts the archive workers and every batch job behind everything else,
+  and `workload.cpu_workers` sizes a library-wide job from the machine (half its cores) rather than
+  asking the operator.
+- **The client's own ladder** (`lib/ladder.js`): a track change used to fire seven requests at once.
+  Now the audio goes first; the artwork, the genre verdict, the lyrics, the silence bounds and the
+  play count wait until the element can play and then run **one at a time**; the prefetch of the
+  next track waits for the same signal. Caching the artwork before telling the media session about
+  it is also what stopped the same cover being fetched twice per track change.
+- **Artwork** (`lib/coverqueue.js`): four covers in flight, each freed slot going to whichever
+  waiting cover is closest to the viewport, with the scroll direction counted as closer. Art that
+  costs no request (above the fold, or already on the device) never queues, and everything degrades
+  to "just load it" — a missing picture is worse than an unordered one.
+
+Worker recycling (`GUNICORN_MAX_REQUESTS`) is **off by default**: the hours-long library jobs run on
+threads inside the worker, and recycling killed them mid-run.
 
 The nightly sync then runs `sweep_for` as the *safety net* for what events can't see (a Deezer-side
 change we only learn about at sync time, a download that failed while the server was down), and
@@ -478,12 +512,30 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   `deezer analyze` is the catch-up and the way to re-measure after `ANALYSIS_VERSION` moves. The
   endpoint **never measures** — the player asks about tracks it is *about* to play, and a request
   that started a three-second ffmpeg pass would answer long after it mattered while holding a thread.
-- **The catch-up is a button too, with a chosen parallelism.** The Étiquetage tab starts the same
-  `backfill` the CLI runs (`POST /api/analysis/backfill`, admin-only, worker + poll), with a
-  **Reclasser tout** toggle (`force`) and a **Parallèle** count (1-8, persisted in `Meta`). Above one
+- **The catch-up is a button too, and it finishes whatever the library.** The Étiquetage tab starts
+  the same `backfill` the CLI runs (`POST /api/analysis/backfill`, admin-only, worker + poll), with
+  a **Reclasser tout** toggle (`force`) and a **Parallèle** count where **0 means auto** (persisted
+  in `Meta`; `analysis.auto_workers` → `workload.cpu_workers`, half the machine's cores). Above one
   worker the Deezer bpm lookup is skipped on purpose — its session is not meant to be hammered from
   several threads — and the tempo is measured from the files. Each pool thread takes and returns its
   own peewee connection; the work is ffmpeg, so the box bounds it, not Python.
+- **It walks the library by page and CHECKPOINTS, never `list()`s it.** `analysis._walk_library`
+  keyset-paginates by primary key (`PAGE_SIZE`) and writes the cursor to `Meta` after every page
+  (`analysis_cursor` / `embed_cursor`, cleared at the end, ignored past `RESUME_MAX_AGE` or when the
+  `force` flag differs). Materialising the library built every Track object before the first
+  measurement ran, and a restart lost the whole run — which is what "it stops around ten thousand
+  tracks" was. `webui/analysis.resume_if_interrupted` / `webui/genre.resume_if_interrupted` restart
+  an interrupted job on boot without being asked, so "analyse everything" means everything, across
+  as many restarts as it takes.
+- **The mel front-end only transforms the patches it embeds** (`embedding.patch_offsets` +
+  `_log_mel_patches`). Building the whole file's spectrogram and keeping a sixtieth of it made the
+  cost *and* the peak memory scale with the track's length — numpy's rfft returns complex128
+  whatever it is fed, so an hour-long set reached the better part of a gigabyte of temporaries for
+  sixty patches. A one-minute track and a two-hour one now cost the same.
+- **A model that will not load is retried, not condemned.** `embedding._session_retry_at` holds a
+  load failure for `SESSION_RETRY_DELAY` and then forgets it. The old permanent flag meant one bad
+  second ended every extraction for the life of the process — and it is also how uploading the model
+  fixes a running server.
 
 The client takes the global answers and keeps the per-moment ones. `engine.js` primes the verdicts
 for the queue window (one call, like `/api/gains`) and **seeds the beat tracker** with the served
@@ -570,6 +622,17 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   known duration when the stream reports none, and a seek on a not-yet-seekable source is chased
   and landed as soon as the buffer allows rather than being dropped. The preview shares the
   player's volume, with its own slider. The button is in Réglages → Animations → Analyse rythmique.
+- **Tagging is reachable from wherever the track is.** The studio is for a tagging pass; the other
+  moment is noticing a wrong genre while listening or scrolling a list, so an admin also gets
+  *Étiqueter le genre…* in any track's three-dot menu (`actions.buildTrackMenu` → `openGenreTag`),
+  opening the same global sheet over the current screen, plus the quiet tag button in both
+  now-playing views.
+- **The genre chip reads the SERVED verdict first** (`webapp/src/lib/trackverdict.js`). It used to
+  read the live classifier only, so it needed the analysis engine running, the `smart` scene
+  selected AND the classifier past its confidence floor — miss any one and there was no label at
+  all, which is why it showed up about half the time. The server measured the track once and a
+  hand-applied tag is not a guess at all, so that leads; the live reading covers what nobody has
+  measured yet.
 
 **Audio analysis** (`webapp/src/lib/audio/`) is ONE engine, shared. `engine.js` owns a single clock
 and a single pass over the analysers; every view reads the same frame object by reference, so a
