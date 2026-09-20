@@ -81,6 +81,54 @@ def reject_cross_site():
             return jsonify({"error": "cross-site request rejected"}), 403
 
 
+# A person waiting in front of the app outranks every background job.
+#
+# This server answers from a small fixed pool of threads, and a first play of a
+# Deezer track holds one of them for as long as the FLAC takes to arrive. The
+# client prefetches through that same route, so a handful of prefetches used to
+# take the WHOLE pool — and then the gains, the lyrics and the favourites list
+# queued behind them for half a minute each. Nothing was slow; everything was
+# waiting.
+#
+# So a request that nobody is looking at says so (``X-NS-Background: 1``, set by
+# the prefetcher and the cache warmers) and is held to a fraction of the pool.
+# Over that fraction it is REFUSED rather than queued — a background request
+# that waits is still holding the thread it was meant not to hold — and the
+# client simply tries again later. Foreground requests are never gated, so the
+# rest of the pool is always there for somebody who is waiting.
+def _is_background_request() -> bool:
+    if request.headers.get("X-NS-Background") == "1":
+        return True
+    return request.args.get("bg") == "1"
+
+
+@webapi.before_request
+def _admit_by_priority():
+    from ..deezer import workload
+
+    request.ns_background = _is_background_request()
+    request.ns_slot = False
+    if not request.ns_background:
+        return
+    if not workload.admit_background():
+        # Deliberately 503 + Retry-After and not a queue: the client reads this
+        # as "not now", which is exactly what it is.
+        resp = jsonify({"error": "busy", "background": True})
+        resp.status_code = 503
+        resp.headers["Retry-After"] = "5"
+        return resp
+    request.ns_slot = True
+
+
+@webapi.teardown_request
+def _release_priority_slot(_exc=None):
+    if getattr(request, "ns_slot", False):
+        from ..deezer import workload
+
+        request.ns_slot = False
+        workload.release_background()
+
+
 # Last-resort safety net. Every route below already handles the failures it can
 # foresee, but Deezer is a third party: it invents new error shapes, hands back
 # half a JSON document, or throws a database race at us mid-import. None of that
@@ -2875,7 +2923,15 @@ def download():
     pf = getattr(current_app, "deezer_prefetch", None)
     if pf is None:
         return jsonify({"error": "downloader unavailable"}), 503
-    queued = pf.download_ids(ids)
+    # WHY this was asked for, not how urgent the client thinks it is: the track
+    # the player is about to need ("prefetch") goes ahead of the two thousand a
+    # "download this playlist" (the default) queued behind it. An unknown or
+    # missing reason is treated as bulk, so nothing can claim the front by
+    # accident.
+    from ..deezer.workload import priority_from_name
+
+    reason = (request.get_json(silent=True) or {}).get("why")
+    queued = pf.download_ids(ids, priority=priority_from_name(reason))
     if queued < len(ids):
         # The archive queue is bounded (see prefetch.py): tell the client how
         # much actually got in rather than pretending the whole batch is coming.
@@ -3313,7 +3369,13 @@ def _stream_episode(episode, bitrate):
             # long show never started playing at all.
             pf = getattr(current_app, "deezer_prefetch", None)
             eid = str(episode.id)
-            on_abort = (lambda: pf.download_episode_ids([eid])) if pf else None
+            from ..deezer.workload import Priority as _P
+
+            on_abort = (
+                (lambda: pf.download_episode_ids([eid], priority=_P.PREFETCH))
+                if pf
+                else None
+            )
             try:
                 mimetype, gen = archive.open_live_episode_stream(
                     provider, episode, on_abort
@@ -3488,6 +3550,21 @@ def stream(deezer_id):
     if track is None or not os.path.isfile(track.path):
         if not _valid_id(deezer_id):
             return jsonify({"error": "track unavailable"}), 404
+        # A PREFETCH must never be what downloads a FLAC on a request thread.
+        # Nobody is waiting for these bytes, and holding a thread for the minute
+        # the download takes is how the person who IS waiting ends up queueing
+        # behind three of them. Queue it at prefetch priority and answer now; the
+        # client reads 503 as "not cached yet" and tries again later.
+        if getattr(request, "ns_background", False):
+            from ..deezer.workload import Priority
+
+            pf = getattr(current_app, "deezer_prefetch", None)
+            if pf is not None:
+                pf.download_ids([deezer_id], priority=Priority.PREFETCH)
+            resp = jsonify({"error": "not archived yet", "queued": True})
+            resp.status_code = 503
+            resp.headers["Retry-After"] = "30"
+            return resp
         # Not archived yet — we need Deezer for the metadata and/or the audio.
         provider, err = _need_provider()
         if err:
@@ -3509,7 +3586,15 @@ def stream(deezer_id):
                 # finalized inside the generator. If the client disconnects early,
                 # on_abort queues a normal background archive so it still caches.
                 pf = getattr(current_app, "deezer_prefetch", None)
-                on_abort = (lambda did=deezer_id: pf.download_ids([did])) if pf else None
+                # They were listening to it and the connection dropped: finish
+                # the archive ahead of anything bulk, not behind it.
+                from ..deezer.workload import Priority as _P
+
+                on_abort = (
+                    (lambda did=deezer_id: pf.download_ids([did], priority=_P.PREFETCH))
+                    if pf
+                    else None
+                )
                 try:
                     mimetype, gen = archive.open_live_stream(provider, track, on_abort)
                 except TrackUnavailable:
@@ -3520,8 +3605,14 @@ def stream(deezer_id):
                 return current_app.response_class(gen, mimetype=mimetype)
 
             # Opus on a cold track needs the full FLAC master first.
+            from ..deezer import workload
+
             try:
-                archive.ensure_archived(provider, track)
+                # Somebody is waiting on these bytes: the bulk archiver stands
+                # down for as long as this takes, instead of racing it for the
+                # same link and the same disk head.
+                with workload.foreground():
+                    archive.ensure_archived(provider, track)
             except TrackUnavailable:
                 return _gone(track, deezer_id)
             except Exception:

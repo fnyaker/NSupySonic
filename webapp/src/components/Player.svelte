@@ -1944,7 +1944,9 @@
       clearTimeout(archiveTimer);
       archiveTimer = setTimeout(() => {
         if (stillNext(nextId) && get(online))
-          api.download([nextId]).catch(() => {}); // server-side pre-archive
+          // Prefetch priority: this one track is about to be needed, so it goes
+          // ahead of whatever bulk archiving is running, and behind nothing.
+          api.download([nextId], "prefetch").catch(() => {});
       }, ARCHIVE_DELAY);
       clearTimeout(prefetchTimer);
       prefetchTimer = setTimeout(() => {

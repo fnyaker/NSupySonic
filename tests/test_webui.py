@@ -343,13 +343,15 @@ class MockPrefetch:
     def __init__(self):
         self.ids = []
         self.episode_ids = []
+        self.priorities = []
 
-    def download_ids(self, ids):
+    def download_ids(self, ids, priority=None):
         ids = list(ids)
         self.ids += ids
+        self.priorities += [priority] * len(ids)
         return len(ids)
 
-    def download_episode_ids(self, ids):
+    def download_episode_ids(self, ids, priority=None):
         ids = list(ids)
         self.episode_ids += ids
         return len(ids)
@@ -2096,7 +2098,7 @@ class WebUITestCase(unittest.TestCase):
         accepted = []
         room = [2]  # the queue takes 2 ids, then 2 more, …
 
-        def picky(ids):
+        def picky(ids, priority=None):
             ids = list(ids)[: room[0]]
             accepted.extend(ids)
             return len(ids)
@@ -2116,7 +2118,7 @@ class WebUITestCase(unittest.TestCase):
         has already flipped."""
         from supysonic.deezer import backfill
 
-        self.app.deezer_prefetch.download_ids = lambda ids: 0
+        self.app.deezer_prefetch.download_ids = lambda ids, priority=None: 0
         self.app.config["DEEZER"]["archive_library"] = False
         try:
             self.assertEqual(backfill._queue_all(self.app, ["1", "2"], "test"), 0)
@@ -2618,7 +2620,9 @@ class WebUITestCase(unittest.TestCase):
 
         self._login()
         queued = []
-        self.app.deezer_prefetch.download_ids = lambda ids: queued.extend(ids) or len(ids)
+        self.app.deezer_prefetch.download_ids = (
+            lambda ids, priority=None: queued.extend(ids) or len(ids)
+        )
 
         # duplicates collapse
         rv = self.client.post("/api/download", json={"ids": ["1", "1", "2"]})
@@ -2642,6 +2646,66 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(
             self.client.post("/api/download", json={"ids": "not-a-list"}).status_code, 400
         )
+
+    # -- priority: a person waiting outranks every background job ---------
+
+    def test_download_reason_decides_the_queue_priority(self):
+        """The client says WHY it wants a track, never how urgent it is."""
+        from supysonic.deezer.workload import Priority
+
+        self._login()
+        pf = self.app.deezer_prefetch
+        self.client.post("/api/download", json={"ids": ["1"], "why": "prefetch"})
+        self.assertEqual(pf.priorities, [Priority.PREFETCH])
+        # No reason, or a reason nobody defined, is bulk — so nothing can claim
+        # the front of the queue by accident (or on purpose).
+        pf.priorities.clear()
+        self.client.post("/api/download", json={"ids": ["2"]})
+        self.client.post("/api/download", json={"ids": ["3"], "why": "URGENT!!"})
+        self.assertEqual(pf.priorities, [Priority.BULK, Priority.BULK])
+
+    def test_a_background_request_never_takes_the_last_threads(self):
+        """Over its share of the pool a background request is refused, not
+        queued — one that waits is still holding the thread it was meant not to
+        hold."""
+        from supysonic.deezer import workload
+
+        self._login()
+        held = []
+        try:
+            # Take every background slot, as a run of prefetches would.
+            while workload.admit_background():
+                held.append(True)
+            self.assertTrue(held)
+            rv = self.client.get("/api/me", headers={"X-NS-Background": "1"})
+            self.assertEqual(rv.status_code, 503)
+            self.assertEqual(rv.headers.get("Retry-After"), "5")
+            # …while the person in front of the app is not gated at all.
+            self.assertEqual(self.client.get("/api/me").status_code, 200)
+        finally:
+            for _ in held:
+                workload.release_background()
+        # The slot is given back once the request is over, so the next one fits.
+        self.assertEqual(
+            self.client.get("/api/me", headers={"X-NS-Background": "1"}).status_code, 200
+        )
+
+    def test_a_prefetch_stream_queues_instead_of_downloading_inline(self):
+        """A prefetch of a not-yet-archived track must never be what downloads a
+        FLAC on a request thread: nobody is waiting for those bytes."""
+        from supysonic.deezer.workload import Priority
+
+        self._login()
+        pf = self.app.deezer_prefetch
+        pf.ids.clear()
+        pf.priorities.clear()
+        rv = self.client.get(
+            "/api/stream/1?q=OPUS_320", headers={"X-NS-Background": "1"}
+        )
+        self.assertEqual(rv.status_code, 503)
+        self.assertTrue(rv.get_json()["queued"])
+        self.assertEqual(pf.ids, ["1"])
+        self.assertEqual(pf.priorities, [Priority.PREFETCH])
 
     # -- bulk ZIP export -------------------------------------------------
 

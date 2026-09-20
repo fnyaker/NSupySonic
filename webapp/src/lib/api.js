@@ -350,7 +350,15 @@ export const api = {
     req("/playlist/" + id + "/tracks", { method: "DELETE", body: body({ indexes }) }),
   reorderPlaylist: (id, tracks) =>
     req("/playlist/" + id + "/order", { method: "PUT", body: body({ tracks }) }),
-  download: (ids) => req("/download", { method: "POST", body: body({ ids }) }),
+  // `why` says what this archive request IS, so the server can order its queue:
+  // "prefetch" is the track about to play, "bulk" (the default) is "archive
+  // this playlist/artist, whenever". Never a number — every caller would claim
+  // to be the urgent one.
+  // Not itself marked background: queueing is instant, and refusing it would
+  // silently lose a playlist the user asked to download. It is what it QUEUES
+  // that is background.
+  download: (ids, why = "bulk") =>
+    req("/download", { method: "POST", body: body({ ids, why }) }),
 
   // manual Deezer refresh (admin) — kicks off a background sync, then poll status
   sync: () => req("/sync", { method: "POST" }),

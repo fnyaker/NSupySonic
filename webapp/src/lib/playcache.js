@@ -136,7 +136,17 @@ export async function prefetchTrack(track, quality) {
   if (isDownloaded(id) || isCached(id) || inFlight.has(id)) return;
   inFlight.add(id);
   try {
-    const res = await fetch(api.streamUrl(id, quality), { credentials: "include" });
+    // NOBODY IS WAITING FOR THIS. Saying so is what stops a prefetch from
+    // taking a server thread away from the person who IS waiting: the server
+    // caps background requests to a fraction of its pool, and answers 503 for a
+    // track it would have had to download first (queueing it at prefetch
+    // priority instead of holding a thread for the minute that takes). A
+    // refusal is not an error here — it means "not cached yet", and the next
+    // track change asks again.
+    const res = await fetch(api.streamUrl(id, quality), {
+      credentials: "include",
+      headers: { "X-NS-Background": "1" },
+    });
     if (!res.ok) return;
     const type = res.headers.get("Content-Type") || "audio/ogg";
     const blob = await res.blob();
@@ -204,12 +214,17 @@ async function putAudio(id, blob, quality, type) {
 
 // Cache a cover (from the same-origin archived-cover route), unless a permanent
 // download already provides it. Keyed by the remote URL the UI renders.
-async function cacheCover(coverUrl, deezerId) {
+async function cacheCover(coverUrl, deezerId, background = true) {
   if (!coverUrl) return;
   const key = coverKey(coverUrl);
   if (get(offlineCovers)[key]) return;
   try {
-    const res = await fetch(api.coverUrl(deezerId), { credentials: "include" });
+    // The art of the track PLAYING is on screen and in the notification, so it
+    // is foreground. The art of a track being prefetched is not.
+    const res = await fetch(api.coverUrl(deezerId), {
+      credentials: "include",
+      headers: background ? { "X-NS-Background": "1" } : {},
+    });
     if (!res.ok) return;
     const blob = await res.blob();
     if (!blob || !blob.size) return;
@@ -236,7 +251,7 @@ export async function cacheCoverFor(track) {
   if (!id || !url) return;
   if (get(offlineCovers)[coverKey(url)]) return; // already have this art
   if (!get(online)) return;
-  await cacheCover(url, id);
+  await cacheCover(url, id, false);
   await enforce(get(playCacheLimit));
 }
 
