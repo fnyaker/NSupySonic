@@ -4352,6 +4352,55 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertFalse(body["truncated"])
         self.assertGreater(gweb.CANDIDATE_SCAN_MAX, gweb.CANDIDATE_MAX)
 
+    def test_candidates_stop_once_the_page_is_full(self):
+        """In play-count order the answer IS the first `limit` rows.
+
+        Looking at the other thousands cost a sidecar read and a run of the
+        head — a few million multiply-adds in plain Python — per row, for rows
+        that were then thrown away. That is what made this endpoint take a
+        minute on a real library.
+        """
+        from supysonic.deezer import embedding as emb
+        from supysonic.webui import genre as gweb
+
+        self._login()
+        gweb.invalidate_predictions()
+        for i in range(8):
+            self._store_embedding(self._track(str(2400 + i)), [0.1] * emb.EMBED_DIM)
+
+        reads = []
+        original = emb.load_embedding
+        emb.load_embedding = lambda t: reads.append(str(t.id)) or original(t)
+        try:
+            body = self.client.get("/api/genre/candidates?limit=3").json
+            self.assertEqual(len(body["candidates"]), 3)
+            self.assertEqual(len(reads), 3, "read a vector for a row it did not return")
+            # …and the SECOND request pays nothing at all: the opinion of a
+            # model about a vector does not change until one of them does.
+            reads.clear()
+            body = self.client.get("/api/genre/candidates?limit=3").json
+            self.assertEqual(len(body["candidates"]), 3)
+            self.assertEqual(reads, [])
+        finally:
+            emb.load_embedding = original
+            gweb.invalidate_predictions()
+
+    def test_the_status_never_waits_for_the_model_to_load(self):
+        """Loading a 40 MB ONNX graph is seconds. Doing it on the thread serving
+        the studio's first request is what made the page take a minute."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        blocking = []
+        original = emb.session_error
+        emb.session_error = lambda: blocking.append(1) or None
+        try:
+            body = self.client.get("/api/genre/status").json
+        finally:
+            emb.session_error = original
+        self.assertEqual(blocking, [], "the status blocked on a model load")
+        self.assertIn(body["extractor"]["session_state"], ("ok", "error", "checking"))
+
     def test_candidates_skip_what_is_already_labelled(self):
         from supysonic.deezer import embedding as emb
 
