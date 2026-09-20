@@ -56,10 +56,14 @@ def _ensure_deezer_archived(res):
         return
     if os.path.isfile(res.path):
         return
+    from ..deezer import workload
     from ..deezer.archive import ensure_archived
 
     try:
-        ensure_archived(provider, res)
+        # A Subsonic client is a person pressing play: the bulk archiver stands
+        # down for as long as this takes rather than racing it for the link.
+        with workload.foreground():
+            ensure_archived(provider, res)
     except Exception as e:
         logger.warning("Deezer archiving failed for track %s: %s", res.id, e)
         raise ServerError("Could not fetch track from Deezer")

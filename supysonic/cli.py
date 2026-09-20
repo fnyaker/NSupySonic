@@ -552,9 +552,8 @@ def deezer_lyrics(config, overwrite, limit):
 @click.option(
     "--workers",
     type=int,
-    default=1,
-    show_default=True,
-    help="Analyse this many tracks at once (1-16).",
+    default=0,
+    help="Analyse this many tracks at once. 0 (the default) sizes it from the machine.",
 )
 @click.pass_obj
 def deezer_analyze(config, force, limit, workers):
@@ -565,9 +564,13 @@ def deezer_analyze(config, force, limit, workers):
     is archived; this is the catch-up for tracks that predate it, and the way to
     re-measure everything after the analysis itself improves.
 
-    With --workers above 1 the Deezer bpm lookup is skipped (its session is not
-    meant to be hammered from several threads) and the tempo is measured from
-    the files instead.
+    Parallel by default: half the machine's cores, so the other half keeps
+    streaming and answering the database. Above one worker the Deezer bpm lookup
+    is skipped (its session is not meant to be hammered from several threads)
+    and the tempo is measured from the files instead.
+
+    Resumable: the run checkpoints after every page, so a server that is
+    restarted mid-library picks up where it stopped rather than starting over.
     """
     from .deezer import get_provider
     from .deezer.analysis import backfill
@@ -593,8 +596,14 @@ def deezer_analyze(config, force, limit, workers):
 @click.option("--force", is_flag=True, help="Re-extract even tracks that already have a vector.")
 @click.option("--limit", type=int, default=None, help="Stop after N extracted tracks.")
 @click.option("--self-test", is_flag=True, help="Only check the extractor is set up correctly.")
+@click.option(
+    "--workers",
+    type=int,
+    default=0,
+    help="Extract this many tracks at once. 0 (the default) sizes it from the machine.",
+)
 @click.pass_obj
-def deezer_embed(config, force, limit, self_test):
+def deezer_embed(config, force, limit, self_test, workers):
     """Extract the audio embedding used by the genre tagging studio.
 
     Needs onnxruntime and a copy of the ONNX feature extractor. Import one in
@@ -642,7 +651,9 @@ def deezer_embed(config, force, limit, self_test):
         raise SystemExit(1)
 
     click.echo("Extracting embeddings...")
-    stats = backfill_embeddings(force=force, limit=limit, progress=click.echo)
+    stats = backfill_embeddings(
+        force=force, limit=limit, workers=workers, progress=click.echo
+    )
     click.echo(
         "Done. embedded={done} skipped={skipped} failed={failed} "
         "(scanned {scanned}).".format(**stats)

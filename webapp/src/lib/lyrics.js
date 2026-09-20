@@ -5,24 +5,36 @@
 import { writable, derived } from "svelte/store";
 import { current, player } from "./stores.js";
 import { api } from "./api.js";
+import { playable } from "./ladder.js";
 
 // { synced: [{ time, text }], text } | null  (null = none / not loaded yet)
 export const trackLyrics = writable(null);
 
-let loadingFor = null;
+// The panel is emptied the instant the track changes — showing the previous
+// song's words over the new one is worse than showing none.
+let showingFor = null;
 current.subscribe(($c) => {
   const id = $c?.deezer_id || null;
-  if (id === loadingFor) return;
-  loadingFor = id;
+  if (id === showingFor) return;
+  showingFor = id;
   trackLyrics.set(null);
-  if (!id) return;
+});
+
+// ...but they are FETCHED only once the audio is under way. Nobody reads along
+// before the song starts, and this request used to race the audio it belongs
+// to. See lib/ladder.js.
+let loadingFor = null;
+playable.subscribe((ready) => {
+  const id = ready || null;
+  if (!id || id === loadingFor) return;
+  loadingFor = id;
   api
     .lyrics(id)
     .then((r) => {
-      if (loadingFor === id) trackLyrics.set(r.lyrics || null);
+      if (loadingFor === id && showingFor === id) trackLyrics.set(r.lyrics || null);
     })
     .catch(() => {
-      if (loadingFor === id) trackLyrics.set(null);
+      if (loadingFor === id && showingFor === id) trackLyrics.set(null);
     });
 });
 

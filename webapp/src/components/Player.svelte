@@ -53,6 +53,15 @@
   } from "../lib/audio/graph.js";
   import { primeEdges, knownEdges } from "../lib/edges.js";
   import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
+  import { primeAnalyses } from "../lib/analysis.js";
+  import {
+    TIER,
+    audioReady,
+    beginTrack,
+    playable,
+    watchAudio,
+    whenReady,
+  } from "../lib/ladder.js";
   import {
     getEpisodeProgress,
     saveEpisodeProgress,
@@ -852,6 +861,9 @@
       if (e && e.start > 0.25) resumeAt = e.start;
     }
     curId = track.deezer_id;
+    // From here, everything that is not the audio itself waits its turn behind
+    // it (see lib/ladder.js).
+    beginTrack(track.deezer_id);
     curQ = get(quality);
     curSeq = get(player).seq;
     lastKnownTime = resumeAt;
@@ -907,6 +919,8 @@
     // that silently burned data on EVERY app launch. preload=none defers the
     // fetch until the user actually presses play (play() triggers the load).
     audio.preload = firstLoad && !get(player).playing ? "none" : "auto";
+    if (detachLadder) detachLadder();
+    detachLadder = watchAudio(audio, track.deezer_id);
     audio.src = src.url;
     audio.load();
     // The element is silent from here until it buffers, so the fade gain can be
@@ -937,17 +951,35 @@
     // Seed duration from metadata right away so the seek bar is correct before
     // the first timeupdate (live transcodes report no duration).
     player.setProgress(resumeAt, track.duration || 0);
-    flushListen(track.deezer_id);
     pushRecent(track);
-    updateMediaSession(track);
-    // Measure this track and the next one. The next one is the point: a
-    // crossfade needs its bounds before it starts, and the server only measures
-    // what is already archived — so a track is trimmed from the play AFTER the
-    // one that archived it, never on first contact.
-    primeEdgesAround(track);
-    // Keep this track's artwork on the device (best effort, tiny, evictable):
-    // what you have played should still show its real pochette offline.
-    cacheCoverFor(track).catch(() => {});
+    // Title and artist on the lock screen NOW: it is local, it costs nothing,
+    // and a notification that names the previous track is a bug. The artwork is
+    // the part that costs a request, so it waits its turn below.
+    updateMediaSession(track, { art: false });
+
+    // THE LADDER. Everything from here is about the track that is loading, and
+    // none of it IS the track. Fired here it was six requests racing the audio
+    // on one connection; behind it, in order, it is six requests the listener
+    // never waits for. See lib/ladder.js.
+    whenReady(TIER.ART, async () => {
+      // Keep this track's artwork on the device (best effort, tiny, evictable):
+      // what you have played should still show its real pochette offline. Doing
+      // it FIRST also means the lock screen is served from the blob this just
+      // stored — the two used to fetch the same cover twice per track change.
+      await cacheCoverFor(track).catch(() => {});
+      updateMediaSession(track);
+    });
+    // The animation asks for the tempo and the genre; a second late is fine,
+    // silence is not.
+    whenReady(TIER.VERDICT, () => primeAnalyses([String(track.deezer_id)]));
+    whenReady(TIER.EXTRA, () => {
+      flushListen(track.deezer_id);
+      // Measure this track and the next one. The next one is the point: a
+      // crossfade needs its bounds before it starts, and the server only
+      // measures what is already archived — so a track is trimmed from the play
+      // AFTER the one that archived it, never on first contact.
+      primeEdgesAround(track);
+    });
   }
 
   // Restart the already-loaded track from the top (same deezer id, new queue
@@ -1713,12 +1745,29 @@
     player.setProgress(el.currentTime, x.track.duration || 0);
     setPlaybackStatus("idle");
     if (x.isBlob) touch(x.track.deezer_id);
-    flushListen(x.track.deezer_id);
     pushRecent(x.track);
-    updateMediaSession(x.track);
-    primeEdgesAround(x.track);
+    updateMediaSession(x.track, { art: false });
     trimmedId = null;
-    cacheCoverFor(x.track).catch(() => {});
+    // A crossfade reaches a new current track without going through loadTrack,
+    // so the ladder has to be opened and closed here — this element is already
+    // playing, so there is nothing for the rest to wait for. Without this the
+    // lyrics, the artwork cache and the verdict would still be waiting on the
+    // PREVIOUS track's signal, which has already fired.
+    if (detachLadder) detachLadder();
+    detachLadder = null;
+    beginTrack(x.track.deezer_id);
+    whenReady(TIER.ART, async () => {
+      await cacheCoverFor(x.track).catch(() => {});
+      updateMediaSession(x.track);
+    });
+    whenReady(TIER.VERDICT, () => primeAnalyses([String(x.track.deezer_id)]));
+    whenReady(TIER.EXTRA, () => {
+      flushListen(x.track.deezer_id);
+      primeEdgesAround(x.track);
+    });
+    // Registered first, released now: past the ladder's gate they would each
+    // start immediately instead of taking their turn.
+    audioReady(x.track.deezer_id);
   }
 
   // The ramp has reached zero: stop the outgoing element and release it.
@@ -1944,11 +1993,21 @@
       clearTimeout(archiveTimer);
       archiveTimer = setTimeout(() => {
         if (stillNext(nextId) && get(online))
-          api.download([nextId]).catch(() => {}); // server-side pre-archive
+          // Prefetch priority: this one track is about to be needed, so it goes
+          // ahead of whatever bulk archiving is running, and behind nothing.
+          api.download([nextId], "prefetch").catch(() => {});
       }, ARCHIVE_DELAY);
       clearTimeout(prefetchTimer);
-      prefetchTimer = setTimeout(() => {
+      const runPrefetch = () => {
         if (!stillNext(nextId) || !get(online) || !get(prefetchEnabled)) return;
+        // The last rung of the ladder. A track that is still buffering has not
+        // finished wanting the link, and the NEXT track wanting it too is how
+        // the one you are listening to stalls. Wait it out rather than dropping
+        // the batch: the point is to go last, not to be skipped.
+        if (!get(playable)) {
+          prefetchTimer = setTimeout(runPrefetch, 2000);
+          return;
+        }
         const s = get(player);
         // The whole configured run, nearest first — prefetchUpcoming walks it
         // one track at a time and gives up as soon as the queue moves on.
@@ -1957,7 +2016,8 @@
           get(quality),
           stillUpcoming
         ).catch(() => {});
-      }, PREFETCH_DELAY);
+      };
+      prefetchTimer = setTimeout(runPrefetch, PREFETCH_DELAY);
     }
   }
 
@@ -1980,6 +2040,7 @@
   // notification artless. So the art is fetched HERE (retried, through the
   // server-side cached /api/cover proxy, with the page's session cookie) and
   // handed to the media session as a local blob: URL that always displays.
+  let detachLadder = null; // readiness listeners on the element in use
   let artSeq = 0; // invalidates an in-flight artwork fetch on track change
   let artCache = { key: null, url: null }; // current track's fetched artwork
 
@@ -2012,7 +2073,7 @@
     return cover || null; // last resort: let the OS try the CDN URL itself
   }
 
-  function updateMediaSession(track) {
+  function updateMediaSession(track, { art = true } = {}) {
     if (!("mediaSession" in navigator) || !track) return;
     const seq = ++artSeq;
     const setMeta = (art) => {
@@ -2048,9 +2109,10 @@
     // Title/artist must show instantly; the artwork upgrade follows as soon as
     // the reliable (blob) copy is in hand.
     setMeta(resolveCover(get(offlineCovers), track.album?.cover));
-    notificationArt(track).then((art) => {
-      if (art && seq === artSeq) setMeta(art);
-    });
+    if (art)
+      notificationArt(track).then((a) => {
+        if (a && seq === artSeq) setMeta(a);
+      });
     try {
       navigator.mediaSession.setActionHandler("play", () => player.play());
       navigator.mediaSession.setActionHandler("pause", () => player.pause());

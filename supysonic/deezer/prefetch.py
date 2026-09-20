@@ -14,6 +14,7 @@ in flight and a live play never download the same track twice.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os.path
 import queue
@@ -22,6 +23,8 @@ import time
 
 from deezerpy._circuit import breaker
 from deezerpy.errors import is_transport_failure
+
+from .workload import Priority, quiet_wait, renice
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +87,17 @@ class DeezerPrefetcher:
         # POST /api/download and fill the volume — taking the database and the
         # transcode cache down with it. Past the cap, extra ids are refused and
         # reported back to the caller instead of being queued.
-        self._dl_queue: queue.Queue = queue.Queue(maxsize=max_download_queue)
+        #
+        # PRIORITISED, because one queue serves three different urgencies. "Play
+        # this now" (a client that disconnected mid-stream), "you will hear this
+        # in three minutes" and "you starred an artist, here is 400 albums" were
+        # served strictly in arrival order — so pressing play during a
+        # discography archive put you behind four hundred albums. Smallest first,
+        # ties broken by arrival so equal priorities stay FIFO.
+        self._dl_queue: queue.PriorityQueue = queue.PriorityQueue(
+            maxsize=max_download_queue
+        )
+        self._dl_seq = itertools.count()
         for _ in range(max(1, dl_workers)):
             dl = threading.Thread(
                 target=self._dl_worker, name="deezer-download", daemon=True
@@ -120,33 +133,37 @@ class DeezerPrefetcher:
             self.enqueue(t)
             n += 1
 
-    def _offer(self, item) -> bool:
+    def _offer(self, item, priority: int) -> bool:
         """Queue one download, or refuse it when the queue is full."""
         try:
-            self._dl_queue.put_nowait(item)
+            self._dl_queue.put_nowait((int(priority), next(self._dl_seq), item))
             return True
         except queue.Full:
             logger.info("Download queue full, dropping %s", item)
             return False
 
-    def download_ids(self, deezer_ids) -> int:
+    def download_ids(self, deezer_ids, priority: int = Priority.BULK) -> int:
         """Queue Deezer track ids for full background archiving.
 
         Returns how many were actually accepted — the caller reports that back,
         so a client that overruns the queue sees it instead of silently
         believing everything is downloading.
+
+        `priority` says WHY, not how urgent (see ``workload.Priority``): the
+        track the player is about to need goes ahead of the thousand a
+        "download this playlist" queued behind it.
         """
         n = 0
         for did in deezer_ids:
             did = str(did)
             if not did:
                 continue
-            if not self._offer(did):
+            if not self._offer(did, priority):
                 break
             n += 1
         return n
 
-    def download_episode_ids(self, episode_ids) -> int:
+    def download_episode_ids(self, episode_ids, priority: int = Priority.BULK) -> int:
         """Queue podcast episode UUIDs for background archiving. Returns count.
 
         Shares the download queue with tracks; the worker tells the two apart by
@@ -157,7 +174,7 @@ class DeezerPrefetcher:
             eid = str(eid)
             if not eid:
                 continue
-            if not self._offer(("episode", eid)):
+            if not self._offer(("episode", eid), priority):
                 break
             n += 1
         return n
@@ -175,16 +192,26 @@ class DeezerPrefetcher:
             import_track,
         )
 
+        # Archiving is never what somebody is waiting on — a stream that needs a
+        # track NOW downloads it on its own thread. So this one runs behind
+        # everything else the box is doing.
+        renice(10)
         try:
             db.connect(reuse_if_open=True)
         except Exception:  # pragma: no cover - connection setup best-effort
             pass
 
         while True:
-            item = self._dl_queue.get()
+            priority, _seq, item = self._dl_queue.get()
             try:
                 if item is None:
                     return
+                # Bulk work stands down while somebody is waiting on a download
+                # of their own: they share one link, one Deezer session and one
+                # (often mechanical) disk. Bounded, so a wedged foreground
+                # download slows this queue rather than stopping it.
+                if priority > Priority.PREFETCH:
+                    quiet_wait(5.0)
                 for attempt in range(_MAX_OUTAGE_RETRIES + 1):
                     try:
                         if isinstance(item, tuple):  # ("episode", uuid)
@@ -240,6 +267,7 @@ class DeezerPrefetcher:
         from ..db import Track, db
         from .archive import ensure_archived
 
+        renice(10)
         try:
             db.connect(reuse_if_open=True)
         except Exception:  # pragma: no cover - connection setup best-effort

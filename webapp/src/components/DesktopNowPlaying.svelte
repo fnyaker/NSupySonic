@@ -51,6 +51,7 @@
   } from "../lib/stores.js";
   import { effectiveMode, MODE_BY_ID } from "../lib/viz/index.js";
   import { readout } from "../lib/audio/engine.js";
+  import { servedStyleLabel } from "../lib/trackverdict.js";
   import Visualizer from "./Visualizer.svelte";
   import EcoToggle from "./EcoToggle.svelte";
   import { currentLyricLine } from "../lib/lyrics.js";
@@ -116,10 +117,12 @@
   $: vmode = effectiveMode($vizMode, $vizBeatDetect, $ecoMode);
   $: fullBleed = $vizFullBleed && (MODE_BY_ID.get(vmode)?.fullBleed ?? false);
   $: stripViz = vmode === "bars";
-  $: styleLabel =
-    $vizShowStyle && vmode === "smart" && $readout.styleConfidence > 0.35
-      ? $readout.styleLabel
-      : "";
+  // The served verdict leads (see lib/trackverdict.js); the live classifier is
+  // the fallback for a track nobody has measured yet, and only once it is sure.
+  $: styleLabel = !$vizShowStyle
+    ? ""
+    : $servedStyleLabel ||
+      (vmode === "smart" && $readout.styleConfidence > 0.35 ? $readout.styleLabel : "");
 
   onDestroy(() => {
     bg.destroy();

@@ -48,6 +48,7 @@ import shutil
 import struct
 import subprocess
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +104,16 @@ FFMPEG_TIMEOUT = 300
 
 _lock = threading.Lock()
 _session = None
-_session_failed = False
 # Why the last load failed, so the studio can say more than "0 computed".
 _session_error = None
+# …and WHEN to try again. A failure here used to be permanent for the life of
+# the process: one load that did not come off — the machine briefly out of
+# memory under a parallel run, a file being replaced as it was read — and every
+# track from then on reported "the model could not be loaded", for hours, with
+# nothing wrong any more. A run that has already measured ten thousand tracks
+# must not be ended by a bad second.
+_session_retry_at = 0.0
+SESSION_RETRY_DELAY = 60.0
 _mel_fb = None
 
 
@@ -408,11 +416,11 @@ def delete_model() -> bool:
 
 def reset_session() -> None:
     """Forget the loaded model so the next extraction reloads from disk."""
-    global _session, _session_failed, _session_error
+    global _session, _session_error, _session_retry_at
     with _lock:
         _session = None
-        _session_failed = False
         _session_error = None
+        _session_retry_at = 0.0
 
 
 def _mel_filterbank(np):
@@ -486,21 +494,64 @@ def _decode(path, seconds=None, start=None):
     return np.frombuffer(raw, dtype=np.float32)
 
 
-def _log_mel(samples):
-    """(frames, 96) log-mel, to the published MusiCNN parametrization."""
+#: Samples one patch spans: 128 frames of 512, hopping 256. 33024 at 16 kHz.
+PATCH_SAMPLES = (PATCH_FRAMES - 1) * HOP_SIZE + FRAME_SIZE
+
+
+def patch_offsets(n_samples: int, take: int = MAX_PATCHES) -> list:
+    """Where to cut the `take` patches this track is summarised from.
+
+    Spread over the whole file rather than taken from the front: an intro is the
+    least representative part of a piece, which is the entire reason this is
+    measured over the whole file.
+    """
+    total = (n_samples - FRAME_SIZE) // HOP_SIZE + 1
+    total = max(0, total) // PATCH_FRAMES
+    if total < 1:
+        return []
+    take = max(1, min(total, take))
+    last = max(0, n_samples - PATCH_SAMPLES)
+    if take == 1:
+        return [0]
+    step = (total - 1) / (take - 1)
+    out = []
+    for i in range(take):
+        off = min(last, int(round(i * step)) * PATCH_FRAMES * HOP_SIZE)
+        if not out or off != out[-1]:
+            out.append(off)
+    return out
+
+
+def _log_mel_patches(samples, offsets):
+    """(patches, 128, 96) log-mel, to the published MusiCNN parametrization.
+
+    ONLY the patches that will be embedded are transformed, and that is a
+    correctness property as much as a speed one. Computing the whole file's
+    spectrogram and then keeping a sixtieth of it made the cost — and the peak
+    memory — scale with the length of the track: numpy's rfft returns complex128
+    whatever it is fed, so an hour-long DJ set reached the better part of a
+    gigabyte of temporaries for sixty patches of output. A library has hour-long
+    sets in it, this runs alongside a music server, and that is what "it stops
+    after ten thousand tracks" looks like from the inside. Here the working set
+    is bounded by MAX_PATCHES, so a one-minute track and a two-hour one cost the
+    same.
+    """
     import numpy as np
 
-    n = 1 + max(0, (len(samples) - FRAME_SIZE) // HOP_SIZE)
-    if n < PATCH_FRAMES:
+    if not offsets:
         raise ValueError("too short to embed")
-    # One strided view over the signal: no copy, no Python loop over frames.
-    frames = np.lib.stride_tricks.as_strided(
-        samples,
-        shape=(n, FRAME_SIZE),
-        strides=(samples.strides[0] * HOP_SIZE, samples.strides[0]),
-    )
+    block = np.empty((len(offsets), PATCH_FRAMES, FRAME_SIZE), dtype=np.float32)
+    stride = samples.strides[0]
+    for k, off in enumerate(offsets):
+        seg = samples[off : off + PATCH_SAMPLES]
+        if len(seg) < PATCH_SAMPLES:
+            raise ValueError("too short to embed")
+        block[k] = np.lib.stride_tricks.as_strided(
+            seg, shape=(PATCH_FRAMES, FRAME_SIZE), strides=(stride * HOP_SIZE, stride)
+        )
     window = np.hanning(FRAME_SIZE + 1)[:-1].astype(np.float32)
-    spec = np.abs(np.fft.rfft(frames * window, axis=1)) ** 2
+    block *= window
+    spec = np.abs(np.fft.rfft(block, axis=2)) ** 2
     mel = spec.astype(np.float32) @ _mel_filterbank(np).T
     # The compression the model was trained with. Not a natural log: base 10.
     return np.log10(10000.0 * mel + 1.0).astype(np.float32)
@@ -519,20 +570,33 @@ def _make_session(path):
 
 
 def _load_session():
-    global _session, _session_failed, _session_error
-    if _session is not None or _session_failed:
+    """The inference session, loading it once and retrying a failure later.
+
+    A failure is remembered for SESSION_RETRY_DELAY and then forgotten, never
+    for good. "No model file" is the one exception worth keeping cheap — it is
+    answered from disk in microseconds and says nothing about a transient state
+    — but even that is re-checked, because uploading the model is precisely how
+    an operator fixes it.
+    """
+    global _session, _session_error, _session_retry_at
+    if _session is not None:
         return _session
+    if _session_error is not None and time.monotonic() < _session_retry_at:
+        return None
     with _lock:
-        if _session is not None or _session_failed:
+        if _session is not None:
             return _session
+        if _session_error is not None and time.monotonic() < _session_retry_at:
+            return None
         path = model_path()
         if not path:
-            _session_failed = True
             _session_error = "no model file"
+            _session_retry_at = time.monotonic() + SESSION_RETRY_DELAY
             return None
         try:
             _session = _make_session(path)
             _session_error = None
+            _session_retry_at = 0.0
             logger.info(
                 "embedding model loaded: %s (inputs=%s outputs=%s)",
                 os.path.basename(path),
@@ -541,9 +605,9 @@ def _load_session():
             )
         except Exception as exc:
             logger.warning("embedding: could not load %s", path, exc_info=True)
-            _session_failed = True
             _session = None
             _session_error = f"{os.path.basename(path)}: {exc}"
+            _session_retry_at = time.monotonic() + SESSION_RETRY_DELAY
     return _session
 
 
@@ -634,22 +698,13 @@ def embed_file_verbose(path):
         return None, why_unavailable() or "extractor unavailable"
     if not os.path.isfile(path):
         return None, "file missing"
-    import numpy as np
-
     try:
-        mel = _log_mel(_decode(path))
+        samples = _decode(path)
+        patches = _log_mel_patches(samples, patch_offsets(len(samples)))
+        del samples
     except Exception as exc:
         logger.warning("embedding: front-end failed for %s", path, exc_info=True)
         return None, f"decode/front-end: {exc}"
-    total = mel.shape[0] // PATCH_FRAMES
-    if total < 1:
-        return None, "too short to embed"
-    # Spread the patches over the whole track rather than taking the first two
-    # minutes: an intro is the least representative part of a piece, which is
-    # the entire reason this is measured over the whole file.
-    take = min(total, MAX_PATCHES)
-    idx = [int(round(i * (total - 1) / max(1, take - 1))) for i in range(take)]
-    patches = np.stack([mel[j * PATCH_FRAMES : (j + 1) * PATCH_FRAMES] for j in idx])
     try:
         rows = _run(patches)
     except Exception as exc:
@@ -877,12 +932,9 @@ def _probe_duration(path):
 
 
 def _embed_span(path, start, seconds):
-    import numpy as np
-
-    mel = _log_mel(_decode(path, seconds=seconds, start=start))
-    total = mel.shape[0] // PATCH_FRAMES
-    if total < 1:
+    samples = _decode(path, seconds=seconds, start=start)
+    offsets = patch_offsets(len(samples))
+    if not offsets:
         return None
-    patches = np.stack([mel[i * PATCH_FRAMES : (i + 1) * PATCH_FRAMES] for i in range(total)])
-    rows = _run(patches)
+    rows = _run(_log_mel_patches(samples, offsets))
     return None if rows is None else _aggregate(rows)

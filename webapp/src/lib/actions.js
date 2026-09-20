@@ -16,6 +16,7 @@ import {
   openPlaylistPicker,
   openShare,
   openReplace,
+  openGenreTag,
 } from "./stores.js";
 import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
 import { addMarkerAt } from "./markers.js";
@@ -553,6 +554,16 @@ export function buildTrackMenu(track, nav) {
       label: "Remplacer le titre…",
       icon: "refresh",
       action: () => openReplace(track),
+    });
+    // Tagging from wherever the track is. The studio is where you tag a library
+    // in one sitting; this is for the other moment — you are looking at a list,
+    // you see a genre that is wrong, and fixing it should not mean finding the
+    // track again somewhere else. The sheet opens OVER the current screen, so
+    // nothing is lost by using it.
+    items.push({
+      label: "Étiqueter le genre…",
+      icon: "tag",
+      action: () => openGenreTag(track),
     });
   }
   // Offline download — device-local, so available to everyone. A plain
