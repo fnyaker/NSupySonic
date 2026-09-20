@@ -7,6 +7,7 @@
   import { api } from "../lib/api.js";
   import { forgetCachedCover } from "../lib/playcache.js";
   import { forgetDownloadedCover } from "../lib/offline.js";
+  import { requestCover } from "../lib/coverqueue.js";
   export let src = null;
   export let alt = "";
   export let round = false;
@@ -31,6 +32,13 @@
   let usingProxy = false;
   let lowFailed = false;
   let img;
+  // The tile, which exists before the image does — it is what the loader
+  // measures to know where this cover is relative to the viewport.
+  let tile;
+  // Has this cover been given its turn to hit the network? See lib/coverqueue.js.
+  // Art that costs no request (a cached blob, above-the-fold art) never waits.
+  let admitted = false;
+  let turn = null;
   // Progressive hi-res: when `src` asks for more than the canonical 500px (the
   // full-screen views do), we render the 500px IMMEDIATELY — it's the exact URL
   // the lists already fetched, so it comes straight from the HTTP cache — and
@@ -80,6 +88,10 @@
   // local blob / proxy fallback simply skips it.
   $: low = usingBlob || usingProxy || lowFailed ? null : loResCover(baseCover(src));
   $: onSrcChange(src);
+  // A blob that arrives while this cover is still queued costs no request, so
+  // it must not keep waiting for a turn it does not need. AFTER onSrcChange,
+  // which is what resets `admitted` for a new source.
+  $: if (usingBlob && !admitted) release(true);
   // A cover that gave up while the network was down must not stay a placeholder
   // for the rest of the session: the moment connectivity returns, start the
   // fallback chain over from the top.
@@ -87,6 +99,18 @@
 
   // Reset the fade + fallback state when the source changes (recycled rows, or
   // an offline↔online swap), and arm the progressive upgrade / stall watchdog.
+  // Give up this cover's place in the loader's queue (or its slot, once it has
+  // one). `admit` marks it free to hit the network — either because its turn
+  // came, or because it never needed one.
+  function release(admit = false) {
+    if (turn) {
+      const t = turn;
+      turn = null;
+      t.done();
+    }
+    if (admit) admitted = true;
+  }
+
   function onSrcChange(s) {
     loaded = false;
     failed = false;
@@ -100,7 +124,16 @@
     cancelHi();
     clearTimeout(stallTimer);
     stallTimer = null;
+    // A recycled row is a different picture: whatever turn the previous one was
+    // waiting for belongs to nobody now.
+    release();
+    admitted = false;
     if (!s) return;
+    // Above-the-fold art and art already on the device cost nothing to show, so
+    // they never queue. Everything else asks for a turn, and the loader gives
+    // the next one to whichever cover is closest to what you are looking at.
+    if (eager || usingBlob) admitted = true;
+    else turn = requestCover(() => tile, () => (admitted = true));
     // With a cached blob there is nothing to upgrade to: it already IS the
     // hi-res art, so skip the CDN preload entirely (one less request, and one
     // less thing to hang on a bad link).
@@ -160,6 +193,7 @@
   }
   onDestroy(() => {
     cancelHi();
+    release();
     clearTimeout(stallTimer);
     clearTimeout(retryTimer);
   });
@@ -230,6 +264,7 @@
       loaded = false;
     } else {
       failed = true;
+      release(); // no further attempt: the slot belongs to another cover now
     }
   }
 
@@ -246,11 +281,12 @@
 </script>
 
 <div
+  bind:this={tile}
   class="cover"
   class:round
   style={size ? `width:${size}px;height:${size}px` : ""}
 >
-  {#if shown && !failed}
+  {#if shown && !failed && admitted}
     {#if low && !loaded}
       <img
         class="low"
@@ -276,9 +312,16 @@
       fetchpriority={eager ? "high" : "low"}
       decoding="async"
       class:loaded
-      on:load={() => (loaded = true)}
+      on:load={() => {
+        loaded = true;
+        release(); // the slot goes to the next cover the moment this one settles
+      }}
       on:error={onError}
     />
+  {:else if shown && !failed}
+    <!-- Waiting its turn: the tile's own background IS the placeholder, so a
+         queued cover looks exactly like a loading one rather than flashing a
+         "no artwork" glyph at everything below the fold. -->
   {:else}
     <!-- Named only when there's something to say; an unnamed role="img" is
          worse for a screen reader than a decorative, hidden tile. -->
