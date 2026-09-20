@@ -51,17 +51,23 @@ _WORKERS_META_KEY = "analysis_workers"
 
 
 def _workers() -> int:
+    """The admin's parallelism choice, or 0 meaning "size it from the machine".
+
+    Auto is the default, and that is the whole point: a nine-core VM measuring
+    one track at a time was slow for no reason, and nobody should have to be
+    told how many cores their server has in order to get the other eight used.
+    """
     row = Meta.get_or_none(Meta.key == _WORKERS_META_KEY)
     if row is not None:
         try:
-            return max(1, min(ANALYSIS_WORKERS_MAX, int(row.value)))
+            return max(0, min(ANALYSIS_WORKERS_MAX, int(row.value)))
         except (TypeError, ValueError):
             pass
-    return 1
+    return 0
 
 
 def _set_workers(value: int) -> int:
-    value = max(1, min(ANALYSIS_WORKERS_MAX, int(value)))
+    value = max(0, min(ANALYSIS_WORKERS_MAX, int(value)))
     row = Meta.get_or_none(Meta.key == _WORKERS_META_KEY)
     if row is None:
         Meta.create(key=_WORKERS_META_KEY, value=str(value))
@@ -132,6 +138,60 @@ def _run_analysis(app, force, workers, limit):
                 pass
 
 
+#: Let the server finish coming up before a library job takes the disk.
+RESUME_DELAY = 45
+
+
+def resume_if_interrupted(app):
+    """Pick a library job back up after a restart that cut it short.
+
+    A run over a real library is hours of work on a thread inside the web
+    server, and it does not get to choose when the container is restarted. The
+    checkpoint is what makes resuming CHEAP; this is what makes it AUTOMATIC —
+    otherwise "analyse everything" silently means "analyse everything, unless
+    something interrupts you, in which case wait to be asked again", and the
+    operator finds out weeks later that two thirds of the library was never
+    measured.
+    """
+    from ..deezer.analysis import ANALYSIS_CURSOR_KEY, _checkpoint_read
+
+    def start():
+        import time
+
+        time.sleep(RESUME_DELAY)
+        with app.app_context():
+            from ..db import close_connection, open_connection
+
+            try:
+                open_connection(reuse=True)
+                state = _checkpoint_read(ANALYSIS_CURSOR_KEY, force=False)
+                forced = _checkpoint_read(ANALYSIS_CURSOR_KEY, force=True)
+                if state is None and forced is None:
+                    return
+                force = state is None
+                total = Track.select().where(Track.last_modification > 0).count()
+            except Exception:
+                logger.debug("Could not read the analysis checkpoint", exc_info=True)
+                return
+            finally:
+                try:
+                    close_connection()
+                except Exception:
+                    pass
+        with _analysis_lock:
+            if _analysis_job["running"]:
+                return
+            _analysis_job.update(
+                running=True, started=now().isoformat(), finished=None, force=force,
+                workers=_workers(), total=total, scanned=0, done=0, skipped=0,
+                failed=0, error=None,
+            )
+        logger.info("Resuming the interrupted analysis backfill")
+        _run_analysis(app, force, _workers(), None)
+
+    threading.Thread(target=start, name="analysis-resume", daemon=True).start()
+
+
 @webapi.route("/analysis/backfill", methods=["POST"])
 @login_required
 @admin_required
@@ -141,13 +201,19 @@ def analysis_backfill_start():
 
     if not ffmpeg_available():
         return jsonify({"error": "ffmpeg n'est pas installé sur le serveur"}), 400
+    from ..deezer.analysis import auto_workers
+
     data = request.get_json(silent=True) or {}
     force = bool(data.get("force"))
+    raw = data.get("workers")
     try:
-        workers = int(data.get("workers") or _workers())
+        workers = _workers() if raw is None else int(raw)
     except (TypeError, ValueError):
         workers = _workers()
     workers = _set_workers(workers)
+    # What the job will actually run with, so the studio can say "auto (4)"
+    # rather than leaving the operator to guess what auto resolved to.
+    effective = auto_workers(workers)
     with _analysis_lock:
         if _analysis_job["running"]:
             return jsonify({"ok": True, **_analysis_job})
@@ -156,7 +222,7 @@ def analysis_backfill_start():
             started=now().isoformat(),
             finished=None,
             force=force,
-            workers=workers,
+            workers=effective,
             total=Track.select().where(Track.last_modification > 0).count(),
             scanned=0,
             done=0,
@@ -178,7 +244,20 @@ def analysis_backfill_start():
 @login_required
 @admin_required
 def analysis_backfill_status():
-    return jsonify({"workers": _workers(), **_analysis_job_json()})
+    from ..deezer.analysis import auto_workers
+
+    # Two different numbers, two different names. `workers` is what the RUNNING
+    # job uses; `workers_setting` is what the admin chose, where 0 means "size
+    # it from the machine" and `workers_auto` says what that comes to here. They
+    # used to share one key, so the job's value silently shadowed the setting
+    # and the studio showed a number nobody had picked.
+    return jsonify(
+        {
+            **_analysis_job_json(),
+            "workers_setting": _workers(),
+            "workers_auto": auto_workers(0),
+        }
+    )
 
 
 def _rows_for(ids):

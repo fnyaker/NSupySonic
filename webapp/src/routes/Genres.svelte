@@ -151,7 +151,8 @@
   // parallelism. Same worker-and-poll shape as the embed run.
   let analysis = null; // { running, total, scanned, done, skipped, failed, error }
   let analysisPoll = null;
-  let analysisWorkers = 2;
+  let analysisWorkers = 0; // 0 = size it from the machine
+  let analysisWorkersAuto = 1;
   let analysisForce = false;
   $: analysisPct =
     analysis && analysis.total
@@ -734,7 +735,9 @@
       try {
         const a = await api.analysisBackfillStatus();
         analysis = a;
-        if (a?.workers) analysisWorkers = a.workers;
+        if (a && typeof a.workers_setting === "number")
+          analysisWorkers = a.workers_setting;
+        if (a?.workers_auto) analysisWorkersAuto = a.workers_auto;
         if (a?.running) pollAnalysis();
       } catch {
         /* admin-only endpoint */
@@ -999,7 +1002,13 @@
             </button>
             <label class="inline-field">
               Parallèle
-              <input type="number" min="1" max="8" bind:value={analysisWorkers} />
+              <!-- 0 means "ask the machine": half its cores, so the other half
+                   keeps streaming. Nobody should have to know how many cores
+                   their server has to get more than one of them used. -->
+              <input type="number" min="0" max="8" bind:value={analysisWorkers} />
+              <span class="muted small"
+                >{analysisWorkers > 0 ? "fixé" : `auto · ${analysisWorkersAuto}`}</span
+              >
             </label>
             <label class="inline-check">
               <input type="checkbox" bind:checked={analysisForce} />

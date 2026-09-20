@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -917,19 +918,167 @@ def queue_analysis(track: Track, provider=None):
     threading.Thread(target=run, name="dz-analysis", daemon=True).start()
 
 
+# -- running something over the whole library --------------------------------
+# Both backfills below walk every archived track. On a real library that is six
+# figures of rows and hours of ffmpeg, which makes three things non-negotiable.
+#
+# NEVER MATERIALISE THE LIBRARY. `list(Track.select())` built every Track object
+# in the database before the first measurement ran — gigabytes of Python for a
+# job whose working set is one track. An `iterator()` fixes the memory and
+# replaces it with a cursor that has to stay open for the whole run.
+#
+# SO: KEYSET PAGINATION. A short query per page, ordered by primary key, each
+# page starting after the last id of the one before. The cursor is a plain
+# value — which is the second reason for it.
+#
+# BECAUSE A LIBRARY JOB MUST SURVIVE THE PROCESS. It runs on a thread inside the
+# web server; a container restart, a worker recycle or an OOM kills it mid-run,
+# and re-reading a hundred thousand already-measured tracks to get back to where
+# it was is not a resume, it is a punishment. The cursor is written to `Meta`
+# after every page and cleared at the end, so the next start picks it up.
+PAGE_SIZE = 200
+#: How long a checkpoint is worth resuming from. Past this the library has
+#: probably changed enough that starting over is the honest answer.
+RESUME_MAX_AGE = 7 * 24 * 3600
+
+
+def _checkpoint_read(key, force):
+    """The id to resume after, or None to start from the beginning."""
+    from ..db import Meta
+
+    row = Meta.get_or_none(Meta.key == key)
+    if row is None:
+        return None
+    try:
+        state = json.loads(row.value)
+        if bool(state.get("force")) != bool(force):
+            return None  # a different run: "re-measure everything" is not this one
+        if time.time() - float(state.get("at") or 0) > RESUME_MAX_AGE:
+            return None
+        return uuid.UUID(state["after"])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _checkpoint_write(key, after, force):
+    from ..db import Meta
+
+    payload = json.dumps({"after": str(after), "force": bool(force), "at": time.time()})
+    row = Meta.get_or_none(Meta.key == key)
+    if row is None:
+        Meta.create(key=key, value=payload)
+    else:
+        row.value = payload
+        row.save()
+
+
+def _checkpoint_clear(key):
+    from ..db import Meta
+
+    Meta.delete().where(Meta.key == key).execute()
+
+
+def _archived_pages(after=None):
+    """Archived tracks in primary-key order, one bounded page at a time."""
+    while True:
+        query = Track.select().where(Track.last_modification > 0)
+        if after is not None:
+            query = query.where(Track.id > after)
+        rows = list(query.order_by(Track.id).limit(PAGE_SIZE))
+        if not rows:
+            return
+        yield rows
+        after = rows[-1].id
+
+
+def auto_workers(requested=None) -> int:
+    """How many tracks to measure at once.
+
+    Asked of the machine, not of the operator: nobody knows how many cores a VM
+    has better than the VM does, and a server that sat at one core while eight
+    were idle was slow for no reason at all. Half of them, so the other half
+    keeps streaming, transcoding and answering the database. An explicit number
+    still wins — the studio offers one — but 0 or None means "work it out".
+    """
+    from .workload import cpu_workers
+
+    try:
+        n = int(requested or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return max(1, min(16, n)) if n > 0 else cpu_workers()
+
+
+def _walk_library(work, workers, stats, report, key, force, limit=None):
+    """Run `work(track)` over the whole archive, in parallel, resumably.
+
+    `work` returns nothing and updates `stats` itself (it is the only thing that
+    knows what "done" means for its job).
+    """
+    from ..db import close_connection, open_connection
+    from .workload import renice
+
+    workers = auto_workers(workers)
+    after = _checkpoint_read(key, force)
+    if after is not None:
+        logger.info("%s: resuming after track %s", key, after)
+    # Hours of ffmpeg and inference must never take a time slice from the thread
+    # serving a stream. Called only from a job thread or the CLI, never from a
+    # request thread — a renice is for the life of the thread.
+    renice(12)
+
+    def guarded(track):
+        # Peewee connections are thread-local and the pool's threads are not the
+        # caller's: each takes its own and gives it back, or the run leaks one
+        # connection per worker.
+        open_connection(reuse=True)
+        try:
+            work(track)
+        finally:
+            close_connection()
+
+    pool = (
+        ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="dz-batch",
+            initializer=lambda: renice(12),
+        )
+        if workers > 1
+        else None
+    )
+    try:
+        for page in _archived_pages(after):
+            if pool is None:
+                for track in page:
+                    work(track)
+            else:
+                list(pool.map(guarded, page))
+            _checkpoint_write(key, page[-1].id, force)
+            if limit is not None and stats["done"] >= limit:
+                return  # partial by request: keep the cursor so the next run resumes
+        _checkpoint_clear(key)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
+
+
+ANALYSIS_CURSOR_KEY = "analysis_cursor"
+EMBED_CURSOR_KEY = "embed_cursor"
+
+
 def backfill(provider=None, force=False, limit=None, progress=None, on_stats=None,
-             workers=1):
+             workers=None):
     """Measure every archived track that has no current verdict.
 
     The safety net for what the archive event cannot see: tracks archived before
     this existed, and anything measured by an older version of the analysis.
 
-    `workers` runs that many tracks at once. Each one is one to three ffmpeg
-    passes plus (optionally) the extractor, so it is the box's CPU and disk that
-    bound it, not Python; 1 is the old one-at-a-time behaviour. Above one the
-    Deezer client is left out on purpose — its session is not meant to be
-    hammered from several threads, and a locally measured tempo is a fine
-    substitute. `on_stats` reports the running counters after every track.
+    `workers` runs that many tracks at once; None sizes it from the machine.
+    Each one is one to three ffmpeg passes plus (optionally) the extractor, so it
+    is the box's CPU and disk that bound it, not Python. Above one the Deezer
+    client is left out on purpose — its session is not meant to be hammered from
+    several threads, and a locally measured tempo is a fine substitute.
+    `on_stats` reports the running counters after every track.
     """
     say = progress or (lambda *_: None)
     report = on_stats or (lambda *_: None)
@@ -939,11 +1088,12 @@ def backfill(provider=None, force=False, limit=None, progress=None, on_stats=Non
             "scanned": 0, "done": 0, "skipped": 0, "failed": 0,
             "error": "ffmpeg is not installed (analysis decodes audio with it)",
         }
-    workers = max(1, min(int(workers or 1), 16))
+    workers = auto_workers(workers)
     if workers > 1:
         provider = None
 
-    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None}
+    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None,
+             "workers": workers}
     lock = threading.Lock()
 
     def work(track):
@@ -978,29 +1128,12 @@ def backfill(provider=None, force=False, limit=None, progress=None, on_stats=Non
                     say(f"  {stats['done']} analysed...")
             report(stats)
 
-    query = list(Track.select().where(Track.last_modification > 0).order_by(Track.created))
-    if workers == 1:
-        for track in query:
-            work(track)
-    else:
-        from ..db import close_connection, open_connection
-
-        def guarded(track):
-            # Peewee connections are thread-local, and the pool's threads are not
-            # the caller's: each one takes its own and gives it back, or the run
-            # leaks a connection per worker.
-            open_connection(reuse=True)
-            try:
-                work(track)
-            finally:
-                close_connection()
-
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dz-analyze") as ex:
-            list(ex.map(guarded, query))
+    _walk_library(work, workers, stats, report, ANALYSIS_CURSOR_KEY, force, limit)
     return stats
 
 
-def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None):
+def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None,
+                        workers=None):
     """Extract the frozen vector for every archived track that lacks one.
 
     Separate from `backfill` because it has a different cost profile and a
@@ -1025,32 +1158,41 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None):
         say(f"Extractor unusable: {load_err}")
         return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": load_err}
 
-    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None}
-    for track in Track.select().where(Track.last_modification > 0).order_by(Track.created):
-        if limit is not None and stats["done"] >= limit:
-            break
-        stats["scanned"] += 1
+    workers = auto_workers(workers)
+    stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None,
+             "workers": workers}
+    lock = threading.Lock()
+
+    def work(track):
+        with lock:
+            if limit is not None and stats["done"] >= limit:
+                return
+            stats["scanned"] += 1
         if not track.path or not os.path.isfile(track.path):
-            stats["skipped"] += 1
-            report(stats)
-            continue
-        if not force:
-            have = emb.load_embedding(track)
-            if emb.vector_is_current(have):
+            with lock:
                 stats["skipped"] += 1
                 report(stats)
-                continue
+            return
+        if not force and emb.vector_is_current(emb.load_embedding(track)):
+            with lock:
+                stats["skipped"] += 1
+                report(stats)
+            return
         vec, reason = emb.embed_file_verbose(track.path)
-        if vec is None or not emb.save_embedding(track, vec):
-            stats["failed"] += 1
-            if stats["error"] is None and reason:
-                # The first reason is representative: the usual causes (a broken
-                # model, a missing ffmpeg) fail every track the same way.
-                stats["error"] = reason
+        ok = vec is not None and emb.save_embedding(track, vec)
+        with lock:
+            if not ok:
+                stats["failed"] += 1
+                # Keep the LAST reason, not the first: a run that starts fine
+                # and then loses the model has everything to say in its tail,
+                # and the first line ("that one file is too short") hid it.
+                if reason:
+                    stats["error"] = reason
+            else:
+                stats["done"] += 1
+                if stats["done"] % 20 == 0:
+                    say(f"  {stats['done']} embedded...")
             report(stats)
-            continue
-        stats["done"] += 1
-        if stats["done"] % 20 == 0:
-            say(f"  {stats['done']} embedded...")
-        report(stats)
+
+    _walk_library(work, workers, stats, report, EMBED_CURSOR_KEY, force, limit)
     return stats

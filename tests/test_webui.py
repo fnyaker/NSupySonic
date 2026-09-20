@@ -3567,13 +3567,21 @@ class TrackAnalysisTestCase(unittest.TestCase):
     def test_analysis_workers_are_clamped_and_persisted(self):
         from supysonic.webui import analysis as wa
 
+        from supysonic.deezer.analysis import auto_workers
+
         self._login()
-        self.assertEqual(wa._workers(), 1)
+        # 0 is the default and it MEANS something: "size it from the machine".
+        # Nobody should have to be told how many cores their server has to get
+        # more than one of them used.
+        self.assertEqual(wa._workers(), 0)
         self.assertEqual(wa._set_workers(99), wa.ANALYSIS_WORKERS_MAX)
         self.assertEqual(wa._workers(), wa.ANALYSIS_WORKERS_MAX)
-        self.assertEqual(wa._set_workers(0), 1)
+        self.assertEqual(wa._set_workers(0), 0)
         body = self.client.get("/api/analysis/backfill").json
-        self.assertEqual(body["workers"], 1)
+        self.assertEqual(body["workers_setting"], 0)
+        # …and the studio is told what auto resolved to, rather than showing 0.
+        self.assertEqual(body["workers_auto"], auto_workers(0))
+        self.assertGreaterEqual(body["workers_auto"], 1)
         self.assertIn("running", body)
 
     def test_backfill_runs_several_workers(self):
@@ -3614,6 +3622,88 @@ class TrackAnalysisTestCase(unittest.TestCase):
         self.assertEqual(stats["done"], 3, stats)
         self.assertEqual(len(seen), 3, stats)
         self.assertIsNone(stats["error"])
+
+    def test_a_killed_backfill_resumes_where_it_stopped(self):
+        """A library job runs for hours on a thread inside the web server. A
+        restart, a worker recycle or an OOM must cost the page it was on, not
+        the hundred thousand tracks it had already measured."""
+        from supysonic.db import Meta, Track
+        from supysonic.deezer import analysis as ana
+
+        for i in range(6):
+            t = self._deezer_track(str(600 + i))
+            t.last_modification = 1
+            t.save()
+
+        seen = []
+        original_page = ana.PAGE_SIZE
+        original_analyze = ana.analyze_track
+        original_isfile = ana.os.path.isfile
+        original_ffmpeg = ana.ffmpeg_available
+        ana.PAGE_SIZE = 2
+        ana.os.path.isfile = lambda p: True
+        ana.ffmpeg_available = lambda: True
+
+        class Stop(BaseException):
+            pass
+
+        def die_after_one_page(track, provider=None, force=False):
+            seen.append(str(track.id))
+            if len(seen) >= 3:  # mid-way through the second page
+                # A BaseException, because this stands in for the process being
+                # taken away — not for a track that failed to measure, which the
+                # job already survives on its own.
+                raise Stop()
+            return object()
+
+        try:
+            ana.analyze_track = die_after_one_page
+            with self.assertRaises(Stop):
+                ana.backfill(workers=1)
+            # The cursor names the end of the page that COMPLETED, so the page
+            # it died in is replayed rather than skipped.
+            self.assertIsNotNone(Meta.get_or_none(Meta.key == ana.ANALYSIS_CURSOR_KEY))
+            first_page = list(seen)
+
+            resumed = []
+            ana.analyze_track = lambda track, provider=None, force=False: (
+                resumed.append(str(track.id)) or object()
+            )
+            stats = ana.backfill(workers=1)
+        finally:
+            ana.PAGE_SIZE = original_page
+            ana.analyze_track = original_analyze
+            ana.os.path.isfile = original_isfile
+            ana.ffmpeg_available = original_ffmpeg
+
+        order = [
+            str(t.id)
+            for t in Track.select()
+            .where(Track.last_modification > 0)
+            .order_by(Track.id)
+        ]
+        self.assertEqual(first_page[:2], order[:2])
+        # It picked up at the page it died in, and finished the library.
+        self.assertEqual(resumed, order[2:])
+        self.assertEqual(stats["done"], len(order) - 2)
+        # A completed run leaves nothing to resume from.
+        self.assertIsNone(Meta.get_or_none(Meta.key == ana.ANALYSIS_CURSOR_KEY))
+
+    def test_a_checkpoint_from_a_different_run_is_not_resumed(self):
+        """"Re-measure everything" and "measure what is missing" are different
+        runs: resuming one from the other's cursor would silently skip the front
+        of the library."""
+        from supysonic.deezer import analysis as ana
+
+        self.assertIsNone(ana._checkpoint_read(ana.ANALYSIS_CURSOR_KEY, force=False))
+        marker = self._deezer_track("777")
+        ana._checkpoint_write(ana.ANALYSIS_CURSOR_KEY, marker.id, force=True)
+        self.assertEqual(
+            ana._checkpoint_read(ana.ANALYSIS_CURSOR_KEY, force=True), marker.id
+        )
+        self.assertIsNone(ana._checkpoint_read(ana.ANALYSIS_CURSOR_KEY, force=False))
+        ana._checkpoint_clear(ana.ANALYSIS_CURSOR_KEY)
+        self.assertIsNone(ana._checkpoint_read(ana.ANALYSIS_CURSOR_KEY, force=True))
 
     def test_the_analysis_worker_reports_progress_and_finishes(self):
         from supysonic.deezer import analysis as ana
@@ -4053,6 +4143,64 @@ class GenreStudioTestCase(unittest.TestCase):
             fp.write(b"\x00" * 64)
         self.assertIsNone(emb.load_embedding(track))
         self.assertEqual(emb.embedding_version(track), 0)
+
+    def test_the_front_end_costs_the_same_for_a_minute_and_for_an_hour(self):
+        """Only the patches that get embedded are transformed.
+
+        The old front-end built the whole file's spectrogram and then kept a
+        sixtieth of it, so both the cost AND the peak memory scaled with the
+        length of the track — and numpy's rfft returns complex128 whatever it is
+        fed, which put an hour-long DJ set near a gigabyte of temporaries for
+        sixty patches of output. A library has hour-long sets in it and this
+        runs alongside a music server.
+        """
+        from supysonic.deezer import embedding as emb
+
+        one_minute = emb.patch_offsets(emb.SAMPLE_RATE * 60)
+        one_hour = emb.patch_offsets(emb.SAMPLE_RATE * 3600)
+        self.assertEqual(len(one_hour), emb.MAX_PATCHES)
+        self.assertLessEqual(len(one_minute), emb.MAX_PATCHES)
+        # Every patch is a real, complete window inside the file...
+        for n, offsets in ((60, one_minute), (3600, one_hour)):
+            total = emb.SAMPLE_RATE * n
+            self.assertTrue(all(0 <= o and o + emb.PATCH_SAMPLES <= total for o in offsets))
+            self.assertEqual(offsets, sorted(set(offsets)))
+        # ...and they are spread over the whole track, not taken from the front:
+        # an intro is the least representative part of a piece, which is the
+        # entire reason this is measured over the whole file.
+        self.assertGreater(one_hour[-1], emb.SAMPLE_RATE * 3000)
+        # A file too short to hold one patch has nothing to say.
+        self.assertEqual(emb.patch_offsets(emb.PATCH_SAMPLES - 1), [])
+
+    def test_a_model_that_would_not_load_is_tried_again_later(self):
+        """A failure here used to be permanent for the life of the process: one
+        load that did not come off and every track from then on reported "the
+        model could not be loaded", with nothing wrong any more. A run that has
+        already measured ten thousand tracks must not end on a bad second."""
+        from supysonic.deezer import embedding as emb
+
+        emb.reset_session()
+        try:
+            self.assertIsNone(emb._load_session())  # no model file here
+            first = emb.session_error()
+            self.assertTrue(first)
+            calls = []
+            original = emb.model_path
+            emb.model_path = lambda: calls.append(1) or None
+            try:
+                # Inside the cooldown it answers from memory: a backfill asking
+                # per track must not stat the disk a hundred thousand times.
+                emb._load_session()
+                self.assertEqual(calls, [])
+                # Past it, it looks again — which is how uploading the model
+                # fixes a running server.
+                emb._session_retry_at = 0.0
+                emb._load_session()
+                self.assertEqual(len(calls), 1)
+            finally:
+                emb.model_path = original
+        finally:
+            emb.reset_session()
 
     def test_a_v1_vector_is_not_offered_as_training_data(self):
         """A head is trained on ONE flat matrix. Mixing a 1280-wide row into a
@@ -4942,7 +5090,7 @@ class GenreStudioTestCase(unittest.TestCase):
 
         self._login()
 
-        def fake_backfill(force=False, on_stats=None):
+        def fake_backfill(force=False, on_stats=None, workers=None):
             stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0}
             for _ in range(3):
                 stats["scanned"] += 1

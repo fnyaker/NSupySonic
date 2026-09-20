@@ -60,6 +60,19 @@ def setup_deezer(app):
         from .deezer.scheduler import maybe_start
 
         app._deezer_scheduler = maybe_start(app)
+
+        # A library-wide analysis runs for hours on a thread inside this
+        # process and does not get to choose when the container restarts. It
+        # checkpoints, so resuming is cheap — this is what makes it automatic,
+        # rather than leaving two thirds of a library silently unmeasured until
+        # somebody thinks to press the button again.
+        if not getattr(app, "_jobs_resumed", False):
+            app._jobs_resumed = True
+            from .webui import analysis as _wa
+            from .webui import genre as _wg
+
+            _wa.resume_if_interrupted(app)
+            _wg.resume_if_interrupted(app)
     return app.deezer
 
 

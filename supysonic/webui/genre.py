@@ -119,6 +119,7 @@ _embed_job = {
     "started": None,
     "finished": None,
     "force": False,
+    "workers": 1,
     "total": 0,
     "scanned": 0,
     "done": 0,
@@ -133,7 +134,7 @@ def _embed_job_json() -> dict:
         return dict(_embed_job)
 
 
-def _run_embed(app, force):
+def _run_embed(app, force, workers=None):
     """Worker: measure every archived track that still lacks a vector."""
     from ..db import close_connection, open_connection
     from ..deezer.analysis import backfill_embeddings
@@ -146,7 +147,7 @@ def _run_embed(app, force):
                 with _embed_lock:
                     _embed_job.update(stats)
 
-            stats = backfill_embeddings(force=force, on_stats=on_stats)
+            stats = backfill_embeddings(force=force, workers=workers, on_stats=on_stats)
             with _embed_lock:
                 _embed_job.update(stats)
         except Exception as exc:
@@ -161,6 +162,58 @@ def _run_embed(app, force):
                 close_connection()
             except Exception:
                 pass
+
+
+#: Let the server finish coming up before a library job takes the disk.
+RESUME_DELAY = 60
+
+
+def resume_if_interrupted(app):
+    """Pick the embedding run back up after a restart that cut it short.
+
+    Same reasoning as the analysis backfill: extracting a vector for a real
+    library is hours of decoding, and an operator who pressed the button once
+    should not have to discover that a container restart quietly ended it.
+    """
+    from ..deezer.analysis import EMBED_CURSOR_KEY, _checkpoint_read
+
+    def start():
+        import time
+
+        time.sleep(RESUME_DELAY)
+        with app.app_context():
+            from ..db import close_connection, open_connection
+            from ..deezer import embedding as emb
+
+            try:
+                open_connection(reuse=True)
+                if emb.why_unavailable():
+                    return  # nothing to resume WITH
+                plain = _checkpoint_read(EMBED_CURSOR_KEY, force=False)
+                forced = _checkpoint_read(EMBED_CURSOR_KEY, force=True)
+                if plain is None and forced is None:
+                    return
+                force = plain is None
+                total = Track.select().where(Track.last_modification > 0).count()
+            except Exception:
+                logger.debug("Could not read the embedding checkpoint", exc_info=True)
+                return
+            finally:
+                try:
+                    close_connection()
+                except Exception:
+                    pass
+        with _embed_lock:
+            if _embed_job["running"]:
+                return
+            _embed_job.update(
+                running=True, started=now().isoformat(), finished=None, force=force,
+                total=total, scanned=0, done=0, skipped=0, failed=0, error=None,
+            )
+        logger.info("Resuming the interrupted embedding backfill")
+        _run_embed(app, force)
+
+    threading.Thread(target=start, name="genre-embed-resume", daemon=True).start()
 
 
 def _resolve(ident):
@@ -395,8 +448,15 @@ def genre_embed_start():
     why = emb.why_unavailable()
     if why:
         return jsonify({"error": why}), 400
+    from ..deezer.analysis import auto_workers
+
     data = request.get_json(silent=True) or {}
     force = bool(data.get("force") or request.args.get("force"))
+    try:
+        workers = int(data.get("workers") or 0)
+    except (TypeError, ValueError):
+        workers = 0
+    workers = auto_workers(workers)
     with _embed_lock:
         if _embed_job["running"]:
             return jsonify({"ok": True, **_embed_job})
@@ -405,6 +465,7 @@ def genre_embed_start():
             started=now().isoformat(),
             finished=None,
             force=force,
+            workers=workers,
             total=Track.select().where(Track.last_modification > 0).count(),
             scanned=0,
             done=0,
@@ -414,7 +475,7 @@ def genre_embed_start():
         )
     app = current_app._get_current_object()
     threading.Thread(
-        target=_run_embed, args=(app, force), name="genre-embed", daemon=True
+        target=_run_embed, args=(app, force, workers), name="genre-embed", daemon=True
     ).start()
     return jsonify({"ok": True, **_embed_job_json()})
 
