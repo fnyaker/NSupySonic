@@ -54,7 +54,14 @@
   import { primeEdges, knownEdges } from "../lib/edges.js";
   import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
   import { primeAnalyses } from "../lib/analysis.js";
-  import { TIER, beginTrack, playable, watchAudio, whenReady } from "../lib/ladder.js";
+  import {
+    TIER,
+    audioReady,
+    beginTrack,
+    playable,
+    watchAudio,
+    whenReady,
+  } from "../lib/ladder.js";
   import {
     getEpisodeProgress,
     saveEpisodeProgress,
@@ -1738,12 +1745,29 @@
     player.setProgress(el.currentTime, x.track.duration || 0);
     setPlaybackStatus("idle");
     if (x.isBlob) touch(x.track.deezer_id);
-    flushListen(x.track.deezer_id);
     pushRecent(x.track);
-    updateMediaSession(x.track);
-    primeEdgesAround(x.track);
+    updateMediaSession(x.track, { art: false });
     trimmedId = null;
-    cacheCoverFor(x.track).catch(() => {});
+    // A crossfade reaches a new current track without going through loadTrack,
+    // so the ladder has to be opened and closed here — this element is already
+    // playing, so there is nothing for the rest to wait for. Without this the
+    // lyrics, the artwork cache and the verdict would still be waiting on the
+    // PREVIOUS track's signal, which has already fired.
+    if (detachLadder) detachLadder();
+    detachLadder = null;
+    beginTrack(x.track.deezer_id);
+    whenReady(TIER.ART, async () => {
+      await cacheCoverFor(x.track).catch(() => {});
+      updateMediaSession(x.track);
+    });
+    whenReady(TIER.VERDICT, () => primeAnalyses([String(x.track.deezer_id)]));
+    whenReady(TIER.EXTRA, () => {
+      flushListen(x.track.deezer_id);
+      primeEdgesAround(x.track);
+    });
+    // Registered first, released now: past the ladder's gate they would each
+    // start immediately instead of taking their turn.
+    audioReady(x.track.deezer_id);
   }
 
   // The ramp has reached zero: stop the outgoing element and release it.
