@@ -25,6 +25,7 @@ import { tierPreset, TIERS } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
 import { LOOK_KEYS, FAMILY_LIST } from "../src/lib/audio/style.js";
 import { WORLDS } from "../src/lib/viz/worlds/index.js";
+import { hasGenreScene } from "../src/lib/viz/genres/index.js";
 import { SKINS, skinId, skinFor, skinCount } from "../src/lib/viz/skins.js";
 
 // --- a canvas that remembers where it was drawn on --------------------------
@@ -307,10 +308,12 @@ test("every scene keeps its material off the artwork", () => {
 test("every genre gets its own animation, not the same one re-weighted", () => {
   // THE complaint this design answers: the old engine drew one visual
   // vocabulary at per-genre strengths, so frenchcore and ambient were the same
-  // picture at different brightness. Each family now maps to a WORLD, and the
-  // worlds are not variations on each other.
+  // picture at different brightness. A family now maps either to its OWN
+  // animation (`lib/viz/genres/`, where the id is the genre itself) or, for the
+  // long tail, to a world it shares — and neither kind is a variation on the
+  // others. The expected value below is whichever applies.
   const cases = {
-    frenchcore: ["shatter", { motion: 0.96, density: 0.85, punch: 0.98, smooth: 0.12, warm: 0.82, melodic: 0.15, chaos: 0.7 }, { hard: 0.9 }],
+    frenchcore: ["frenchcore", { motion: 0.96, density: 0.85, punch: 0.98, smooth: 0.12, warm: 0.82, melodic: 0.15, chaos: 0.7 }, { hard: 0.9 }],
     techno: ["tunnel", { motion: 0.66, density: 0.62, smooth: 0.38, warm: 0.28, melodic: 0.28, chaos: 0.2 }, { groove: 0.85 }],
     psytrance: ["kaleido", { motion: 0.9, density: 0.86, smooth: 0.3, warm: 0.22, melodic: 0.4, chaos: 0.32 }, { hard: 0.6, groove: 0.4 }],
     rap: ["vinyl", { motion: 0.46, punch: 0.7, warm: 0.62, melodic: 0.35, smooth: 0.6 }, { groove: 0.6, voice: 0.4 }],
@@ -321,6 +324,7 @@ test("every genre gets its own animation, not the same one re-weighted", () => {
     dubstep: ["wobble", { motion: 0.7, density: 0.7, punch: 0.88, warm: 0.34, chaos: 0.55, smooth: 0.2 }, { hard: 0.8 }],
     jazz: ["smoke", { motion: 0.4, density: 0.46, warm: 0.7, chaos: 0.2, smooth: 0.66, melodic: 0.85 }, { voice: 0.6, sustain: 0.4 }],
     house: ["bloom", { motion: 0.5, density: 0.55, warm: 0.6, smooth: 0.58, melodic: 0.55 }, { groove: 0.7, voice: 0.3 }],
+    zaag: ["zaag", { motion: 0.86, density: 0.78, punch: 0.88, warm: 0.26, melodic: 0.34, chaos: 0.5 }, { hard: 0.88 }],
     hardstyle: ["hardbounce", { motion: 0.78, punch: 0.95, warm: 0.62, melodic: 0.45, chaos: 0.3 }, { hard: 0.9 }],
     trance: ["starfield", { motion: 0.62, density: 0.7, warm: 0.3, smooth: 0.72, melodic: 0.84 }, { groove: 0.5, sustain: 0.5 }],
   };
@@ -330,7 +334,12 @@ test("every genre gets its own animation, not the same one re-weighted", () => {
       w: 1600, h: 900, seconds: 9,
       style: styleOf(arche, look, family),
     });
-    assert.equal(r.scene.world, expected, `${family} did not land on its own world`);
+    assert.equal(r.scene.world, expected, `${family} did not land on its own animation`);
+    assert.equal(
+      r.scene.kind,
+      hasGenreScene(family) ? "genre" : "world",
+      `${family} should be drawn by its ${hasGenreScene(family) ? "own file" : "world"}`
+    );
     assert.equal(r.scene.skin, family, `${family} was dressed as ${r.scene.skin}`);
     assert.ok(r.ink.length > 40, `${family}: ${expected} drew almost nothing`);
     sigs[family] = signature(r.ink, 1600, 900);
@@ -339,6 +348,7 @@ test("every genre gets its own animation, not the same one re-weighted", () => {
   // are the pairs a listener would call obviously unrelated.
   const pairs = [
     ["frenchcore", "ambient"],
+    ["zaag", "house"],
     ["techno", "rap"],
     ["synthwave", "dubstep"],
     ["psytrance", "metal"],
@@ -420,8 +430,8 @@ test("two genres sharing a world still draw differently", () => {
   // seven big slabs and a strobe against twenty splinters — and if that came
   // out identical the catalogue would be decoration.
   const pairs = [
-    [["gabber", { chaos: 0.5, motion: 0.9, punch: 1 }, { hard: 0.9 }],
-     ["speedcore", { chaos: 0.88, motion: 1, punch: 1 }, { hard: 0.95 }]],
+    [["hardstyle", { chaos: 0.3, motion: 0.78, punch: 0.95 }, { hard: 0.9 }],
+     ["rawstyle", { chaos: 0.45, motion: 0.8, punch: 1 }, { hard: 0.92 }]],
     [["techno", { chaos: 0.2, motion: 0.66 }, { groove: 0.85 }],
      ["acidtechno", { chaos: 0.35, motion: 0.8 }, { groove: 0.8 }]],
     [["liquiddnb", { chaos: 0.2, motion: 0.85 }, { groove: 0.6, hard: 0.4 }],
@@ -492,7 +502,7 @@ test("a shape switch, not a multiplier, is what separates neighbours", () => {
   const pairs = [
     ["dubstep", "riddim"],        // a sine LFO against a square gate
     ["garage", "breakbeat"],      // columns against strips
-    ["hardstyle", "zaag"],        // a streak lead against a saw one
+    ["hardstyle", "pieep"],       // a streak lead against a stepped arpeggio
 
     ["punk", "doom"],             // lit from the front, or from behind
     ["ambient", "drone"],         // clouds against curtains
@@ -556,11 +566,14 @@ test("a change of genre is a dissolve, never a cut", () => {
   assert.equal(scene.world, "nebula");
   assert.equal(scene.leaving, null);
   // One tenth of a second of the new genre: the old world must still be there.
+  // ...and the incoming one is a DEDICATED animation, which is the case worth
+  // pinning: the crossfade must not care which kind it is dissolving between.
   const hard = styleOf({ hard: 0.9 }, { motion: 0.96, chaos: 0.7 }, "frenchcore");
   run(hard, 0.2);
-  assert.equal(scene.world, "shatter");
+  assert.equal(scene.world, "frenchcore");
+  assert.equal(scene.kind, "genre");
   assert.equal(scene.leaving, "nebula", "the outgoing world was cut instead of faded");
-  run(hard, 2.5);
+  run(hard, 4);
   assert.equal(scene.leaving, null, "the dissolve never finished");
 });
 

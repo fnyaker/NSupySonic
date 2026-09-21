@@ -947,6 +947,64 @@ work exists for.
   the scene washes over (that feedback would go to white in about a second), that the frame is read
   exactly once, and the whole step-down ladder.
 
+**A genre may bring its OWN animation** (`lib/viz/genres/`, one file each). A world plus a skin is a
+shared motif with a genre's numbers poured into it: the right answer for the long tail and the wrong
+one for a genre somebody actually listens to, because no parameter turns a bouncing core into a
+sawtooth waveform. `smart.js` prefers a dedicated file whenever the resolved genre has one and falls
+back to the world for everything else, so the catalogue fills in a genre at a time without a flag
+day, and the crossfade does not care which kind it is dissolving between. Eight so far — frenchcore,
+tribecore, raggatek, gabber, speedcore, hardtekk, zaag, uptempo — plus five musical neighbours that
+share a file.
+
+**These genres are not one scene, and the first version of that directory said they were.** Tribe,
+hardtek and raggatek do come out of the European sound-system and teknival world. Everything else
+does not: gabber is Rotterdam and Thunderdome and a commercial industry from the start; uptempo is a
+festival and club genre with its own labels; zaag is a Dutch hardstyle KICK DESIGN out of the
+Q-dance lineage (the name is the sound, not a place); hardtekk is the German club scene; speedcore is
+a label-and-festival world; frenchcore began in the French free party scene and has been a festival
+genre for two decades. Filing them all under "free party" is inaccurate and dismissive of scenes that
+are large and organised. The animations are built from what each genre SOUNDS like — the kick, the
+swing, the tempo, the lead — which is the honest basis for a picture and the one that does not put
+words in a scene's mouth.
+
+**No constant that should be musical** (`lib/viz/musical.js`). The animations were full of numbers
+that knew nothing about the music — `spin += dt * 0.05`, `if (s.age > 3.4)` — and a scene written
+that way turns at one rate through a 90 BPM intro and a 200 BPM drop, holds a trail for 3.4 seconds
+whether that is half a bar or six, and has one character however the track moves under it. So
+nothing downstream expresses a duration in seconds or a rate in "per second": `m.overBeats(n)` is a
+lifetime, `m.perBeat(n)` / `m.sweep(turns)` are rates, `m.ease(v, target, beats, dt)` is a smoothing,
+and the shape of the moment comes off `m.drive` / `m.weight` / `m.air` / `m.tension` / `m.calm`.
+`webapp/test/musical.test.mjs` drives every dedicated animation at 90 and at 180 BPM over the same
+wall clock and fails any that does not move materially more at the second — a hard-coded rate scores
+~1.0 and is invisible in review, which is the only reason this line can be held. A second test drives
+a drop against a breakdown at one tempo and fails anything that draws them the same. Both caught real
+regressions the day they were written (a ring that reversed direction every phrase moved LESS the
+harder the track drove, scoring 0.27).
+
+**ANALYSIS AND RENDERING ARE DIFFERENT THINGS, and `lib/viz/bridge.js` is the line between them.**
+The sound is analysed ONCE, in the tab that has the audio — one beat tracker, one classifier — so
+the genre, the tempo and the grid are decided once and both screens agree by construction. What
+crosses the channel is that analysis. What each side does with it is its own business: the player
+and the projector pick their own scene (`vizMode` / `vizScreenMode`), their own quality tier and
+their own frame rate, and neither waits for the other. The player can sit on "Aucune" while the
+projector runs, which is a supported arrangement and now has a button for it.
+
+The level the analysis runs AT is the only thing that must be shared, and it is **the most demanding
+of the two**: the viewer announces what its scene needs (`lv` on its hello, re-announced when the
+projector's mode changes), `host.js` subscribes at that level, and the engine's own
+`recomputeLevel` maxes it with whatever this tab wants — so the rule falls out of machinery that
+already existed.
+
+**Why the two screens used to drift apart** — it was never a clock problem, it was a sampling one.
+The engine runs at ~94 Hz and the channel publishes at 45, so a beat, which is true on exactly ONE
+analysis frame, had a better than even chance of landing in a frame the throttle dropped: the
+projector was missing about half of every track's beats, kicks and downbeats. Continuous values can
+be sampled; **events have to be latched**. `beat`, `downbeat`, `kickHit`, the style kick's `hit` and
+the peak `onset` are accumulated across the dropped frames and cleared once sent. `kickHit` was also
+simply absent from the payload, so every animation that fires on a kick never fired at all on the
+second screen — which is all of `lib/viz/genres/`. `webapp/test/bridge.test.mjs` pins both halves:
+no event lost to the throttle, and no event reported twice.
+
 **The projector window** (`routes/Viz.svelte`, `lib/viz/bridge.js`, `lib/viz/host.js`) is the same
 SPA on `#/viz`, opened in a second tab to be dragged onto a beamer. It plays **nothing**: a second
 `<audio>` would be a second stream, a second decode and a second playhead drifting out of sync with

@@ -28,6 +28,21 @@ import { setBackgroundAnalysis, BAND_COUNT } from "../audio/engine.js";
 import { LOOK_KEYS } from "../audio/style.js";
 
 const CHANNEL = "nsupysonic-viz";
+// ANALYSIS AND RENDERING ARE DIFFERENT THINGS, and this channel is the line
+// between them. The sound is analysed ONCE, in the tab that has the audio — one
+// beat tracker, one classifier, so the genre is decided once and both screens
+// agree about it by construction. What crosses the channel is that analysis.
+// What each side does with it is its own business: the player and the projector
+// pick their own scene, their own quality tier and their own frame rate, and
+// neither waits for the other.
+//
+// The level the analysis runs AT is the most demanding of the two, which is the
+// only part that has to be shared: a projector on `smart` needs a beat tracker
+// even if the player is showing bars, and a player on `smart` needs one whether
+// or not anybody is watching the second screen. The viewer announces what it
+// needs (`lv` on its hello), the publisher subscribes at that level, and the
+// engine's own `recomputeLevel` maxes it with whatever this tab wants — so the
+// rule falls out of machinery that already existed rather than a new one.
 const PUBLISH_HZ = 45; // the projector renders at 60; 45 is indistinguishable
 // A viewer proves it is alive by pinging. That ping is a setInterval in a
 // window that is, by design, not the focused one — and a browser throttles
@@ -53,8 +68,11 @@ function open() {
 }
 
 // --- the playing tab --------------------------------------------------------
-export function createPublisher({ onViewers } = {}) {
-  const ch = open();
+export function createPublisher({ onViewers, channel } = {}) {
+  // `channel` is a seam for the tests: the latching below is the fix for the
+  // projector missing half of every track's events, and it is not observable
+  // from anywhere else.
+  const ch = channel || open();
   if (!ch)
     return {
       send() {},
@@ -69,13 +87,31 @@ export function createPublisher({ onViewers } = {}) {
   const src = Math.random().toString(36).slice(2);
   const viewers = new Map(); // id → last seen
   let announced = 0;
+  let viewerLevel = 0;
+  // Events are STICKY between publishes. The engine runs at ~94 Hz and this
+  // channel at 45, so a beat — which is true on exactly one frame — had a
+  // better than even chance of landing in a frame that was dropped. The
+  // projector was therefore missing about half of every track's beats, kicks
+  // and downbeats, which is most of what "they are not in sync" was: not a
+  // clock problem, a sampling one. Continuous values can be sampled; events
+  // have to be accumulated.
+  let hadBeat = false;
+  let hadDown = false;
+  let hadKick = false;
+  let hadStyleHit = false;
+  let peakOnset = 0;
   let transport = { playing: false, loaded: false };
   let beat = null;
 
   // The host only runs the analysis engine while somebody is watching, so the
   // count crossing zero is the signal it acts on.
   function announce() {
-    if (viewers.size === announced) return;
+    // The most demanding viewer decides, and a change of level is as much a
+    // reason to re-announce as a change of count.
+    let lv = 0;
+    for (const v of viewers.values()) if (v && v.lv > lv) lv = v.lv;
+    if (viewers.size === announced && lv === viewerLevel) return;
+    viewerLevel = lv;
     announced = viewers.size;
     setBackgroundAnalysis(announced > 0);
     if (announced > 0 && !beat) beat = setInterval(sendState, HEARTBEAT_EVERY);
@@ -83,7 +119,7 @@ export function createPublisher({ onViewers } = {}) {
       clearInterval(beat);
       beat = null;
     }
-    onViewers?.(announced);
+    onViewers?.(announced, viewerLevel);
   }
 
   function sendState() {
@@ -103,7 +139,7 @@ export function createPublisher({ onViewers } = {}) {
 
   function prune() {
     const now = Date.now();
-    for (const [id, t] of viewers) if (now - t > VIEWER_TIMEOUT) viewers.delete(id);
+    for (const [id, v] of viewers) if (now - v.at > VIEWER_TIMEOUT) viewers.delete(id);
     announce();
   }
 
@@ -112,7 +148,11 @@ export function createPublisher({ onViewers } = {}) {
     if (!m || typeof m !== "object") return;
     if (m.t === "hello" || m.t === "ping") {
       const known = viewers.has(m.id);
-      viewers.set(m.id, Date.now());
+      // `lv` is the analysis level this viewer needs for the scene IT chose.
+      // An older projector does not send one; SMART is the safe assumption,
+      // because under-analysing silently degrades its picture while
+      // over-analysing only costs this tab a little work.
+      viewers.set(m.id, { at: Date.now(), lv: Number.isFinite(m.lv) ? m.lv : 2 });
       announce();
       if (!known) {
         if (metaCache) ch.postMessage(metaCache);
@@ -131,6 +171,16 @@ export function createPublisher({ onViewers } = {}) {
     // Called on every analysis frame; throttles itself.
     send(frame) {
       if (!viewers.size) return;
+      // Latch first, ALWAYS — before the throttle can return. This runs on
+      // every analysis frame and is four ORs and a max.
+      const fb = frame.beat;
+      const ff = frame.features;
+      if (fb.beat) hadBeat = true;
+      if (fb.downbeat) hadDown = true;
+      if (ff?.kickHit) hadKick = true;
+      if (frame.style?.kick?.hit) hadStyleHit = true;
+      if (fb.onset > peakOnset) peakOnset = fb.onset;
+
       const now = performance.now();
       if (now - last < 1000 / PUBLISH_HZ) return;
       last = now;
@@ -158,11 +208,15 @@ export function createPublisher({ onViewers } = {}) {
         f: f
           ? [f.level, f.flux, f.lowFlux, f.midFlux, f.highFlux, f.centroidN, f.flatness,
              f.percussivity, f.vocalMod, f.crest, f.silent ? 1 : 0, f.kick,
-             f.dynamics, f.tonal, f.melody, f.melodyPitch, f.melodyFlux, f.chordChange]
+             f.dynamics, f.tonal, f.melody, f.melodyPitch, f.melodyFlux, f.chordChange,
+             // `kickHit` was simply missing, so every animation on the
+             // projector that fires on a kick never fired at all — including
+             // all of `lib/viz/genres/`, whose whole timing is built on it.
+             hadKick ? 1 : 0]
           : null,
         c: f?.chroma ? (chroma.set(f.chroma), chroma) : null,
-        b: [b.bpm, b.confidence, b.phase, b.beat ? 1 : 0, b.beatIndex, b.barPos,
-            b.beatsPerBar, b.downbeat ? 1 : 0, b.onset, b.kickPulse, b.period,
+        b: [b.bpm, b.confidence, b.phase, hadBeat ? 1 : 0, b.beatIndex, b.barPos,
+            b.beatsPerBar, hadDown ? 1 : 0, peakOnset, b.kickPulse, b.period,
             b.locked ? 1 : 0],
         s: st
           ? {
@@ -174,10 +228,12 @@ export function createPublisher({ onViewers } = {}) {
               // like. Without it every projector scene fell back to the neutral
               // default and frenchcore drew the same picture as techno.
               w: st.look ? (LOOK_KEYS.forEach((k, i) => (look[i] = st.look[k])), look) : null,
-              k: [st.kick.type, st.kick.strength, st.kick.decay, st.kick.hit ? 1 : 0],
+              k: [st.kick.type, st.kick.strength, st.kick.decay, hadStyleHit ? 1 : 0],
             }
           : null,
       });
+      hadBeat = hadDown = hadKick = hadStyleHit = false;
+      peakOnset = 0;
     },
     // Transport state. Sent on every change and, while anyone is watching, as
     // a heartbeat — it is the projector's proof that this tab is still here.
@@ -209,13 +265,15 @@ export function createPublisher({ onViewers } = {}) {
 // --- the projector tab ------------------------------------------------------
 // Rebuilds a frame object with the same shape the scenes expect, so a scene has
 // no idea whether it is running next to the audio or on the other screen.
-export function createSubscriber(onFrame, onMeta, onState) {
+export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
+  let level = initialLevel;
   const ch = open();
   const id = Math.random().toString(36).slice(2);
   const energy = { sub: 0, bass: 0, lowMid: 0, mid: 0, high: 0, air: 0 };
   const features = {
     level: 0, flux: 0, lowFlux: 0, midFlux: 0, highFlux: 0, centroidN: 0,
     flatness: 0, percussivity: 0, vocalMod: 0, crest: 0, silent: true, kick: 0,
+    kickHit: false,
     dynamics: 1, tonal: 0, melody: 0, melodyPitch: 0.5, melodyFlux: 0, chordChange: 0,
     chroma: new Float32Array(12),
   };
@@ -273,7 +331,7 @@ export function createSubscriber(onFrame, onMeta, onState) {
           if (rank <= sourceRank && !stale) return;
           source = m.src;
           // The new source has not told us what it is playing yet.
-          ch.postMessage({ t: "hello", id });
+          ch.postMessage({ t: "hello", id, lv: level });
         } else if (!source) {
           source = m.src ?? null;
         }
@@ -312,6 +370,10 @@ export function createSubscriber(onFrame, onMeta, onState) {
           features.dynamics = a[12]; features.tonal = a[13]; features.melody = a[14];
           features.melodyPitch = a[15]; features.melodyFlux = a[16]; features.chordChange = a[17];
         }
+        // Latched by the publisher across the frames the throttle dropped, so
+        // this is "a kick happened since the last message" rather than "a kick
+        // is happening in the frame that got through".
+        features.kickHit = a.length > 18 ? !!a[18] : false;
       }
       if (m.c) features.chroma.set(m.c);
       const b = m.b;
@@ -337,8 +399,8 @@ export function createSubscriber(onFrame, onMeta, onState) {
       }
       onFrame(frame);
     };
-    ch.postMessage({ t: "hello", id });
-    pingTimer = setInterval(() => ch.postMessage({ t: "ping", id }), PING_EVERY);
+    ch.postMessage({ t: "hello", id, lv: level });
+    pingTimer = setInterval(() => ch.postMessage({ t: "ping", id, lv: level }), PING_EVERY);
     // "Is anything still there?" — keyed off the HEARTBEAT, so a paused player
     // stays connected. Only a player tab that has actually gone away (closed,
     // navigated, crashed) stops sending one.
@@ -365,7 +427,7 @@ export function createSubscriber(onFrame, onMeta, onState) {
   function onVisible() {
     if (!document.hidden) {
       try {
-        ch?.postMessage({ t: "hello", id });
+        ch?.postMessage({ t: "hello", id, lv: level });
       } catch {
         /* ignore */
       }
@@ -382,6 +444,21 @@ export function createSubscriber(onFrame, onMeta, onState) {
   return {
     get supported() {
       return !!ch;
+    },
+    /**
+     * The projector's own scene changed, so what it needs from the analysis
+     * changed too. Announced immediately rather than at the next ping: a
+     * viewer that switched to `smart` should not draw two beat-less bars while
+     * a twenty-second timer runs down.
+     */
+    setLevel(lv) {
+      if (!Number.isFinite(lv) || lv === level) return;
+      level = lv;
+      try {
+        ch?.postMessage({ t: "ping", id, lv: level });
+      } catch {
+        /* the channel is gone; the next hello carries it */
+      }
     },
     close() {
       clearInterval(pingTimer);

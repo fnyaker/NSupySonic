@@ -17,6 +17,11 @@ import { createPublisher } from "./bridge.js";
 
 let pub = null;
 let unsub = null;
+// The level the projector asked for. The engine's own `recomputeLevel` then
+// takes the maximum of this and whatever this tab's own visualizer wants, so
+// "the most demanding of the two decides" needs no arbitration here — one
+// subscription per consumer, and the engine already maxes them.
+let wantLevel = LEVEL.SMART;
 let stopStores = [];
 let pruneTimer = null;
 
@@ -56,14 +61,23 @@ function sendMeta() {
 function syncEngine() {
   const want = !!pub && pub.viewers > 0 && get(playing);
   if (want && !unsub) {
-    // SMART: the projector is the one place where the full engine is always
-    // worth running — it is a dedicated screen, and the window that owns it is
-    // normally the only thing the machine is doing.
-    unsub = subscribeFrames((f) => pub.send(f), LEVEL.SMART);
+    unsub = subscribeFrames((f) => pub.send(f), wantLevel);
     sendMeta();
   } else if (!want && unsub) {
     unsub();
     unsub = null;
+  }
+}
+
+/** The projector changed what it needs: re-subscribe at the new level. */
+function setLevel(lv) {
+  const next = Number.isFinite(lv) ? lv : LEVEL.SMART;
+  if (next === wantLevel) return;
+  wantLevel = next;
+  if (unsub) {
+    unsub();
+    unsub = null;
+    syncEngine();
   }
 }
 
@@ -75,8 +89,10 @@ function detach() {
 export function initVizHost() {
   if (pub) return;
   pub = createPublisher({
-    onViewers() {
+    onViewers(count, level) {
+      setLevel(level);
       syncEngine();
+      void count;
     },
   });
   stopStores = [
