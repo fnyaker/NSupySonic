@@ -19,6 +19,7 @@
   import { train, release } from "../lib/genre/trainer.js";
   import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
+  import JobFailures from "../components/JobFailures.svelte";
   import Cover from "../components/Cover.svelte";
 
   const ARCHETYPES = [
@@ -1005,6 +1006,7 @@
               <Icon name="alert" size={16} /><span>{embed.error}</span>
             </div>
           {/if}
+          <JobFailures job={embed} label="empreintes" />
         {/if}
 
         <div class="analysis-bar" class:running={analysis?.running}>
@@ -1057,6 +1059,10 @@
             <Icon name="alert" size={16} /><span>{analysis.error}</span>
           </div>
         {/if}
+        <!-- The banner is the headline; this is the report. A counter with no
+             per-track reason sent the operator to the container log, which is
+             exactly what somebody using the app from a phone cannot read. -->
+        <JobFailures job={analysis} label="analyse" />
 
         {#if !tags.length}
           <p class="muted empty">

@@ -3604,24 +3604,181 @@ class TrackAnalysisTestCase(unittest.TestCase):
 
         def fake_analyze(track, provider=None, force=False):
             seen.append(str(track.id))
-            return object()  # a truthy "row"
+            return object(), None  # (row, reason) — a truthy "row"
 
-        original_analyze = ana.analyze_track
+        original_analyze = ana.analyze_track_verbose
         original_isfile = ana.os.path.isfile
         original_ffmpeg = ana.ffmpeg_available
-        ana.analyze_track = fake_analyze
+        ana.analyze_track_verbose = fake_analyze
         ana.os.path.isfile = lambda p: True  # the fixture has no real audio
         ana.ffmpeg_available = lambda: True  # CI has no ffmpeg either
         try:
             stats = ana.backfill(workers=2)
         finally:
-            ana.analyze_track = original_analyze
+            ana.analyze_track_verbose = original_analyze
             ana.os.path.isfile = original_isfile
             ana.ffmpeg_available = original_ffmpeg
         self.assertEqual(stats["scanned"], 3, stats)
         self.assertEqual(stats["done"], 3, stats)
         self.assertEqual(len(seen), 3, stats)
         self.assertIsNone(stats["error"])
+
+    def test_a_failed_track_reports_why_and_which(self):
+        """"analysis failed" is not a bug report.
+
+        The whole job used to surface one filename and the word "failed", so a
+        corrupt archive, a file deleted under us and an ffmpeg without
+        aspectralstats all looked identical from the app — and the only place
+        the reason existed was the container log. The run must carry the cause
+        of every failure and the name of every track it happened to.
+        """
+        from supysonic.db import Track
+        from supysonic.deezer import analysis as ana
+
+        for i in range(3):
+            t = self._deezer_track(str(900 + i))
+            t.last_modification = 1
+            t.save()
+        self.assertEqual(Track.select().where(Track.last_modification > 0).count(), 3)
+
+        calls = []
+
+        def flaky(track, provider=None, force=False):
+            calls.append(str(track.id))
+            if len(calls) == 1:
+                return None, "spectral pass: ffmpeg exited 1: Invalid data found"
+            if len(calls) == 2:
+                return None, "spectral pass: ffmpeg exited 1: Invalid data found"
+            return object(), None
+
+        orig = (ana.analyze_track_verbose, ana.os.path.isfile, ana.ffmpeg_available)
+        ana.analyze_track_verbose = flaky
+        ana.os.path.isfile = lambda p: True
+        ana.ffmpeg_available = lambda: True
+        try:
+            stats = ana.backfill(workers=1)
+        finally:
+            (ana.analyze_track_verbose, ana.os.path.isfile,
+             ana.ffmpeg_available) = orig
+
+        self.assertEqual(stats["failed"], 2, stats)
+        self.assertEqual(stats["done"], 1, stats)
+        # Every failure is named, with the reason it gave.
+        self.assertEqual(len(stats["failures"]), 2, stats)
+        for f in stats["failures"]:
+            self.assertIn("Invalid data found", f["reason"])
+            self.assertTrue(f["track"])
+        # The reasons are tallied, so the one-line summary can name the cause
+        # that dominates the run instead of whichever file came first.
+        self.assertEqual(
+            stats["failure_reasons"],
+            {"spectral pass: ffmpeg exited 1: Invalid data found": 2},
+            stats,
+        )
+        # ...and the summary itself says a cause, not just a count.
+        self.assertIn("Invalid data found", stats["error"])
+        self.assertIn("2", stats["error"])
+
+    def test_the_failure_sample_is_bounded(self):
+        """A library-wide breakage must not make the status payload unbounded."""
+        from supysonic.deezer import analysis as ana
+
+        stats = {"failed": 0, "failures": [], "failure_reasons": {}}
+
+        class FakeTrack:
+            path = "/archive/x.flac"
+            id = "fake"
+            title = "x"
+
+        for _ in range(ana.FAILURE_SAMPLE_MAX + 25):
+            stats["failed"] += 1
+            ana._record_failure(stats, FakeTrack(), "spectral pass: boom")
+
+        self.assertEqual(len(stats["failures"]), ana.FAILURE_SAMPLE_MAX)
+        # The tally, unlike the sample, counts every one of them.
+        self.assertEqual(
+            stats["failure_reasons"]["spectral pass: boom"],
+            ana.FAILURE_SAMPLE_MAX + 25,
+        )
+
+    def test_a_missing_file_says_so_rather_than_failing_blankly(self):
+        """The DB says archived and the disk disagrees: its own sentence.
+
+        It is the one failure that is not about the audio at all, and reporting
+        it as "analysis failed" sent the operator hunting for a decoder bug.
+        """
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track("950")
+        row, reason = ana.analyze_track_verbose(t)
+        self.assertIsNone(row)
+        self.assertIn("missing", reason)
+        # The legacy one-value entry point still behaves exactly as it did.
+        self.assertIsNone(ana.analyze_track(t))
+
+    def test_a_broken_file_reports_what_ffmpeg_actually_said(self):
+        """The whole chain, from ffmpeg's stderr to the line the operator reads.
+
+        This is the regression that made the analysis undebuggable: ffmpeg says
+        exactly what is wrong with a file, `_spectral` had that text in hand and
+        raised "ffmpeg exited 1" instead, `analyze_track` turned that into None,
+        and the job turned None into "<file>: analysis failed". Four layers,
+        each dropping a little more, and nothing left at the end to act on.
+        """
+        from supysonic.deezer import analysis as ana
+
+        stderr = (
+            b"ffmpeg version 6.1.1 Copyright (c) 2000-2023\n"
+            b"  built with gcc 13\n"
+            b"configuration: --enable-gpl\n"
+            b"Input #0, flac, from '/archive/a/b/02 - Steal Your Heart.flac':\n"
+            b"  Duration: 00:03:21.03, bitrate: 912 kb/s\n"
+            b"[flac @ 0x5581] Invalid data found when processing input\n"
+        )
+
+        class FakeProc:
+            returncode = 1
+            stdout = b""
+
+        FakeProc.stderr = stderr
+        t = self._deezer_track("960")
+        orig = (ana.subprocess.run, ana.os.path.isfile, ana.ffmpeg_available)
+        ana.subprocess.run = lambda *a, **k: FakeProc()
+        ana.os.path.isfile = lambda p: True
+        ana.ffmpeg_available = lambda: True
+        try:
+            row, reason = ana.analyze_track_verbose(t)
+        finally:
+            ana.subprocess.run, ana.os.path.isfile, ana.ffmpeg_available = orig
+
+        self.assertIsNone(row)
+        # The stage, and then ffmpeg's own words.
+        self.assertTrue(reason.startswith("spectral pass:"), reason)
+        self.assertIn("Invalid data found when processing input", reason)
+        # The banner is not the reason and must not crowd out the one that is.
+        self.assertNotIn("ffmpeg version", reason)
+
+    def test_ffmpeg_tail_keeps_the_error_and_drops_the_banner(self):
+        """ffmpeg always says what went wrong; the banner never does."""
+        from supysonic.deezer import analysis as ana
+
+        err = (
+            "ffmpeg version 6.1 Copyright (c) 2000-2023\n"
+            "  built with gcc 13\n"
+            "  libavutil      58. 29.100\n"
+            "configuration: --enable-gpl\n"
+            "Input #0, flac, from '/archive/x.flac':\n"
+            "  Duration: 00:03:21.00, bitrate: 900 kb/s\n"
+            "[flac @ 0x55] Invalid data found when processing input\n"
+        )
+        tail = ana.ffmpeg_tail(err)
+        self.assertIn("Invalid data found when processing input", tail)
+        self.assertNotIn("ffmpeg version", tail)
+        self.assertNotIn("configuration", tail)
+        # Bounded: a runaway stderr must not become the status payload.
+        self.assertLessEqual(len(ana.ffmpeg_tail("x" * 5000)), 400)
+        self.assertEqual(ana.ffmpeg_tail(""), "")
+        self.assertEqual(ana.ffmpeg_tail(None), "")
 
     def test_a_killed_backfill_resumes_where_it_stopped(self):
         """A library job runs for hours on a thread inside the web server. A
@@ -3637,7 +3794,7 @@ class TrackAnalysisTestCase(unittest.TestCase):
 
         seen = []
         original_page = ana.PAGE_SIZE
-        original_analyze = ana.analyze_track
+        original_analyze = ana.analyze_track_verbose
         original_isfile = ana.os.path.isfile
         original_ffmpeg = ana.ffmpeg_available
         ana.PAGE_SIZE = 2
@@ -3654,10 +3811,10 @@ class TrackAnalysisTestCase(unittest.TestCase):
                 # taken away — not for a track that failed to measure, which the
                 # job already survives on its own.
                 raise Stop()
-            return object()
+            return object(), None
 
         try:
-            ana.analyze_track = die_after_one_page
+            ana.analyze_track_verbose = die_after_one_page
             with self.assertRaises(Stop):
                 ana.backfill(workers=1)
             # The cursor names the end of the page that COMPLETED, so the page
@@ -3666,13 +3823,13 @@ class TrackAnalysisTestCase(unittest.TestCase):
             first_page = list(seen)
 
             resumed = []
-            ana.analyze_track = lambda track, provider=None, force=False: (
-                resumed.append(str(track.id)) or object()
+            ana.analyze_track_verbose = lambda track, provider=None, force=False: (
+                resumed.append(str(track.id)) or (object(), None)
             )
             stats = ana.backfill(workers=1)
         finally:
             ana.PAGE_SIZE = original_page
-            ana.analyze_track = original_analyze
+            ana.analyze_track_verbose = original_analyze
             ana.os.path.isfile = original_isfile
             ana.ffmpeg_available = original_ffmpeg
 

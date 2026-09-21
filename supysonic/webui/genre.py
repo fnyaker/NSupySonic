@@ -141,12 +141,18 @@ _embed_job = {
     "skipped": 0,
     "failed": 0,
     "error": None,
+    # Which tracks failed and why — see webui/analysis.py for why a counter on
+    # its own is not a report anybody can act on.
+    "failures": [],
+    "failure_reasons": {},
 }
 
 
 def _embed_job_json() -> dict:
+    from .analysis import _job_snapshot
+
     with _embed_lock:
-        return dict(_embed_job)
+        return _job_snapshot(_embed_job)
 
 
 def _run_embed(app, force, workers=None):
@@ -158,13 +164,19 @@ def _run_embed(app, force, workers=None):
         try:
             open_connection(reuse=True)
 
+            from .analysis import _job_snapshot
+
             def on_stats(stats):
+                # Copied on the way in: the ledger belongs to the worker
+                # threads, and a status poll must not iterate it live.
+                snap = _job_snapshot(stats)
                 with _embed_lock:
-                    _embed_job.update(stats)
+                    _embed_job.update(snap)
 
             stats = backfill_embeddings(force=force, workers=workers, on_stats=on_stats)
+            snap = _job_snapshot(stats)
             with _embed_lock:
-                _embed_job.update(stats)
+                _embed_job.update(snap)
         except Exception as exc:
             logger.warning("Embedding backfill crashed", exc_info=True)
             with _embed_lock:
@@ -228,6 +240,7 @@ def resume_if_interrupted(app):
             _embed_job.update(
                 running=True, started=now().isoformat(), finished=None, force=force,
                 total=total, scanned=0, done=0, skipped=0, failed=0, error=None,
+                failures=[], failure_reasons={},
             )
         logger.info("Resuming the interrupted embedding backfill")
         _run_embed(app, force)
@@ -550,7 +563,11 @@ def genre_embed_start():
     workers = auto_workers(workers)
     with _embed_lock:
         if _embed_job["running"]:
-            return jsonify({"ok": True, **_embed_job})
+            # Snapshot, not a spread of the live dict: the ledger inside
+            # it is a container the worker threads keep appending to.
+            from .analysis import _job_snapshot
+
+            return jsonify({"ok": True, **_job_snapshot(_embed_job)})
         _embed_job.update(
             running=True,
             started=now().isoformat(),
@@ -563,6 +580,8 @@ def genre_embed_start():
             skipped=0,
             failed=0,
             error=None,
+            failures=[],
+            failure_reasons={},
         )
     app = current_app._get_current_object()
     threading.Thread(

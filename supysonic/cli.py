@@ -546,6 +546,30 @@ def deezer_lyrics(config, overwrite, limit):
     )
 
 
+def _echo_failures(stats):
+    """Print WHY a library job failed, not only how many times.
+
+    "failed=37" on its own is a number to go looking for an explanation for;
+    the ledger the job keeps already has one per track, so print the tally and
+    the files rather than making the operator turn on debug logging and run the
+    whole thing again.
+    """
+    reasons = stats.get("failure_reasons") or {}
+    if not reasons:
+        return
+    click.echo("Failures, by cause:")
+    for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
+        click.echo(f"  {n:>5}x  {reason}")
+    sample = stats.get("failures") or []
+    if sample:
+        click.echo("Failing tracks:")
+        for f in sample:
+            click.echo(f"  {f.get('track')}: {f.get('reason')}")
+        hidden = stats.get("failed", 0) - len(sample)
+        if hidden > 0:
+            click.echo(f"  ... and {hidden} more (the job keeps a sample).")
+
+
 @deezer.command("analyze")
 @click.option("--force", is_flag=True, help="Re-measure even tracks that already have a verdict.")
 @click.option("--limit", type=int, default=None, help="Stop after N measured tracks.")
@@ -590,6 +614,7 @@ def deezer_analyze(config, force, limit, workers):
         "Done. analysed={done} skipped={skipped} failed={failed} "
         "(scanned {scanned}).".format(**stats)
     )
+    _echo_failures(stats)
 
 
 @deezer.command("embed")
@@ -658,6 +683,7 @@ def deezer_embed(config, force, limit, self_test, workers):
         "Done. embedded={done} skipped={skipped} failed={failed} "
         "(scanned {scanned}).".format(**stats)
     )
+    _echo_failures(stats)
 
 
 @deezer.command("scan-local")

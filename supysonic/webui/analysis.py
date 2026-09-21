@@ -94,12 +94,31 @@ _analysis_job = {
     "skipped": 0,
     "failed": 0,
     "error": None,
+    # WHICH tracks failed and why, not just how many. A counter alone sent the
+    # operator to the container logs (or to guessing) every time, which is the
+    # whole reason this job was impossible to debug from the app.
+    "failures": [],
+    "failure_reasons": {},
 }
+
+
+def _job_snapshot(job: dict) -> dict:
+    """A copy safe to hand to jsonify while the job thread is still running.
+
+    ``dict(job)`` is shallow, so the failure ledger it returned was the very
+    list the worker threads append to — and serialising a list that is being
+    appended to is a "changed size during iteration" 500 in the middle of a
+    poll. The containers are small; copying them is free.
+    """
+    out = dict(job)
+    out["failures"] = list(job.get("failures") or ())
+    out["failure_reasons"] = dict(job.get("failure_reasons") or {})
+    return out
 
 
 def _analysis_job_json() -> dict:
     with _analysis_lock:
-        return dict(_analysis_job)
+        return _job_snapshot(_analysis_job)
 
 
 def _run_analysis(app, force, workers, limit):
@@ -111,8 +130,12 @@ def _run_analysis(app, force, workers, limit):
             open_connection(reuse=True)
 
             def on_stats(stats):
+                # Called under the backfill's own lock, so the ledger is
+                # consistent at this instant — copy it here and the job state
+                # never aliases a container the workers keep mutating.
+                snap = _job_snapshot(stats)
                 with _analysis_lock:
-                    _analysis_job.update(stats)
+                    _analysis_job.update(snap)
 
             provider = getattr(app, "deezer", None)
             stats = backfill(
@@ -122,8 +145,9 @@ def _run_analysis(app, force, workers, limit):
                 workers=workers,
                 on_stats=on_stats,
             )
+            snap = _job_snapshot(stats)
             with _analysis_lock:
-                _analysis_job.update(stats)
+                _analysis_job.update(snap)
         except Exception as exc:
             logger.warning("Analysis backfill crashed", exc_info=True)
             with _analysis_lock:
@@ -184,7 +208,7 @@ def resume_if_interrupted(app):
             _analysis_job.update(
                 running=True, started=now().isoformat(), finished=None, force=force,
                 workers=_workers(), total=total, scanned=0, done=0, skipped=0,
-                failed=0, error=None,
+                failed=0, error=None, failures=[], failure_reasons={},
             )
         logger.info("Resuming the interrupted analysis backfill")
         _run_analysis(app, force, _workers(), None)
@@ -216,7 +240,9 @@ def analysis_backfill_start():
     effective = auto_workers(workers)
     with _analysis_lock:
         if _analysis_job["running"]:
-            return jsonify({"ok": True, **_analysis_job})
+            # Snapshot, not a spread of the live dict: the ledger inside
+            # it is a container the worker threads keep appending to.
+            return jsonify({"ok": True, **_job_snapshot(_analysis_job)})
         _analysis_job.update(
             running=True,
             started=now().isoformat(),
@@ -229,6 +255,8 @@ def analysis_backfill_start():
             skipped=0,
             failed=0,
             error=None,
+            failures=[],
+            failure_reasons={},
         )
     app = current_app._get_current_object()
     threading.Thread(
