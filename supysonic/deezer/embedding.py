@@ -157,32 +157,56 @@ def why_unavailable() -> str | None:
     return None
 
 
+# The last config we managed to read, kept for threads that have none.
+#
+# Flask's application context is THREAD-LOCAL, and almost everything here that
+# matters runs off the request thread: the background probe below, the analysis
+# pool, a resumed backfill. Such a thread asking `current_app` gets nothing, so
+# `model_dirs()` came back empty and `model_path()` answered None — and the
+# studio showed "the model is present but will not load: no model file" about a
+# file it was describing the size of in the same response, because the card was
+# rendered on the request thread and the load was attempted on another.
+#
+# The config does not change while the process runs, so remembering it is both
+# correct and the smallest possible fix.
+_config_cache = {}
+
+
 def _config() -> dict:
     """The active config as a plain mapping, whichever context we run in.
 
-    Under the server that is Flask's ``current_app``. Under the CLI there is no
-    app context — and without a fallback `supysonic-cli deezer embed` could
-    never see the very model the web UI just installed — so the process-wide
-    config the CLI built is used instead.
+    Under the server that is Flask's ``current_app``. Off the request thread —
+    or under the CLI, where there is no app context at all — the remembered
+    snapshot stands in, and failing that the process-wide config the CLI built.
+    Without those, `supysonic-cli deezer embed` could never see the very model
+    the web UI just installed.
     """
     try:
         from flask import current_app
 
         cfg = current_app.config
         if cfg:
-            return {k: cfg[k] for k in ("WEBAPP", "DEEZER") if k in cfg}
+            out = {k: cfg[k] for k in ("WEBAPP", "DEEZER") if k in cfg}
+            if out:
+                _config_cache.update(out)
+                return out
     except Exception:
         pass
+    if _config_cache:
+        return dict(_config_cache)
     try:
         from ..config import get_current_config
 
         conf = get_current_config()
     except Exception:
         return {}
-    return {
+    out = {
         "WEBAPP": getattr(conf, "WEBAPP", {}) or {},
         "DEEZER": getattr(conf, "DEEZER", {}) or {},
     }
+    if out.get("WEBAPP") or out.get("DEEZER"):
+        _config_cache.update(out)
+    return out
 
 
 def _deezer_conf() -> dict:
@@ -569,8 +593,13 @@ def _make_session(path):
     return ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
 
 
-def _load_session():
+def _load_session(path=None):
     """The inference session, loading it once and retrying a failure later.
+
+    `path` is resolved by the CALLER when the caller is the one with the config
+    — see `session_probe`. Resolving it here on a thread that has no Flask
+    application context is how "no model file" came to be reported about a file
+    that was plainly there.
 
     A failure is remembered for SESSION_RETRY_DELAY and then forgotten, never
     for good. "No model file" is the one exception worth keeping cheap — it is
@@ -588,9 +617,12 @@ def _load_session():
             return _session
         if _session_error is not None and time.monotonic() < _session_retry_at:
             return None
-        path = model_path()
         if not path:
-            _session_error = "no model file"
+            path = model_path()
+        if not path:
+            _session_error = (
+                "no model file; upload it in the genre studio or set [deezer] embed_model"
+            )
             _session_retry_at = time.monotonic() + SESSION_RETRY_DELAY
             return None
         try:
@@ -641,10 +673,22 @@ def session_probe() -> dict:
     this reports what is known and starts a background load when it is not,
     which the next poll picks up.
     """
-    global _probe_thread
+    global _probe_thread, _session_error, _session_retry_at
+    if _session is not None:
+        return {"state": "ok", "error": None}
+    # Resolved HERE, on the caller's thread: it is the one with the Flask
+    # application context, and so the only one that can see where the models
+    # directory is. It is a few `isfile` calls, not something worth a thread.
+    path = model_path()
     with _lock:
         if _session is not None:
             return {"state": "ok", "error": None}
+        if not path:
+            _session_error = (
+                "no model file; upload it in the genre studio or set [deezer] embed_model"
+            )
+            _session_retry_at = 0.0  # an upload fixes this; never make it wait
+            return {"state": "error", "error": _session_error}
         err = _session_error
         stale = err is not None and time.monotonic() >= _session_retry_at
         busy = _probe_thread is not None and _probe_thread.is_alive()
@@ -653,7 +697,7 @@ def session_probe() -> dict:
         if busy:
             return {"state": "checking", "error": None}
         _probe_thread = threading.Thread(
-            target=_load_session, name="embed-probe", daemon=True
+            target=_load_session, args=(path,), name="embed-probe", daemon=True
         )
         _probe_thread.start()
     return {"state": "checking", "error": None}

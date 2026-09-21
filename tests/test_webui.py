@@ -5037,6 +5037,50 @@ class GenreStudioTestCase(unittest.TestCase):
         with self.app.app_context():
             self.assertIsNone(emb.model_path())
 
+    def test_the_model_is_found_from_a_thread_with_no_app_context(self):
+        """Flask's application context is THREAD-LOCAL, and almost everything
+        that loads this model runs off the request thread: the status probe, the
+        analysis pool, a resumed backfill. Such a thread asking `current_app`
+        gets nothing, so the models directory came back empty and the studio
+        reported "the model is present but will not load: no model file" about a
+        file whose size it was printing in the same response.
+        """
+        import threading
+
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        self.assertEqual(self._upload_extractor().status_code, 200)
+        emb.reset_session()
+
+        # The probe runs on the REQUEST thread, which has the context...
+        probe = self.client.get("/api/genre/status").json["extractor"]
+        self.assertIsNotNone(probe["model"], "the card lost the file it just stored")
+        self.assertNotEqual(
+            probe["session_error"],
+            "no model file",
+            "the status contradicted itself about a file it can see",
+        )
+
+        # ...and everything else does not. Whatever this answers, it must not be
+        # that the file is missing: it is right there.
+        seen = {}
+
+        def off_thread():
+            seen["path"] = emb.model_path()
+            seen["error"] = emb.session_error()
+
+        t = threading.Thread(target=off_thread)
+        t.start()
+        t.join(30)
+        self.assertIsNotNone(seen["path"], "a background thread could not find the model")
+        self.assertTrue(os.path.isfile(seen["path"]))
+        if seen["error"]:
+            # Without onnxruntime the load fails, and that is a fine answer —
+            # "there is no file" is not.
+            self.assertNotIn("no model file", seen["error"])
+        emb.reset_session()
+
     def test_extractor_upload_replaces_the_previous_one(self):
         from supysonic.deezer import embedding as emb
 
