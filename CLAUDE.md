@@ -74,7 +74,9 @@ export FLASK_APP="supysonic.web:create_application()"; flask run   # backend dev
 # Web UI (Svelte SPA)
 cd webapp && npm install && npm run build            # -> supysonic/webui/dist (gitignored)
 cd webapp && npm run dev                             # hot reload; proxies /api -> localhost:5000
-cd webapp && npm test                                # node --test: the analysis DSP, the animation scenes, the genre trainers, the cover loader (no deps)
+cd webapp && npm test                                # node --test: the analysis DSP, the animation scenes, the genre trainers, the cover loader.
+                                                     # No test framework — but run the npm install above first: the modules under
+                                                     # test reach svelte/store via stores.js, and a pretest guard says so in one line.
 
 # Deezer CLI
 supysonic-cli deezer login-test                      # check the ARL works
@@ -519,6 +521,21 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   worker the Deezer bpm lookup is skipped on purpose — its session is not meant to be hammered from
   several threads — and the tempo is measured from the files. Each pool thread takes and returns its
   own peewee connection; the work is ffmpeg, so the box bounds it, not Python.
+- **A crashed ffmpeg is not the same as a failed measurement.** Some ffmpeg builds trip
+  `av_assert0(best_input >= 0)` in the CLI's filtergraph scheduler (`ffmpeg_filter.c`) while
+  flushing at END OF STREAM: the process dies of SIGABRT (`returncode -6`) having already decoded
+  the whole track and printed every frame of it. Judging the run by its exit code threw a COMPLETE
+  measurement away and called four perfectly healthy FLACs broken. So `_spectral` parses FIRST and
+  judges after: a run that produced at least `MIN_SALVAGE_FRAMES` is a measurement whatever killed
+  the process, and `lufs`/`lra` come from ebur128's **running** per-frame line (`_EBUR_RUNNING`)
+  when the abort took the Summary block with it — the same two numbers, since the integrated value
+  at the last frame IS the whole-stream one. With nothing salvageable and a death by signal it
+  retries once **without `ebur128`** (`_spectral_cmd(loudness=False)`): the loudness meter is the
+  droppable half — `lra` has a default — while without `aspectralstats` there is no verdict at all.
+  `-t` also moved BEFORE `-i`, so the read limit ends the demuxer and the graph gets an ordinary
+  end of stream instead of an output-side trim. And `ffmpeg_tail` skips per-frame filter telemetry
+  (`_EBUR_PROGRESS`): ebur128 prints a line every 100 ms, so quoting the last three lines buried
+  the assertion that explained the crash under two progress dumps.
 - **A failure must name its CAUSE, never just its count.** This is a rule about every batch job,
   not a detail of this one. The analysis used to report `"<file>: analysis failed"` — one filename,
   no reason, and only the first of them — because four layers each dropped a little more: ffmpeg
@@ -752,8 +769,11 @@ Two older details are still there for the same reasons they always were: the ODF
 (~20 ms) before the autocorrelation, or a period that is not a whole number of grid slots (174 BPM
 is 34.5) loses half its correlation to its own double; and every candidate is divided by the
 **same** harmonic weight, or slow candidates get a free pass because their harmonics fall off the
-end of the search range. `webapp/test/audio.test.mjs` pins all of it (`npm test`, no dependency to
-install) — the wall-clock bug it caught would have made the tracker drift with the frame rate.
+end of the search range. `webapp/test/audio.test.mjs` pins all of it (`npm test`; no
+test framework to install, though `npm install` must have run — `test/preflight.mjs` says that in
+one line rather than letting node abort five files and report them as five DSP failures, which is
+a trap that has already cost one debugging session) — the wall-clock bug it caught would have made
+the tracker drift with the frame rate.
 
 `style.js` reads the kick's shape (attack, decay, click, grit → soft / hard / industrial) and a
 smoothed family vector (techno, hardtekk, zaag, frenchcore, uptempo, pieep, krach, rock, metal,

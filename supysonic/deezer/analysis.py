@@ -138,6 +138,16 @@ _STAT = re.compile(
 )
 _LUFS = re.compile(r"^\s*I:\s*(-?[\d.]+)\s*LUFS", re.M)
 _LRA = re.compile(r"^\s*LRA:\s*(-?[\d.]+)\s*LU", re.M)
+# ebur128 prints the INTEGRATED loudness and the loudness range on every
+# per-frame line as well, not only in the Summary block it emits at EOF. The
+# last such line therefore carries the same two numbers the Summary would have
+# — which is what makes a run that died during the EOF flush still usable.
+_EBUR_RUNNING = re.compile(
+    r"\bI:\s*(-?[\d.]+)\s*LUFS\s+LRA:\s*(-?[\d.]+)\s*LU"
+)
+# ...and those same lines are pure telemetry, one per 100 ms, so they must
+# never be what an error message ends up quoting.
+_EBUR_PROGRESS = re.compile(r"^\[Parsed_\w+ @ 0x[0-9a-f]+\]\s*t:\s*[\d.]")
 
 # The descriptors worth keeping. aspectralstats prints more; collecting only
 # these keeps a ten-minute track to a few tens of thousands of floats.
@@ -168,35 +178,53 @@ def ffmpeg_tail(err: str, lines: int = 3) -> str:
         line = line.strip()
         if not line or line.startswith(_FFMPEG_NOISE):
             continue
+        # A filter's per-frame readout is telemetry, and there are hundreds of
+        # them: keeping the last three lines verbatim buried the one line that
+        # actually said what happened under two ebur128 progress dumps.
+        if _EBUR_PROGRESS.match(line):
+            continue
         out.append(line)
     return " | ".join(out[-lines:])[:400]
 
 
-def _spectral(path):
-    """Whole-file spectral descriptors and loudness, in one decode."""
-    cmd = [
-        "ffmpeg", "-nostats", "-v", "info", "-i", path,
-        "-map", "0:a:0", "-t", str(MAX_SECONDS),
+# A crashed run is only worth keeping if it got far enough to mean something.
+# One aspectralstats frame is ~93 ms at this rate, so this is about six seconds
+# — enough for the medians below to describe the track rather than its intro.
+MIN_SALVAGE_FRAMES = 64
+
+
+def _spectral_cmd(path, loudness=True):
+    """The one-decode measurement, with or without the loudness meter.
+
+    ebur128 rides the same decode as the spectral stats because the audio only
+    has to be read once. It is also the part that can be dropped: `lra` has a
+    default and `lufs` is optional, while without aspectralstats there is no
+    verdict at all. So the fallback keeps the essential filter and loses the
+    one that has somewhere to fall back to.
+    """
+    graph = "aspectralstats=win_size=2048,ametadata=mode=print:file=-"
+    if loudness:
+        # ebur128 passes the audio through, so both measurements ride one
+        # decode. Its summary goes to stderr; the per-frame stats go to stdout.
+        graph = "ebur128=peak=none," + graph
+    return [
+        "ffmpeg", "-nostats", "-v", "info",
+        # -t BEFORE -i, so the limit stops the demuxer and the filter graph
+        # gets an ordinary end of stream. As an output option it trims after
+        # the graph instead, which is both more decoding and a stranger state
+        # to leave the graph in.
+        "-t", str(MAX_SECONDS), "-i", path,
+        "-map", "0:a:0",
         # Mono at 22 kHz: the descriptors below are about the shape of the
         # spectrum, not its top octave, and this quarters the filtering cost.
         "-ac", "1", "-ar", "22050",
-        # ebur128 passes the audio through, so both measurements ride one decode.
-        # Its summary goes to stderr; the per-frame stats go to stdout.
-        "-af", "ebur128=peak=none,aspectralstats=win_size=2048,"
-               "ametadata=mode=print:file=-",
+        "-af", graph,
         "-f", "null", "-",
     ]
-    proc = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=FFMPEG_TIMEOUT, check=False,
-    )
-    out = proc.stdout.decode("utf-8", "replace")
-    err = proc.stderr.decode("utf-8", "replace")
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg exited {proc.returncode}: {ffmpeg_tail(err) or 'no output'}"
-        )
 
+
+def _parse_spectral(out, err):
+    """The measurement itself, from whatever the run managed to print."""
     series = {k: [] for k in _WANTED}
     for name, raw in _STAT.findall(out):
         if name not in series:
@@ -208,16 +236,25 @@ def _spectral(path):
         if math.isfinite(v):
             series[name].append(v)
     if not series["centroid"]:
-        # ffmpeg succeeded and still produced nothing to measure: the file is
-        # shorter than one analysis window, or it decoded to silence, or this
-        # build has no aspectralstats. Its own words say which.
-        raise ValueError(
-            "ffmpeg produced no spectral frames "
-            f"({ffmpeg_tail(err) or 'file too short, or not decodable audio'})"
-        )
+        return None
 
+    # The Summary block first, since it is the authoritative one — then the
+    # last running line, which carries the same two figures and is all there is
+    # when the process died before it could print the summary.
     lufs = _LUFS.search(err)
     lra = _LRA.search(err)
+    running = None
+    if lufs is None or lra is None:
+        for running in _EBUR_RUNNING.finditer(err):
+            pass  # the LAST one: the integrated value over the whole stream
+
+    def _num(m, group, fallback_group):
+        if m is not None:
+            return float(m.group(1))
+        if running is not None:
+            return float(running.group(fallback_group))
+        return None
+
     flux = series["flux"]
     med_flux = _median(flux)
     return {
@@ -230,13 +267,80 @@ def _spectral(path):
         # Scale-free: how much the busiest frames stand out from the typical
         # one. The absolute flux depends on the master's level; this does not.
         "flux_peak": (_pct(flux, 0.9) / med_flux) if med_flux > 1e-9 else 1.0,
-        "lufs": float(lufs.group(1)) if lufs else None,
+        "lufs": _num(lufs, 1, 1),
         # Loudness range, in LU. This is the single best "how squashed is this"
         # axis there is: a limitered hardcore master sits near 3, a live string
         # quartet near 15, and no normalization of ours is involved.
-        "lra": float(lra.group(1)) if lra else None,
+        "lra": _num(lra, 1, 2),
         "frames": len(series["centroid"]),
     }
+
+
+def _spectral(path):
+    """Whole-file spectral descriptors and loudness, in one decode.
+
+    ROBUST TO FFMPEG ABORTING ON ITS OWN BUG, on purpose. Some builds trip
+    `av_assert0(best_input >= 0)` in the CLI's filtergraph scheduler
+    (ffmpeg_filter.c) while flushing at end of stream — the process dies of
+    SIGABRT having already measured the ENTIRE track and printed every frame
+    of it. Treating that as a failed measurement threw away a complete one and
+    reported "analysis failed" for a file that is in perfect health, so what
+    counts is whether there is a measurement, not how the process ended.
+    """
+    proc = subprocess.run(
+        _spectral_cmd(path), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=FFMPEG_TIMEOUT, check=False,
+    )
+    out = proc.stdout.decode("utf-8", "replace")
+    err = proc.stderr.decode("utf-8", "replace")
+    feats = _parse_spectral(out, err)
+
+    if proc.returncode == 0:
+        if feats is None:
+            # ffmpeg succeeded and still produced nothing to measure: the file
+            # is shorter than one analysis window, or it decoded to silence, or
+            # this build has no aspectralstats. Its own words say which.
+            raise ValueError(
+                "ffmpeg produced no spectral frames "
+                f"({ffmpeg_tail(err) or 'file too short, or not decodable audio'})"
+            )
+        return feats
+
+    # It did not exit cleanly. Did it measure the track anyway?
+    if feats is not None and feats["frames"] >= MIN_SALVAGE_FRAMES:
+        logger.info(
+            "analysis: ffmpeg exited %s on %s after measuring %s frames "
+            "(%s) — keeping the measurement",
+            proc.returncode, path, feats["frames"], ffmpeg_tail(err, lines=1),
+        )
+        return feats
+
+    # Killed by a signal with nothing usable: give it one more go without the
+    # loudness meter, which is the part that can be dropped and the part the
+    # abort happens inside. A verdict with a defaulted loudness range beats no
+    # verdict at all.
+    if proc.returncode < 0:
+        logger.info(
+            "analysis: ffmpeg died of signal %s on %s; retrying without ebur128",
+            -proc.returncode, path,
+        )
+        retry = subprocess.run(
+            _spectral_cmd(path, loudness=False),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=FFMPEG_TIMEOUT, check=False,
+        )
+        feats = _parse_spectral(
+            retry.stdout.decode("utf-8", "replace"),
+            retry.stderr.decode("utf-8", "replace"),
+        )
+        if feats is not None and (
+            retry.returncode == 0 or feats["frames"] >= MIN_SALVAGE_FRAMES
+        ):
+            return feats
+
+    raise RuntimeError(
+        f"ffmpeg exited {proc.returncode}: {ffmpeg_tail(err) or 'no output'}"
+    )
 
 
 # --- pass 2: tempo from a low-band envelope --------------------------------
