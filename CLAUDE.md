@@ -905,6 +905,48 @@ hi-hat ring, a set of spokes and a web before anyone noticed. Read the first poi
 before asking for the second (`const p0 = place(...); const x0 = p0[0], y0 = p0[1];`), which is what
 the older scenes already do; the contract is pinned by a test.
 
+**Everything above is what a scene DRAWS; `lib/viz/post.js` is what makes it look lit.** The scenes
+were putting flat additive strokes straight on the output — hairlines on black, hard edges, visible
+banding — and none of that is any one scene's fault or fixable eighteen times over inside them. What
+separates a 1998 canvas demo from a modern visualizer is the pass that runs AFTER the drawing, on
+the whole frame: **bloom** (bright areas bleed, which is what makes a stroke read as light rather
+than as ink), a **chromatic fringe** on the wide halo, and **grain** — a dither first and a mood
+second, since an 8-bit canvas cannot hold a smooth dark gradient. Deliberately **no vignette**:
+darkening the edges is the other half of the stock recipe and it would undo the thing the geometry
+work exists for.
+
+- **The bloom is a SECOND, SMALL canvas over the first, blended by CSS** — not a composite onto the
+  output. The obvious build (render to an offscreen buffer, copy it out, add the bloom) measured
+  45–52 ms a frame against 0.26 ms for the scene itself. Bisected, none of it was the blur (0.21 ms
+  — it is a 260×150 buffer); it was **full-frame canvas traffic**: 27 ms to read the scene canvas
+  and 14 ms for the full-size upscale. So the scene still draws straight onto the visible canvas
+  exactly as it always did, the bloom is built at a fifth of the size, and the compositor does the
+  upscale and the blend on the GPU. One full-frame read a frame instead of three.
+- **Every `filter` runs on a small buffer; every full-size draw has `filter = "none"`.**
+  `ctx.filter` applies over the area drawn INTO, so a hue-rotate on the upscale is a full-frame
+  filter pass however small the source was — doing that three times a frame is where the first
+  113 ms went.
+- **The scene gives back exactly what the bloom adds** (`SCENE_GAIN`, applied by `withPostGain`).
+  Every world was calibrated to a frame mean of 0.05–0.20 with a bloom nowhere in the picture, and
+  switching one on does not redistribute that light, it ADDS to it: techno went from 0.113 to 0.292
+  with 4% of the frame clipped. So `preset.glow` comes down by the order the halo puts back and the
+  exposure stays where 227 skins were tuned to sit. The bright pass is deliberately a HIGH threshold
+  with **no saturation boost** — saturating a frame the palette has already coloured is what
+  collapsed every world to the same magenta.
+- **It measures itself**, because none of those numbers transfer. These are all canvas-to-canvas
+  blits: free on a GPU, hopeless on a software rasteriser, and nothing available in the page says
+  which one the user has. `run` times its own first frames and steps DOWN a level (ultra → high →
+  medium → off) rather than straight off, with a fast path for frames several times over budget so
+  a bad device loses five frames and not a second. That check has a useful property: timing canvas
+  calls normally measures only how long they took to QUEUE, so on an accelerated device it reads ~0
+  and never trips — it reads true only when something forces the pipeline to synchronise, which is
+  exactly the case where the pass is too expensive. A tier the user selects outranks whatever it
+  stepped itself down to, and a bail-out rebuilds the scene at full `glow` rather than leaving it
+  dimmed for a halo that is no longer coming.
+- `webapp/test/post.test.mjs` pins the exposure contract, that the pass never writes into the canvas
+  the scene washes over (that feedback would go to white in about a second), that the frame is read
+  exactly once, and the whole step-down ladder.
+
 **The projector window** (`routes/Viz.svelte`, `lib/viz/bridge.js`, `lib/viz/host.js`) is the same
 SPA on `#/viz`, opened in a second tab to be dragged onto a beamer. It plays **nothing**: a second
 `<audio>` would be a second stream, a second decode and a second playhead drifting out of sync with

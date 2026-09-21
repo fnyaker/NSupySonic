@@ -327,8 +327,8 @@ export const SKINS = {
   soundtrack: { world: "cathedral", hue: -16, sat: 0.9, p: { shafts: 1.2, swell: 1.3, fan: 0.8, dust: 1 } },
 
   // === other ===============================================================
-  chiptune: { world: "pixels", hue: 100, sat: 1.2, p: { cell: 1.3, glitch: 0.3, sprites: 1.4, steps: 2, scroll: 1 } },
-  eightbit: { world: "pixels", hue: 108, sat: 1.25, p: { cell: 1.5, glitch: 0.25, sprites: 1.5, steps: 2, scroll: 0.8 } },
+  chiptune: { world: "pixels", energy: 0.82, hue: 100, sat: 1.2, p: { cell: 1.3, glitch: 0.3, sprites: 1.4, steps: 2, scroll: 1 } },
+  eightbit: { world: "pixels", energy: 0.82, hue: 108, sat: 1.25, p: { cell: 1.5, glitch: 0.25, sprites: 1.5, steps: 2, scroll: 0.8 } },
   dance: { world: "bloom", hue: 22, sat: 1.1, p: { confetti: 1.3, blooms: 1.1, petal: 5, ray: 0.5 } },
 };
 
