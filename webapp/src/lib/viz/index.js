@@ -39,7 +39,9 @@ export const MODES = [
   {
     id: "smart",
     label: "Moteur intelligent",
-    hint: "Écoute le morceau — tempo, type de kick, style — et compose l'animation.",
+    hint:
+      "Une animation par genre : corridor pour la techno, éclats pour la frenchcore, " +
+      "kaléidoscope pour la psytrance, vinyle pour le rap, horizon pour la synthwave…",
     rhythm: true,
     fullBleed: true,
   },

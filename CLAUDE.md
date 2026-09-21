@@ -750,8 +750,8 @@ frenchcore, so there is a THIRD output: **`look`, seven numbers** (`LOOK_KEYS`: 
 punch, smooth, warm, melodic, chaos) blended by the same family weights. It is deliberately not a
 name — a name cannot be interpolated — and every family starts from its archetype's look and
 overrides only what it actually differs on, so a new family costs one line. `smart.js` composes on
-it (four of its nine layers are weighted by it outright, `smooth` decides the trail wash, `density`
-the layer weight) and `palette.js` leans the chosen hue a third of the way toward red or cyan on
+it (each world reads it to tell its own subgenres apart — `chaos` widens the cracks, `motion` sets
+the travel, `melodic` decides whether the lead is drawn) and `palette.js` leans the chosen hue a third of the way toward red or cyan on
 `warm`, never replacing the source the user picked. A **served** verdict names a family, so
 `style.familyLook(id)` turns that name back into the seven numbers and `engine.merged` carries
 them: without it the look vector was dropped exactly when the server had measured the track, and a
@@ -799,21 +799,55 @@ concentric circles you can count. So a ring travels at a **constant** speed (an 
 trail exactly where there are most copies), is **wider than its own per-frame step** so the copies
 merge into one soft shell, and the wash has a **floor** so only three or four copies are ever alive.
 
-**`smart.js` is nine layers, not five.** The five archetypes (sustain / voice / groove / hard /
-rock) are what can be blended, and they are why a vocal house track and a vocal metal track do not
-look alike — but psytrance, frenchcore, drum & bass and speedcore all pool into `hard`, and `hard`
-drew one thing, which is what "the smart engine is too generic" was. The other four are weighted by
-the `look` vector instead, which is exactly the axis those genres differ on: **warp** (speed —
-streaks rushing out to the corners, one volley per beat), **lattice** (chaos — a grid that snaps on
-the beat and tears into offset slabs), **orbit** (melody — an arc per sounding pitch class, each at
-the radius its own chroma earns) and **haze** (calm — slow blooms, for the music that has no events
-to draw). Each layer's `want()` reads the mix, the weights are smoothed, and only the strongest
-`preset.layers + 1` are drawn — nine at once is soup as well as work. Inside the layers the look
-keeps deciding: the shockwave goes jagged with `chaos`, the dot grid's pitch follows `density`, the
-streak count follows `motion`. `webapp/test/viz.test.mjs` drives every scene against a recording
-2D context and pins the two properties a person would otherwise have to eyeball — that each one
-reaches all four edges of a 16:9 frame, and that under a centred cover less than a quarter of what
-it draws lands behind it — plus that frenchcore and ambient light genuinely different layers.
+**`smart.js` picks the ANIMATION, not the weights.** It used to be one fixed set of layers whose
+alphas the classifier moved — a bloom for the voice, a shockwave for the kick, a wall for the
+guitars, four more keyed to the `look` vector. That is the right shape for blending *within* a style
+and the wrong shape for the question being asked: every genre came out of the same primitives at
+different strengths, so frenchcore and ambient were the same soft radial vocabulary at different
+brightness. The classifier's `dominant` family now chooses a **WORLD** — a complete, self-contained
+scene with its own motif, motion, background and trail (`lib/viz/worlds/`, one file each). Thirteen
+of them, drawn from what the genres themselves look like, covering all fifty-odd families:
+
+| world | motif | families |
+|---|---|---|
+| `tunnel` | a machine corridor rushing at the viewer, one ring laid down per beat | techno, hardtechno, industrial, electronic |
+| `shatter` | the frame in radiating shards, thrown out and rotated a notch on every kick | hardcore, frenchcore, uptempo, speedcore, krach, tribecore |
+| `hardbounce` | a core that squashes on the kick inside a radial bar ring, saw streaks on the lead | hardstyle, rawstyle, hardtekk, zaag, hardpingpong, german party, pieep |
+| `kaleido` | mirrored sectors turning against each other | psytrance |
+| `starfield` | stars streaming out, accelerating through a build, arcs on the chord changes | trance |
+| `breakgrid` | the picture sliced into strips that scroll and chop on the breaks | drum & bass, breakbeat, garage |
+| `wobble` | one band across the middle, LFO'd and chromatically split, tearing on the drop | dubstep |
+| `vinyl` | a turning record, boom in the middle, slash across it on the snare | hip-hop, rap, trap, phonk, reggaeton, dancehall |
+| `stagelights` | spotlights sweeping over a jagged silhouette, lit from the TOP | rock, metal, punk, hard rock, brutal |
+| `horizon` | the banded sun over a perspective floor grid | synthwave, lofi |
+| `bloom` | soft blooms from every emission point, confetti on the downbeat | pop, dance, house, disco, funk, soul, R&B, afro, amapiano, indie |
+| `smoke` | a brush stroke per note attack, drifting | jazz, blues, folk, country, reggae |
+| `nebula` | clouds, and no event in it anywhere | ambient, strings |
+
+The `look` vector is still read INSIDE each world, which is what keeps hardstyle from looking
+exactly like hardtekk: `chaos` widens the cracks in `shatter` and the tears in `breakgrid`,
+`motion` sets how fast the shards turn and the stars travel, `punch` how far a kick throws them,
+`melodic` whether the saw lead is drawn at all. The coarse answer — the thing you recognise across
+the room — is the world; the fine one is still a blend.
+
+**Nothing hard-switches**, which is the property the layer engine had and this must not lose. Two
+things protect it: style.js already refuses to rename the dominant family until a challenger has led
+by a clear margin for a second and a half, and a change is a **crossfade** — the outgoing world keeps
+being updated and drawn at a falling weight for 1.6 s while the incoming one rises, so a track
+drifting between two neighbouring families dissolves between two pictures instead of flickering.
+A second change while the first is still dissolving drops the one that was leaving: three worlds on
+screen is not a crossfade, it is a mess, and it is also three times the work.
+
+The **world owns its trail wash** (`WORLDS[id].trail`, applied by the compositor), because how much
+of the previous frame to keep is a property of the motif and not of the engine — speedcore wants a
+strobe (0.55), ambient wants a minute-long exposure (0.12), and `horizon` wants a full repaint (1)
+because a sky is not a trail. That also sets each world's alpha budget: additive compositing settles
+at roughly `alpha / trail`, so nebula's clouds are drawn at a tenth of what a normal world would use.
+`webapp/test/viz.test.mjs` drives every scene against a recording 2D context and pins that each one
+reaches all four edges of a 16:9 frame, that under a centred cover less than a quarter of its drawing
+lands behind it, that every family in style.js has a world, that thirteen named genres each land on
+their own one AND draw in measurably different places (an 8×8 ink histogram), and that a change of
+genre is a dissolve rather than a cut.
 
 **The projector window** (`routes/Viz.svelte`, `lib/viz/bridge.js`, `lib/viz/host.js`) is the same
 SPA on `#/viz`, opened in a second tab to be dragged onto a beamer. It plays **nothing**: a second
