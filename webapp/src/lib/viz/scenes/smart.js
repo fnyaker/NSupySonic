@@ -34,6 +34,7 @@
 
 import { approach, clamp, hsl, lerp } from "../util.js";
 import { WORLDS, makeWorld, worldFor } from "../worlds/index.js";
+import { skinFor, skinId } from "../skins.js";
 
 // How long a change of world takes. Long enough to read as a dissolve rather
 // than a cut, short enough that it is over before the next chorus.
@@ -44,7 +45,8 @@ export function createSmartScene(opts = {}) {
   const o = { intensity: opts.intensity ?? 0.7, reducedMotion: !!opts.reducedMotion };
 
   // At most two are ever alive: the one on screen and the one leaving.
-  let cur = makeWorld(worldFor("", "groove"), preset, o);
+  let curId = "";
+  let cur = makeWorld(worldFor("groove"), preset, o, {});
   let prev = null;
   let fade = 1; // 0 → prev is fully in front, 1 → cur is
 
@@ -52,13 +54,19 @@ export function createSmartScene(opts = {}) {
   let level = 0;
   let trail = WORLDS[cur.id].trail;
 
-  function switchTo(id) {
-    if (id === cur.id) return;
+  // The crossfade is keyed to the GENRE, not to the world. Two genres sharing a
+  // world are still two different pictures — gabber's seven slabs against
+  // speedcore's twenty splinters are both `shatter` — so a change between them
+  // has to build the new instance and dissolve to it exactly as a change of
+  // world does.
+  function switchTo(id, skin) {
+    if (id === curId) return;
+    curId = id;
     // A second change while the first is still dissolving: the one that was
     // leaving is dropped outright. Three worlds on screen is not a crossfade,
     // it is a mess, and it is also three times the work.
     prev = fade > 0.08 ? cur : prev;
-    cur = makeWorld(id, preset, o);
+    cur = makeWorld(skin.world, preset, o, skin);
     fade = 0;
   }
 
@@ -66,7 +74,13 @@ export function createSmartScene(opts = {}) {
 
   function update(frame, dt, geom) {
     const st = frame.style;
-    switchTo(worldFor(st?.dominant || "", st?.archetype || ""));
+    const family = st?.dominant || "";
+    const arche = st?.archetype || "";
+    // `skinId` normalises whatever it is handed — an id, a French label, an
+    // admin's own spelling — and falls back through the archetype, so there is
+    // always something to dress the scene in.
+    const id = skinId(family, arche) || "@" + (arche || "none");
+    switchTo(id, skinFor(family, arche));
 
     dyn = approach(dyn, frame.features?.dynamics ?? 1, 0.12, dt);
     level = approach(level, frame.features?.level || 0, 0.14, dt);
@@ -98,9 +112,11 @@ export function createSmartScene(opts = {}) {
     const gain = (0.55 + o.intensity * 0.9) * (0.22 + 0.78 * dyn);
     if (prev) {
       const f = 1 - fade;
-      prev.impl.draw(g, geom, pal, { fade: f, energy: Math.min(1.3, f * gain) });
+      const e = (prev.skin?.energy ?? 1) * f * gain;
+      prev.impl.draw(g, geom, pal, { fade: f, energy: Math.min(1.3, e) });
     }
-    cur.impl.draw(g, geom, pal, { fade, energy: Math.min(1.3, fade * gain) });
+    const e = (cur.skin?.energy ?? 1) * fade * gain;
+    cur.impl.draw(g, geom, pal, { fade, energy: Math.min(1.3, e) });
     void level;
   }
 
@@ -116,9 +132,13 @@ export function createSmartScene(opts = {}) {
     update,
     draw,
     setOptions,
-    // For the tests and the settings readout: which animation is on screen.
+    // For the tests and the settings readout: which animation is on screen,
+    // and which genre is dressing it.
     get world() {
       return cur.id;
+    },
+    get skin() {
+      return curId;
     },
     get leaving() {
       return prev?.id || null;

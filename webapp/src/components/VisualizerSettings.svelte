@@ -34,7 +34,8 @@
   import { PALETTES } from "../lib/viz/palette.js";
   import { TIERS, autoTier } from "../lib/viz/quality.js";
   import { LEVEL, subscribeFrames, readout } from "../lib/audio/engine.js";
-  import { WORLDS, worldFor } from "../lib/viz/worlds/index.js";
+  import { WORLDS } from "../lib/viz/worlds/index.js";
+  import { SKINS, skinId } from "../lib/viz/skins.js";
   import { LOOKAHEAD_MAX } from "../lib/audio/graph.js";
   import { openProjector } from "../lib/viz/host.js";
   import { FAMILY_LIST } from "../lib/audio/style.js";
@@ -82,7 +83,11 @@
 
   $: styleName =
     FAMILY_LIST.find((f) => f.id === $readout.style)?.label || $readout.styleLabel || "—";
-  $: worldName = WORLDS[worldFor($readout.style, $readout.archetype)]?.label || "—";
+  // What the engine actually resolved: the genre's own skin, then the world
+  // that skin dresses. Two sub-genres sharing a world is normal and is
+  // exactly what this readout is for — it names the row that was matched.
+  $: skinKey = skinId($readout.style, $readout.archetype);
+  $: worldName = WORLDS[(SKINS[skinKey] || {}).world]?.label || "—";
 </script>
 
 <section class="card">

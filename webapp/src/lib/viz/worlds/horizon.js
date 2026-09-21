@@ -15,7 +15,20 @@ import { approach, clamp, envelope, hsl, lerp, rng } from "../util.js";
 const TAU = Math.PI * 2;
 const STARS = 40;
 
-export function createHorizonWorld(preset, opts) {
+export function createHorizonWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  const SUN = p.sun ?? 1;
+  const BANDS = Math.max(0, Math.round(7 * (p.bands ?? 1)));
+  const GRID = p.grid ?? 1;
+  const SCAN = p.scan ?? 0.3;
+  // `peaks` puts a ridge along the horizon — a mountain line is the difference
+  // between outrun (driving toward something) and lofi (sitting still). It is
+  // fixed, not spectral: a horizon that danced would be a second visualizer.
+  // `reverse` sends the floor away from the viewer instead of toward them.
+  const PEAKS = clamp(p.peaks ?? 0, 0, 1);
+  const REVERSE = (p.reverse ?? 0) > 0.5 ? -1 : 1;
+  const SPEED = skin.speed ?? 1;
+  const ridge = new Float32Array(24);
   const rand = rng(1984);
   const star = new Float32Array(STARS * 3); // x, y, twinkle seed
   for (let i = 0; i < STARS; i++) {
@@ -23,6 +36,7 @@ export function createHorizonWorld(preset, opts) {
     star[i * 3 + 1] = rand();
     star[i * 3 + 2] = rand() * TAU;
   }
+  for (let i = 0; i < ridge.length; i++) ridge[i] = 0.25 + rand() * 0.75;
   let scroll = 0;
   let bass = 0;
   let mid = 0;
@@ -42,7 +56,7 @@ export function createHorizonWorld(preset, opts) {
       mid = envelope(mid, clamp(((e.lowMid + e.mid) / total) * 2.6, 0, 1), dt, 0.03, 0.22);
       // The floor runs at one grid line per beat, so the drive is the tempo.
       const period = beat.locked ? beat.period : 0.6;
-      scroll = (scroll + dt / period) % 1;
+      scroll = ((scroll + (dt * SPEED * REVERSE) / period) % 1 + 1) % 1;
       void f;
     },
 
@@ -83,7 +97,7 @@ export function createHorizonWorld(preset, opts) {
       }
 
       // --- the sun ---------------------------------------------------------
-      const sunR = Math.min(W, H) * (0.19 + bass * 0.04) * (geom.hole ? 0.55 : 1);
+      const sunR = Math.min(W, H) * (0.19 + bass * 0.04) * SUN * (geom.hole ? 0.55 : 1);
       const sunY = geom.hole
         ? clamp(geom.cy - geom.hh - sunR * 1.05, sunR * 0.7, hz - sunR * 0.28)
         : hz - sunR * 0.28;
@@ -102,7 +116,7 @@ export function createHorizonWorld(preset, opts) {
       // punched through the sky as well and left bars of pure black hanging
       // over the horizon.
       g.globalCompositeOperation = "source-over";
-      const bands = 7;
+      const bands = BANDS;
       for (let i = 0; i < bands; i++) {
         const t = i / bands;
         const y = sunY + sunR * (0.05 + t * 0.95);
@@ -121,6 +135,20 @@ export function createHorizonWorld(preset, opts) {
           g.fillRect(x, y2, bw, y + thick - y2);
         }
       }
+      // --- the ridge, opaque like the sky it stands against -----------------
+      if (PEAKS > 0.05) {
+        g.beginPath();
+        g.moveTo(0, hz);
+        for (let i = 0; i < ridge.length; i++) {
+          const x = (i / (ridge.length - 1)) * W;
+          g.lineTo(x, hz - ridge[i] * H * 0.09 * PEAKS);
+        }
+        g.lineTo(W, hz);
+        g.closePath();
+        g.fillStyle = hsl(pal.low + 6, pal.sat * 0.6, 0.06, 0.96 * w.fade);
+        g.fill();
+      }
+
       g.globalCompositeOperation = "lighter";
 
       // --- the floor grid --------------------------------------------------
@@ -130,7 +158,7 @@ export function createHorizonWorld(preset, opts) {
       g.beginPath();
       // Verticals, converging on the vanishing point.
       const VANISH = geom.cx;
-      const cols = 15;
+      const cols = Math.max(5, Math.round(15 * GRID));
       for (let i = 0; i <= cols; i++) {
         const t = i / cols - 0.5;
         g.moveTo(VANISH + t * W * 0.12, hz);
@@ -139,7 +167,7 @@ export function createHorizonWorld(preset, opts) {
       g.stroke();
       // Horizontals, spaced by perspective and scrolling toward the viewer. The
       // squared step is what makes the floor recede instead of being a ladder.
-      const rows = 13;
+      const rows = Math.max(5, Math.round(13 * GRID));
       for (let i = 0; i < rows; i++) {
         const t = (i + scroll) / rows;
         const y = hz + (H - hz) * t * t;
@@ -155,8 +183,9 @@ export function createHorizonWorld(preset, opts) {
       // --- the tape ---------------------------------------------------------
       // Lofi is a worn medium, so it gets scan lines; synthwave, which is a
       // clean one, does not. `chaos` is the axis that separates them.
-      if (chaos > 0.12 && preset.layers >= 3) {
-        g.fillStyle = hsl(pal.high, 0.1, 0.9, 0.025 * chaos * w.energy);
+      const grain = Math.max(chaos, SCAN);
+      if (grain > 0.12 && preset.layers >= 3) {
+        g.fillStyle = hsl(pal.high, 0.1, 0.9, 0.025 * grain * w.energy);
         for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1);
       }
       g.globalCompositeOperation = "source-over";

@@ -15,6 +15,7 @@
 // Plus the third one, for the smart engine: does a different genre actually
 // produce a different picture, or only a differently-tinted one?
 
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -23,7 +24,8 @@ import { createScene, MODES, effectiveMode, levelFor } from "../src/lib/viz/inde
 import { tierPreset, TIERS } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
 import { LOOK_KEYS, FAMILY_LIST } from "../src/lib/audio/style.js";
-import { FAMILY_WORLD, WORLDS } from "../src/lib/viz/worlds/index.js";
+import { WORLDS } from "../src/lib/viz/worlds/index.js";
+import { SKINS, skinId, skinFor, skinCount } from "../src/lib/viz/skins.js";
 
 // --- a canvas that remembers where it was drawn on --------------------------
 //
@@ -329,6 +331,7 @@ test("every genre gets its own animation, not the same one re-weighted", () => {
       style: styleOf(arche, look, family),
     });
     assert.equal(r.scene.world, expected, `${family} did not land on its own world`);
+    assert.equal(r.scene.skin, family, `${family} was dressed as ${r.scene.skin}`);
     assert.ok(r.ink.length > 40, `${family}: ${expected} drew almost nothing`);
     sigs[family] = signature(r.ink, 1600, 900);
   }
@@ -348,16 +351,187 @@ test("every genre gets its own animation, not the same one re-weighted", () => {
   }
 });
 
-test("every family the classifier can name has a world", () => {
+test("every family the classifier can name has its own skin", () => {
   // A family added to style.js and forgotten here would silently fall back,
   // which is exactly the kind of gap nobody notices until a genre looks wrong.
   for (const f of FAMILY_LIST) {
-    assert.ok(
-      FAMILY_WORLD[f.id],
-      `family "${f.id}" has no world (falls back to the archetype default)`
+    const id = skinId(f.id);
+    assert.ok(id, `family "${f.id}" has no skin`);
+    assert.ok(WORLDS[SKINS[id].world], `family "${f.id}" points at an unknown world`);
+    // ...and its LABEL resolves to the same PICTURE, because that is what a
+    // hand-applied tag from the genre studio actually carries. The id and the
+    // label may be two names for one sound ("garage" / "UK garage"), so what
+    // has to match is the world, not the row.
+    const byLabel = skinId(f.label);
+    assert.ok(byLabel, `the label of "${f.id}" ("${f.label}") resolves to nothing`);
+    assert.equal(
+      SKINS[byLabel].world,
+      SKINS[id].world,
+      `"${f.label}" and "${f.id}" land in different worlds`
     );
-    assert.ok(WORLDS[FAMILY_WORLD[f.id]], `family "${f.id}" points at an unknown world`);
   }
+});
+
+test("the catalogue is far wider than the detector, and every row is usable", () => {
+  // The point of the skin table: the live classifier can only name what six
+  // descriptors separate, but a tag or a trained model can name a sub-genre,
+  // and that sub-genre should not fall back to its parent's picture.
+  assert.ok(skinCount() > 150, `only ${skinCount()} genres are dressed`);
+  for (const [id, sk] of Object.entries(SKINS)) {
+    assert.ok(WORLDS[sk.world], `${id}: unknown world ${sk.world}`);
+    for (const k of ["hue", "sat", "light", "speed", "energy"]) {
+      if (sk[k] === undefined) continue;
+      assert.ok(Number.isFinite(sk[k]), `${id}: ${k} is not a number`);
+    }
+    if (sk.sat !== undefined) assert.ok(sk.sat > 0 && sk.sat <= 2, `${id}: sat ${sk.sat}`);
+    if (sk.speed !== undefined) assert.ok(sk.speed > 0 && sk.speed <= 3, `${id}: speed ${sk.speed}`);
+    // Most parameters are multipliers around 1; a few are counts (the number of
+    // sides on a corridor) and a few are SIGNED, because the thing they set is
+    // a direction — a corridor whose rings recede, a grid that scrolls the
+    // other way. All of them are bounded: a typo of 400 would allocate an array
+    // that size.
+    for (const v of Object.values(sk.p || {}))
+      assert.ok(Number.isFinite(v) && v >= -64 && v <= 64, `${id}: odd parameter ${v}`);
+  }
+  // Every world is actually reached by something — a world nothing selects is
+  // dead code that still has to be maintained.
+  const used = new Set(Object.values(SKINS).map((x) => x.world));
+  for (const w of Object.keys(WORLDS))
+    assert.ok(used.has(w), `no genre uses the "${w}" world`);
+});
+
+test("a name arrives however it likes and still finds its skin", () => {
+  assert.equal(skinId("Drum & Bass"), "dnb");
+  assert.equal(skinId("drum and bass"), "dnb");
+  assert.equal(skinId("Psytrance"), "psytrance");
+  assert.equal(skinId("PSY"), "psytrance");
+  assert.equal(skinId("Cordes / classique"), "strings");
+  assert.equal(skinId("Hard pingpong"), "hardpingpong");
+  assert.equal(skinId("musique classique"), "classical");
+  assert.equal(skinId("8-bit"), "eightbit");
+  // Unknown names still dress the scene rather than leaving it blank.
+  assert.equal(skinId("a genre nobody has named", "hard"), "hardstyle");
+  assert.ok(WORLDS[skinFor("total nonsense").world]);
+});
+
+test("two genres sharing a world still draw differently", () => {
+  // The second half of the answer. Thirteen worlds cannot cover two hundred
+  // genres on their own; what separates gabber from speedcore is the skin —
+  // seven big slabs and a strobe against twenty splinters — and if that came
+  // out identical the catalogue would be decoration.
+  const pairs = [
+    [["gabber", { chaos: 0.5, motion: 0.9, punch: 1 }, { hard: 0.9 }],
+     ["speedcore", { chaos: 0.88, motion: 1, punch: 1 }, { hard: 0.95 }]],
+    [["techno", { chaos: 0.2, motion: 0.66 }, { groove: 0.85 }],
+     ["acidtechno", { chaos: 0.35, motion: 0.8 }, { groove: 0.8 }]],
+    [["liquiddnb", { chaos: 0.2, motion: 0.85 }, { groove: 0.6, hard: 0.4 }],
+     ["drumfunk", { chaos: 0.5, motion: 0.95 }, { hard: 0.6, groove: 0.4 }]],
+    [["classical", { melodic: 0.95, smooth: 0.9 }, { sustain: 0.95 }],
+     ["gospel", { melodic: 0.9, smooth: 0.8, warm: 0.8 }, { voice: 0.6, sustain: 0.4 }]],
+  ];
+  for (const [[a, la, aa], [b, lb, ab]] of pairs) {
+    const ra = paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(aa, la, a) });
+    const rb = paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(ab, lb, b) });
+    assert.equal(ra.scene.world, rb.scene.world, `${a}/${b} should share a world`);
+    assert.notEqual(ra.scene.skin, rb.scene.skin);
+    const d = sigDistance(signature(ra.ink, 1600, 900), signature(rb.ink, 1600, 900));
+    assert.ok(d > 0.08, `${a} and ${b} came out identical (distance ${d.toFixed(3)})`);
+  }
+});
+
+test("place() hands back one shared array, and the scenes know it", () => {
+  // Pinning the contract rather than the consequence. `place` reuses a single
+  // pair to keep a 94 Hz loop out of the garbage collector, so two results held
+  // at once are the same array — and a scene that forgets draws a zero-length
+  // segment, which throws nothing, logs nothing and simply is not there. It
+  // cost a dashed corridor, a tonearm, a hi-hat ring, a set of spokes and a web
+  // before anyone noticed, so the sharp edge is written down here.
+  const geometry = createGeometry();
+  geometry.set(1600, 900, null);
+  const g = geometry.out;
+  const a = g.place(0, 1);
+  const first = [a[0], a[1]];
+  const b = g.place(Math.PI, 1);
+  assert.equal(a, b, "place no longer shares its buffer — update the scenes' comments");
+  assert.notDeepEqual(first, [b[0], b[1]], "two different angles gave the same point");
+});
+
+test("every genre the studio offers is a genre the animation can dress", () => {
+  // The two halves of the vocabulary are written in different languages and
+  // have to agree: `analysis.known_genres()` is what the genre studio offers an
+  // admin to tag with, and this table is what the animation does with the tag
+  // that comes back. A label the studio offers and the engine cannot resolve is
+  // a track that gets tagged carefully and then animated generically, which is
+  // the exact failure this whole catalogue exists to fix — and nothing else in
+  // either suite would catch it, because neither side is wrong on its own.
+  const py = readFileSync(
+    new URL("../../supysonic/deezer/analysis.py", import.meta.url),
+    "utf8"
+  );
+  const block = py.match(/EXTRA_GENRES = \[([\s\S]*?)\n\]/);
+  assert.ok(block, "EXTRA_GENRES is no longer where this test looks for it");
+  const rows = [...block[1].matchAll(/\("([^"]+)",\s*"([a-z]+)"\)/g)];
+  assert.ok(rows.length > 100, `only ${rows.length} extra genres parsed`);
+  const orphans = [];
+  for (const [, label] of rows) if (!skinId(label)) orphans.push(label);
+  assert.deepEqual(orphans, [], `no skin for: ${orphans.join(", ")}`);
+
+  // And the other direction, at the level that matters: the archetypes the
+  // studio files them under are the ones the fallback knows.
+  const arches = new Set(rows.map((r) => r[2]));
+  for (const a of arches)
+    assert.ok(skinId("a name nothing will ever match", a), `no fallback for archetype ${a}`);
+});
+
+test("a shape switch, not a multiplier, is what separates neighbours", () => {
+  // The stronger version of the test above, and the one that pins the thing
+  // that was missing: both sides are painted with the SAME look vector and the
+  // same archetype, so the classifier is telling the two worlds exactly the
+  // same story and the only difference left is the skin's shape switch. A
+  // catalogue that only scaled things would fail every line of this.
+  const pairs = [
+    ["dubstep", "riddim"],        // a sine LFO against a square gate
+    ["garage", "breakbeat"],      // columns against strips
+    ["hardstyle", "zaag"],        // a streak lead against a saw one
+
+    ["punk", "doom"],             // lit from the front, or from behind
+    ["ambient", "drone"],         // clouds against curtains
+    ["downtempo", "dub"],         // a delay receding against one bouncing
+    ["piano", "choral"],          // parallel shafts against a vault
+    ["psytrance", "goa"],         // a kaleidoscope against a pinwheel
+    ["idm", "chiptune"],          // a smooth grid against a two-level one
+    ["techno", "minimal"],        // a corridor rushing at you, or away
+    ["reggae", "samba"],          // a groove that never resolves, and one that does
+  ];
+  const look = { motion: 0.6, density: 0.6, punch: 0.6, smooth: 0.5, warm: 0.5, melodic: 0.5, chaos: 0.4 };
+  const arche = { groove: 0.6, hard: 0.4 };
+  for (const [a, b] of pairs) {
+    const ra = paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(arche, look, a) });
+    const rb = paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(arche, look, b) });
+    assert.equal(ra.scene.world, rb.scene.world, `${a}/${b} should share a world`);
+    const d = sigDistance(signature(ra.ink, 1600, 900), signature(rb.ink, 1600, 900));
+    // The closest pair measures 0.22 and most are several times that, so the
+    // bar is set where a real regression (a switch that stopped being read)
+    // would land rather than where today's numbers happen to sit.
+    assert.ok(d > 0.15, `${a} and ${b} draw in the same places (distance ${d.toFixed(3)})`);
+  }
+
+  // `vinyl` is deliberately not in that list, and the reason is worth writing
+  // down. Its motif is ONE disc filling the frame, so everything it draws —
+  // the tonearm, the hi-hat spokes, a warped groove — lands inside the same
+  // footprint and an 8x8 histogram of where the ink fell cannot see any of it.
+  // How MUCH ink there is can: boom bap is played off a deck (a tonearm, no
+  // machine hats) and trap is programmed (sixteen spokes, no deck), so the two
+  // put down measurably different amounts of it. Fitting the spatial threshold
+  // to this pair instead would have cost the eleven pairs above their teeth.
+  const ink = (g) =>
+    paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(arche, look, g) }).ink.length;
+  const bap = ink("boombap");
+  const trp = ink("trap");
+  assert.ok(
+    Math.abs(bap - trp) / Math.max(bap, trp) > 0.05,
+    `boom bap and trap lay down the same ink (${bap} vs ${trp})`
+  );
 });
 
 test("a change of genre is a dissolve, never a cut", () => {

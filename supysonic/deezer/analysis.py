@@ -585,16 +585,128 @@ FAMILIES = [
 ]
 
 ARCHETYPES = ("sustain", "voice", "groove", "hard", "rock")
+# --- the wider catalogue ----------------------------------------------------
+# The families above are what a heuristic on six descriptors can honestly
+# SEPARATE. They are not what a listener calls their music: nobody has a shelf
+# labelled "hard", they have gabber and frenchcore and speedcore, and those three
+# want three different pictures (webapp/src/lib/viz/skins.js dresses every name
+# below differently).
+#
+# So the studio's vocabulary is deliberately wider than the detector's. Nothing
+# here is ever GUESSED — `classify` only ever returns a FAMILIES id — but every
+# one of them can be tagged by hand and then predicted by the trained head,
+# which is exactly the mechanism that can tell hardtekk from frenchcore when a
+# heuristic cannot.
+#
+# The labels are chosen so the animation engine resolves them: it lowercases and
+# strips everything but letters and digits before looking a name up, so "Boom
+# bap" and "boombap" are the same genre. `webapp/test/viz.test.mjs` reads this
+# list and fails if any of them stops resolving.
+EXTRA_GENRES = [
+    # --- techno & machine ---------------------------------------------------
+    ("Minimal", "groove"), ("Detroit", "groove"), ("Acid techno", "groove"),
+    ("Schranz", "hard"), ("Industrial techno", "hard"), ("Peaktime", "groove"),
+    ("EBM", "groove"), ("IDM", "groove"), ("Glitch", "groove"),
+    ("Experimental", "sustain"), ("Noise", "hard"),
+    # --- house & disco ------------------------------------------------------
+    ("Deep house", "groove"), ("Tech house", "groove"), ("Prog house", "groove"),
+    ("Melodic house", "groove"), ("Bigroom", "hard"), ("Electro house", "groove"),
+    ("French house", "groove"), ("Ghetto house", "groove"), ("Gqom", "groove"),
+    ("Italo disco", "voice"), ("Nu disco", "groove"), ("Boogie", "voice"),
+    ("Eurodance", "voice"), ("Hard house", "hard"), ("Hardbass", "hard"),
+    ("Jumpstyle", "hard"),
+    # --- garage & breaks ----------------------------------------------------
+    ("Two step", "groove"), ("Speed garage", "groove"),
+    ("Bassline", "hard"), ("Big beat", "groove"), ("Nu breaks", "groove"),
+    ("Jersey club", "groove"), ("Moombahton", "groove"), ("Glitch hop", "groove"),
+    # --- drum & bass --------------------------------------------------------
+    ("Liquid DnB", "groove"), ("Neurofunk", "hard"), ("Jump up", "hard"),
+    ("Jungle", "groove"), ("Darkstep", "hard"), ("Drumfunk", "groove"),
+    # --- bass ---------------------------------------------------------------
+    ("Brostep", "hard"), ("Riddim", "hard"), ("Melodic dubstep", "sustain"),
+    ("Future bass", "voice"), ("Trap EDM", "hard"), ("Hard trap", "hard"),
+    # --- trance & psy -------------------------------------------------------
+    ("Uplifting trance", "sustain"), ("Prog trance", "groove"),
+    ("Vocal trance", "voice"), ("Hard trance", "hard"), ("Goa", "groove"),
+    ("Full on", "hard"), ("Darkpsy", "hard"), ("Hitech", "hard"),
+    ("Forest", "groove"), ("Psydub", "sustain"),
+    # --- hard ---------------------------------------------------------------
+    ("Gabber", "hard"), ("UK hardcore", "hard"), ("Happy hardcore", "voice"),
+    ("Terrorcore", "hard"), ("Extratone", "hard"), ("Hardtek", "hard"),
+    ("Acidcore", "hard"), ("Raggatek", "hard"), ("Industrial hardcore", "hard"),
+    ("Crossbreed", "hard"), ("Doomcore", "hard"), ("Breakcore", "hard"),
+    ("Lolicore", "hard"), ("Makina", "hard"), ("Euphoric hardstyle", "hard"),
+    ("Rawphase", "hard"), ("Tekk", "hard"), ("Bouncy", "hard"),
+    # --- urban --------------------------------------------------------------
+    ("Boom bap", "groove"), ("Drill", "groove"), ("UK drill", "groove"),
+    ("Cloud rap", "voice"), ("Emo rap", "voice"), ("G funk", "groove"),
+    ("Lofi hiphop", "sustain"), ("Grime", "groove"), ("Dembow", "groove"),
+    ("Afrobeats", "voice"), ("Afroswing", "voice"),
+    # --- rock & metal -------------------------------------------------------
+    ("Garage rock", "rock"), ("Psych rock", "rock"), ("Prog rock", "rock"),
+    ("Hardcore punk", "rock"), ("Post punk", "rock"), ("Pop punk", "rock"),
+    ("Ska punk", "rock"), ("Ska", "voice"), ("Grunge", "rock"), ("Emo", "rock"),
+    ("Shoegaze", "sustain"), ("Heavy metal", "rock"), ("Thrash", "rock"),
+    ("Death metal", "rock"), ("Black metal", "rock"), ("Doom", "rock"),
+    ("Sludge", "rock"), ("Metalcore", "rock"), ("Deathcore", "rock"),
+    ("Djent", "rock"), ("Nu metal", "rock"), ("Power metal", "rock"),
+    ("Symphonic metal", "sustain"),
+    # --- pop & vocal --------------------------------------------------------
+    ("Synthpop", "voice"), ("Dream pop", "sustain"), ("Hyperpop", "voice"),
+    ("K-pop", "voice"), ("J-pop", "voice"), ("City pop", "voice"),
+    ("Vaporwave", "sustain"), ("Future funk", "groove"), ("Latin pop", "voice"),
+    ("Chanson", "voice"), ("Schlager", "voice"), ("Neo soul", "voice"),
+    ("Motown", "voice"), ("Gospel", "voice"),
+    # --- chill & downtempo --------------------------------------------------
+    ("Chillhop", "sustain"), ("Downtempo", "sustain"), ("Trip hop", "groove"),
+    ("Chillout", "sustain"), ("Dub", "groove"), ("Dub techno", "groove"),
+    ("Retrowave", "voice"), ("Outrun", "groove"), ("Darksynth", "hard"),
+    ("Darkwave", "sustain"), ("Coldwave", "sustain"), ("Gothic", "sustain"),
+    ("Witch house", "groove"),
+    # --- still --------------------------------------------------------------
+    ("Dark ambient", "sustain"), ("Drone", "sustain"), ("New age", "sustain"),
+    ("Minimalism", "sustain"),
+    # --- played -------------------------------------------------------------
+    ("Bebop", "voice"), ("Swing", "voice"), ("Big band", "voice"),
+    ("Smooth jazz", "voice"), ("Jazz fusion", "voice"), ("Delta blues", "voice"),
+    ("Bluegrass", "voice"), ("Singer songwriter", "voice"), ("Celtic", "voice"),
+    ("Flamenco", "voice"), ("Tango", "voice"), ("Salsa", "voice"),
+    ("Cumbia", "voice"), ("Samba", "voice"), ("Bossa nova", "voice"),
+    ("Rocksteady", "groove"), ("Afrobeat", "groove"), ("Highlife", "voice"),
+    ("Kizomba", "voice"), ("Bollywood", "voice"), ("Arabic", "voice"),
+    # --- classical ----------------------------------------------------------
+    ("Classical", "sustain"), ("Orchestral", "sustain"), ("Opera", "voice"),
+    ("Choral", "voice"), ("Baroque", "sustain"), ("Romantic", "sustain"),
+    ("Piano", "sustain"), ("Film score", "sustain"), ("Soundtrack", "sustain"),
+    # --- other --------------------------------------------------------------
+    ("Chiptune", "groove"), ("Eightbit", "groove"),
+]
+
+
 FAMILY_LABEL = {fid: label for fid, label, _a, _w in FAMILIES}
 
 
 def known_genres():
-    """``[(label, archetype), ...]`` — the vocabulary this engine already knows.
+    """``[(label, archetype), ...]`` — the vocabulary the studio offers.
 
-    The studio seeds its tag list from this, so the genres the heuristic can
-    already guess arrive ready to confirm instead of being retyped by hand.
+    The families the heuristic can guess come first, so tagging starts by
+    confirming a guess; the wider catalogue follows, so a sub-genre a heuristic
+    could never separate is still one keystroke away instead of being retyped by
+    hand. Nothing in the second half is ever returned by `classify`.
+
+    Deduplicated on the label, family first. The studio keys its tags by name,
+    so a label appearing in both lists seeds ONE tag — and the caller counting
+    what it asked for against what it got is then quietly off by one, which is
+    exactly how a stray "UK garage" in both halves was found.
     """
-    return [(label, arch) for _fid, label, arch, _fn in FAMILIES]
+    out = []
+    seen = set()
+    for label, arch in [(l, a) for _fid, l, a, _fn in FAMILIES] + list(EXTRA_GENRES):
+        if label in seen:
+            continue
+        seen.add(label)
+        out.append((label, arch))
+    return out
 
 
 def classify(features):

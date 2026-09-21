@@ -121,6 +121,18 @@ export function createGeometry() {
    * SHAPE wants — a polygon drawn at aniso 1 on a 16:9 screen stops reading as
    * a polygon and starts reading as a border round the picture.
    */
+  // ONE array, reused on every call. Allocating a pair per point would be a
+  // few thousand short-lived arrays a frame, which is exactly the kind of
+  // garbage a 94 Hz update loop cannot afford — but it means a caller holding
+  // TWO results at once is holding the same array twice. Read the first one's
+  // numbers out before asking for the second:
+  //
+  //     const p0 = geom.place(a0, r0);
+  //     const x0 = p0[0], y0 = p0[1];     // <- before the next call
+  //     const p1 = geom.place(a1, r1);
+  //
+  // Getting this wrong draws a zero-length segment, which is not an error and
+  // not visible — it is simply a motif that silently stopped being there.
   function place(a, radial, aniso = 1) {
     const inner = innerAt(a);
     let edge = edgeAt(a);

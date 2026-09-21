@@ -14,6 +14,7 @@
 // updated once per analysis frame. Scenes read it; nothing allocates.
 
 import { approach, approachAngle, clamp, mixAngle, rgbToHsl } from "./util.js";
+import { skinFor } from "./skins.js";
 
 export const PALETTES = [
   { id: "cover", label: "Pochette" },
@@ -59,6 +60,30 @@ export function createPalette(mode = "cover") {
       mode = m;
       out.mode = m;
     }
+  }
+
+  // The genre's own colour temperament (lib/viz/skins.js). The `warm` lean
+  // below is one axis blended across families; this is the specific thing a
+  // named genre asks for — acid is not simply "warm", it is acid green, and
+  // black metal is not "cold", it is bleached. Like `warm` it is a LEAN on the
+  // source the user picked, never a replacement: the cover still decides which
+  // colour is being leaned.
+  let skinHue = 0;
+  let skinSat = 1;
+  let skinLight = 1;
+  function setSkin(s) {
+    skinHue = +(s?.hue ?? 0) || 0;
+    skinSat = +(s?.sat ?? 1) || 1;
+    skinLight = +(s?.light ?? 1) || 1;
+  }
+  // Resolved from the frame, and MEMOISED on the name: this runs ninety times a
+  // second and the answer only changes when the classifier renames the family.
+  let lastName = null;
+  function followSkin(style) {
+    const name = style ? `${style.dominant}|${style.archetype}` : "";
+    if (name === lastName) return;
+    lastName = name;
+    setSkin(style ? skinFor(style.dominant, style.archetype) : null);
   }
 
   // The cover's dominant colour, as [r,g,b]. Called when the track changes.
@@ -127,6 +152,11 @@ export function createPalette(mode = "cover") {
       targetSat = clamp(targetSat + (f?.chordChange || 0) * 0.12, 0, 1);
     }
 
+    followSkin(frame.style);
+    targetHue += skinHue;
+    targetSat = clamp(targetSat * skinSat, 0.02, 1);
+    targetLight = clamp(targetLight * skinLight, 0.12, 0.85);
+
     // Ease everything: an instant hue change on a full-screen background is a
     // flash, and this runs at ~94 Hz.
     hue = approachAngle(hue, targetHue, 0.5, dt);
@@ -144,5 +174,5 @@ export function createPalette(mode = "cover") {
     return out;
   }
 
-  return { update, setMode, setCover, out };
+  return { update, setMode, setCover, setSkin, out };
 }

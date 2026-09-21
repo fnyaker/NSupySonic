@@ -43,10 +43,19 @@ class EngineGenresTestCase(unittest.TestCase):
             "Dance / EDM", "Drum & bass", "Dubstep", "Disco / funk", "Psytrance",
         ):
             self.assertIn(label, labels)
-        # Ids and labels are what the studio seeds tags from; both must be unique.
+        # Ids and labels are what the studio seeds tags from; both must be
+        # unique. The studio keys its tags BY NAME, so a label appearing in
+        # both halves of the vocabulary seeds one tag and every count taken
+        # against the list is then quietly off by one.
         ids = [fid for fid, _l, _a, _w in ana.FAMILIES]
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(len(labels), len(ana.FAMILIES))
+        every = [label for label, _arch in ana.known_genres()]
+        self.assertEqual(len(every), len(set(every)))
+        # The offered vocabulary is the families the heuristic can guess PLUS
+        # the sub-genres it cannot, so it is a strict superset of them.
+        family_labels = {label for _fid, label, _a, _w in ana.FAMILIES}
+        self.assertTrue(family_labels < labels)
+        self.assertGreater(len(labels), len(ana.FAMILIES) * 2)
 
     def test_a_hardcore_track_reads_as_hardcore(self):
         style, conf, arch, weights = ana.classify(

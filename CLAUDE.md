@@ -547,10 +547,15 @@ stand in for an event.
 `webapp/src/lib/genre/`, `routes/Genres.svelte`) is the answer to "the classifier does not know MY
 genres". The heuristic above knows the styles it was written with; this teaches it yours.
 
-- **The studio opens onto the engine's own vocabulary.** The first admin visit seeds a `GenreTag`
-  per family in `analysis.FAMILIES` (label, colour, archetype) — fifty-odd, from ambient to
-  speedcore, rap to psytrance — so tagging starts by CONFIRMING a guess instead of typing the
-  vocabulary first. It is additive and version-aware (a `Meta` value remembers how many the engine
+- **The studio opens onto a vocabulary WIDER than the detector.** The first admin visit seeds a
+  `GenreTag` per entry in `analysis.known_genres()` — the ~54 families the live classifier can name
+  (`FAMILIES`) plus `EXTRA_GENRES`, ~170 sub-genres it cannot, from detroit to drumfunk and from
+  rawphase to bossa nova — so tagging starts by CONFIRMING a guess instead of typing the vocabulary
+  first, and a sub-genre the heuristic could never guess is still one click away. Nothing in
+  `EXTRA_GENRES` is ever *returned* by `classify`; it is there to be hand-applied and then predicted
+  by the trained head. Every label is chosen so the animation engine resolves it
+  (`viz/skins.js#skinId` lowercases and strips everything but letters and digits), and a test in
+  `webapp/test/viz.test.mjs` reads this Python list and fails if any label has no skin. It is additive and version-aware (a `Meta` value remembers how many the engine
   knew): a release that adds families re-syncs them on the next admin visit, a genre you delete
   stays deleted as long as the vocabulary has not changed, and the *Genres du moteur* button brings
   back just the missing ones. Only the admin seeds; a guest reading `/genre/status` writes nothing.
@@ -805,8 +810,8 @@ guitars, four more keyed to the `look` vector. That is the right shape for blend
 and the wrong shape for the question being asked: every genre came out of the same primitives at
 different strengths, so frenchcore and ambient were the same soft radial vocabulary at different
 brightness. The classifier's `dominant` family now chooses a **WORLD** — a complete, self-contained
-scene with its own motif, motion, background and trail (`lib/viz/worlds/`, one file each). Thirteen
-of them, drawn from what the genres themselves look like, covering all fifty-odd families:
+scene with its own motif, motion, background and trail (`lib/viz/worlds/`, one file each). Eighteen
+of them, drawn from what the genres themselves look like:
 
 | world | motif | families |
 |---|---|---|
@@ -822,13 +827,50 @@ of them, drawn from what the genres themselves look like, covering all fifty-odd
 | `horizon` | the banded sun over a perspective floor grid | synthwave, lofi |
 | `bloom` | soft blooms from every emission point, confetti on the downbeat | pop, dance, house, disco, funk, soul, R&B, afro, amapiano, indie |
 | `smoke` | a brush stroke per note attack, drifting | jazz, blues, folk, country, reggae |
-| `nebula` | clouds, and no event in it anywhere | ambient, strings |
+| `nebula` | clouds, and no event in it anywhere | ambient, strings, drone, shoegaze |
+| `cathedral` | shafts of light down a nave, a rose window on the harmony | classical, orchestral, choral, opera, film score, gospel |
+| `carnival` | concentric rings of beads on patterns of different lengths, meeting every few bars | salsa, samba, afrobeat, reggae, reggaeton, amapiano, ska |
+| `pixels` | a coarse lit grid with sprites walking on it and rows tearing | chiptune, IDM, breakcore, hyperpop, glitch, grime |
+| `ocean` | swells re-drawn as a delay line, receding or bouncing | dub, trip-hop, downtempo, cloud rap, dub techno |
+| `neon` | tubes of bent glass over a wet street, VHS tracking across it | vaporwave, city pop, synthpop, italo disco |
 
 The `look` vector is still read INSIDE each world, which is what keeps hardstyle from looking
 exactly like hardtekk: `chaos` widens the cracks in `shatter` and the tears in `breakgrid`,
 `motion` sets how fast the shards turn and the stars travel, `punch` how far a kick throws them,
 `melodic` whether the saw lead is drawn at all. The coarse answer — the thing you recognise across
 the room — is the world; the fine one is still a blend.
+
+**A world is machinery; a SKIN is what one genre does with it** (`lib/viz/skins.js`). Eighteen
+worlds cannot dress two hundred sub-genres on their own, and the layer engine's failure repeats one
+level down if they try: hardstyle and zaag both land on `hardbounce`, and without a skin they are
+the same picture in two colours. So the catalogue holds **227 rows**, one per genre, each naming its
+world, how its palette leans (`hue` / `sat` / `light`, applied by `palette.js#setSkin` on top of the
+source the user picked, never replacing it), its `speed` and `energy`, and a bag of world
+parameters. `skinFor(name, archetype)` normalises whatever it is handed — an id, a French label from
+the classifier, a hand-typed tag with spaces, accents or hyphens — through `ALIASES` and falls back
+to the archetype's anchor row when nothing matches, so an unknown name still gets a considered
+picture rather than the default one.
+
+**The `p` bag carries two kinds of parameter, and only one of them is worth the table's length.**
+A *scaling* parameter (`shards`, `dots`, `beams`) says how MUCH of the motif there is; a catalogue
+of nothing but those is two hundred brightness settings. A *shape* parameter changes what the motif
+IS, and every world has a few — `wobble`'s `wave` picks a sine, a square or a saw LFO (melodic
+dubstep, riddim and brostep are that difference in the music, so they are that difference on
+screen); `breakgrid`'s `axis` turns the strips into falling columns; `hardbounce`'s `lead` draws the
+lead as a streak, a staircase or a triangle wave (zaag is Dutch for saw); `stagelights`'s `backlit`
+moves the rig behind the band so doom and black metal are silhouettes; `tunnel`'s `dir` −1 sends the
+corridor away from the viewer; `vinyl`'s `arm` puts a tonearm on the deck and `hats` a machine
+hi-hat over it; `kaleido`'s `mirror` 0 makes a pinwheel out of a kaleidoscope. Each world's header
+comment lists its own vocabulary, and a world states a default for every one of them, so a new
+sub-genre costs one line. The four anchor rows (techno, house, ambient, electronic) override almost
+nothing on purpose: they ARE the default each world was written around.
+
+**The studio's vocabulary is the same vocabulary** (`analysis.EXTRA_GENRES` + `known_genres()`).
+The live classifier honestly separates ~54 families, so a *tag* is where a sub-genre name comes
+from — and a label the studio offers that the animation cannot resolve is a track somebody tagged
+carefully and then watched get animated generically. The two lists are written in different
+languages and a test reads the Python one and resolves every label through `skinId` (it caught a
+misspelled `popunk` and a missing `jerseyclub` the day it was written).
 
 **Nothing hard-switches**, which is the property the layer engine had and this must not lose. Two
 things protect it: style.js already refuses to rename the dominant family until a challenger has led
@@ -845,9 +887,23 @@ because a sky is not a trail. That also sets each world's alpha budget: additive
 at roughly `alpha / trail`, so nebula's clouds are drawn at a tenth of what a normal world would use.
 `webapp/test/viz.test.mjs` drives every scene against a recording 2D context and pins that each one
 reaches all four edges of a 16:9 frame, that under a centred cover less than a quarter of its drawing
-lands behind it, that every family in style.js has a world, that thirteen named genres each land on
-their own one AND draw in measurably different places (an 8×8 ink histogram), and that a change of
-genre is a dissolve rather than a cut.
+lands behind it, that every family in style.js has a skin, that thirteen named genres each land on
+their own world AND draw in measurably different places (an 8×8 ink histogram), that a change of
+genre is a dissolve rather than a cut, and that **eleven pairs sharing a world separate on the shape
+switch alone** — both sides painted with the SAME look vector and archetype, so the classifier is
+telling the two worlds an identical story and only the skin is left. `vinyl` is deliberately absent
+from that list: its motif is one disc filling the frame, so a tonearm or a ring of hi-hat spokes
+cannot move the footprint an 8×8 histogram measures, and boom bap against trap is pinned on ink
+VOLUME instead. Fitting the spatial threshold to the pair it cannot judge would have cost the other
+eleven their teeth.
+
+**`geometry.place` returns ONE shared array**, reused on every call so a 94 Hz loop does not make a
+few thousand short-lived pairs a frame. A caller holding two results at once is therefore holding
+the same array twice, the segment between them collapses to a point, and the motif silently stops
+being there — no error, no warning, nothing in the log. It cost a dashed corridor, a tonearm, a
+hi-hat ring, a set of spokes and a web before anyone noticed. Read the first point's numbers out
+before asking for the second (`const p0 = place(...); const x0 = p0[0], y0 = p0[1];`), which is what
+the older scenes already do; the contract is pinned by a test.
 
 **The projector window** (`routes/Viz.svelte`, `lib/viz/bridge.js`, `lib/viz/host.js`) is the same
 SPA on `#/viz`, opened in a second tab to be dragged onto a beamer. It plays **nothing**: a second

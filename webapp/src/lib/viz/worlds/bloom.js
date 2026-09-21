@@ -10,12 +10,26 @@
 // The blooms come from `geometry.nodes`, so on a wide screen there are three of
 // them spread across it and beside artwork there is one on each flank — the
 // scene is never one circle in the middle.
+//
+// Eighteen genres open out of this one, so the skin changes what a bloom IS:
+// `petal` gives it lobes, and a five-lobed flower and a plain ring are not the
+// same picture at any brightness (disco and k-pop bloom in petals, deep house
+// never does). `ray` fires spokes of light out of each one — a mirror ball.
+// `float` is the confetti's gravity and it may be NEGATIVE, so amapiano and
+// soul rise where eurodance falls.
 
 import { approach, clamp, envelope, hsl, lerp, rng } from "../util.js";
 
 const TAU = Math.PI * 2;
 
-export function createBloomWorld(preset, opts) {
+export function createBloomWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  const BLOOMS = p.blooms ?? 1;
+  const CONFETTI = p.confetti ?? 1;
+  const VOICE = p.voice ?? 1;
+  const PETAL = Math.max(0, Math.round(p.petal ?? 0));
+  const RAY = clamp(p.ray ?? 0, 0, 2);
+  const FLOAT = p.float ?? 1;
   const MAX = 10;
   const blooms = [];
   for (let i = 0; i < MAX; i++) blooms.push({ age: -1, node: 0, hue: 0, p: 0 });
@@ -45,7 +59,7 @@ export function createBloomWorld(preset, opts) {
         b.age = 0;
         b.node = (rand() * nodes) | 0;
         b.hue = (rand() - 0.5) * 50;
-        b.p = 0.55 + (f.kick || 0) * 0.5;
+        b.p = (0.55 + (f.kick || 0) * 0.5) * BLOOMS;
       }
       for (const b of blooms) {
         if (b.age < 0) continue;
@@ -55,13 +69,14 @@ export function createBloomWorld(preset, opts) {
 
       // Confetti on the downbeat — the one moment a room throws its hands up.
       if (beat.downbeat && !opts.reducedMotion) {
-        const n = Math.min(14, 5 + Math.round(level * 12));
+        const n = Math.min(20, Math.round((5 + level * 12) * CONFETTI));
         for (let k = 0; k < n; k++) {
           const i = (confNext = (confNext + 1) % N) * 6;
           conf[i] = 0.1 + rand() * 0.8;
           conf[i + 1] = 0.25 + rand() * 0.3;
           conf[i + 2] = (rand() - 0.5) * 0.35;
-          conf[i + 3] = -0.25 - rand() * 0.45;
+          // Thrown up, then carried by whichever way this genre's gravity runs.
+        conf[i + 3] = (-0.25 - rand() * 0.45) * (FLOAT < 0 ? 0.4 : 1);
           conf[i + 4] = 1;
           conf[i + 5] = rand();
         }
@@ -71,7 +86,7 @@ export function createBloomWorld(preset, opts) {
         if (conf[i + 4] <= 0) continue;
         conf[i] += conf[i + 2] * dt;
         conf[i + 1] += conf[i + 3] * dt;
-        conf[i + 3] += dt * 0.55; // gravity
+        conf[i + 3] += dt * 0.55 * FLOAT; // gravity, or lift where it is negative
         conf[i + 4] -= dt * 0.5;
       }
     },
@@ -108,17 +123,47 @@ export function createBloomWorld(preset, opts) {
         gr.addColorStop(1, hsl(hue + 18, pal.sat, 0.6, 0));
         g.fillStyle = gr;
         g.beginPath();
-        g.arc(nd.x, nd.y, r, 0, TAU);
+        if (PETAL >= 3) {
+          // A flower rather than a ring: the same gradient, read through a
+          // lobed outline. Rotated by its own age so it opens as it turns.
+          const steps = PETAL * 12;
+          for (let k = 0; k <= steps; k++) {
+            const ang = (k / steps) * TAU + t * 0.8;
+            const rr = r * (0.62 + 0.38 * Math.abs(Math.cos(ang * PETAL * 0.5)));
+            const x = nd.x + Math.cos(ang) * rr;
+            const y = nd.y + Math.sin(ang) * rr;
+            k === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+          }
+          g.closePath();
+        } else {
+          g.arc(nd.x, nd.y, r, 0, TAU);
+        }
         g.fill();
+
+        // Mirror-ball spokes: straight light leaving the bloom. Only the
+        // genres that are actually played under one ask for them.
+        if (RAY > 0.05) {
+          g.strokeStyle = hsl(hue, pal.sat, 0.82, a * 0.5 * RAY);
+          g.lineWidth = Math.max(1, geom.rMin * 0.004);
+          g.beginPath();
+          for (let k = 0; k < 8; k++) {
+            const ang = (k / 8) * TAU + b.hue * 0.02;
+            const co = Math.cos(ang);
+            const si = Math.sin(ang);
+            g.moveTo(nd.x + co * r * 0.5, nd.y + si * r * 0.5);
+            g.lineTo(nd.x + co * r * 2.1, nd.y + si * r * 2.1);
+          }
+          g.stroke();
+        }
       }
 
       // The voice, where there is one: a soft column of light rising through
       // the middle of the picture at the syllable rate.
-      if (vocal > 0.06 && melodic > 0.4) {
+      if (VOICE > 0.1 && vocal > 0.06 && melodic * VOICE > 0.35) {
         const vw = geom.w * (0.1 + vocal * 0.2);
         const vg = g.createLinearGradient(geom.cx - vw, 0, geom.cx + vw, 0);
         vg.addColorStop(0, hsl(pal.high, pal.sat, 0.78, 0));
-        vg.addColorStop(0.5, hsl(pal.high, pal.sat, 0.8, vocal * 0.14 * w.energy * preset.glow));
+        vg.addColorStop(0.5, hsl(pal.high, pal.sat, 0.8, vocal * 0.14 * VOICE * w.energy * preset.glow));
         vg.addColorStop(1, hsl(pal.high, pal.sat, 0.78, 0));
         g.fillStyle = vg;
         g.fillRect(geom.cx - vw, 0, vw * 2, geom.h);
