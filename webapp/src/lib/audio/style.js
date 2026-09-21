@@ -751,6 +751,20 @@ const FAMILY_BY_ID = new Map(FAMILIES.map((f) => [f.id, f]));
 const FAMILY_LOOK = new Map(FAMILIES.map((f) => [f.id, lookFor(f)]));
 export const FAMILY_LIST = FAMILIES.map(({ id, label, a }) => ({ id, label, archetype: a }));
 
+/**
+ * What one named family looks like, for a verdict that arrives already decided.
+ *
+ * The server measures the whole track and serves a family NAME; the renderer
+ * needs seven numbers. Without this the served verdict replaced the live one
+ * and took the look vector with it — so the moment a track had been analysed,
+ * every scene fell back to the neutral default and the genre-specific layers
+ * switched off. Exactly backwards: knowing the genre for certain is when the
+ * look should be most confident.
+ */
+export function familyLook(id) {
+  return FAMILY_LOOK.get(id) || null;
+}
+
 // --- the kick ---------------------------------------------------------------
 // A kick is classified from its SHAPE, not its level: how fast it arrives, how
 // much broadband click rides on top of it, how noisy it is, and how long it

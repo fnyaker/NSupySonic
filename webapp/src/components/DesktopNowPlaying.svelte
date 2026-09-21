@@ -63,6 +63,11 @@
   import VirtualList from "./VirtualList.svelte";
 
   let tab = "queue";
+  // The artwork's box, handed to the animation so its scenes lay themselves out
+  // AROUND the cover instead of behind it (lib/viz/geometry.js). An element
+  // rather than a measurement: the cover is min(46vh, 100%) wide and centred in
+  // a column that is itself centred, and none of that belongs in a scene.
+  let coverBox;
 
   function trackMenu(e) {
     e.preventDefault();
@@ -152,6 +157,7 @@
         layout="full"
         active={$immersiveOpen}
         paused={!$playing}
+        occluder={coverBox}
       />
     </div>
   {/if}
@@ -189,7 +195,7 @@
         {/if}
       </div>
 
-      <div class="cover">
+      <div class="cover" bind:this={coverBox}>
         <div class="glow" style={`background-image:${cssUrl(glowSrc)}`}></div>
         {#key $current.deezer_id}
           <div class="cover-fade" in:fade={{ duration: 260 }} out:fade={{ duration: 260 }}>

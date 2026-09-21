@@ -706,6 +706,8 @@
         layout="full"
         active={$immersiveOpen}
         paused={!$playing}
+        occluder={scroller}
+        occluderShape="square"
       />
     </div>
   {/if}

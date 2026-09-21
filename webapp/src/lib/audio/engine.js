@@ -53,7 +53,7 @@ import {
 import { buildBandPlan, buildEnergyPlan, readBands, readEnergy, ENERGY_BANDS } from "./spectrum.js";
 import { createFeatureExtractor } from "./features.js";
 import { createBeatTracker } from "./tempo.js";
-import { createStyleClassifier } from "./style.js";
+import { createStyleClassifier, familyLook, LOOK_KEYS } from "./style.js";
 
 // 120 log-spaced bands over 22 Hz..18 kHz — about 20 per octave, so roughly
 // half a semitone. Fixed rather than per-view: scenes that want fewer bars
@@ -334,10 +334,13 @@ function tick(now) {
 }
 
 // The served verdict, wearing the shape the scenes already read.
+const mergedLook = {};
+for (const k of LOOK_KEYS) mergedLook[k] = 0;
 const mergedStyle = {
   kick: null,
   families: [],
   archetypes: { sustain: 0, voice: 0, groove: 0, hard: 0, rock: 0 },
+  look: mergedLook,
   dominant: "",
   dominantLabel: "",
   archetype: "groove",
@@ -348,6 +351,15 @@ const mergedStyle = {
 function merged(live, v) {
   mergedStyle.kick = live.kick;
   mergedStyle.families = live.families;
+  // The served verdict names a family; the renderer needs the seven numbers
+  // that family implies (style.js LOOK_KEYS). Dropping them — which is what
+  // this function used to do — meant that a track the server HAD measured got
+  // the neutral default look and lost every genre-specific layer, while an
+  // unmeasured one kept them. Where the server has no opinion the live vector
+  // stands, exactly as for everything else here.
+  const served = familyLook(v.style);
+  const src = served || live.look;
+  if (src) for (const k of LOOK_KEYS) mergedLook[k] = src[k];
   mergedStyle.dominant = v.style || live.dominant;
   mergedStyle.dominantLabel = v.styleLabel || live.dominantLabel;
   mergedStyle.archetype = v.archetype || live.archetype;

@@ -672,6 +672,180 @@ test("a served tempo starts the tracker locked instead of hunting", () => {
   );
 });
 
+// -- the tracker against material that used to move it ----------------------
+//
+// The generators below schedule onsets on a TIMELINE and render them into
+// frames, rather than asking "is the current frame near a beat". The naive
+// version silently drops events at high tempo — a 190 BPM beat is 29 frames
+// and a phase window a fraction of a beat wide is less than one — and a tracker
+// fed a train with holes in it is being tested against nothing.
+function renderOdf(events, { seconds, dt = 1 / 94, noise = 0.004, beds = [] }) {
+  const n = Math.ceil(seconds / dt);
+  const flux = new Float64Array(n);
+  const low = new Float64Array(n);
+  for (const e of events) {
+    const i = Math.round(e.t / dt);
+    if (i < 0 || i >= n) continue;
+    // A transient spread over ~3 frames, as an analyser window spreads one.
+    for (let k = 0; k < 3; k++) {
+      const w = [1, 0.45, 0.15][k];
+      if (i + k < n) {
+        flux[i + k] += e.f * w;
+        low[i + k] += (e.l || 0) * w;
+      }
+    }
+  }
+  const frames = [];
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0), seed / 4294967296);
+  for (let i = 0; i < n; i++) {
+    let f = flux[i] + noise * (0.6 + rnd() * 0.8);
+    let l = low[i] + noise * 0.5 * (0.6 + rnd() * 0.8);
+    for (const bed of beds) {
+      const [bf, bl] = bed(i * dt);
+      f += bf;
+      l += bl;
+    }
+    frames.push([f, l, dt]);
+  }
+  return frames;
+}
+
+// Four-to-the-floor with sixteenth percussion, a clap, a riser before every
+// eighth bar, a four-bar breakdown every sixteen, and the occasional enormous
+// FX stab. Everything in there is something that used to move the reading.
+function clubTrack(bpm, { seconds = 90, sixteenths = 0.7, breakdown = true, fx = true } = {}) {
+  const period = 60 / bpm;
+  const bar = period * 4;
+  const ev = [];
+  const inBreak = (t) =>
+    breakdown && Math.floor(t / bar) % 16 >= 8 && Math.floor(t / bar) % 16 < 12;
+  let seed = 3;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0), seed / 4294967296);
+  for (let b = 0; b * period < seconds; b++) {
+    const t = b * period;
+    if (inBreak(t)) continue;
+    ev.push({ t, f: 0.09, l: 0.14 });
+    for (const s of [0.25, 0.5, 0.75])
+      ev.push({ t: t + s * period, f: 0.09 * sixteenths * (s === 0.5 ? 1 : 0.8), l: 0 });
+    if (b % 4 === 2) ev.push({ t: t + 0.001, f: 0.05, l: 0 });
+  }
+  if (fx) for (let t = 3; t < seconds; t += 1) if (rnd() < 0.08) ev.push({ t, f: 0.7, l: 0.35 });
+  const beds = [
+    (t) => {
+      const i = Math.floor(t / bar) % 8;
+      if (i < 6) return [0, 0];
+      const p = ((t % (bar * 8)) - bar * 6) / (bar * 2);
+      return [0.06 * p * p, 0.02 * p * p]; // a riser
+    },
+    (t) => (inBreak(t) ? [0.012, 0.004] : [0, 0]), // a pad under the breakdown
+  ];
+  return renderOdf(ev, { seconds, beds });
+}
+
+function readTempo(tracker, frames, { warmup = 20 } = {}) {
+  const reads = [];
+  let t = 0;
+  for (const [f, l, dt] of frames) {
+    const o = tracker.process(f, l, dt);
+    t += dt;
+    if (t > warmup) reads.push(o.locked ? o.bpm : 0);
+  }
+  const sorted = [...reads].sort((a, b) => a - b);
+  let jumps = 0;
+  for (let i = 1; i < reads.length; i++) if (Math.abs(reads[i] - reads[i - 1]) > 2) jumps++;
+  return { median: sorted[(sorted.length / 2) | 0], jumps, reads };
+}
+
+test("the tempo holds through risers, breakdowns and FX stabs", () => {
+  // This is the complaint the conditioning, the running tempogram and the
+  // persistence rules exist for: the reading used to walk off to a harmonic
+  // and back several times a track. It must now be one number.
+  for (const bpm of [128, 150, 175, 190, 230]) {
+    const { median, jumps } = readTempo(createBeatTracker(), clubTrack(bpm));
+    assert.ok(
+      Math.abs(median / bpm - 1) < 0.03,
+      `${bpm} BPM tracked at ${median.toFixed(1)}`
+    );
+    assert.equal(jumps, 0, `${bpm} BPM: the reading moved ${jumps} times`);
+  }
+});
+
+test("a loud sixteenth layer does not double the tempo", () => {
+  // Sixteenths land on the beat grid AND on a grid twice as fast, so the
+  // autocorrelation cannot separate them: it is the bass fold that has to.
+  const { median } = readTempo(createBeatTracker(), clubTrack(150, { sixteenths: 0.9 }));
+  assert.ok(Math.abs(median / 150 - 1) < 0.03, `tracked ${median.toFixed(1)} instead of 150`);
+});
+
+test("a kick every other beat does not halve the tempo", () => {
+  // Half-time: the kick is on 1 and 3, the snare on 2 and 4. Asking the bass
+  // alone whether anything happens in between gets this exactly wrong — which
+  // is why the slow-down test reads the whole band.
+  const period = 60 / 140;
+  const ev = [];
+  for (let b = 0; b * period < 90; b++) {
+    const t = b * period;
+    if (b % 2 === 0) ev.push({ t, f: 0.08, l: 0.13 });
+    else ev.push({ t, f: 0.07, l: 0.01 });
+    ev.push({ t: t + period / 2, f: 0.02, l: 0 });
+  }
+  const { median } = readTempo(createBeatTracker(), renderOdf(ev, { seconds: 90 }));
+  assert.ok(Math.abs(median / 140 - 1) < 0.03, `tracked ${median.toFixed(1)} instead of 140`);
+});
+
+test("hats on the offbeat do not double a slow tempo either", () => {
+  // The mirror case: a 92 BPM ballad with an eighth-note hat. The eighth grid
+  // holds every onset there is, so it wins the autocorrelation outright — and
+  // the bass, which has nothing on the offbeat, is what says otherwise.
+  const period = 60 / 92;
+  const ev = [];
+  for (let b = 0; b * period < 90; b++) {
+    const t = b * period;
+    if (b % 2 === 0) ev.push({ t, f: 0.06, l: 0.1 });
+    else ev.push({ t, f: 0.07, l: 0.01 });
+    ev.push({ t: t + period / 2, f: 0.012, l: 0 });
+  }
+  const { median } = readTempo(createBeatTracker(), renderOdf(ev, { seconds: 90 }));
+  assert.ok(Math.abs(median / 92 - 1) < 0.04, `tracked ${median.toFixed(1)} instead of 92`);
+});
+
+test("a breakdown is not a tempo change", () => {
+  // Four bars with no drums in them say nothing about the tempo, and the
+  // estimate used to be adopted anyway — which is where a 128 BPM track spent
+  // the bars after a breakdown at 64 and then at 255.
+  const frames = clubTrack(128, { seconds: 120 });
+  const tr = createBeatTracker();
+  const reads = [];
+  let t = 0;
+  for (const [f, l, dt] of frames) {
+    const o = tr.process(f, l, dt);
+    t += dt;
+    if (t > 20 && o.locked) reads.push(o.bpm);
+  }
+  const lo = Math.min(...reads);
+  const hi = Math.max(...reads);
+  assert.ok(hi - lo < 2, `the tempo wandered over [${lo.toFixed(1)}..${hi.toFixed(1)}]`);
+});
+
+test("a served tempo survives the track, and a wrong one is corrected", () => {
+  // The seed stays in play as a prior, not just as a starting point: a good
+  // figure holds through an ambiguous bar...
+  const good = createBeatTracker();
+  good.seed(175);
+  const a = readTempo(good, clubTrack(175));
+  assert.ok(Math.abs(a.median / 175 - 1) < 0.03, `seeded 175 drifted to ${a.median.toFixed(1)}`);
+  assert.equal(a.jumps, 0);
+  // ...and a figure the music disagrees with is still overruled by it.
+  const wrong = createBeatTracker();
+  wrong.seed(117);
+  const b = readTempo(wrong, clubTrack(175));
+  assert.ok(
+    Math.abs(b.median / 175 - 1) < 0.03,
+    `a wrong seed was obeyed: ${b.median.toFixed(1)}`
+  );
+});
+
 test("a seed outside the searchable range is refused", () => {
   const tr = createBeatTracker();
   assert.equal(tr.seed(0), false);

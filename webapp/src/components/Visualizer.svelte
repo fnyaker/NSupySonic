@@ -20,6 +20,7 @@
   import { api } from "../lib/api.js";
   import { subscribeFrames } from "../lib/audio/engine.js";
   import { createScene, levelFor } from "../lib/viz/index.js";
+  import { createGeometry } from "../lib/viz/geometry.js";
   import { createPalette } from "../lib/viz/palette.js";
   import { resolveTier, tierPreset, createGovernor } from "../lib/viz/quality.js";
 
@@ -38,6 +39,16 @@
   // engine itself (there is no audio in that tab to analyse).
   export let external = false;
   export let coverRgb = null;
+  // The artwork, when there is one in front of the canvas. Scenes route their
+  // best material around whatever box this element occupies instead of putting
+  // it behind the cover — see lib/viz/geometry.js. It is an ELEMENT rather than
+  // a set of numbers because the cover is 72vw on a phone, min(46vh, 100%) on a
+  // desktop and absent on the projector, and none of that belongs in a scene.
+  export let occluder = null;
+  // "box" uses the element's own rectangle (the desktop cover already is the
+  // artwork); "square" takes the largest centred square inside it, which is
+  // what the mobile cover carousel actually shows.
+  export let occluderShape = "box";
 
   let canvas;
   let box;
@@ -53,6 +64,7 @@
   let cssW = 0;
   let cssH = 0;
   let lastPaint = 0;
+  const geometry = createGeometry();
   let reduced = false;
   let dimmed = false;
   let idle = false;
@@ -69,12 +81,33 @@
   export function pushFrame(f) {
     if (!scene || !active) return;
     pal.update(f, f.dt);
-    scene.update(f, f.dt);
+    scene.update(f, f.dt, geometry.out);
   }
 
   function buildScene() {
     scene = createScene(mode, { preset, layout, intensity, reducedMotion: reduced });
-    if (scene && cssW) scene.resize(cssW, cssH, preset);
+    if (scene && cssW) scene.resize(cssW, cssH, preset, geometry.out);
+  }
+
+  // The artwork's box, in canvas coordinates. Measured rather than assumed, and
+  // only when the layout moves — `getBoundingClientRect` on two elements is
+  // nothing once per resize and would be a real cost once per frame.
+  function measureOccluder() {
+    if (!box) return null;
+    if (!occluder || typeof occluder.getBoundingClientRect !== "function") return null;
+    const r = occluder.getBoundingClientRect();
+    const b = box.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    let { width, height } = r;
+    let x = r.left - b.left;
+    let y = r.top - b.top;
+    if (occluderShape === "square") {
+      const side = Math.min(width, height);
+      x += (width - side) / 2;
+      y += (height - side) / 2;
+      width = height = side;
+    }
+    return { x, y, w: width, h: height };
   }
 
   function sizeCanvas() {
@@ -99,7 +132,8 @@
     // which clears the backing store — has to start from a clean state rather
     // than from whatever garbage the new dimensions left.
     g.clearRect(0, 0, w, h);
-    scene?.resize(w, h, preset);
+    geometry.set(w, h, measureOccluder());
+    scene?.resize(w, h, preset, geometry.out);
   }
 
   function startLoop() {
@@ -122,7 +156,7 @@
     }
     lastPaint = now;
     const t0 = performance.now();
-    scene.draw(g, cssW, cssH, pal.out);
+    scene.draw(g, cssW, cssH, pal.out, geometry.out);
     governor?.sample(performance.now() - t0, fps > 0 ? 1000 / fps : 16.7);
   }
 
@@ -137,7 +171,7 @@
     if (unsub || idle || external || !active || mode === "off") return;
     unsub = subscribeFrames((f) => {
       pal.update(f, f.dt);
-      scene?.update(f, f.dt);
+      scene?.update(f, f.dt, geometry.out);
     }, levelFor(mode));
   }
   function detach() {
@@ -221,6 +255,17 @@
     sizeCanvas();
     detach();
     attach();
+  }
+  // The player binds its cover after this component has mounted, so the
+  // occluder arrives late; and it changes size with the viewport, which the
+  // observer catches. One owner for the subscription, here, rather than a
+  // second one in onMount that would have to agree with it.
+  let watched = null;
+  $: if (ro && occluder !== watched) {
+    if (watched) ro.unobserve(watched);
+    watched = occluder;
+    if (watched) ro.observe(watched);
+    sizeCanvas();
   }
   $: scene?.setOptions?.({ intensity, reducedMotion: reduced });
   $: pal.setMode(palette);

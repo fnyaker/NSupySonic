@@ -74,7 +74,7 @@ export FLASK_APP="supysonic.web:create_application()"; flask run   # backend dev
 # Web UI (Svelte SPA)
 cd webapp && npm install && npm run build            # -> supysonic/webui/dist (gitignored)
 cd webapp && npm run dev                             # hot reload; proxies /api -> localhost:5000
-cd webapp && npm test                                # node --test: the analysis DSP, the genre trainers, the cover loader (no deps)
+cd webapp && npm test                                # node --test: the analysis DSP, the animation scenes, the genre trainers, the cover loader (no deps)
 
 # Deezer CLI
 supysonic-cli deezer login-test                      # check the ARL works
@@ -687,15 +687,54 @@ afterwards read as a full-strength kick.
 
 `tempo.js` is a spectral-flux onset function on a fixed 100 Hz grid, an autocorrelation summed over
 harmonics, and a phase-locked loop. Once locked, beats are **predicted**, not detected, so a scene
-lands on the beat instead of a detector's latency after it. Three details are there because the
-tracker was wrong without them, all of them at the tempi this player exists for: the ODF is smoothed
+lands on the beat instead of a detector's latency after it.
+
+**The reading has to be ONE number.** A tempo that walks off to a harmonic and back — 120, then 250,
+then 120 — is worse than no tempo at all: everything downstream (the animation's grid, the
+classifier's `tempoTrust`, the label in the header) re-times with it. Six things keep it still, and
+each of them was measured against a tracker that did not have it. The generators in
+`webapp/test/audio.test.mjs` schedule onsets on a timeline and render them into frames (asking "is
+this frame near a beat" silently drops events above ~180 BPM, and a tracker fed a train with holes
+in it is being tested against nothing); across a 70→250 BPM sweep of busy material the old tracker
+got 54 of 74 cases exactly right with 381 tempo jumps between them, this one gets 72 with 1:
+
+- the ODF is **conditioned** before anything reads it. A local mean (~120 ms) is subtracted and the
+  rest half-wave rectified, which removes a riser, a filter sweep or a reverb wash — all of them
+  raise the flux *continuously*, and a continuous rise is not a beat. What is left is expressed in
+  units of the track's own average onset and **clipped**, so one enormous FX stab is worth about one
+  and a quarter kicks in an eight-second window instead of twenty. The clip is deliberately far
+  above an ordinary onset (25×): flattening a kick and a hi-hat onto the same value is its own way
+  of losing the tempo.
+- the autocorrelation runs on a **bass-weighted** mix, because every genre this player is pointed at
+  puts its beat there and the treble is where the effects and the offbeat hats live;
+- the harmonic-summed correlation is **averaged over time** (a running tempogram, ~2 s of estimates
+  over an 8 s window). One estimate is a snapshot an FX bar can dominate; the average cannot be
+  moved by one bar of anything;
+- a shortlist of candidates is then scored on how well the ODF actually **folds onto each one's
+  grid**, normalised by what a window that size would catch from noise — autocorrelation cannot tell
+  a tempo from twice that tempo, and a half-empty grid can;
+- the octave is arbitrated by **folding the bass**, as a graded vote held over several estimates with
+  a dead band and a cooldown, asked about **the level the grid is on** rather than about whatever the
+  fresh autocorrelation peaked at. To go *faster* only the bass may answer (an offbeat hi-hat is not
+  a beat); to go *slower* the whole band is asked, or a 140 BPM track with a kick every other beat
+  reports 70;
+- nothing moves the grid without **persistence**: a candidate that is neither the current tempo nor
+  an octave of it must win five consecutive estimates, and the incumbent carries a bonus. A tempo
+  somebody measured over the whole track (Deezer's `bpm`, via `seed`) stays in play as a prior on
+  every later estimate rather than only as a starting point — beatable, so a wrong figure is still
+  corrected.
+
+**And a breakdown is not a tempo change.** With no drums in it the last seconds carry no onsets and
+the autocorrelation is reading a pad; the estimate is skipped entirely (both going into the quiet
+part and coming out of it, which is the window that is three-quarters empty) and the grid coasts on
+what the music had before. That alone is where "128 BPM, then 64, then 255" came from.
+
+Two older details are still there for the same reasons they always were: the ODF is smoothed
 (~20 ms) before the autocorrelation, or a period that is not a whole number of grid slots (174 BPM
-is 34.5) loses half its correlation to its own double; every candidate is divided by the **same**
-harmonic weight, or slow candidates get a free pass because their harmonics fall off the end of the
-search range; and the octave is arbitrated by **folding the bass onset function**, because an
-offbeat hi-hat lives in the treble and cannot fool it. `webapp/test/audio.test.mjs` pins all of it
-(`npm test`, no dependency to install) — the wall-clock bug it caught would have made the tracker
-drift with the frame rate.
+is 34.5) loses half its correlation to its own double; and every candidate is divided by the
+**same** harmonic weight, or slow candidates get a free pass because their harmonics fall off the
+end of the search range. `webapp/test/audio.test.mjs` pins all of it (`npm test`, no dependency to
+install) — the wall-clock bug it caught would have made the tracker drift with the frame rate.
 
 `style.js` reads the kick's shape (attack, decay, click, grit → soft / hard / industrial) and a
 smoothed family vector (techno, hardtekk, zaag, frenchcore, uptempo, pieep, krach, rock, metal,
@@ -711,8 +750,12 @@ frenchcore, so there is a THIRD output: **`look`, seven numbers** (`LOOK_KEYS`: 
 punch, smooth, warm, melodic, chaos) blended by the same family weights. It is deliberately not a
 name — a name cannot be interpolated — and every family starts from its archetype's look and
 overrides only what it actually differs on, so a new family costs one line. `smart.js` composes on
-it (`smooth` decides the trail wash, `density` the layer weight) and `palette.js` leans the chosen
-hue a third of the way toward red or cyan on `warm`, never replacing the source the user picked.
+it (four of its nine layers are weighted by it outright, `smooth` decides the trail wash, `density`
+the layer weight) and `palette.js` leans the chosen hue a third of the way toward red or cyan on
+`warm`, never replacing the source the user picked. A **served** verdict names a family, so
+`style.familyLook(id)` turns that name back into the seven numbers and `engine.merged` carries
+them: without it the look vector was dropped exactly when the server had measured the track, and a
+track that had been analysed lost every genre-specific layer while an unmeasured one kept them.
 
 **A quiet passage is not a different genre.** A breakdown has no drums, no pulse and no grit, so
 every measurement says "ambient" and the whole look of a hardcore track would change halfway
@@ -725,16 +768,61 @@ a palette whose SOURCE the user picks (cover art / the spectrum itself / fixed s
 tiers that `auto`-resolve from the device and **step down on their own** when a frame overruns its
 budget. `Visualizer.svelte` hosts the canvas: `scene.update()` runs on every analysis frame (~94 Hz,
 so a beat is never missed) and `scene.draw()` on rAF under the user's frame cap — the two rates are
-separate on purpose. `smart.js` is not five visualizers with a switch; it is five layers drawn at
-the weight their archetype holds, so a track that is half sung and half instrumental looks like
-both. Réglages → Animations configures all of it around a live preview and a readout of what the
-engine currently believes.
+separate on purpose. Réglages → Animations configures all of it around a live preview and a readout
+of what the engine currently believes.
+
+**A scene draws on the FRAME, never on `min(w, h)`** (`lib/viz/geometry.js`). Building everything
+around an inscribed circle produced the same fault twice: on a 16:9 beamer a third of the picture
+stayed black, and in the full-screen player the brightest part of every scene was behind the album
+cover. Both are answered by two primitives every scene (except `bars`) is written on:
+
+- `place(angle, radial, aniso)` — polar coordinates for *this* frame. `radial` 0 is the inner
+  boundary (the artwork's rim, or the centre when there is none) and 1 is the frame's own edge along
+  that angle, so a ring of points at radial 1 traces the screen rather than a circle inscribed in
+  it. `aniso` below 1 blends back toward a circle through the corners, because a *shape* drawn at
+  full anisotropy stops reading as a shape and starts reading as a border round the picture.
+- `ringRx/ringRy(t)` — an expanding ring that starts at the artwork's rim and leaves through the
+  corners, leaning partway toward the frame's aspect (`RING_ANISO`): fully anisotropic is a squashed
+  oval, fully isotropic never touches the sides of a wide screen while it is still bright.
+
+The artwork is **measured from the DOM**, never guessed: `Visualizer.svelte` takes an `occluder`
+element (the desktop cover box; the mobile carousel, from which `occluderShape="square"` takes the
+centred square the slide actually shows) and re-measures it on resize only. The projector and the
+settings preview pass none, and get the whole frame.
+
+**Two rules about compositing, both measured rather than eyeballed.** Everything is drawn additively
+over a translucent wash, so a scene's steady-state brightness is roughly `alpha / wash` — tripling
+what a scene covers without touching either is how `pulse` went from a glow in the middle to a white
+rectangle. And a canvas is eight bits per channel: a ring crossing the frame in a third of a second
+leaves one trail copy per frame, and a dozen quantisation steps on a dark background is a set of
+concentric circles you can count. So a ring travels at a **constant** speed (an ease-out bunches its
+trail exactly where there are most copies), is **wider than its own per-frame step** so the copies
+merge into one soft shell, and the wash has a **floor** so only three or four copies are ever alive.
+
+**`smart.js` is nine layers, not five.** The five archetypes (sustain / voice / groove / hard /
+rock) are what can be blended, and they are why a vocal house track and a vocal metal track do not
+look alike — but psytrance, frenchcore, drum & bass and speedcore all pool into `hard`, and `hard`
+drew one thing, which is what "the smart engine is too generic" was. The other four are weighted by
+the `look` vector instead, which is exactly the axis those genres differ on: **warp** (speed —
+streaks rushing out to the corners, one volley per beat), **lattice** (chaos — a grid that snaps on
+the beat and tears into offset slabs), **orbit** (melody — an arc per sounding pitch class, each at
+the radius its own chroma earns) and **haze** (calm — slow blooms, for the music that has no events
+to draw). Each layer's `want()` reads the mix, the weights are smoothed, and only the strongest
+`preset.layers + 1` are drawn — nine at once is soup as well as work. Inside the layers the look
+keeps deciding: the shockwave goes jagged with `chaos`, the dot grid's pitch follows `density`, the
+streak count follows `motion`. `webapp/test/viz.test.mjs` drives every scene against a recording
+2D context and pins the two properties a person would otherwise have to eyeball — that each one
+reaches all four edges of a 16:9 frame, and that under a centred cover less than a quarter of what
+it draws lands behind it — plus that frenchcore and ambient light genuinely different layers.
 
 **The projector window** (`routes/Viz.svelte`, `lib/viz/bridge.js`, `lib/viz/host.js`) is the same
 SPA on `#/viz`, opened in a second tab to be dragged onto a beamer. It plays **nothing**: a second
 `<audio>` would be a second stream, a second decode and a second playhead drifting out of sync with
 the room within a minute. The playing tab publishes its analysis frames over a BroadcastChannel
-(~700 bytes at 45 Hz) and the projector renders them — one decode, one analysis, one timeline. A
+(~800 bytes at 45 Hz — the melodic channel, the dynamics gate and the `look` vector are in there
+too; without them the projector ran the same scenes with no quiet passages, no melody layer and the
+neutral default look, which is most of why the second screen looked more generic than the player it
+mirrors) and the projector renders them — one decode, one analysis, one timeline. A
 live viewer is also what tells the engine to keep running while the player tab is hidden. That
 window never writes the playback session back (`DISPLAY_ONLY` in `stores.js`): its snapshot is
 frozen at the moment it opened, and writing it would roll the real player's position back to then.
