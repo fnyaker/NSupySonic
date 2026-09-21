@@ -25,6 +25,7 @@
 // its heartbeat holds, and only lets another take over once it goes quiet.
 
 import { setBackgroundAnalysis, BAND_COUNT } from "../audio/engine.js";
+import { LOOK_KEYS } from "../audio/style.js";
 
 const CHANNEL = "nsupysonic-viz";
 const PUBLISH_HZ = 45; // the projector renders at 60; 45 is indistinguishable
@@ -97,6 +98,8 @@ export function createPublisher({ onViewers } = {}) {
   let last = 0;
   let metaCache = null;
   const bands = new Float32Array(BAND_COUNT);
+  const chroma = new Float32Array(12);
+  const look = new Float32Array(LOOK_KEYS.length);
 
   function prune() {
     const now = Date.now();
@@ -147,12 +150,17 @@ export function createPublisher({ onViewers } = {}) {
           frame.energy.high,
           frame.energy.air,
         ],
-        // Only the descriptors the scenes actually read. Sending the whole
-        // feature object would triple the payload for fields nothing draws.
+        // Only the descriptors the scenes actually read — but ALL of them. The
+        // melodic channel and the dynamics gate were missing, so the projector
+        // ran the same scenes with `dynamics` undefined (no quiet passages) and
+        // no chroma at all (no melody layer), which is most of why the second
+        // screen looked more generic than the player it mirrors.
         f: f
           ? [f.level, f.flux, f.lowFlux, f.midFlux, f.highFlux, f.centroidN, f.flatness,
-             f.percussivity, f.vocalMod, f.crest, f.silent ? 1 : 0, f.kick]
+             f.percussivity, f.vocalMod, f.crest, f.silent ? 1 : 0, f.kick,
+             f.dynamics, f.tonal, f.melody, f.melodyPitch, f.melodyFlux, f.chordChange]
           : null,
+        c: f?.chroma ? (chroma.set(f.chroma), chroma) : null,
         b: [b.bpm, b.confidence, b.phase, b.beat ? 1 : 0, b.beatIndex, b.barPos,
             b.beatsPerBar, b.downbeat ? 1 : 0, b.onset, b.kickPulse, b.period,
             b.locked ? 1 : 0],
@@ -162,6 +170,10 @@ export function createPublisher({ onViewers } = {}) {
               l: st.dominantLabel,
               c: st.confidence,
               a: st.archetypes,
+              // The look vector: seven numbers that say what the SUBGENRE looks
+              // like. Without it every projector scene fell back to the neutral
+              // default and frenchcore drew the same picture as techno.
+              w: st.look ? (LOOK_KEYS.forEach((k, i) => (look[i] = st.look[k])), look) : null,
               k: [st.kick.type, st.kick.strength, st.kick.decay, st.kick.hit ? 1 : 0],
             }
           : null,
@@ -204,13 +216,19 @@ export function createSubscriber(onFrame, onMeta, onState) {
   const features = {
     level: 0, flux: 0, lowFlux: 0, midFlux: 0, highFlux: 0, centroidN: 0,
     flatness: 0, percussivity: 0, vocalMod: 0, crest: 0, silent: true, kick: 0,
+    dynamics: 1, tonal: 0, melody: 0, melodyPitch: 0.5, melodyFlux: 0, chordChange: 0,
+    chroma: new Float32Array(12),
   };
   const beat = {
     bpm: 0, confidence: 0, phase: 0, beat: false, beatIndex: 0, barPos: 0,
     beatsPerBar: 4, downbeat: false, onset: 0, kickPulse: 0, period: 0.5, locked: false,
   };
   const kick = { type: "soft", strength: 0, decay: 0.1, hit: false };
-  const style = { dominant: "", dominantLabel: "", confidence: 0, archetypes: null, kick };
+  const look = {};
+  for (const k of LOOK_KEYS) look[k] = 0;
+  const style = {
+    dominant: "", dominantLabel: "", confidence: 0, archetypes: null, look: null, kick,
+  };
   const frame = {
     t: 0, dt: 1 / 60,
     bands: new Float32Array(BAND_COUNT),
@@ -287,7 +305,15 @@ export function createSubscriber(onFrame, onMeta, onState) {
         features.midFlux = a[3]; features.highFlux = a[4]; features.centroidN = a[5];
         features.flatness = a[6]; features.percussivity = a[7]; features.vocalMod = a[8];
         features.crest = a[9]; features.silent = !!a[10]; features.kick = a[11] || 0;
+        // Older publishers stop at index 11, so keep the neutral defaults when
+        // the tail is missing: a projector and a player can be on different
+        // builds for as long as one of the two tabs stays open.
+        if (a.length > 12) {
+          features.dynamics = a[12]; features.tonal = a[13]; features.melody = a[14];
+          features.melodyPitch = a[15]; features.melodyFlux = a[16]; features.chordChange = a[17];
+        }
       }
+      if (m.c) features.chroma.set(m.c);
       const b = m.b;
       beat.bpm = b[0]; beat.confidence = b[1]; beat.phase = b[2]; beat.beat = !!b[3];
       beat.beatIndex = b[4]; beat.barPos = b[5]; beat.beatsPerBar = b[6];
@@ -296,6 +322,10 @@ export function createSubscriber(onFrame, onMeta, onState) {
       if (m.s) {
         style.dominant = m.s.d; style.dominantLabel = m.s.l; style.confidence = m.s.c;
         style.archetypes = m.s.a;
+        if (m.s.w) {
+          for (let i = 0; i < LOOK_KEYS.length; i++) look[LOOK_KEYS[i]] = m.s.w[i];
+          style.look = look;
+        } else style.look = null;
         kick.type = m.s.k[0]; kick.strength = m.s.k[1];
         kick.decay = m.s.k[2]; kick.hit = !!m.s.k[3];
         frame.style = style;

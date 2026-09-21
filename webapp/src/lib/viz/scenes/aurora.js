@@ -6,6 +6,11 @@
 // Each ribbon is driven by one slice of the spectrum, so the bass ribbon rolls
 // slowly and deeply while the top one ripples — the motion itself carries the
 // music rather than just the brightness.
+//
+// The ribbons use the WHOLE height, and where the artwork is in the way they
+// are dealt into the strips above and below it instead of being drawn behind
+// it. The old fixed 0.22..0.78 band was the worst of both: a letterboxed strip
+// on a beamer, and exactly the part of a phone the cover covers.
 
 import { approach, clamp, hsl, wave } from "../util.js";
 
@@ -39,7 +44,20 @@ export function createAuroraScene(opts = {}) {
     phase += dt * speed;
   }
 
-  function draw(g, w, h, pal) {
+  // Where ribbon `t` (0..1) sits. Without artwork: the full height. With it:
+  // the free strips above and below, in proportion to how much of each there
+  // is — so on a phone the ribbons frame the cover and on a wide screen where
+  // the cover leaves little vertical room they simply spread out again.
+  function baseline(t, h, geom) {
+    const top = geom.hole ? geom.cy - geom.hh : 0;
+    const bot = geom.hole ? geom.cy + geom.hh : h;
+    const room = top + (h - bot);
+    if (!geom.hole || room < h * 0.3) return h * (0.07 + t * 0.86);
+    const d = t * room;
+    return d < top ? h * 0.03 + d * 0.9 : bot + (d - top) * 0.92;
+  }
+
+  function draw(g, w, h, pal, geom) {
     g.globalCompositeOperation = "source-over";
     const bg = g.createLinearGradient(0, 0, 0, h);
     bg.addColorStop(0, hsl(pal.hue - 18, pal.sat * 0.5, 0.07, 1));
@@ -49,25 +67,33 @@ export function createAuroraScene(opts = {}) {
 
     g.globalCompositeOperation = "lighter";
     const steps = Math.max(24, Math.min(96, Math.floor(w / 12)));
+    // Everything is sized against the ribbon's own SLOT — the height each one
+    // gets — rather than against the frame. Sizing on the frame meant that
+    // spreading them over the full height (instead of the middle half) made
+    // each one two thirds taller as well, six of them overlapped completely,
+    // and the scene stopped being ribbons and became a flat poster.
+    const span = geom.hole ? Math.max(h * 0.28, h - 2 * geom.hh) : h;
+    const slot = span / RIBBONS;
     for (let r = 0; r < RIBBONS; r++) {
       const t = r / (RIBBONS - 1 || 1);
-      const base = h * (0.22 + t * 0.56);
-      const thick = h * (0.05 + amp[r] * 0.2) * (0.6 + level * 0.6);
+      const base = baseline(t, h, geom);
+      const thick = slot * (0.45 + amp[r] * 1.05) * (0.6 + level * 0.6);
       const hue = pal.low + (pal.high - pal.low) * t;
-      const alpha = (0.14 + amp[r] * 0.42) * preset.glow;
+      const alpha = (0.07 + amp[r] * 0.2) * preset.glow;
+      const swing = slot * (0.45 + amp[r] * 0.9);
 
       g.beginPath();
       for (let i = 0; i <= steps; i++) {
         const x = (i / steps) * w;
-        const n = wave(i / steps * 3.2, phase * (0.6 + t), r * 3.7);
-        const y = base + n * h * (0.06 + amp[r] * 0.14);
+        const n = wave((i / steps) * 3.2, phase * (0.6 + t), r * 3.7);
+        const y = base + n * swing;
         if (i === 0) g.moveTo(x, y);
         else g.lineTo(x, y);
       }
       for (let i = steps; i >= 0; i--) {
         const x = (i / steps) * w;
-        const n = wave(i / steps * 3.2, phase * (0.6 + t), r * 3.7);
-        const y = base + n * h * (0.06 + amp[r] * 0.14) + thick;
+        const n = wave((i / steps) * 3.2, phase * (0.6 + t), r * 3.7);
+        const y = base + n * swing + thick;
         g.lineTo(x, y);
       }
       g.closePath();
