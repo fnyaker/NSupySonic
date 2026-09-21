@@ -653,6 +653,38 @@ smart). Three things in there are load-bearing:
   rAF stops in a hidden tab, which is the normal case for the player once the projector window is
   in front of it. rAF is the fallback, and carries the first frames while the worklet compiles.
 
+**`features.js` — three rules, each of which replaced something measurably wrong:**
+
+- The onset function is **SuperFlux** (Böck & Widmer, DAFx-13): log magnitude, differenced against
+  a version of the frame ~20 ms back that has been **maximum-filtered across three bins**. A
+  partial that merely drifted is covered by its own neighbour's maximum and contributes nothing;
+  energy appearing where there was none still does. Plain flux fired on every vibrato and every
+  tremolo pad — measured, a sustained chord with no attack anywhere in it produced `midFlux` of
+  **0.987 out of 1**. It now produces 0.000. The lookback is indexed by TIME, not by frame count,
+  because this engine's clock is not guaranteed regular, and consecutive frames of a 2048-sample
+  window overlap almost entirely (their difference is window smear, not music).
+- **Level is information.** Adaptive whitening divided every bin by its own running maximum, which
+  makes a whisper and a wall of sound produce the same numbers *by design* — right for a beat
+  tracker, wrong for an animation asked to be calm when the music is calm. `dynamics` is this
+  moment against `loudRef` (the track's own loud level: up in 0.4 s, down over 25 s), and
+  **everything a scene draws is multiplied by it** while the tracker keeps the ungated signal, so
+  the grid survives a breakdown even when the animation settles. Measured on identical material 12
+  dB down, the old extractor read the same kick strength (0.365 against 0.355); it now reads 0.122.
+  End to end, a −20 dB breakdown used to render **1.23× brighter than the drop** and now renders
+  0.60×.
+- **There is a melody in there too.** One exponential average per bin splits what PERSISTS (a held
+  note, a pad, a voice) from what APPEARS (a drum), and the persistent half carries `chroma`,
+  `melody`, `melodyPitch`, `melodyFlux` and `chordChange`. The chroma counts how far a bin stands
+  above the third of an octave around it — a prefix sum makes each window O(1) — and divides by
+  how many bins land on each pitch class: an FFT is linear and pitch is logarithmic, so raw energy
+  gave flat noise a strongly peaked chroma and it read as a clear melody, exactly backwards.
+
+The kick keeps its fast/slow envelope ratio (a sustained 808 drives both envelopes together and
+fires nothing; a kick on top of it does not), and gains what it had neither of: a **refractory
+window** so a ring-out is not a second hit, and the level gate above. Its reference decays over
+~11 s rather than 1.5 s — the old one was erased by any breakdown, so the first small movement
+afterwards read as a full-strength kick.
+
 `tempo.js` is a spectral-flux onset function on a fixed 100 Hz grid, an autocorrelation summed over
 harmonics, and a phase-locked loop. Once locked, beats are **predicted**, not detected, so a scene
 lands on the beat instead of a detector's latency after it. Three details are there because the
@@ -673,6 +705,20 @@ the renderer blends on — animations can interpolate between five archetypes, n
 genre names, and a scene that re-drew itself every time the classifier changed its mind between two
 neighbouring hardcore subgenres would be unwatchable. Nothing hard-switches: both outputs are
 weights, smoothed over seconds, and the dominant family changes with hysteresis.
+
+Five archetypes are enough to blend between and nowhere near enough to tell hardtekk from
+frenchcore, so there is a THIRD output: **`look`, seven numbers** (`LOOK_KEYS`: motion, density,
+punch, smooth, warm, melodic, chaos) blended by the same family weights. It is deliberately not a
+name — a name cannot be interpolated — and every family starts from its archetype's look and
+overrides only what it actually differs on, so a new family costs one line. `smart.js` composes on
+it (`smooth` decides the trail wash, `density` the layer weight) and `palette.js` leans the chosen
+hue a third of the way toward red or cyan on `warm`, never replacing the source the user picked.
+
+**A quiet passage is not a different genre.** A breakdown has no drums, no pulse and no grit, so
+every measurement says "ambient" and the whole look of a hardcore track would change halfway
+through and change back at the drop. The classifier's adaptation rate is therefore scaled by
+`dynamics²`: at half level it only slows a little, at a twentieth it all but freezes and holds what
+it knows until there is something to form an opinion from.
 
 **Animations** (`webapp/src/lib/viz/`): a scene registry (`off`, `bars`, `pulse`, `aurora`, `smart`),
 a palette whose SOURCE the user picks (cover art / the spectrum itself / fixed schemes), and quality

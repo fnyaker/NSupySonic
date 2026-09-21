@@ -13,7 +13,7 @@
 // A palette exposes a base hue plus three accents (low / mid / high) and is
 // updated once per analysis frame. Scenes read it; nothing allocates.
 
-import { approach, approachAngle, clamp, rgbToHsl } from "./util.js";
+import { approach, approachAngle, clamp, mixAngle, rgbToHsl } from "./util.js";
 
 export const PALETTES = [
   { id: "cover", label: "Pochette" },
@@ -110,6 +110,21 @@ export function createPalette(mode = "cover") {
       targetSat = p.sat;
       targetLight = p.light;
       targetSpread = p.spread;
+    }
+
+    // The genre's own temperature, as a pull rather than an override: the user
+    // picked the palette SOURCE and that choice stands, but frenchcore and
+    // psytrance do not want the same end of it. `warm` is 0 for cold and 1 for
+    // hot, so this leans the hue a third of the way toward red or toward cyan
+    // and leaves the rest of the palette alone. See style.js's LOOK_KEYS.
+    const look = frame.style?.look;
+    if (look) {
+      const towards = look.warm > 0.5 ? 14 : 196; // red, or cyan
+      const pull = Math.abs(look.warm - 0.5) * 0.62;
+      targetHue = mixAngle(targetHue, towards, pull);
+      // A harmony that is moving earns a little more colour; a held drone does
+      // not. This is the melodic channel showing up in the palette at all.
+      targetSat = clamp(targetSat + (f?.chordChange || 0) * 0.12, 0, 1);
     }
 
     // Ease everything: an instant hue change on a full-screen background is a

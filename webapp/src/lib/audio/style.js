@@ -41,6 +41,102 @@ function below(x, t, w) {
 // The visual archetypes the renderer understands.
 export const ARCHETYPES = ["sustain", "voice", "groove", "hard", "rock"];
 
+// --- what a genre LOOKS like ------------------------------------------------
+// Five archetypes are enough for a renderer to blend between, and not nearly
+// enough to tell hardtekk from frenchcore — which is the whole complaint the
+// `look` vector answers. It is deliberately NOT a name: a name cannot be
+// interpolated, and a scene that re-drew itself every time the classifier
+// changed its mind between two neighbouring hardcore subgenres would be
+// unwatchable. It is seven numbers, blended by the same family weights the
+// archetypes are pooled from, so it moves exactly as smoothly as they do and
+// says far more.
+//
+//   motion   how fast things travel
+//   density  how much is on screen
+//   punch    how hard a beat hits the image
+//   smooth   how much easing and trail (the opposite of snap)
+//   warm     palette temperature bias — 0 is cold and blue, 1 is hot and red
+//   melodic  how much the melody drives it rather than the drums
+//   chaos    how much randomness, glitch and distortion belongs in it
+export const LOOK_KEYS = ["motion", "density", "punch", "smooth", "warm", "melodic", "chaos"];
+
+// Every family starts from its archetype and overrides only what it actually
+// differs on, so a new family costs one line and the table stays readable.
+const ARCHETYPE_LOOK = {
+  sustain: { motion: 0.16, density: 0.28, punch: 0.1, smooth: 0.93, warm: 0.45, melodic: 0.88, chaos: 0.04 },
+  voice: { motion: 0.34, density: 0.42, punch: 0.3, smooth: 0.74, warm: 0.62, melodic: 0.8, chaos: 0.08 },
+  groove: { motion: 0.56, density: 0.58, punch: 0.58, smooth: 0.5, warm: 0.5, melodic: 0.45, chaos: 0.16 },
+  hard: { motion: 0.82, density: 0.72, punch: 0.92, smooth: 0.2, warm: 0.7, melodic: 0.22, chaos: 0.45 },
+  rock: { motion: 0.62, density: 0.55, punch: 0.72, smooth: 0.36, warm: 0.7, melodic: 0.5, chaos: 0.3 },
+};
+
+// Only where a subgenre genuinely reads differently from its neighbours. The
+// numbers are the point of this table, so each line is a claim about the music:
+// psytrance is fast and cold and relentless; lofi barely moves and is warm;
+// zaag is a cold buzzing lead and frenchcore is a red wall.
+const LOOK_OVERRIDES = {
+  ambient: { motion: 0.06, density: 0.16, punch: 0.04, warm: 0.38 },
+  strings: { motion: 0.2, density: 0.34, warm: 0.55, melodic: 0.95 },
+  jazz: { motion: 0.4, density: 0.46, warm: 0.7, chaos: 0.2, smooth: 0.66 },
+  lofi: { motion: 0.2, density: 0.3, punch: 0.22, smooth: 0.9, warm: 0.78, chaos: 0.14 },
+  synthwave: { motion: 0.44, density: 0.5, smooth: 0.8, warm: 0.88, melodic: 0.78 },
+  soul: { warm: 0.8, melodic: 0.82, smooth: 0.8 },
+  blues: { warm: 0.78, melodic: 0.85, motion: 0.3 },
+  folk: { motion: 0.24, density: 0.3, warm: 0.66, melodic: 0.9, chaos: 0.04 },
+  country: { warm: 0.72, melodic: 0.85, motion: 0.36 },
+  rnb: { warm: 0.74, smooth: 0.82, melodic: 0.8 },
+  reggae: { motion: 0.36, warm: 0.62, smooth: 0.76, melodic: 0.6 },
+  dancehall: { motion: 0.5, warm: 0.74, chaos: 0.2 },
+  reggaeton: { motion: 0.52, warm: 0.76, punch: 0.62 },
+  hiphop: { motion: 0.42, punch: 0.66, warm: 0.6, melodic: 0.4, smooth: 0.6 },
+  rap: { motion: 0.46, punch: 0.7, warm: 0.62, melodic: 0.35 },
+  trap: { motion: 0.5, density: 0.5, punch: 0.78, warm: 0.42, chaos: 0.26, melodic: 0.3 },
+  phonk: { motion: 0.54, punch: 0.8, warm: 0.3, chaos: 0.34, smooth: 0.4 },
+  drill: { motion: 0.5, punch: 0.74, warm: 0.3, chaos: 0.3 },
+  house: { motion: 0.5, density: 0.55, warm: 0.6, smooth: 0.58, melodic: 0.55 },
+  afrohouse: { motion: 0.52, warm: 0.78, melodic: 0.6, density: 0.6 },
+  amapiano: { motion: 0.44, warm: 0.76, smooth: 0.7, melodic: 0.62 },
+  disco: { motion: 0.56, warm: 0.85, melodic: 0.7, density: 0.62 },
+  funk: { motion: 0.58, warm: 0.84, melodic: 0.68, punch: 0.62 },
+  garage: { motion: 0.62, density: 0.6, chaos: 0.24, warm: 0.5 },
+  breakbeat: { motion: 0.7, density: 0.66, chaos: 0.34, punch: 0.66 },
+  techno: { motion: 0.66, density: 0.62, warm: 0.28, smooth: 0.38, melodic: 0.28, chaos: 0.2 },
+  hardtechno: { motion: 0.8, density: 0.7, warm: 0.3, punch: 0.82, chaos: 0.34, smooth: 0.24 },
+  trance: { motion: 0.62, density: 0.7, warm: 0.3, smooth: 0.72, melodic: 0.84 },
+  psytrance: { motion: 0.9, density: 0.86, warm: 0.22, smooth: 0.3, melodic: 0.4, chaos: 0.32 },
+  dance: { motion: 0.58, warm: 0.66, melodic: 0.66, density: 0.6 },
+  germanparty: { motion: 0.56, warm: 0.88, melodic: 0.74, chaos: 0.12 },
+  dnb: { motion: 0.88, density: 0.8, punch: 0.72, warm: 0.36, chaos: 0.34, smooth: 0.26, melodic: 0.4 },
+  dubstep: { motion: 0.7, density: 0.7, punch: 0.88, warm: 0.34, chaos: 0.55, smooth: 0.2 },
+  hardstyle: { motion: 0.78, punch: 0.95, warm: 0.62, melodic: 0.45, chaos: 0.3 },
+  rawstyle: { motion: 0.84, punch: 0.98, warm: 0.5, chaos: 0.5, melodic: 0.24 },
+  hardtekk: { motion: 0.8, density: 0.66, punch: 0.86, warm: 0.5, melodic: 0.5, chaos: 0.28 },
+  zaag: { motion: 0.86, density: 0.78, punch: 0.88, warm: 0.26, melodic: 0.34, chaos: 0.5 },
+  frenchcore: { motion: 0.94, density: 0.82, punch: 0.98, warm: 0.86, chaos: 0.55, melodic: 0.2 },
+  uptempo: { motion: 0.97, density: 0.88, punch: 1, warm: 0.78, chaos: 0.66, melodic: 0.14 },
+  hardcore: { motion: 0.9, density: 0.8, punch: 0.95, warm: 0.74, chaos: 0.5 },
+  tribecore: { motion: 0.88, density: 0.84, warm: 0.6, chaos: 0.6, melodic: 0.2 },
+  speedcore: { motion: 1, density: 0.95, punch: 1, warm: 0.8, chaos: 0.88, melodic: 0.08, smooth: 0.1 },
+  industrial: { motion: 0.76, density: 0.7, warm: 0.2, chaos: 0.8, melodic: 0.12, smooth: 0.16 },
+  krach: { motion: 0.95, density: 0.9, warm: 0.4, chaos: 0.95, melodic: 0.06, smooth: 0.08 },
+  pieep: { motion: 0.88, density: 0.62, warm: 0.36, chaos: 0.42, melodic: 0.62 },
+  hardpingpong: { motion: 0.9, density: 0.7, warm: 0.44, chaos: 0.5, melodic: 0.4 },
+  rock: { motion: 0.6, warm: 0.72, melodic: 0.55, chaos: 0.26 },
+  hardrock: { motion: 0.7, punch: 0.8, warm: 0.76, chaos: 0.36 },
+  punk: { motion: 0.82, punch: 0.8, warm: 0.74, chaos: 0.5, smooth: 0.2 },
+  metal: { motion: 0.78, density: 0.72, punch: 0.84, warm: 0.62, chaos: 0.5, smooth: 0.22 },
+  brutal: { motion: 0.9, density: 0.82, punch: 0.92, warm: 0.5, chaos: 0.75, smooth: 0.12 },
+  indie: { motion: 0.48, warm: 0.66, melodic: 0.7, smooth: 0.55 },
+  pop: { motion: 0.46, warm: 0.7, melodic: 0.74, smooth: 0.64 },
+  vocalPop: { motion: 0.4, warm: 0.7, melodic: 0.82, smooth: 0.7 },
+  electronic: { motion: 0.58, warm: 0.5, melodic: 0.5 },
+};
+
+function lookFor(family) {
+  const base = ARCHETYPE_LOOK[family.a] || ARCHETYPE_LOOK.groove;
+  return { ...base, ...(LOOK_OVERRIDES[family.id] || {}) };
+}
+
 // Genre families. `w` is the weighting function; `a` is the archetype it feeds.
 // The comment on each says which measurement is actually doing the work, so a
 // later tweak knows what it is trading against.
@@ -652,6 +748,7 @@ const FAMILIES = [
 ];
 
 const FAMILY_BY_ID = new Map(FAMILIES.map((f) => [f.id, f]));
+const FAMILY_LOOK = new Map(FAMILIES.map((f) => [f.id, lookFor(f)]));
 export const FAMILY_LIST = FAMILIES.map(({ id, label, a }) => ({ id, label, archetype: a }));
 
 // --- the kick ---------------------------------------------------------------
@@ -777,6 +874,8 @@ export function createStyleClassifier() {
   const kick = createKickAnalyser();
   const weights = new Map(FAMILIES.map((f) => [f.id, 0]));
   const arche = { sustain: 0.2, voice: 0.2, groove: 0.2, hard: 0.2, rock: 0.2 };
+  const look = {};
+  for (const k of LOOK_KEYS) look[k] = ARCHETYPE_LOOK.groove[k];
   let dominant = "";
   let dominantSince = 0;
   let pendingDominant = "";
@@ -786,6 +885,9 @@ export function createStyleClassifier() {
     kick: kick.out,
     families: [], // [{id, label, weight}], strongest first
     archetypes: arche,
+    // Seven numbers saying what this music should LOOK like, blended across
+    // the families exactly as the archetypes are. See LOOK_KEYS.
+    look,
     dominant: "",
     dominantLabel: "",
     archetype: "groove",
@@ -820,6 +922,12 @@ export function createStyleClassifier() {
       kSoft: k.soft,
       kHard: k.hard,
       kIndus: k.industrial,
+      // The melodic channel (features.js). Available to every weighting
+      // function; used sparingly, because a genre is mostly rhythm and timbre.
+      melody: f.melody,
+      tonalness: f.tonal,
+      chord: f.chordChange,
+      dyn: f.dynamics,
     };
 
     // No stable tempo → every tempo-driven family is guessing. Rather than let
@@ -839,7 +947,20 @@ export function createStyleClassifier() {
     }
     // Nothing matched (a silent passage, or an intro with no character yet):
     // decay toward neutral instead of dividing by ~0 and amplifying noise.
-    const a = 1 - Math.exp(-dt / 2.5); // ~2.5 s to follow a genuine change
+    //
+    // ...and LEARN MORE SLOWLY WHEN THE MUSIC IS QUIET. A breakdown has no
+    // drums, no pulse and no grit, so every measurement the classifier runs on
+    // says "ambient" — and the look of the whole scene would change halfway
+    // through a hardcore track and change back at the drop. A quiet passage is
+    // not a different genre, it is the same genre with the drums out, so the
+    // classifier holds what it knows and re-forms its opinion when there is
+    // something to form it from.
+    // Squared, so the damping bites where it matters: a passage at half level
+    // is still musically informative and only slows down a little, while a real
+    // breakdown — a twentieth of the level — all but freezes the opinion until
+    // the music comes back.
+    const dyn = f.dynamics ?? 1;
+    const a = (1 - Math.exp(-dt / 2.5)) * (0.04 + 0.96 * dyn * dyn);
     if (sum < 1e-4) {
       for (const fam of FAMILIES) weights.set(fam.id, weights.get(fam.id) * (1 - a));
     } else {
@@ -849,15 +970,24 @@ export function createStyleClassifier() {
       }
     }
 
-    // Archetype mix: the families' weights, pooled.
+    // Archetype mix: the families' weights, pooled. And the look vector, from
+    // the same weights — one pass, so a subgenre-accurate animation costs
+    // nothing beyond what the archetypes already cost.
     for (const key of ARCHETYPES) arche[key] = 0;
+    for (const key of LOOK_KEYS) look[key] = 0;
     let wsum = 0;
     for (const fam of FAMILIES) {
       const w = weights.get(fam.id);
+      if (w <= 0) continue;
       arche[fam.a] += w;
+      const l = FAMILY_LOOK.get(fam.id);
+      for (const key of LOOK_KEYS) look[key] += l[key] * w;
       wsum += w;
     }
-    if (wsum > 1e-6) for (const key of ARCHETYPES) arche[key] /= wsum;
+    if (wsum > 1e-6) {
+      for (const key of ARCHETYPES) arche[key] /= wsum;
+      for (const key of LOOK_KEYS) look[key] /= wsum;
+    }
 
     // Dominant family, with hysteresis: a challenger has to stay ahead by a
     // clear margin for a second and a half before it takes the name. Without
