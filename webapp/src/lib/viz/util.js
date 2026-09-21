@@ -58,6 +58,16 @@ export function rgbToHsl([r, g, b]) {
   return [h, s, l];
 }
 
+// --- deterministic randomness -----------------------------------------------
+// A world's scatter — where its shards sit, which way its motes drift — has to
+// be stable for the life of the scene, so it cannot come from Math.random() on
+// every frame. One tiny LCG per world instance gives a fixed layout that is
+// still different from its neighbour's.
+export function rng(seed = 1) {
+  let s = (seed >>> 0) || 1;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0), s / 4294967296);
+}
+
 // --- cheap noise ------------------------------------------------------------
 // Two summed sines per axis. Not Perlin, but it is continuous, seamless in time,
 // costs four trig calls, and nothing on screen is measuring its spectrum.

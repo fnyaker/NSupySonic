@@ -34,6 +34,7 @@
   import { PALETTES } from "../lib/viz/palette.js";
   import { TIERS, autoTier } from "../lib/viz/quality.js";
   import { LEVEL, subscribeFrames, readout } from "../lib/audio/engine.js";
+  import { WORLDS, worldFor } from "../lib/viz/worlds/index.js";
   import { LOOKAHEAD_MAX } from "../lib/audio/graph.js";
   import { openProjector } from "../lib/viz/host.js";
   import { FAMILY_LIST } from "../lib/audio/style.js";
@@ -81,6 +82,7 @@
 
   $: styleName =
     FAMILY_LIST.find((f) => f.id === $readout.style)?.label || $readout.styleLabel || "—";
+  $: worldName = WORLDS[worldFor($readout.style, $readout.archetype)]?.label || "—";
 </script>
 
 <section class="card">
@@ -278,6 +280,15 @@
     <div class="ro">
       <span class="ro-k">Kick</span>
       <span class="ro-v">{KICK_LABEL[$readout.kick] || "—"}</span>
+      <span class="bar"></span>
+    </div>
+    <!-- Which of the thirteen animations the style above has chosen. Without
+         it the smart engine's whole point — that the picture is different per
+         genre — is something you have to notice rather than something the
+         settings tell you. -->
+    <div class="ro">
+      <span class="ro-k">Animation</span>
+      <span class="ro-v">{mode === "smart" && $readout.style ? worldName : "—"}</span>
       <span class="bar"></span>
     </div>
   </div>
