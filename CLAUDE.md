@@ -519,6 +519,25 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   worker the Deezer bpm lookup is skipped on purpose — its session is not meant to be hammered from
   several threads — and the tempo is measured from the files. Each pool thread takes and returns its
   own peewee connection; the work is ffmpeg, so the box bounds it, not Python.
+- **A failure must name its CAUSE, never just its count.** This is a rule about every batch job,
+  not a detail of this one. The analysis used to report `"<file>: analysis failed"` — one filename,
+  no reason, and only the first of them — because four layers each dropped a little more: ffmpeg
+  printed `Invalid data found when processing input` on stderr, `_spectral` raised
+  `"ffmpeg exited 1"` and discarded the text it was holding, `analyze_track` turned that into
+  `None`, and the job turned `None` into the word "failed". The reason existed at every step and
+  survived none of them, so the only way to debug a library job was to read the container log —
+  which is exactly what somebody running the app from a phone cannot do. So: `ffmpeg_tail` keeps
+  ffmpeg's own words (and drops the banner, which is never the reason); `analyze_track_verbose`
+  returns `(row, reason)` — the same contract as `embedding.embed_file_verbose` — naming the STAGE
+  (`spectral pass:`, `classify:`, `database:`, `file missing from the archive`) and quoting what it
+  said; `_record_failure` keeps a bounded per-track ledger (`failures`, capped at
+  `FAILURE_SAMPLE_MAX`) plus a full tally (`failure_reasons`), so the one-line summary names the
+  cause that DOMINATES the run rather than whichever file happened to be first. Both backfills and
+  both job endpoints carry it, `components/JobFailures.svelte` shows it with a copy button, and the
+  CLI prints it. The job dicts are snapshotted at the web boundary (`_job_snapshot`) because the
+  ledger belongs to the worker threads and a status poll must never iterate a list being appended
+  to. Re-running the backfill without "Reclasser tout" retries exactly the failures, since anything
+  with a current verdict is skipped — so a diagnosis costs one button, not a whole library.
 - **It walks the library by page and CHECKPOINTS, never `list()`s it.** `analysis._walk_library`
   keyset-paginates by primary key (`PAGE_SIZE`) and writes the cursor to `Meta` after every page
   (`analysis_cursor` / `embed_cursor`, cleared at the end, ignored past `RESUME_MAX_AGE` or when the

@@ -144,6 +144,34 @@ _LRA = re.compile(r"^\s*LRA:\s*(-?[\d.]+)\s*LU", re.M)
 _WANTED = ("centroid", "spread", "flatness", "entropy", "rolloff", "flux")
 
 
+# Lines that are never the reason a run failed: the banner, the build flags,
+# and the stream inventory ffmpeg prints on the way in.
+_FFMPEG_NOISE = (
+    "ffmpeg version", "built with", "configuration:", "lib", "Input #",
+    "Output #", "Stream mapping:", "Stream #", "Metadata:", "Duration:",
+    "encoder", "Press [q]", "Side data:",
+)
+
+
+def ffmpeg_tail(err: str, lines: int = 3) -> str:
+    """The last few meaningful lines of an ffmpeg run, for an error message.
+
+    ffmpeg ALWAYS says what went wrong — "Invalid data found when processing
+    input", "moov atom not found", "Output file #0 does not contain any
+    stream", "No such filter: 'aspectralstats'". Throwing that away and
+    reporting the exit code instead is what turned every kind of broken file
+    into one indistinguishable "analysis failed", so the tail is kept and only
+    the banner is dropped.
+    """
+    out = []
+    for line in (err or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith(_FFMPEG_NOISE):
+            continue
+        out.append(line)
+    return " | ".join(out[-lines:])[:400]
+
+
 def _spectral(path):
     """Whole-file spectral descriptors and loudness, in one decode."""
     cmd = [
@@ -162,10 +190,12 @@ def _spectral(path):
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=FFMPEG_TIMEOUT, check=False,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg exited {proc.returncode}")
     out = proc.stdout.decode("utf-8", "replace")
     err = proc.stderr.decode("utf-8", "replace")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg exited {proc.returncode}: {ffmpeg_tail(err) or 'no output'}"
+        )
 
     series = {k: [] for k in _WANTED}
     for name, raw in _STAT.findall(out):
@@ -178,7 +208,13 @@ def _spectral(path):
         if math.isfinite(v):
             series[name].append(v)
     if not series["centroid"]:
-        raise ValueError("no spectral frames")
+        # ffmpeg succeeded and still produced nothing to measure: the file is
+        # shorter than one analysis window, or it decoded to silence, or this
+        # build has no aspectralstats. Its own words say which.
+        raise ValueError(
+            "ffmpeg produced no spectral frames "
+            f"({ffmpeg_tail(err) or 'file too short, or not decodable audio'})"
+        )
 
     lufs = _LUFS.search(err)
     lra = _LRA.search(err)
@@ -216,17 +252,25 @@ def _low_envelope(path):
     Python-level sample processing happens at all.
     """
     cmd = [
-        "ffmpeg", "-v", "0", "-i", path,
+        # -v error, not -v 0: silencing ffmpeg entirely meant a failure here
+        # arrived as a bare CalledProcessError with nothing in it to read.
+        "ffmpeg", "-v", "error", "-i", path,
         "-map", "0:a:0", "-t", str(MAX_SECONDS),
         "-af", "lowpass=f=170",
         "-ac", "1", "-ar", str(_SR), "-f", "u8", "pipe:1",
     ]
-    raw = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        timeout=FFMPEG_TIMEOUT, check=True,
-    ).stdout
+    proc = subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=FFMPEG_TIMEOUT, check=False,
+    )
+    err = proc.stderr.decode("utf-8", "replace")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg exited {proc.returncode}: {ffmpeg_tail(err) or 'no output'}"
+        )
+    raw = proc.stdout
     if not raw:
-        raise ValueError("no audio decoded")
+        raise ValueError(f"no audio decoded ({ffmpeg_tail(err) or 'empty output'})")
     per = _SR // ENV_HZ
     env = []
     for i in range(0, len(raw) - per + 1, per):
@@ -657,20 +701,49 @@ def _deezer_bpm(provider, track):
 
 def analyze_track(track: Track, provider=None, force: bool = False):
     """Measure one archived track and store the verdict. Returns the row."""
-    if not track or not track.path or not os.path.isfile(track.path):
-        return None
+    return analyze_track_verbose(track, provider, force=force)[0]
+
+
+def analyze_track_verbose(track: Track, provider=None, force: bool = False):
+    """``(row, reason)`` — exactly one of which is set.
+
+    Same contract as ``embedding.embed_file_verbose``, and it exists for the
+    same reason: "analysis failed" is not a sentence anybody can act on. A
+    file deleted from under us, an archive that was written truncated, an
+    ffmpeg build without ``aspectralstats`` and a database that refused the
+    write are four different problems with four different fixes, and they all
+    used to arrive as the same word. The reason names the STAGE and repeats
+    what the stage itself said, so the operator reads a cause rather than a
+    verdict.
+    """
+    if track is None:
+        return None, "no track"
+    if not track.path:
+        return None, "the track has no file path (it was never archived)"
+    if not os.path.isfile(track.path):
+        # The DB says archived, the disk disagrees. Worth its own sentence:
+        # it is the one failure that is not about the audio at all.
+        return None, f"file missing from the archive ({track.path})"
     if not ffmpeg_available():
-        return None
+        return None, "ffmpeg is not installed (analysis decodes audio with it)"
     existing = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
     if existing and not force and existing.version >= ANALYSIS_VERSION:
-        return existing
+        return existing, None
 
     t0 = time.monotonic()
     try:
         feats = _spectral(track.path)
-    except Exception:
-        logger.warning("analysis: spectral pass failed for %s", track.path, exc_info=True)
-        return None
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "analysis: spectral pass timed out after %ss for %s",
+            FFMPEG_TIMEOUT, track.path,
+        )
+        return None, f"spectral pass: timed out after {FFMPEG_TIMEOUT}s"
+    except Exception as exc:
+        logger.warning(
+            "analysis: spectral pass failed for %s: %s", track.path, exc, exc_info=True
+        )
+        return None, f"spectral pass: {exc}"
 
     bpm = _deezer_bpm(provider, track)
     source = "deezer" if bpm else None
@@ -680,8 +753,11 @@ def analyze_track(track: Track, provider=None, force: bool = False):
         measured, conf, pulse = _measure_tempo(track.path)
         if not bpm and measured:
             bpm, bpm_conf, source = measured, conf, "measured"
-    except Exception:
-        logger.warning("analysis: tempo pass failed for %s", track.path, exc_info=True)
+    except Exception as exc:
+        # Not fatal: a track with no tempo is still worth a style verdict.
+        logger.warning(
+            "analysis: tempo pass failed for %s: %s", track.path, exc, exc_info=True
+        )
 
     # The frozen extractor's vector, when this server can make one. It is what
     # the tagging studio trains on and what a trained head reads; producing it
@@ -692,8 +768,10 @@ def analyze_track(track: Track, provider=None, force: bool = False):
 
         if emb.available():
             vec = emb.ensure_embedding(track)
-    except Exception:
-        logger.warning("analysis: embedding failed for %s", track.path, exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "analysis: embedding failed for %s: %s", track.path, exc, exc_info=True
+        )
 
     feats.update(
         bpm=bpm or 0.0,
@@ -703,7 +781,13 @@ def analyze_track(track: Track, provider=None, force: bool = False):
         lra=feats.get("lra") if feats.get("lra") is not None else 7.0,
         lufs=feats.get("lufs"),
     )
-    style, style_conf, arch, weights = classify(feats)
+    try:
+        style, style_conf, arch, weights = classify(feats)
+    except Exception as exc:
+        logger.warning(
+            "analysis: classify failed for %s: %s", track.path, exc, exc_info=True
+        )
+        return None, f"classify: {exc}"
     source = "heuristic"
     model_dist = None
     # A label the user applied by hand is the strongest signal there is, and the
@@ -735,8 +819,10 @@ def analyze_track(track: Track, provider=None, force: bool = False):
                     arch = gen.archetype_for(label) or arch
                     source = "model"
                     model_dist = dist
-        except Exception:
-            logger.warning("analysis: genre head failed for %s", track.path, exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "analysis: genre head failed for %s: %s", track.path, exc, exc_info=True
+            )
 
     payload = {
         "centroid": round(feats["centroid"], 1),
@@ -764,12 +850,19 @@ def analyze_track(track: Track, provider=None, force: bool = False):
     row.style_confidence = style_conf
     row.archetype = arch
     row.data = json.dumps(payload, separators=(",", ":"))
-    row.save(force_insert=existing is None)
+    try:
+        row.save(force_insert=existing is None)
+    except Exception as exc:
+        logger.warning(
+            "analysis: storing the verdict failed for %s: %s",
+            track.path, exc, exc_info=True,
+        )
+        return None, f"database: {exc}"
     logger.info(
         "analysed %s: %s bpm (%s), %s (%.2f) in %.1fs",
         track.path, bpm, source, style, style_conf, payload["took"],
     )
-    return row
+    return row, None
 
 
 def payload_for(row, tag=None):
@@ -1065,6 +1158,44 @@ def _walk_library(work, workers, stats, report, key, force, limit=None):
 ANALYSIS_CURSOR_KEY = "analysis_cursor"
 EMBED_CURSOR_KEY = "embed_cursor"
 
+# How many individual failures a run remembers. A library-wide job can fail on
+# thousands of tracks, and a list that long is neither shippable in a status
+# poll nor readable — but ONE filename with no reason (which is what this used
+# to report) is not a bug report either. Enough to see the pattern and name the
+# files, bounded so the job never grows without limit.
+FAILURE_SAMPLE_MAX = 40
+
+
+def _record_failure(stats, track, reason):
+    """Remember one failed track, with the reason, under the caller's lock.
+
+    The counters say HOW MANY failed; this is what says which, and why. The
+    reasons are tallied as they arrive so the one-line summary names the cause
+    that actually dominates the run rather than whichever file happened to be
+    first — a hundred tracks failing on a missing ffmpeg filter and one failing
+    on a truncated file is one problem, not a hundred and one.
+    """
+    reason = str(reason or "analysis failed")
+    name = os.path.basename(track.path) if track is not None and track.path else "?"
+    tally = stats.setdefault("failure_reasons", {})
+    tally[reason] = tally.get(reason, 0) + 1
+    sample = stats.setdefault("failures", [])
+    if len(sample) < FAILURE_SAMPLE_MAX:
+        sample.append({
+            "track": name,
+            "path": (track.path if track is not None else None),
+            "id": (str(track.id) if track is not None else None),
+            "title": (track.title if track is not None else None),
+            "reason": reason,
+        })
+    top, count = max(tally.items(), key=lambda kv: kv[1])
+    n = stats.get("failed", 0)
+    # One line, and it has to hold up alone: it is what a toast shows.
+    stats["error"] = (
+        f"{name}: {reason}" if n <= 1
+        else f"{n} tracks failed, {count}x: {top}"
+    )
+
 
 def backfill(provider=None, force=False, limit=None, progress=None, on_stats=None,
              workers=None):
@@ -1087,13 +1218,14 @@ def backfill(provider=None, force=False, limit=None, progress=None, on_stats=Non
         return {
             "scanned": 0, "done": 0, "skipped": 0, "failed": 0,
             "error": "ffmpeg is not installed (analysis decodes audio with it)",
+            "failures": [], "failure_reasons": {},
         }
     workers = auto_workers(workers)
     if workers > 1:
         provider = None
 
     stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None,
-             "workers": workers}
+             "workers": workers, "failures": [], "failure_reasons": {}}
     lock = threading.Lock()
 
     def work(track):
@@ -1113,15 +1245,20 @@ def backfill(provider=None, force=False, limit=None, progress=None, on_stats=Non
                 report(stats)
             return
         try:
-            row = analyze_track(track, provider, force=force)
-        except Exception:
-            logger.warning("analysis: failed for %s", track.path, exc_info=True)
-            row = None
+            row, reason = analyze_track_verbose(track, provider, force=force)
+        except Exception as exc:
+            # analyze_track_verbose is meant to convert everything into a
+            # reason; anything that still escapes is a bug in it, and it still
+            # must not reach the operator as a blank.
+            logger.warning(
+                "analysis: unhandled failure for %s: %s", track.path, exc, exc_info=True
+            )
+            row, reason = None, f"unhandled: {exc!r}"
         with lock:
             if row is None:
                 stats["failed"] += 1
-                if stats["error"] is None:
-                    stats["error"] = f"{os.path.basename(track.path)}: analysis failed"
+                _record_failure(stats, track, reason)
+                say(f"  FAILED {os.path.basename(track.path)}: {reason}")
             else:
                 stats["done"] += 1
                 if stats["done"] % 25 == 0:
@@ -1150,17 +1287,19 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None,
     why = emb.why_unavailable()
     if why:
         say(f"Extractor unavailable: {why}")
-        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": why}
+        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": why,
+                "failures": [], "failure_reasons": {}}
     # One check up front. A model that cannot load would otherwise be reported as
     # thousands of per-track failures, which tells the operator nothing.
     load_err = emb.session_error()
     if load_err:
         say(f"Extractor unusable: {load_err}")
-        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": load_err}
+        return {"scanned": 0, "done": 0, "skipped": 0, "failed": 0,
+                "error": load_err, "failures": [], "failure_reasons": {}}
 
     workers = auto_workers(workers)
     stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None,
-             "workers": workers}
+             "workers": workers, "failures": [], "failure_reasons": {}}
     lock = threading.Lock()
 
     def work(track):
@@ -1183,11 +1322,12 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None,
         with lock:
             if not ok:
                 stats["failed"] += 1
-                # Keep the LAST reason, not the first: a run that starts fine
-                # and then loses the model has everything to say in its tail,
-                # and the first line ("that one file is too short") hid it.
-                if reason:
-                    stats["error"] = reason
+                # The ledger tallies reasons, so the summary names the cause
+                # that dominates the run — which is what the old "keep the LAST
+                # reason" rule was reaching for, without losing the others.
+                _record_failure(
+                    stats, track, reason or "the vector could not be stored"
+                )
             else:
                 stats["done"] += 1
                 if stats["done"] % 20 == 0:
