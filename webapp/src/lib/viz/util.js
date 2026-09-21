@@ -24,6 +24,14 @@ export function approachAngle(v, target, tau, dt) {
   return v + d * (1 - Math.exp(-dt / Math.max(1e-4, tau)));
 }
 
+// Move `amount` of the way from one hue to another, the short way round. Used
+// to lean a chosen palette toward a genre's own temperature without replacing
+// it: at 0 the hue is untouched, at 1 it is the target.
+export function mixAngle(a, b, amount) {
+  const d = (((b - a) % 360) + 540) % 360 - 180;
+  return a + d * Math.max(0, Math.min(1, amount));
+}
+
 // --- colour -----------------------------------------------------------------
 export function hsl(h, s, l, a = 1) {
   return `hsla(${((h % 360) + 360) % 360},${(s * 100).toFixed(1)}%,${(l * 100).toFixed(1)}%,${a})`;

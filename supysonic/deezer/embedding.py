@@ -614,12 +614,49 @@ def _load_session():
 def session_error() -> str | None:
     """Why the model cannot be used, or None when it loads.
 
-    Loading is cached, so this is cheap after the first call. The studio asks
-    once before a backfill: failing 3000 tracks one by one tells the operator
+    BLOCKS on the first call — loading a 40 MB ONNX graph takes seconds — so it
+    belongs on a worker, never on a request thread. A page that only wants to
+    SHOW the state asks `session_probe` instead.
+
+    Loading is cached, so this is cheap after the first call. A backfill asks
+    once before it starts: failing 3000 tracks one by one tells the operator
     nothing, while one sentence about the model tells them everything."""
     if _load_session() is not None:
         return None
     return _session_error or "the model could not be loaded (see the server log)"
+
+
+_probe_thread = None
+
+
+def session_probe() -> dict:
+    """What we already know about the model, WITHOUT waiting to find out.
+
+    ``{"state": "ok" | "error" | "checking", "error": str | None}``.
+
+    The studio's first request used to load the model on the thread serving it,
+    and a 40 MB graph is seconds — on a page that also wanted three other
+    things, that was most of a minute before anything painted. Nobody needs the
+    answer synchronously: the page can say "vérification…" and ask again. So
+    this reports what is known and starts a background load when it is not,
+    which the next poll picks up.
+    """
+    global _probe_thread
+    with _lock:
+        if _session is not None:
+            return {"state": "ok", "error": None}
+        err = _session_error
+        stale = err is not None and time.monotonic() >= _session_retry_at
+        busy = _probe_thread is not None and _probe_thread.is_alive()
+        if err is not None and not stale:
+            return {"state": "error", "error": err}
+        if busy:
+            return {"state": "checking", "error": None}
+        _probe_thread = threading.Thread(
+            target=_load_session, name="embed-probe", daemon=True
+        )
+        _probe_thread.start()
+    return {"state": "checking", "error": None}
 
 
 def _run(patches):

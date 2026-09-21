@@ -163,10 +163,23 @@
   $: trainable = eligible.length >= 2 && labelled >= eligible.length * 3;
   $: thin = tags.filter((t) => (counts[t.name] || 0) > 0 && (counts[t.name] || 0) < 8);
 
+  // The extractor check no longer happens on the request thread (loading a
+  // 40 MB ONNX graph is seconds), so the first answer may be "vérification…".
+  // Ask again a few times rather than leaving the card undecided for ever.
+  let probeTries = 0;
+  let probeTimer = null;
   async function refresh() {
     try {
       status = await api.genreStatus();
       error = "";
+      clearTimeout(probeTimer);
+      probeTimer = null;
+      if (status?.extractor?.session_state === "checking" && probeTries < 8) {
+        probeTries += 1;
+        probeTimer = setTimeout(refresh, 2000);
+      } else {
+        probeTries = 0;
+      }
     } catch (e) {
       error = e?.message || "impossible de charger le studio";
     } finally {
@@ -703,48 +716,58 @@
     }
   }
 
-  onMount(async () => {
-    await refresh();
+  // Everything this page needs, asked for AT ONCE and painted as it arrives.
+  //
+  // It used to await five requests in a row, with the slowest of them — the
+  // candidate list, which reads one vector file per scanned track off the disk
+  // — third in the queue. So the job progress, which is the one thing an
+  // operator opens this page to look at while a backfill runs, was the LAST
+  // thing to appear, behind a request that could take a minute. They are
+  // independent answers about independent things; nothing was ever waiting for
+  // anything.
+  async function loadJobStatus() {
+    if (!$user?.admin) return;
+    // A job started before a reload keeps running server-side: pick its
+    // progress back up instead of pretending nothing is happening.
+    const [ext, emb, ana] = await Promise.allSettled([
+      api.genreExtractorTestStatus(),
+      api.genreEmbedStatus(),
+      api.analysisBackfillStatus(),
+    ]);
+    if (ext.status === "fulfilled" && ext.value) {
+      const s = ext.value;
+      if (s.running) {
+        extStatus = s;
+        extTesting = true;
+        pollExtractorTest();
+      } else if (s.started) {
+        extStatus = s;
+      }
+    }
+    if (emb.status === "fulfilled" && emb.value) {
+      embed = emb.value;
+      if (embed.running) pollEmbed();
+    }
+    if (ana.status === "fulfilled" && ana.value) {
+      analysis = ana.value;
+      if (typeof analysis.workers_setting === "number")
+        analysisWorkers = analysis.workers_setting;
+      if (analysis.workers_auto) analysisWorkersAuto = analysis.workers_auto;
+      if (analysis.running) pollAnalysis();
+    }
+  }
+
+  onMount(() => {
+    refresh();
+    loadJobStatus();
     // Unconditionally: the extractor is what MEASURES a track, and tagging only
     // needs what was already measured. An archive carried over from a server
     // that had onnxruntime is a perfectly good training set on one that does
     // not, and gating this on the extractor left that library untaggable.
-    await loadCandidates();
-    if ($user?.admin) {
-      try {
-        const s = await api.genreExtractorTestStatus();
-        if (s?.running) {
-          extStatus = s;
-          extTesting = true;
-          pollExtractorTest();
-        } else if (s?.started) {
-          extStatus = s;
-        }
-      } catch {
-        /* admin-only endpoint; nothing to show for anyone else */
-      }
-      // A backfill started before a reload keeps running server-side: pick its
-      // progress back up instead of pretending nothing is happening.
-      try {
-        const e = await api.genreEmbedStatus();
-        embed = e;
-        if (e?.running) pollEmbed();
-      } catch {
-        /* admin-only endpoint */
-      }
-      try {
-        const a = await api.analysisBackfillStatus();
-        analysis = a;
-        if (a && typeof a.workers_setting === "number")
-          analysisWorkers = a.workers_setting;
-        if (a?.workers_auto) analysisWorkersAuto = a.workers_auto;
-        if (a?.running) pollAnalysis();
-      } catch {
-        /* admin-only endpoint */
-      }
-    }
+    loadCandidates();
   });
   onDestroy(() => {
+    clearTimeout(probeTimer);
     stopPreview();
     stopExtPoll();
     stopEmbedPoll();
@@ -974,6 +997,8 @@
             <div class="banner bad">
               <Icon name="alert" size={16} /><span>{extractor.session_error}</span>
             </div>
+          {:else if extractor.session_state === "checking"}
+            <p class="muted small">Vérification du modèle…</p>
           {/if}
           {#if embed?.error}
             <div class="banner bad">

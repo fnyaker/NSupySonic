@@ -23,12 +23,13 @@ import json
 import logging
 import random as _random
 import threading
+import time
 
 from uuid import UUID
 
 from flask import current_app, jsonify, request
 
-from ..db import GenreModel, GenreTag, Track, TrackTag, now
+from ..db import Album, Artist, GenreModel, GenreTag, Track, TrackTag, now
 from . import _is_admin, _valid_id, admin_required, login_required, webapi
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,15 @@ CANDIDATE_SCAN_MAX = 4000
 # top of the play-count order would only ever re-rank the music that least needs
 # tagging. Still bounded — this is a scroll position, not a table walk.
 CANDIDATE_SCAN_ACTIVE = 12000
+#: How long ONE candidates request may spend building its pool. A ranking over
+#: the rows it could afford inside a second and a half is a good ranking; a page
+#: that never arrives is not one at all.
+CANDIDATE_BUDGET = 1.5
+#: A track with no vector costs a disk read to discover that, so the miss is
+#: remembered too — but only briefly, because the backfill is out there creating
+#: exactly these files while the studio is open.
+CANDIDATE_MISS_TTL = 120.0
+_PRED_CACHE_MAX = 30000
 # A head for a 1280-d extractor and fifty genres is ~130 KB of base64. A big
 # two-layer MLP (2x512) is ~2.5 MB. Eight megabytes is far past anything
 # legitimate and stops a bad request from being a memory problem.
@@ -72,6 +82,14 @@ def _extractor_status() -> dict:
     from ..deezer import embedding as emb
 
     usable = emb.available() and bool(emb.model_path())
+    # A model that is present but will not load (a wrong file, an input the
+    # front-end cannot feed) is the one failure that otherwise shows up as
+    # thousands of per-track failures, so the studio says so up front. But it
+    # asks WITHOUT waiting: loading a 40 MB ONNX graph is seconds, and doing it
+    # on the thread serving this request is what made the studio's first visit
+    # take most of a minute to paint. The probe reports what is known and loads
+    # in the background; the page shows "vérification…" and asks again.
+    probe = emb.session_probe() if usable else {"state": "ok", "error": None}
     return {
         "available": usable,
         "reason": emb.why_unavailable(),
@@ -80,11 +98,8 @@ def _extractor_status() -> dict:
         "onnxruntime": emb.onnxruntime_available(),
         "model": emb.model_info(),
         "uploadable": emb.can_write_model(),
-        # A model that is present but will not load (a wrong file, an input the
-        # front-end cannot feed) is the one failure that otherwise shows up as
-        # thousands of per-track failures. Loading is cached, so this costs one
-        # model load on the first studio visit and nothing after.
-        "session_error": emb.session_error() if usable else None,
+        "session_state": probe["state"],
+        "session_error": probe["error"],
         # Where to get the exact export the front-end needs, so the studio never
         # has to say "find the model file yourself".
         "model_url": emb.MODEL_URL,
@@ -158,6 +173,10 @@ def _run_embed(app, force, workers=None):
             with _embed_lock:
                 _embed_job["running"] = False
                 _embed_job["finished"] = now().isoformat()
+            # Vectors that did not exist when the studio last asked do now, and
+            # the ones that did may have been re-extracted. Every opinion the
+            # candidate list is holding was formed before that.
+            invalidate_predictions()
             try:
                 close_connection()
             except Exception:
@@ -216,6 +235,70 @@ def resume_if_interrupted(app):
     threading.Thread(target=start, name="genre-embed-resume", daemon=True).start()
 
 
+# -- what the model thinks of a track, remembered ----------------------------
+# Running a trained head over one embedding is a few million multiply-adds in
+# plain Python, and the vector it runs on is a file on a disk. On a library of
+# any size, doing both for every scanned row on every request is what turned the
+# studio's candidate list into a minute of waiting. Neither answer changes until
+# the model or the labels do, so neither is paid twice.
+_pred_lock = threading.Lock()
+_pred_state = {"key": None, "rows": {}}
+
+
+def _prediction_cache(gen, label_count: int) -> dict:
+    """The per-track opinion cache for the CURRENT model, cleared when it moves."""
+    head = gen.active_head()
+    key = (
+        head.get("version") if head else None,
+        head.get("kind") if head else None,
+        len(head.get("labels") or ()) if head else 0,
+        label_count,  # the prototypes move with every new label
+    )
+    with _pred_lock:
+        if _pred_state["key"] != key:
+            _pred_state["key"] = key
+            _pred_state["rows"] = {}
+        return _pred_state["rows"]
+
+
+def invalidate_predictions() -> None:
+    """Forget every cached opinion (a fresh extraction changed the vectors)."""
+    with _pred_lock:
+        _pred_state["key"] = None
+        _pred_state["rows"] = {}
+
+
+def _candidate_row(track, emb, gen, cache):
+    """One candidate row, or None when the track has no vector to judge it by."""
+    hit = cache.get(track.id)
+    if isinstance(hit, float):  # a remembered miss
+        if time.monotonic() - hit < CANDIDATE_MISS_TTL:
+            return None
+        hit = None
+    if hit is None:
+        vec = emb.load_embedding(track)
+        if vec is None:
+            if len(cache) < _PRED_CACHE_MAX:
+                cache[track.id] = time.monotonic()
+            return None
+        # The head is only one of two opinions once labels exist. The prototype
+        # needs no training, so it is the only one with something to say while a
+        # genre is still one or two examples old — see deezer/genre.py.
+        hit = (gen.predict(vec), gen.prototype_predict(vec))
+        if len(cache) < _PRED_CACHE_MAX:
+            cache[track.id] = hit
+    guess, proto = hit
+    row = _track_json(track, guess)
+    if proto:
+        row["prototype"] = {"label": proto[0], "similarity": proto[1]}
+    # top1 − top2 already says how decided the head is. With no head nothing is
+    # "decided", so everything is equally worth a look and the play count is
+    # free to break the tie.
+    margin = (guess[3] if len(guess) > 3 else 1.0) if guess else 0.0
+    row["uncertainty"] = round(max(0.0, 1.0 - margin), 4)
+    return row
+
+
 def _resolve(ident):
     """A Track from either a Deezer numeric id or a local UUID."""
     from ..deezer import ids as dz_ids
@@ -272,13 +355,21 @@ def genre_status():
         # One-time — see seed_default_tags.
         gen.seed_default_tags()
 
+    from peewee import fn
+
     head = gen.active_head()
     labelled = TrackTag.select().count()
-    counts = {}
-    for tag in GenreTag.select():
-        counts[tag.name] = (
-            TrackTag.select().where(TrackTag.tag == tag).count()
-        )
+    # ONE grouped query, not one per tag. The studio seeds fifty-odd genres on
+    # its first visit, so the old loop opened fifty round trips before the page
+    # could paint anything — and it grew every time somebody added a genre.
+    counts = {t.name: 0 for t in GenreTag.select(GenreTag.name)}
+    grouped = (
+        TrackTag.select(GenreTag.name, fn.COUNT(TrackTag.track).alias("n"))
+        .join(GenreTag)
+        .group_by(GenreTag.name)
+    )
+    for row in grouped:
+        counts[row.tag.name] = row.n
     model = (
         GenreModel.select()
         .where(GenreModel.active == True)  # noqa: E712
@@ -633,8 +724,18 @@ def genre_candidates():
     labelled = {tt.track_id for tt in TrackTag.select(TrackTag.track)}
     rows = []
     scanned = 0
+    deadline = time.monotonic() + CANDIDATE_BUDGET
+    out_of_time = False
+    cache = _prediction_cache(gen, len(labelled))
     query = (
-        Track.select()
+        # Artist and album are JOINED, not walked. Reading `track.artist.name`
+        # off a bare Track row is a second SELECT, and `track.album.name` a
+        # third, so a four-thousand-row scan opened eight thousand round trips
+        # before it had looked at a single vector.
+        Track.select(Track, Artist, Album)
+        .join(Artist, on=(Track.artist == Artist.id))
+        .switch(Track)
+        .join(Album, on=(Track.album == Album.id))
         .where(Track.last_modification > 0)
         .order_by(Track.play_count.desc(), Track.created.desc())
         # Bounded: whether a track HAS a vector is a file on disk, not a column,
@@ -647,28 +748,25 @@ def genre_candidates():
         scanned += 1
         if track.id in labelled:
             continue
-        vec = emb.load_embedding(track)
-        if vec is None:
+        row = _candidate_row(track, emb, gen, cache)
+        if row is None:
             continue
-        guess = gen.predict(vec)
-        row = _track_json(track, guess)
-        # The head is only one of two opinions once labels exist. The prototype
-        # needs no training, so it is the only one with something to say while a
-        # genre is still one or two examples old — see deezer/genre.py.
-        proto = gen.prototype_predict(vec)
-        if proto:
-            row["prototype"] = {"label": proto[0], "similarity": proto[1]}
-        if guess:
-            # top1 − top2 already says how decided the head is.
-            margin = guess[3] if len(guess) > 3 else 1.0
-            row["uncertainty"] = round(max(0.0, 1.0 - margin), 4)
-        else:
-            # No head: nothing is "decided", so everything is equally worth a
-            # look and play count is free to break the tie.
-            row["uncertainty"] = 1.0
         rows.append(row)
+        # In play-count order the answer IS the first `limit` rows, so there is
+        # nothing to gain from looking at the other three thousand — and a great
+        # deal to lose: reading a sidecar off a spinning disk and running the
+        # head over it in plain Python is milliseconds each, which is how this
+        # endpoint came to take a minute.
+        if not by_uncertainty and len(rows) >= limit:
+            break
+        # The uncertainty order genuinely needs a pool, so it gets a CLOCK
+        # instead of a row count. A ranking over the two thousand rows we could
+        # afford is a good ranking; a page that never arrives is not.
+        if time.monotonic() > deadline:
+            out_of_time = True
+            break
 
-    truncated = len(rows) > limit
+    truncated = len(rows) > limit or out_of_time
     if not by_uncertainty:
         rows = rows[:limit]
     else:

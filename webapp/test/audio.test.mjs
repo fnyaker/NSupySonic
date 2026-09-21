@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { buildBandPlan, buildEnergyPlan, readBands, readEnergy, ENERGY_BANDS } from "../src/lib/audio/spectrum.js";
 import { createFeatureExtractor } from "../src/lib/audio/features.js";
 import { createBeatTracker, ODF_HZ } from "../src/lib/audio/tempo.js";
-import { createStyleClassifier, FAMILY_LIST } from "../src/lib/audio/style.js";
+import { createStyleClassifier, FAMILY_LIST, LOOK_KEYS } from "../src/lib/audio/style.js";
 
 const SR = 48000;
 const FFT_LO = 8192;
@@ -186,6 +186,148 @@ test("a sustained 808 with no kick does not read as a kick", () => {
   assert.ok(peak < 0.25, `a steady note read ${peak.toFixed(2)} as a kick`);
 });
 
+// --- the dynamics gate ------------------------------------------------------
+// The complaint this exists for: "in the quiet parts the animation is frantic".
+// The old extractor divided every bin by its own running maximum, which makes a
+// whisper and a wall of sound produce the same numbers BY DESIGN. Measured on
+// the material below, it read the same kick strength twelve decibels down, and
+// a sustained pad with no attack anywhere in it produced nearly full-scale
+// flux. Both are pinned here so neither can come back.
+
+function readAll(specs, dt = 1 / 90, skip = 0) {
+  const fx = createFeatureExtractor({ sampleRate: SR, fftHi: FFT_HI, floorDb: FLOOR });
+  const acc = {};
+  specs.forEach((s, i) => {
+    const f = fx.process(s, dt);
+    if (i < skip) return;
+    for (const k of Object.keys(f)) {
+      if (typeof f[k] !== "number") continue;
+      const a = (acc[k] = acc[k] || { max: -Infinity, sum: 0, n: 0 });
+      if (f[k] > a.max) a.max = f[k];
+      a.sum += f[k];
+      a.n++;
+    }
+  });
+  const out = {};
+  for (const [k, a] of Object.entries(acc)) out[k] = { max: a.max, mean: a.sum / a.n };
+  return out;
+}
+
+// A whole spectrum at `gain` dB relative to a nominal mix, so the SAME music
+// can be played loud and quiet.
+function atGain(specs, gain) {
+  return specs.map((s) => s.map((v) => (v <= FLOOR ? FLOOR : Math.max(FLOOR, v + gain))));
+}
+
+test("the same beat twelve decibels down reads as quieter, not as the same", () => {
+  const loud = kickTrain({ bpm: 150, seconds: 10, click: true });
+  // One extractor, one track: loud for ten seconds, then the identical material
+  // twelve decibels down. That is a breakdown, and it must not look like a drop.
+  const fx = createFeatureExtractor({ sampleRate: SR, fftHi: FFT_HI, floorDb: FLOOR });
+  let hot = 0;
+  for (const s of loud) hot = Math.max(hot, fx.process(s, 1 / 90).kick);
+  let quiet = 0;
+  let gate = 1;
+  for (const s of atGain(loud, -12)) {
+    const f = fx.process(s, 1 / 90);
+    quiet = Math.max(quiet, f.kick);
+    gate = Math.min(gate, f.dynamics);
+  }
+  assert.ok(hot > 0.6, `the loud part only reached ${hot.toFixed(2)}`);
+  assert.ok(
+    quiet < hot * 0.6,
+    `twelve decibels down still read ${quiet.toFixed(2)} against ${hot.toFixed(2)}`
+  );
+  assert.ok(gate < 0.8, `the gate never closed (${gate.toFixed(2)})`);
+});
+
+test("a sustained pad produces no onsets at all", () => {
+  // The exact failure the maximum filter is for: partials that merely sit there
+  // used to produce a frame-to-frame difference every single frame.
+  const n = FFT_HI / 2;
+  const pad = [];
+  for (let i = 0; i < 600; i++) {
+    const a = new Float32Array(n).fill(FLOOR);
+    const hzPerBin = SR / 2 / n;
+    for (const f0 of [220, 277, 330])
+      for (let h = 1; h <= 6; h++) {
+        const b = Math.round((f0 * h) / hzPerBin);
+        if (b < n) a[b] = -20 - 4 * h;
+      }
+    pad.push(a);
+  }
+  const r = readAll(pad, 1 / 90, 60);
+  assert.ok(r.kick.max < 0.05, `a pad read ${r.kick.max.toFixed(2)} as a kick`);
+  assert.ok(r.midFlux.max < 0.02, `a pad produced midFlux ${r.midFlux.max.toFixed(3)}`);
+  assert.ok(r.highFlux.max < 0.02, `a pad produced highFlux ${r.highFlux.max.toFixed(3)}`);
+  assert.ok(
+    r.percussivity.max < 0.1,
+    `a pad read ${r.percussivity.max.toFixed(2)} percussive`
+  );
+  // ...and it is unmistakably tonal, which is the other half of the split.
+  assert.ok(r.tonal.mean > 0.7, `a pad read only ${r.tonal.mean.toFixed(2)} tonal`);
+});
+
+test("a beat is percussive and a pad is not, on the same scale", () => {
+  const beat = readAll(kickTrain({ bpm: 150, seconds: 8, click: true }), 1 / 90, 90);
+  assert.ok(
+    beat.percussivity.max > 0.45,
+    `a four-on-the-floor read only ${beat.percussivity.max.toFixed(2)} percussive`
+  );
+});
+
+// --- the melodic channel ----------------------------------------------------
+
+test("chroma says which pitches are sounding, and noise has no opinion", () => {
+  const n = FFT_HI / 2;
+  const hzPerBin = SR / 2 / n;
+  const chord = new Float32Array(n).fill(FLOOR);
+  for (const f0 of [220, 277, 330])
+    for (let h = 1; h <= 6; h++) {
+      const b = Math.round((f0 * h) / hzPerBin);
+      if (b < n) chord[b] = -20 - 4 * h;
+    }
+  const noise = tiltedSpectrum(n, SR / 2, () => 0);
+
+  const tonal = readAll(new Array(600).fill(chord), 1 / 90, 120);
+  const flat = readAll(new Array(600).fill(noise), 1 / 90, 120);
+  assert.ok(
+    tonal.melody.mean > flat.melody.mean + 0.2,
+    `a chord (${tonal.melody.mean.toFixed(2)}) is not clearly more melodic than noise (${flat.melody.mean.toFixed(2)})`
+  );
+  // An FFT is linear and pitch is logarithmic, so without dividing by how many
+  // bins land on each class, flat noise comes out with a strongly peaked chroma
+  // and reads as a clear melody — exactly backwards.
+  assert.ok(flat.melody.mean < 0.45, `noise read ${flat.melody.mean.toFixed(2)} melodic`);
+});
+
+test("the harmony reading moves on a chord change and not on a held one", () => {
+  const n = FFT_HI / 2;
+  const hzPerBin = SR / 2 / n;
+  const voicing = (roots) => {
+    const a = new Float32Array(n).fill(FLOOR);
+    for (const f0 of roots)
+      for (let h = 1; h <= 6; h++) {
+        const b = Math.round((f0 * h) / hzPerBin);
+        if (b < n) a[b] = -20 - 4 * h;
+      }
+    return a;
+  };
+  const A = voicing([220, 277, 330]);
+  const B = voicing([246, 311, 370]);
+  const held = new Array(1200).fill(A);
+  const moving = [];
+  for (let i = 0; i < 1200; i++) moving.push(i % 270 < 135 ? A : B);
+
+  const h = readAll(held, 1 / 90, 90);
+  const m = readAll(moving, 1 / 90, 90);
+  assert.ok(h.chordChange.max < 0.05, `a held chord read ${h.chordChange.max.toFixed(3)}`);
+  assert.ok(
+    m.chordChange.mean > 0.05,
+    `a progression only read ${m.chordChange.mean.toFixed(3)}`
+  );
+});
+
 test("features separate a tone from noise", () => {
   const nyq = SR / 2;
   const n = FFT_HI / 2;
@@ -320,6 +462,126 @@ test("a fast, distorted, gridded kick reads as one of the hard families", () => 
   assert.ok(
     ["industrial", "hard"].includes(out.kick.type),
     `kick classified as ${out.kick.type}`
+  );
+});
+
+// A classifier driven with the shape of a hard, fast, gridded track.
+function hardDriver() {
+  const energy = { sub: 0.5, bass: 0.9, lowMid: 0.2, mid: 0.25, high: 0.2, air: 0.1 };
+  const features = {
+    level: 0.85, flux: 0.2, lowFlux: 0, midFlux: 0.05, highFlux: 0.05,
+    centroidN: 0.55, flatness: 0.62, percussivity: 0.9, vocalMod: 0.03,
+    crest: 2.4, silent: false, dynamics: 1, melody: 0.1, tonal: 0.3, chordChange: 0.02,
+  };
+  const beat = {
+    bpm: 205, confidence: 0.9, phase: 0, beat: false, beatIndex: 0, barPos: 0,
+    beatsPerBar: 4, downbeat: false, onset: 0, kickPulse: 0.92, period: 60 / 205,
+    locked: true,
+  };
+  return { energy, features, beat };
+}
+
+function driveHard(cls, frames, t0 = 0, mutate = () => {}) {
+  const { energy, features, beat } = hardDriver();
+  const dt = 1 / 90;
+  let out = null;
+  for (let i = 0; i < frames; i++) {
+    const t = t0 + i * dt;
+    const phase = (t % beat.period) / beat.period;
+    features.lowFlux = phase < 0.03 ? 1.2 : 0.01;
+    features.highFlux = phase < 0.05 ? 0.4 : 0.02;
+    mutate(features, beat, energy, i);
+    out = cls.process(features, beat, energy, t, dt);
+  }
+  return out;
+}
+
+test("the look vector is a blend, always inside its own range", () => {
+  const cls = createStyleClassifier();
+  const out = driveHard(cls, 1800);
+  for (const k of LOOK_KEYS) {
+    assert.ok(Number.isFinite(out.look[k]), `${k} is not finite`);
+    assert.ok(out.look[k] >= 0 && out.look[k] <= 1, `${k} left 0..1 at ${out.look[k]}`);
+  }
+});
+
+test("a hard track and an ambient one do not look the same", () => {
+  const hard = driveHard(createStyleClassifier(), 1800).look;
+
+  const cls = createStyleClassifier();
+  const energy = { sub: 0.2, bass: 0.2, lowMid: 0.3, mid: 0.3, high: 0.1, air: 0.05 };
+  const features = {
+    level: 0.4, flux: 0.002, lowFlux: 0.001, midFlux: 0.001, highFlux: 0.001,
+    centroidN: 0.3, flatness: 0.18, percussivity: 0.02, vocalMod: 0.02,
+    crest: 5.5, silent: false, dynamics: 1, melody: 0.9, tonal: 0.95, chordChange: 0.05,
+  };
+  const beat = {
+    bpm: 0, confidence: 0.05, phase: 0, beat: false, beatIndex: 0, barPos: 0,
+    beatsPerBar: 4, downbeat: false, onset: 0, kickPulse: 0.02, period: 0.5, locked: false,
+  };
+  let calm = null;
+  for (let i = 0; i < 1800; i++) calm = cls.process(features, beat, energy, i / 90, 1 / 90);
+
+  assert.ok(
+    hard.motion > calm.look.motion + 0.25,
+    `motion ${hard.motion.toFixed(2)} vs ${calm.look.motion.toFixed(2)}`
+  );
+  assert.ok(
+    hard.punch > calm.look.punch + 0.3,
+    `punch ${hard.punch.toFixed(2)} vs ${calm.look.punch.toFixed(2)}`
+  );
+  assert.ok(
+    calm.look.melodic > hard.melodic + 0.2,
+    `melodic ${calm.look.melodic.toFixed(2)} vs ${hard.melodic.toFixed(2)}`
+  );
+});
+
+test("the look never jumps between frames", () => {
+  // The whole reason this is numbers and not a name: a scene that re-drew
+  // itself every time the classifier changed its mind between two neighbouring
+  // hardcore subgenres would be unwatchable.
+  const cls = createStyleClassifier();
+  driveHard(cls, 900);
+  let prev = { ...cls.out.look };
+  let worst = 0;
+  driveHard(cls, 900, 10, () => {});
+  for (let i = 0; i < 900; i++) {
+    const out = driveHard(cls, 1, 20 + i / 90);
+    for (const k of LOOK_KEYS) worst = Math.max(worst, Math.abs(out.look[k] - prev[k]));
+    prev = { ...out.look };
+  }
+  assert.ok(worst < 0.02, `the look moved ${worst.toFixed(3)} in a single frame`);
+});
+
+test("a breakdown does not re-classify the track", () => {
+  // No drums, no pulse, no grit: every measurement says "ambient". But a quiet
+  // passage is not a different genre, it is the same genre with the drums out —
+  // and the look of the whole scene changing halfway through a hardcore track
+  // and changing back at the drop is the bug this guards.
+  const cls = createStyleClassifier();
+  const loud = driveHard(cls, 2700);
+  const before = { ...loud.look };
+  const beforeHard = loud.archetypes.hard;
+
+  // Eight seconds of breakdown: the gate is nearly shut, so the classifier
+  // should barely move.
+  const quiet = driveHard(cls, 720, 30, (features, beat) => {
+    features.dynamics = 0.05;
+    features.percussivity = 0.02;
+    features.flatness = 0.2;
+    features.crest = 5;
+    features.lowFlux = 0.001;
+    features.highFlux = 0.001;
+    beat.kickPulse = 0.05;
+    beat.confidence = 0.1;
+  });
+  assert.ok(
+    quiet.archetypes.hard > beforeHard * 0.75,
+    `a breakdown dropped the hard archetype from ${beforeHard.toFixed(2)} to ${quiet.archetypes.hard.toFixed(2)}`
+  );
+  assert.ok(
+    Math.abs(quiet.look.motion - before.motion) < 0.15,
+    `motion moved ${Math.abs(quiet.look.motion - before.motion).toFixed(2)} through a breakdown`
   );
 });
 

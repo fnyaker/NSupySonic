@@ -47,16 +47,23 @@ function bowLayer(preset) {
       vib += dt * 5.4 * TAU; // ~5.4 Hz — the rate a string player actually uses
       lull += dt;
       const active = strokes.filter((s) => s.on).length;
-      // A new stroke on a rise out of quiet, or simply every so often while the
-      // music keeps going — a bow does change direction.
-      if (active < MAX && f.level > 0.18 && lull > lerp(2.6, 0.9, f.level)) {
+      // A stroke is a NOTE, so a note attack starts one — `melodyFlux` is the
+      // onset function with the drums taken out of it (features.js). The timer
+      // is the fallback for music that sustains without ever re-attacking; a
+      // bow does change direction eventually.
+      const attack = (f.melodyFlux || 0) > 0.012 && lull > 0.22;
+      if (active < MAX && f.level > 0.18 && (attack || lull > lerp(2.6, 0.9, f.level))) {
         lull = 0;
         const s = strokes.find((x) => !x.on);
         if (s) {
           s.on = true;
           s.dir = Math.random() < 0.5 ? 1 : -1;
           s.x = s.dir > 0 ? -0.15 : 1.15;
-          s.y = 0.2 + Math.random() * 0.6;
+          // High notes ride high on the screen. `melodyPitch` is where the
+          // SUSTAINED energy sits, so this follows the line being played rather
+          // than the loudest thing in the mix.
+          const pitch = f.melodyPitch ?? 0.5;
+          s.y = clamp(0.82 - pitch * 0.62 + (Math.random() - 0.5) * 0.16, 0.12, 0.86);
           s.len = 0.3 + Math.random() * 0.35;
           s.v = lerp(0.1, 0.34, f.level) * (0.7 + Math.random() * 0.6);
           s.age = 0;
@@ -506,6 +513,14 @@ export function createSmartScene(opts = {}) {
   const weight = { sustain: 0, voice: 0, groove: 0.4, hard: 0, rock: 0 };
   const KEYS = Object.keys(weight);
   let level = 0;
+  // The subgenre's own character (style.js LOOK_KEYS) and how loud this moment
+  // is against the track's own loud reference (features.js `dynamics`). The
+  // five layers say WHAT is drawn; these two say how hard, how fast and how
+  // smeared — which is what makes hardtekk and frenchcore look different, and
+  // what makes a breakdown look like a breakdown.
+  let density = 0.58;
+  let smooth = 0.5;
+  let dyn = 1;
 
   function resize() {}
 
@@ -515,6 +530,12 @@ export function createSmartScene(opts = {}) {
       const target = mix ? mix[k] || 0 : k === "groove" ? 0.35 : 0;
       weight[k] = approach(weight[k], target, 1.4, dt);
     }
+    const look = frame.style?.look;
+    density = approach(density, look ? look.density : 0.58, 1.2, dt);
+    smooth = approach(smooth, look ? look.smooth : 0.5, 1.2, dt);
+    // Already smoothed upstream, and asymmetric there: this only keeps a frame
+    // of jitter out of a full-screen alpha.
+    dyn = approach(dyn, frame.features?.dynamics ?? 1, 0.12, dt);
     level = approach(level, frame.features?.level || 0, 0.14, dt);
     for (const k of KEYS) if (weight[k] > 0.035) layers[k].update(frame, dt);
   }
@@ -523,15 +544,25 @@ export function createSmartScene(opts = {}) {
     // Trail wash rather than a clear: motion trails for free, and it means a
     // layer fading out leaves the scene gracefully instead of vanishing.
     g.globalCompositeOperation = "source-over";
-    g.fillStyle = hsl(pal.hue, 0.45, 0.045, preset.trail);
+    // A smeary genre keeps more of the previous frame; a snappy one clears
+    // harder. The trail wash IS the clear, so this is the one knob that decides
+    // whether ambient reads as a long exposure and speedcore as a strobe.
+    // ...and a quiet passage washes harder still. Without this, anything that
+    // stops MOVING when the drums drop out keeps being drawn in the same place
+    // with `lighter` compositing and saturates to white — a breakdown ended up
+    // brighter than the drop, which is measurably what it used to do.
+    const trail = preset.trail * lerp(1.6, 0.55, smooth) * lerp(1.7, 1, dyn);
+    g.fillStyle = hsl(pal.hue, 0.45, 0.045, clamp(trail, 0.04, 0.95));
     g.fillRect(0, 0, w, h);
 
-    // A floor of ambient colour so the scene is never black between events.
+    // A floor of ambient colour so the scene is never black between events —
+    // dimmed with the music, so a breakdown is genuinely darker rather than a
+    // full-brightness scene with less happening in it.
     const cx = w / 2;
     const cy = h * 0.55;
     const R = Math.max(w, h) * 0.75;
     const bg = g.createRadialGradient(cx, cy, 0, cx, cy, R);
-    bg.addColorStop(0, hsl(pal.hue, pal.sat * 0.7, 0.2, 0.22 + level * 0.2));
+    bg.addColorStop(0, hsl(pal.hue, pal.sat * 0.7, 0.2, (0.16 + level * 0.2) * (0.35 + 0.65 * dyn)));
     bg.addColorStop(1, hsl(pal.hue + 30, pal.sat * 0.5, 0.06, 0));
     g.fillStyle = bg;
     g.fillRect(0, 0, w, h);
@@ -544,7 +575,14 @@ export function createSmartScene(opts = {}) {
       // distribution, and drawing it linearly means the also-rans are nearly as
       // present as the winner. The exponent keeps the secondary layers as
       // texture under the dominant one instead of competing with it.
-      const wgt = Math.pow(weight[k], 1.35) * (0.6 + o.intensity * 0.95);
+      // `density` is the subgenre saying how much should be on screen at once,
+      // and `dyn` is the music saying how much of it is earned right now. A
+      // quiet passage keeps the scene — it just stops shouting.
+      const wgt =
+        Math.pow(weight[k], 1.35) *
+        (0.6 + o.intensity * 0.95) *
+        lerp(0.72, 1.18, density) *
+        (0.1 + 0.9 * dyn);
       layers[k].draw(g, w, h, pal, Math.min(1.25, wgt));
     }
   }
