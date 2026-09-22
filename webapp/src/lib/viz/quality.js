@@ -10,11 +10,52 @@
 
 export const TIERS = ["low", "medium", "high", "ultra"];
 
+// THE SCOPE'S TIMEBASE IS NOT A QUALITY SETTING. What the oscilloscope shows is
+// a fixed slice of time (see scenes/scope.js#WINDOW_MS); what the tier changes
+// is how PRECISELY that same slice is drawn. Widening the window at ultra would
+// not be more precision, it would be a different picture — eight times as much
+// waveform crammed into the same lane, which reads as noise.
+//
+// So four knobs, each a real step in accuracy rather than a step in effort:
+//
+//   buffer     the analyser's fftSize, and `search` how much of it (in ms) the
+//   search     TRIGGER may hunt back through for a rising edge. This is what
+//              keeps the trace STILL, and more of it is strictly more stable:
+//              25 ms finds an edge in anything with a pulse, 250 ms still finds
+//              one in a half-time passage or under a held pad, where the short
+//              search gives up and the trace free-runs. Measured on a steady
+//              tone, a triggered trace drifts 0.9 px a frame at low and
+//              0.007 px at high against 86.5 px untriggered.
+//   points     the ceiling on plotted columns. At 256 a 2000-sample window is
+//              decimated eight to one and a hi-hat is a smooth suggestion; at
+//              4096 nothing is decimated at all and a 4K beamer gets a column
+//              per pixel.
+//   exact      per-column MIN/MAX (what a real DSO draws) instead of
+//              peak-preserving decimation, so nothing between two vertices is
+//              invented.
+//   fine       sub-sample trigger interpolation, and the fractional column ends
+//              that carry it to the screen. One sample at 48 kHz is ~0.95 px of
+//              horizontal jitter on a 1920-wide lane — a shimmer along the whole
+//              trace. Measured on a steady tone: 1.03 px a frame at medium
+//              against 0.007 px at high, a factor of 158.
+//   interp     read the window at FRACTIONAL sample positions, so a lane with
+//              more pixels than samples draws a resampled curve instead of a
+//              stair-step. Ultra only: it is the last half-pixel of accuracy
+//              and it costs a multiply per column.
+//   passes     how many strokes build the beam. The core is never the one
+//              dropped; what goes at the cheaper tiers is the middle body.
+const SCOPE = {
+  low: { buffer: 4096, search: 25, points: 256, exact: false, fine: false, interp: false, divisions: 4, passes: 2 },
+  medium: { buffer: 4096, search: 40, points: 512, exact: false, fine: false, interp: false, divisions: 6, passes: 2 },
+  high: { buffer: 8192, search: 120, points: 2048, exact: true, fine: true, interp: false, divisions: 8, passes: 3 },
+  ultra: { buffer: 16384, search: 250, points: 4096, exact: true, fine: true, interp: true, divisions: 10, passes: 3 },
+};
+
 const PRESETS = {
-  low: { dpr: 1, particles: 24, bars: 40, glow: 0.45, trail: 0.34, blur: 0, layers: 2 },
-  medium: { dpr: 1.5, particles: 64, bars: 56, glow: 0.7, trail: 0.24, blur: 0, layers: 3 },
-  high: { dpr: 2, particles: 130, bars: 72, glow: 1, trail: 0.17, blur: 1, layers: 4 },
-  ultra: { dpr: 2, particles: 240, bars: 96, glow: 1.25, trail: 0.12, blur: 1, layers: 5 },
+  low: { dpr: 1, particles: 24, bars: 40, glow: 0.45, trail: 0.34, blur: 0, layers: 2, scope: SCOPE.low },
+  medium: { dpr: 1.5, particles: 64, bars: 56, glow: 0.7, trail: 0.24, blur: 0, layers: 3, scope: SCOPE.medium },
+  high: { dpr: 2, particles: 130, bars: 72, glow: 1, trail: 0.17, blur: 1, layers: 4, scope: SCOPE.high },
+  ultra: { dpr: 2, particles: 240, bars: 96, glow: 1.25, trail: 0.12, blur: 1, layers: 5, scope: SCOPE.ultra },
 };
 
 export function autoTier() {

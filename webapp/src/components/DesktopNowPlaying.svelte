@@ -46,6 +46,8 @@
     vizFps,
     vizBeatDetect,
     vizFullBleed,
+    vizScopeOrientation,
+    vizScopeColour,
     vizShowStyle,
     ecoMode,
   } from "../lib/stores.js";
@@ -157,6 +159,8 @@
         layout="full"
         active={$immersiveOpen}
         paused={!$playing}
+        scopeOrientation={$vizScopeOrientation}
+        scopeColour={$vizScopeColour}
         occluder={coverBox}
       />
     </div>

@@ -13,7 +13,7 @@
 // The registry itself is in `./modes.js`, which imports nothing. Anything that
 // only needs to know which modes exist should import THAT, not this.
 
-export { MODES, MODE_BY_ID, effectiveMode, levelFor } from "./modes.js";
+export { MODES, MODE_BY_ID, effectiveMode, levelFor, needsWave } from "./modes.js";
 
 // One promise per mode, so a scene module is fetched once however many views
 // ask for it and a switch back to a mode already used is synchronous-ish.
@@ -28,6 +28,9 @@ function load(mode) {
       break;
     case "pulse":
       p = import("./scenes/pulse.js").then((m) => m.createPulseScene);
+      break;
+    case "scope":
+      p = import("./scenes/scope.js").then((m) => m.createScopeScene);
       break;
     case "aurora":
       p = import("./scenes/aurora.js").then((m) => m.createAuroraScene);

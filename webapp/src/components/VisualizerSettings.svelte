@@ -21,6 +21,8 @@
     vizLookahead,
     vizFps,
     vizFullBleed,
+    vizScopeOrientation,
+    vizScopeColour,
     vizScreenMode,
     vizScreenQuality,
     ecoMode,
@@ -30,7 +32,7 @@
     isAdmin,
   } from "../lib/stores.js";
   import { push } from "svelte-spa-router";
-  import { MODES, effectiveMode } from "../lib/viz/modes.js";
+  import { MODES, effectiveMode, needsWave } from "../lib/viz/modes.js";
   import { PALETTES } from "../lib/viz/palette.js";
   import { TIERS, autoTier } from "../lib/viz/quality.js";
   import { LEVEL, subscribeFrames, readout } from "../lib/audio/engine.js";
@@ -50,6 +52,20 @@
 
   const KICK_LABEL = { soft: "souple", hard: "dur", industrial: "industriel" };
 
+  // The oscilloscope's two knobs. Written out here rather than imported from
+  // the scene: `lib/viz/scenes/scope.js` is code-split precisely so that a
+  // launch never parses it, and importing it for two arrays of labels would
+  // hoist the whole scene back into the settings chunk.
+  const SCOPE_AXES = [
+    { v: "horizontal", label: "Horizontal", hint: "Deux bandes, l'une sous l'autre" },
+    { v: "vertical", label: "Vertical", hint: "Deux colonnes, côte à côte" },
+  ];
+  const SCOPE_TINTS = [
+    { v: "duo", label: "Deux teintes", hint: "Gauche et droite aux deux bouts de la palette" },
+    { v: "mono", label: "Une teinte", hint: "Les deux voies sur la couleur de base" },
+    { v: "sweep", label: "Dégradé", hint: "La teinte parcourt la trace, comme les barres" },
+  ];
+
   $: mode = effectiveMode($vizMode, $vizBeatDetect, $ecoMode);
   $: degraded = mode !== $vizMode && !$ecoMode;
   $: autoLabel = autoTier();
@@ -57,6 +73,9 @@
   // to show what the user just switched OFF is exactly the kind of pointless
   // work this setting exists to stop.
   $: showPreview = mode !== "off";
+  // The scope is configured wherever it is running: the player here, or the
+  // separate screen, which has its own scene and the same instrument.
+  $: scopeChosen = needsWave(mode) || needsWave($vizScreenMode);
   $: previewLive = showPreview && !!$current && $playing;
 
   // While this page is open the engine runs its full analysis, whatever the
@@ -125,6 +144,8 @@
         fps={$vizFps}
         layout="full"
         paused={!previewLive}
+        scopeOrientation={$vizScopeOrientation}
+        scopeColour={$vizScopeColour}
       />
       {#if !previewLive}
         <span class="ph">Lancez un titre pour voir l'aperçu</span>
@@ -184,6 +205,44 @@
       </p>
     {/if}
   </div>
+
+  <!-- The scope's own settings, shown when it is the scene somewhere — here or
+       on the separate screen. They sit directly under the picker that reveals
+       them, which is where a reader looks next. -->
+  {#if scopeChosen}
+    <div class="block">
+      <div class="block-head">
+        <span class="block-title">Oscilloscope</span>
+        <span class="block-hint muted">
+          Une trace par canal, déclenchée sur le grave comme un vrai oscilloscope —
+          l'image tient en place au lieu de glisser. La précision suit le niveau de
+          détail plus bas : à « ultra » chaque échantillon est tracé, avec un
+          déclenchement au sous-échantillon. Les couleurs viennent de la palette
+          choisie ci-dessous.
+        </span>
+      </div>
+      <div class="seg">
+        {#each SCOPE_AXES as o}
+          <button
+            class="seg-btn"
+            class:sel={$vizScopeOrientation === o.v}
+            title={o.hint}
+            on:click={() => vizScopeOrientation.set(o.v)}>{o.label}</button
+          >
+        {/each}
+      </div>
+      <div class="seg mt">
+        {#each SCOPE_TINTS as c}
+          <button
+            class="seg-btn"
+            class:sel={$vizScopeColour === c.v}
+            title={c.hint}
+            on:click={() => vizScopeColour.set(c.v)}>{c.label}</button
+          >
+        {/each}
+      </div>
+    </div>
+  {/if}
 
   <div class="block">
     <div class="block-head">

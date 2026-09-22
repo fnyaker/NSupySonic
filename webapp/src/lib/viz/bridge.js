@@ -44,6 +44,26 @@ const CHANNEL = "nsupysonic-viz";
 // engine's own `recomputeLevel` maxes it with whatever this tab wants — so the
 // rule falls out of machinery that already existed rather than a new one.
 const PUBLISH_HZ = 45; // the projector renders at 60; 45 is indistinguishable
+// THE OSCILLOSCOPE IS THE ONE SCENE THAT NEEDS THE SAMPLES THEMSELVES, and no
+// summary of them will do: a waveform reduced before it crosses is a waveform
+// the projector cannot trigger, and an untriggered trace slides sideways until
+// it is unreadable. So the raw window crosses, as Int16 — sixteen bits over
+// ±1.0 is thirty-two thousand steps of vertical resolution, which is two orders
+// of magnitude past what any screen can show, at half the bytes of a float.
+//
+// It is strictly opt-in and sized by the VIEWER (`wv` on its hello, its own
+// tier's trigger buffer): a projector on any other scene keeps costing the
+// ~800 bytes a frame it always did, and one on the scope costs up to 32 kB —
+// which is a memcpy inside one browser process, not a network. That cap is
+// also why a projector at `ultra` searches 128 ms back for its trigger rather
+// than the 250 ms it would have next to the audio: still more than any other
+// tier gets, and not worth a megabyte a second on the wire.
+//
+// A viewer that does not ask (an older build) is sent nothing, and a publisher
+// that does not answer (an older player tab) leaves the projector's scope with
+// no probe on it: it draws its graticule and a flat line, which is the truth
+// rather than a broken picture.
+const WAVE_MAX = 8192;
 // A viewer proves it is alive by pinging. That ping is a setInterval in a
 // window that is, by design, not the focused one — and a browser throttles
 // timers in a backgrounded tab to once a second, then to once a MINUTE after a
@@ -88,6 +108,11 @@ export function createPublisher({ onViewers, channel } = {}) {
   const viewers = new Map(); // id → last seen
   let announced = 0;
   let viewerLevel = 0;
+  let viewerWave = 0;
+  // Reused between messages, like `bands` above: structured clone copies them
+  // on the way out, so the sender may keep writing into the same pair.
+  let waveL = null;
+  let waveR = null;
   // Events are STICKY between publishes. The engine runs at ~94 Hz and this
   // channel at 45, so a beat — which is true on exactly one frame — had a
   // better than even chance of landing in a frame that was dropped. The
@@ -111,12 +136,19 @@ export function createPublisher({ onViewers, channel } = {}) {
   // The host only runs the analysis engine while somebody is watching, so the
   // count crossing zero is the signal it acts on.
   function announce() {
-    // The most demanding viewer decides, and a change of level is as much a
-    // reason to re-announce as a change of count.
+    // The most demanding viewer decides, and a change of level — or of the
+    // waveform window, which is the same kind of demand — is as much a reason
+    // to re-announce as a change of count.
     let lv = 0;
-    for (const v of viewers.values()) if (v && v.lv > lv) lv = v.lv;
-    if (viewers.size === announced && lv === viewerLevel) return;
+    let wv = 0;
+    for (const v of viewers.values()) {
+      if (!v) continue;
+      if (v.lv > lv) lv = v.lv;
+      if (v.wv > wv) wv = v.wv;
+    }
+    if (viewers.size === announced && lv === viewerLevel && wv === viewerWave) return;
     viewerLevel = lv;
+    viewerWave = wv;
     announced = viewers.size;
     setBackgroundAnalysis(announced > 0);
     if (announced > 0 && !beat) beat = setInterval(sendState, HEARTBEAT_EVERY);
@@ -124,7 +156,7 @@ export function createPublisher({ onViewers, channel } = {}) {
       clearInterval(beat);
       beat = null;
     }
-    onViewers?.(announced, viewerLevel);
+    onViewers?.(announced, viewerLevel, viewerWave);
   }
 
   function sendState() {
@@ -142,6 +174,32 @@ export function createPublisher({ onViewers, channel } = {}) {
   const chroma = new Float32Array(12);
   const look = new Float32Array(LOOK_KEYS.length);
 
+  // The freshest `viewerWave` samples of each channel, quantised to Int16.
+  // Returns false when there is nothing to send — no viewer wants one, or this
+  // tab has no stereo tap running (nothing on screen here asked for samples, so
+  // the engine never built it).
+  function packWave(wv) {
+    if (!viewerWave || !wv || !wv.size || !wv.left) return false;
+    const n = Math.min(viewerWave, wv.size);
+    if (!waveL || waveL.length !== n) {
+      waveL = new Int16Array(n);
+      waveR = new Int16Array(n);
+    }
+    const off = wv.size - n;
+    const l = wv.left;
+    const r = wv.right;
+    for (let i = 0; i < n; i++) {
+      // Audio can and does step past ±1 between the limiter and here, so clamp
+      // rather than let it wrap — a wrapped sample is a full-scale spike the
+      // scope would draw and nobody played.
+      const a = l[off + i];
+      const b = r[off + i];
+      waveL[i] = a >= 1 ? 32767 : a <= -1 ? -32767 : (a * 32767) | 0;
+      waveR[i] = b >= 1 ? 32767 : b <= -1 ? -32767 : (b * 32767) | 0;
+    }
+    return true;
+  }
+
   function prune() {
     const now = Date.now();
     for (const [id, v] of viewers) if (now - v.at > VIEWER_TIMEOUT) viewers.delete(id);
@@ -157,7 +215,14 @@ export function createPublisher({ onViewers, channel } = {}) {
       // An older projector does not send one; SMART is the safe assumption,
       // because under-analysing silently degrades its picture while
       // over-analysing only costs this tab a little work.
-      viewers.set(m.id, { at: Date.now(), lv: Number.isFinite(m.lv) ? m.lv : 2 });
+      viewers.set(m.id, {
+        at: Date.now(),
+        lv: Number.isFinite(m.lv) ? m.lv : 2,
+        // Unlike the level, a MISSING waveform request means none: an older
+        // viewer has no scene that could read one, and guessing generously
+        // here would put 16 kB a frame on the wire for nobody.
+        wv: Number.isFinite(m.wv) ? Math.min(WAVE_MAX, Math.max(0, m.wv | 0)) : 0,
+      });
       announce();
       if (!known) {
         if (metaCache) ch.postMessage(metaCache);
@@ -197,6 +262,7 @@ export function createPublisher({ onViewers, channel } = {}) {
       if (now - last < 1000 / PUBLISH_HZ) return;
       last = now;
       bands.set(frame.bands);
+      const wave = packWave(frame.wave);
       const b = frame.beat;
       const f = frame.features;
       const st = frame.style;
@@ -227,6 +293,12 @@ export function createPublisher({ onViewers, channel } = {}) {
              hadKick ? 1 : 0]
           : null,
         c: f?.chroma ? (chroma.set(f.chroma), chroma) : null,
+        // The raw per-channel window, only when a viewer asked for one. `wsr`
+        // travels with it because the scope's timebase is in MILLISECONDS and
+        // the two tabs cannot assume one sample rate between them.
+        w: wave ? waveL : null,
+        w2: wave ? waveR : null,
+        wsr: wave ? frame.wave.sampleRate : 0,
         b: [b.bpm, b.confidence, b.phase, hadBeat ? 1 : 0, b.beatIndex, b.barPos,
             b.beatsPerBar, hadDown ? 1 : 0, peakOnset, b.kickPulse, b.period,
             b.locked ? 1 : 0],
@@ -286,8 +358,9 @@ export function createPublisher({ onViewers, channel } = {}) {
 // --- the projector tab ------------------------------------------------------
 // Rebuilds a frame object with the same shape the scenes expect, so a scene has
 // no idea whether it is running next to the audio or on the other screen.
-export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
+export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2, initialWave = 0) {
   let level = initialLevel;
+  let waveWant = Math.min(WAVE_MAX, Math.max(0, initialWave | 0));
   const ch = open();
   const id = Math.random().toString(36).slice(2);
   const energy = { sub: 0, bass: 0, lowMid: 0, mid: 0, high: 0, air: 0 };
@@ -314,10 +387,15 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
   const style = {
     dominant: "", dominantLabel: "", confidence: 0, archetypes: null, look: null, kick,
   };
+  // Rebuilt from the Int16 pair on arrival and reused between messages, in the
+  // shape lib/audio/engine.js publishes — a scene has no idea whether it is
+  // reading the tap next to the audio or a copy of it from the other screen.
+  const wave = { left: null, right: null, size: 0, sampleRate: 48000 };
   const frame = {
     t: 0, dt: 1 / 60,
     bands: new Float32Array(BAND_COUNT),
     energy, features, beat, pattern: null, style: null, silent: true,
+    wave: null,
   };
   let lastAt = 0;
   let lastBeat = 0;
@@ -358,7 +436,7 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
           if (rank <= sourceRank && !stale) return;
           source = m.src;
           // The new source has not told us what it is playing yet.
-          ch.postMessage({ t: "hello", id, lv: level });
+          ch.postMessage({ t: "hello", id, lv: level, wv: waveWant });
         } else if (!source) {
           source = m.src ?? null;
         }
@@ -430,6 +508,22 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
         kick.decay = m.s.k[2]; kick.hit = !!m.s.k[3];
         frame.style = style;
       } else frame.style = null;
+      if (m.w && m.w2 && m.w.length) {
+        const n = m.w.length;
+        if (!wave.left || wave.left.length !== n) {
+          wave.left = new Float32Array(n);
+          wave.right = new Float32Array(n);
+        }
+        const wl = wave.left;
+        const wr = wave.right;
+        for (let i = 0; i < n; i++) {
+          wl[i] = m.w[i] / 32767;
+          wr[i] = m.w2[i] / 32767;
+        }
+        wave.size = n;
+        wave.sampleRate = m.wsr || 48000;
+        frame.wave = wave;
+      } else frame.wave = null;
       frame.silent = features.silent;
       if (!alive) {
         alive = true;
@@ -437,8 +531,11 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
       }
       onFrame(frame);
     };
-    ch.postMessage({ t: "hello", id, lv: level });
-    pingTimer = setInterval(() => ch.postMessage({ t: "ping", id, lv: level }), PING_EVERY);
+    ch.postMessage({ t: "hello", id, lv: level, wv: waveWant });
+    pingTimer = setInterval(
+      () => ch.postMessage({ t: "ping", id, lv: level, wv: waveWant }),
+      PING_EVERY
+    );
     // "Is anything still there?" — keyed off the HEARTBEAT, so a paused player
     // stays connected. Only a player tab that has actually gone away (closed,
     // navigated, crashed) stops sending one.
@@ -465,7 +562,7 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
   function onVisible() {
     if (!document.hidden) {
       try {
-        ch?.postMessage({ t: "hello", id, lv: level });
+        ch?.postMessage({ t: "hello", id, lv: level, wv: waveWant });
       } catch {
         /* ignore */
       }
@@ -489,11 +586,13 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
      * viewer that switched to `smart` should not draw two beat-less bars while
      * a twenty-second timer runs down.
      */
-    setLevel(lv) {
-      if (!Number.isFinite(lv) || lv === level) return;
-      level = lv;
+    setLevel(lv, wv = waveWant) {
+      const want = Math.min(WAVE_MAX, Math.max(0, wv | 0));
+      if ((!Number.isFinite(lv) || lv === level) && want === waveWant) return;
+      if (Number.isFinite(lv)) level = lv;
+      waveWant = want;
       try {
-        ch?.postMessage({ t: "ping", id, lv: level });
+        ch?.postMessage({ t: "ping", id, lv: level, wv: waveWant });
       } catch {
         /* the channel is gone; the next hello carries it */
       }

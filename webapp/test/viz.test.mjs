@@ -45,9 +45,14 @@ function recorder(w, h) {
   let m = [1, 0, 0, 1, 0, 0];
   const stack = [];
   const grad = () => ({ addColorStop() {} });
+  // The third element is the compositing mode the point was drawn under. Every
+  // caller that only wants coordinates destructures the first two and is
+  // unaffected; what it buys is telling a scene's GLOW layer from its line work
+  // — and, for the oscilloscope, its trace (additive) from the graticule it is
+  // drawn against (which is not).
   const put = (px, py) => {
     if (!Number.isFinite(px) || !Number.isFinite(py)) return;
-    ink.push([m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]]);
+    ink.push([m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5], g.globalCompositeOperation]);
   };
   const g = {
     canvas: { width: w, height: h },
@@ -119,6 +124,15 @@ function recorder(w, h) {
       put(a, b);
       put(a + rw, b + rh);
     },
+    // Text is ink with a position like any other: the scope names its two
+    // traces, and a recorder without `fillText` would take the suite down
+    // rather than measure it (see `strokeRect` below, which already did).
+    fillText(_text, a, b) {
+      put(a, b);
+    },
+    measureText(t) {
+      return { width: String(t).length * 6 };
+    },
     // A recorder that is MISSING a canvas call does not measure the scene
     // wrongly, it throws — `industrial` draws its frames with `strokeRect` and
     // took the whole suite down with "g.strokeRect is not a function" the first
@@ -157,6 +171,89 @@ function recorder(w, h) {
   return g;
 }
 
+// --- the audio the scenes are driven with -----------------------------------
+//
+// The oscilloscope draws the SAMPLES, so a frame with no samples in it tests
+// nothing about it — and a drawn sine would test its own drawing. This is one
+// looping second of the kind of record this player exists for, written as
+// samples: a pitched kick swept 180 -> 45 Hz into a soft clipper twice a second,
+// a saw lead panned right, hats on the offbeats, and the two channels genuinely
+// different so "one trace per channel" is a claim a test can check.
+//
+// Built ONCE and stored twice end to end, so any offset yields a contiguous
+// window without a wrap and a frame costs a subarray rather than a synthesis.
+const WAVE_SR = 48000;
+const WAVE_LEN = WAVE_SR;
+const waveSrcL = new Float32Array(WAVE_LEN * 2);
+const waveSrcR = new Float32Array(WAVE_LEN * 2);
+(function buildWave() {
+  const beat = 0.5; // 120 BPM
+  let hatSeed = 12345;
+  const rnd = () => ((hatSeed = (hatSeed * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
+  let kickPhase = 0;
+  for (let i = 0; i < WAVE_LEN; i++) {
+    const t = i / WAVE_SR;
+    const inBeat = t % beat;
+    // The kick: a sine whose frequency falls through the first 50 ms, driven
+    // into a clipper. Its own low end is what the scope's trigger locks to.
+    const kEnv = Math.exp(-inBeat * 9);
+    const kHz = 45 + 135 * Math.exp(-inBeat * 26);
+    kickPhase += (2 * Math.PI * kHz) / WAVE_SR;
+    const kick = Math.tanh(Math.sin(kickPhase) * 3.2) * kEnv * 0.75;
+    // The lead: three harmonics of 220 Hz, panned right.
+    const lead =
+      (Math.sin(2 * Math.PI * 220 * t) * 0.5 +
+        Math.sin(2 * Math.PI * 440 * t) * 0.22 +
+        Math.sin(2 * Math.PI * 660 * t) * 0.11) *
+      0.32;
+    // Hats on the offbeats: short bursts of noise.
+    const hEnv = Math.exp(-((inBeat - beat / 2 + beat) % beat) * 90);
+    const hat = rnd() * hEnv * 0.12;
+    waveSrcL[i] = Math.max(-1, Math.min(1, kick + lead * 0.35 + hat));
+    waveSrcR[i] = Math.max(-1, Math.min(1, kick + lead + hat * 0.6));
+  }
+  waveSrcL.copyWithin(WAVE_LEN, 0, WAVE_LEN);
+  waveSrcR.copyWithin(WAVE_LEN, 0, WAVE_LEN);
+})();
+
+const silentWave = new Float32Array(WAVE_LEN);
+
+// A sustained 220 Hz tone. Music is the right material for almost everything
+// here, but not for "does the trace stand still": on real music consecutive
+// windows share only 60% of their audio, so the picture legitimately changes
+// whatever the trigger does, and the measurement says nothing. A steady tone is
+// the one signal where the trace SHOULD be identical frame to frame, which
+// makes the trigger the only thing the number can be about.
+const toneSrc = new Float32Array(WAVE_LEN * 2);
+for (let i = 0; i < toneSrc.length; i++)
+  toneSrc[i] = Math.sin((2 * Math.PI * 220 * i) / WAVE_SR) * 0.6;
+
+function waveAt(t, size = 4096, mode = "music") {
+  if (mode === "tone") {
+    const off = Math.floor(t * WAVE_SR) % WAVE_LEN;
+    return {
+      left: toneSrc.subarray(off, off + size),
+      right: toneSrc.subarray(off, off + size),
+      size,
+      sampleRate: WAVE_SR,
+    };
+  }
+  if (mode === "silent")
+    return {
+      left: silentWave.subarray(0, size),
+      right: silentWave.subarray(0, size),
+      size,
+      sampleRate: WAVE_SR,
+    };
+  const off = Math.floor(t * WAVE_SR) % WAVE_LEN;
+  return {
+    left: waveSrcL.subarray(off, off + size),
+    right: waveSrcR.subarray(off, off + size),
+    size,
+    sampleRate: WAVE_SR,
+  };
+}
+
 // --- a frame the scenes can be driven with ----------------------------------
 const BANDS = 120;
 function makeFrame(t, opts = {}) {
@@ -185,6 +282,7 @@ function makeFrame(t, opts = {}) {
       period: beatEvery, locked: true,
     },
     style: opts.style ?? null,
+    wave: opts.wave === null ? null : waveAt(t, opts.waveSize || 4096, opts.wave),
   };
 }
 
@@ -213,22 +311,31 @@ const SCENE_FACTORY = {
   bars: (await import("../src/lib/viz/scenes/bars.js")).createBarsScene,
   pulse: (await import("../src/lib/viz/scenes/pulse.js")).createPulseScene,
   aurora: (await import("../src/lib/viz/scenes/aurora.js")).createAuroraScene,
+  scope: (await import("../src/lib/viz/scenes/scope.js")).createScopeScene,
   smart: (await import("../src/lib/viz/scenes/smart.js")).createSmartScene,
 };
 const makeScene = (mode, opts) => (SCENE_FACTORY[mode] ? SCENE_FACTORY[mode](opts) : null);
 
 // Run a scene for a while and return where it drew.
-function paint(mode, { w, h, occl = null, style = null, tier = "high", seconds = 6 } = {}) {
+function paint(
+  mode,
+  {
+    w, h, occl = null, style = null, tier = "high", seconds = 6,
+    orientation = "horizontal", colour = "duo", wave, waveSize,
+  } = {}
+) {
   const preset = tierPreset(tier);
   const geometry = createGeometry();
   geometry.set(w, h, occl);
-  const scene = makeScene(mode, { preset, layout: "full", intensity: 0.8 });
+  const scene = makeScene(mode, {
+    preset, layout: "full", intensity: 0.8, orientation, colour,
+  });
   scene.resize(w, h, preset, geometry.out);
   const pal = createPalette("neon");
   const g = recorder(w, h);
   const dt = 1 / 60;
   for (let i = 0; i < Math.round(seconds / dt); i++) {
-    const f = makeFrame(i * dt, { style });
+    const f = makeFrame(i * dt, { style, wave, waveSize });
     pal.update(f, dt);
     scene.update(f, dt, geometry.out);
     scene.draw(g, w, h, pal.out, geometry.out);
@@ -691,6 +798,211 @@ test("a scene with no style yet still draws, and still fills the frame", () => {
     assert.ok(ink.length > 30, `${mode}: drew nothing without a style verdict`);
     const { maxX } = extent(ink);
     assert.ok(maxX > 1600 * 0.8, `${mode}: stayed in the middle without a style verdict`);
+  }
+});
+
+// --- the oscilloscope -------------------------------------------------------
+//
+// The two tests above ask every scene whether it fills the frame and keeps off
+// the artwork, and the scope answers both. Neither of them would notice if it
+// drew its graticule and nothing else — which is why what follows drives the
+// SAMPLES through it and measures the trace on its own. The recorder tags each
+// point with the compositing mode it was drawn under, and the scope's trace is
+// the only thing it draws additively, so `lighter` separates the beam from the
+// instrument it is drawn on.
+
+const SCOPE_W = 1600;
+const SCOPE_H = 900;
+
+/**
+ * Drive the scope and hand back, per frame, the TRACE's points split by lane.
+ * `rows` is the trace read back one frame at a time, which is what a question
+ * about stability needs; the generic `paint` above accumulates everything.
+ */
+function scopeRun({
+  w = SCOPE_W, h = SCOPE_H, tier = "high", orientation = "horizontal",
+  wave = "music", occl = null, seconds = 4, settle = 1,
+} = {}) {
+  const preset = tierPreset(tier);
+  const geometry = createGeometry();
+  geometry.set(w, h, occl);
+  const scene = makeScene("scope", { preset, layout: "full", intensity: 0.8, orientation });
+  scene.resize(w, h, preset, geometry.out);
+  const pal = createPalette("neon");
+  const dt = 1 / 60;
+  const rows = [];
+  const axis = orientation === "horizontal" ? 1 : 0;
+  const cut = orientation === "horizontal" ? h / 2 : w / 2;
+  for (let i = 0; i < Math.round(seconds / dt); i++) {
+    const f = makeFrame(i * dt, { wave });
+    pal.update(f, dt);
+    scene.update(f, dt, geometry.out);
+    const g = recorder(w, h);
+    scene.draw(g, w, h, pal.out, geometry.out);
+    if (i * dt < settle) continue; // let the auto-range and the lock settle
+    const trace = g.ink.filter((pt) => pt[2] === "lighter");
+    rows.push([
+      trace.filter((pt) => pt[axis] < cut).map((pt) => pt[axis]),
+      trace.filter((pt) => pt[axis] >= cut).map((pt) => pt[axis]),
+    ]);
+  }
+  return { rows, scene, axis, geom: geometry.out };
+}
+
+const deflection = (rows, lane, zero) => {
+  let max = 0;
+  let sum = 0;
+  let n = 0;
+  for (const r of rows)
+    for (const v of r[lane]) {
+      const d = Math.abs(v - zero);
+      if (d > max) max = d;
+      sum += d;
+      n++;
+    }
+  return { max, mean: n ? sum / n : 0, n };
+};
+
+test("the scope draws the signal, one trace per channel, and goes flat without one", () => {
+  // Horizontal, no artwork: lane G is the top half (zero line at h/4), lane D
+  // the bottom (3h/4).
+  const zeroG = SCOPE_H / 4;
+  const zeroD = (SCOPE_H * 3) / 4;
+
+  const music = scopeRun({ wave: "music" });
+  const g = deflection(music.rows, 0, zeroG);
+  const d = deflection(music.rows, 1, zeroD);
+  assert.ok(g.n > 1000 && d.n > 1000, "the scope drew almost no trace");
+  // Measured on the bench material: 168.2 px and 196.1 px of peak deflection
+  // against a lane half-height of 199 — the auto-range lets the loudest kicks
+  // reach the rails on purpose, which is what a scope does.
+  assert.ok(g.max > 60, `left trace barely moved (${g.max.toFixed(1)} px)`);
+  assert.ok(d.max > 60, `right trace barely moved (${d.max.toFixed(1)} px)`);
+
+  // THE TWO CHANNELS ARE READ SEPARATELY, which is the whole reason there are
+  // two of them. The bench signal puts the lead almost three times louder on
+  // the right, and between kicks that is most of what is in the window —
+  // measured, the right trace's mean deflection is 1.26x the left's. A scope
+  // fed one summed signal (which is all an AnalyserNode can give, hence the
+  // dedicated tap in lib/audio/graph.js) would read exactly 1.00 here.
+  const ratio = d.mean / g.mean;
+  assert.ok(ratio > 1.1, `the two channels drew the same thing (ratio ${ratio.toFixed(3)})`);
+
+  // Silence is a flat line ON the zero line, not an empty canvas: an
+  // instrument showing nothing and an instrument that has stopped are
+  // different things, and the auto-range must not invent a signal out of the
+  // noise floor either.
+  const quiet = scopeRun({ wave: "silent" });
+  const qg = deflection(quiet.rows, 0, zeroG);
+  assert.ok(qg.n > 1000, "the scope stopped drawing on silence");
+  assert.ok(qg.max < 1, `silence deflected the trace by ${qg.max.toFixed(2)} px`);
+  assert.equal(quiet.scene.locked < 0.05, true, "silence must not report a trigger lock");
+
+  // ...and with no tap at all (an older projector feed, or before the graph
+  // exists) it still draws its face rather than throwing or blanking.
+  const none = scopeRun({ wave: null });
+  assert.ok(deflection(none.rows, 0, zeroG).n > 1000, "no tap left the scope blank");
+});
+
+test("triggering is what holds the trace still", () => {
+  // On a sustained tone a triggered trace must be the SAME trace every frame.
+  // The reference is the same windows read from the end of the buffer, which
+  // is exactly what a scope with no trigger shows.
+  const tone = scopeRun({ wave: "tone", tier: "high", seconds: 3 });
+  assert.ok(tone.scene.locked > 0.9, `no lock on a steady tone (${tone.scene.locked.toFixed(2)})`);
+
+  const drift = (rows, lane) => {
+    let sum = 0;
+    let n = 0;
+    for (let i = 1; i < rows.length; i++) {
+      const a = rows[i - 1][lane];
+      const b = rows[i][lane];
+      const m = Math.min(a.length, b.length);
+      for (let c = 0; c < m; c++) {
+        sum += Math.abs(a[c] - b[c]);
+        n++;
+      }
+    }
+    return n ? sum / n : 0;
+  };
+  const moved = drift(tone.rows, 0);
+  // Measured: 0.007 px triggered against 86.5 px free-running on this tone —
+  // four orders of magnitude, and the difference between an instrument and a
+  // waveform sliding off the side of the screen.
+  assert.ok(moved < 2, `the trace slid ${moved.toFixed(3)} px a frame on a steady tone`);
+});
+
+test("the scope's precision climbs with the quality tier, and ultra is the exact one", () => {
+  // Precision, not timebase: every tier shows the same slice of time. What
+  // changes is how much of it survives to the screen.
+  //
+  // Measured on a 4K-wide frame, where the lane is wider than the tiers'
+  // ceilings and each one's own limit is what bites: 256 / 512 / 2048 / 4044
+  // columns. (On a 1600-wide frame high and ultra both reach one column per
+  // pixel, which is as precise as a display can be asked to be.)
+  const cols = TIERS.map((t) => scopeRun({ tier: t, w: 4096, h: 2160, seconds: 0.6, settle: 0 }).scene.cols);
+  for (let i = 1; i < cols.length; i++)
+    assert.ok(cols[i] > cols[i - 1], `${TIERS[i]} is no finer than ${TIERS[i - 1]} (${cols.join(" / ")})`);
+  assert.ok(cols[3] >= 4000, `ultra capped at ${cols[3]} columns on a 4K lane`);
+
+  // And the step that is NOT a column count: the sub-sample trigger. Below
+  // `high` the window starts on a whole sample, so the trace shifts a whole
+  // sample at a time — ~0.95 px on a 1920-wide lane, seen as a shimmer down
+  // the whole trace. Measured on the steady tone: 1.03 px a frame at medium,
+  // 0.007 px at high, a factor of 158.
+  const drift = (run) => {
+    const rows = run.rows;
+    let sum = 0;
+    let n = 0;
+    for (let i = 1; i < rows.length; i++) {
+      const a = rows[i - 1][0];
+      const b = rows[i][0];
+      const m = Math.min(a.length, b.length);
+      for (let c = 0; c < m; c++) {
+        sum += Math.abs(a[c] - b[c]);
+        n++;
+      }
+    }
+    return n ? sum / n : 0;
+  };
+  const coarse = drift(scopeRun({ wave: "tone", tier: "medium", seconds: 3 }));
+  const fine = drift(scopeRun({ wave: "tone", tier: "high", seconds: 3 }));
+  assert.ok(
+    fine < coarse * 0.2,
+    `the sub-sample trigger bought nothing (medium ${coarse.toFixed(3)} px, high ${fine.toFixed(3)} px)`
+  );
+});
+
+test("the scope's orientation moves the lanes, and both keep off the artwork", () => {
+  // Horizontal is two bands stacked; vertical is two columns side by side. The
+  // claim is that the SAME signal lands somewhere else, not that a label
+  // changed.
+  const flat = paint("scope", { w: SCOPE_W, h: SCOPE_H, orientation: "horizontal" });
+  const tall = paint("scope", { w: SCOPE_W, h: SCOPE_H, orientation: "vertical" });
+  const a = signature(flat.ink, SCOPE_W, SCOPE_H);
+  const b = signature(tall.ink, SCOPE_W, SCOPE_H);
+  assert.ok(
+    sigDistance(a, b) > 0.5,
+    `the two orientations drew in the same places (${sigDistance(a, b).toFixed(2)})`
+  );
+
+  // Both have to route around the cover in the full-screen player — the
+  // horizontal one into the strips above and below it, the vertical one into
+  // the columns beside it. The generic test above only ever asked the default.
+  const w = 420;
+  const h = 900;
+  const side = w * 0.72;
+  const occl = { x: (w - side) / 2, y: (h - side) / 2, w: side, h: side };
+  for (const orientation of ["horizontal", "vertical"]) {
+    const r = paint("scope", { w, h, occl, orientation });
+    const inside = r.ink.filter(
+      (pt) => Math.abs(pt[0] - r.geom.cx) < r.geom.hw && Math.abs(pt[1] - r.geom.cy) < r.geom.hh
+    ).length;
+    assert.ok(r.ink.length > 50, `scope/${orientation}: drew almost nothing`);
+    assert.ok(
+      inside / r.ink.length < 0.25,
+      `scope/${orientation}: ${((inside / r.ink.length) * 100) | 0}% of the drawing is behind the cover`
+    );
   }
 });
 

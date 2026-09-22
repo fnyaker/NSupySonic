@@ -27,7 +27,7 @@
   import { dominantColor } from "../lib/color.js";
   import { api } from "../lib/api.js";
   import { subscribeFrames } from "../lib/audio/engine.js";
-  import { createScene, levelFor } from "../lib/viz/index.js";
+  import { createScene, levelFor, needsWave } from "../lib/viz/index.js";
   import { createGeometry } from "../lib/viz/geometry.js";
   import { createPalette } from "../lib/viz/palette.js";
   import { resolveTier, tierPreset, createGovernor } from "../lib/viz/quality.js";
@@ -58,6 +58,11 @@
   // artwork); "square" takes the largest centred square inside it, which is
   // what the mobile cover carousel actually shows.
   export let occluderShape = "box";
+  // The oscilloscope's own two settings. Passed through rather than read from
+  // the stores here because this component is also the projector's canvas, and
+  // that window renders with the same settings the player does.
+  export let scopeOrientation = "horizontal";
+  export let scopeColour = "duo";
 
   let canvas;
   let box;
@@ -120,7 +125,14 @@
   function buildScene() {
     const token = ++sceneToken;
     const wanted = mode;
-    const p = createScene(wanted, { preset, layout, intensity, reducedMotion: reduced });
+    const p = createScene(wanted, {
+      preset,
+      layout,
+      intensity,
+      reducedMotion: reduced,
+      orientation: scopeOrientation,
+      colour: scopeColour,
+    });
     if (!p) {
       scene = null;
       return;
@@ -130,7 +142,7 @@
       if (token !== sceneToken || !built) return;
       scene = built;
       if (cssW) scene.resize(cssW, cssH, preset, geometry.out);
-      scene.setOptions?.({ intensity, reducedMotion: reduced });
+      scene.setOptions?.(sceneOptions());
     }).catch(() => {
       // The chunk could not be fetched (offline mid-deploy, a failed update).
       // Leave the canvas empty rather than throwing: the next mode change, or
@@ -233,14 +245,26 @@
     preset = withPostGain(tierPreset(next), next);
     buildScene();
     sizeCanvas();
+    // The subscription carries the tier's own waveform window, so a step down
+    // has to re-take it or the engine keeps holding the larger tap.
+    detach();
+    attach();
   }
 
   function attach() {
     if (unsub || idle || external || !active || mode === "off") return;
-    unsub = subscribeFrames((f) => {
-      pal.update(f, f.dt);
-      scene?.update(f, f.dt, geometry.out);
-    }, levelFor(mode));
+    unsub = subscribeFrames(
+      (f) => {
+        pal.update(f, f.dt);
+        scene?.update(f, f.dt, geometry.out);
+      },
+      levelFor(mode),
+      // The raw per-channel samples, for the scope and for nothing else. The
+      // window is the TIER's, so the engine builds the stereo tap at whatever
+      // the most demanding view on screen needs — the same rule it already
+      // applies to the analysis level.
+      { wave: needsWave(mode) ? preset.scope?.buffer || 4096 : 0 }
+    );
   }
   function detach() {
     unsub?.();
@@ -344,7 +368,22 @@
     if (watched) ro.observe(watched);
     sizeCanvas();
   }
-  $: scene?.setOptions?.({ intensity, reducedMotion: reduced });
+  function sceneOptions() {
+    return {
+      intensity,
+      reducedMotion: reduced,
+      orientation: scopeOrientation,
+      colour: scopeColour,
+    };
+  }
+  // Pushed into the live scene rather than rebuilding it, for the same reason
+  // intensity is: flipping the orientation while watching should move the
+  // lanes, not restart the trigger lock and the auto-range that took a second
+  // to settle. The arguments are there so Svelte tracks them.
+  $: applyOptions(intensity, reduced, scopeOrientation, scopeColour);
+  function applyOptions() {
+    scene?.setOptions?.(sceneOptions());
+  }
   $: pal.setMode(palette);
   $: applyPaused(paused, active);
 

@@ -45,6 +45,10 @@ import {
   getAnalysers,
   getContext,
   requestAnalyser,
+  requestScope,
+  releaseScope,
+  setScopeWindow,
+  readScope,
   resumeAudio,
   lookaheadSeconds,
   FFT_LO,
@@ -69,6 +73,14 @@ const CEIL_DB = -14;
 export const LEVEL = { SPECTRUM: 0, RHYTHM: 1, SMART: 2 };
 
 let analysisLevel = LEVEL.SPECTRUM;
+// THE RAW WAVEFORM IS NOT A LEVEL, it is orthogonal to all three. An
+// oscilloscope wants the samples and nothing else — no beat grid, no
+// classifier — while a smart scene wants the whole ladder and no samples, so
+// folding the two into one number would have made the scope pay for a beat
+// tracker it never reads. It is asked for per subscriber instead
+// (`subscribeFrames(fn, level, { wave: samples })`), and the engine takes the
+// largest window anyone wants, exactly as it takes the deepest level.
+let waveWant = 0;
 let subs = [];
 let running = false;
 let clock = null; // { stop() }
@@ -189,6 +201,10 @@ export const frame = {
   // The MUSICAL reading: main kick vs roll note, drop, build, breakdown. See
   // lib/audio/pattern.js. Null until the engine is running at rhythm level.
   pattern: null,
+  // The raw samples, PER CHANNEL: { left, right, size, sampleRate }, oldest
+  // first. Null unless a subscriber asked for them — see `waveWant`. The arrays
+  // are reused between frames like everything else here.
+  wave: null,
   style: null,
   level: LEVEL.SPECTRUM,
   silent: true,
@@ -342,6 +358,10 @@ function tick(now) {
   frame.t = now;
   frame.dt = dt;
   frame.level = analysisLevel;
+  // Two more memcpys out of the analysers' ring buffers, and only when a scope
+  // is on screen. Null the rest of the time so a scene can tell "nobody is
+  // tapping" from "the tap read silence".
+  frame.wave = waveWant ? readScope() : null;
 
   if (analysisLevel >= LEVEL.RHYTHM) {
     const b = beatTracker.process(f.flux, f.lowFlux, dt);
@@ -596,15 +616,20 @@ if (typeof document !== "undefined")
  * what you need inside the callback, never keep a reference to it.
  * @param {(f: typeof frame) => void} fn
  * @param {number} level one of LEVEL.*
+ * @param {{wave?: number}} [opts] `wave` is how many samples per channel this
+ *   subscriber wants on `frame.wave`; 0 (the default) means it wants none and
+ *   the stereo tap is never built for it.
  */
-export function subscribeFrames(fn, level = LEVEL.SPECTRUM) {
-  const entry = { fn, level };
+export function subscribeFrames(fn, level = LEVEL.SPECTRUM, opts = {}) {
+  const entry = { fn, level, wave: Math.max(0, +opts.wave || 0) };
   subs = subs.concat(entry);
   recomputeLevel();
+  recomputeWave();
   refresh();
   return () => {
     subs = subs.filter((s) => s !== entry);
     recomputeLevel();
+    recomputeWave();
     refresh();
   };
 }
@@ -617,6 +642,24 @@ function recomputeLevel() {
     // Coming back up to rhythm/smart with stale internal state would produce a
     // confident but wrong verdict for a few seconds.
     if (lv > LEVEL.SPECTRUM) resetAnalysis();
+  }
+}
+
+// The largest window anybody wants. The tap is held by the ENGINE, not by the
+// subscriber, so two scopes on screen (the player and the settings preview)
+// share one splitter and one pair of analysers — the same rule as the frame
+// itself.
+function recomputeWave() {
+  let want = 0;
+  for (const s of subs) if (s.wave > want) want = s.wave;
+  if (want === waveWant) return;
+  const had = waveWant > 0;
+  waveWant = want;
+  if (want && !had) requestScope(want);
+  else if (want) setScopeWindow(want);
+  else {
+    releaseScope();
+    frame.wave = null;
   }
 }
 
