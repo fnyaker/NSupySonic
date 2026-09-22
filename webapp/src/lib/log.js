@@ -240,10 +240,14 @@ function logFileName() {
   return `nsupysonic-log-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.txt`;
 }
 
-/** Copy the log to the clipboard — the reliable path inside a WebView, where a
- * download can be swallowed by the host app. */
-export async function copyLog() {
-  const text = logText();
+/** Copy any text to the clipboard — the reliable path inside a WebView, where
+ * a download can be swallowed by the host app.
+ *
+ * Lives here rather than beside its first caller because the WebView fallback
+ * is the whole point: `navigator.clipboard` is unavailable on an insecure
+ * origin and refuses without a user gesture, and every "copy this so you can
+ * send it to me" button needs the same dance. */
+export async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
     return true;
@@ -263,6 +267,11 @@ export async function copyLog() {
       return false;
     }
   }
+}
+
+/** Copy the whole client journal. */
+export async function copyLog() {
+  return copyText(logText());
 }
 
 export function isLogging() {
