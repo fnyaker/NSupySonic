@@ -448,6 +448,14 @@ export function setFade(el, v) {
   return true;
 }
 
+// Whether an element plays THROUGH the graph — and so through its delays (the
+// two compressors' lookahead, the analysis lookahead, the context's own output
+// latency), which its currentTime knows nothing about. The listen party needs
+// this to publish where the host is HEARD, not where its element is.
+export function isWired(el) {
+  return !!(ctx && el && strips.has(el));
+}
+
 // True when a crossfade is actually possible right now: the graph exists and
 // both elements are wired through it.
 export function canCrossfade(a, b) {

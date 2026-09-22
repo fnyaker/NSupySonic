@@ -57,6 +57,7 @@
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
+  import PartyButton from "./PartyButton.svelte";
   import Icon from "./Icon.svelte";
   import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
@@ -265,6 +266,7 @@
             </button>
           {/if}
           <button class="sm" on:click={() => openShare($current)} title="Partager" aria-label="Partager"><Icon name="share" size={19} /></button>
+          <PartyButton size={19} />
           <button class="sm" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={20} /></button>
           <EcoToggle />
           <QualityMenu />

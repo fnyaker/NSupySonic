@@ -1281,6 +1281,63 @@ to kill the click of a cut mid-waveform and short enough to be inaudible as a de
 needs the Web Audio graph, so like the effects it is off by default (see the note in `graph.js`
 about a suspended AudioContext silencing a backgrounded tab).
 
+**Listen party** (`supysonic/webui/party.py`, `webapp/src/lib/party/`, `routes/Party.svelte`,
+`components/PartySheet.svelte`). The host shares a link (`/party/<id>`, with a QR code in the sheet);
+whoever opens it — no account needed — hears what the host plays, **at the same instant**, to the
+sample on each device. Modelled on beatsync (github.com/freeman-jiang/beatsync): NTP-style clock,
+one shared timeline, Web Audio scheduling. What differs, and why:
+
+- **Polling, never a held connection.** A socket or long-poll per listener pins one of the worker's
+  16 threads for the whole party. Guests poll the in-memory state (~1 s, 350 ms near a predicted
+  handover). Continuous playback does not care: it is extrapolated from the anchor.
+- **The host is the reference, and is only WATCHED.** `lib/party/host.js` reads the active
+  `<audio>` element four times a second against the party clock, fits the readings to one line
+  (`anchor.js`, median — a single `currentTime` read is only good to a few ms) and publishes the
+  anchor `{t, p}` only when the player leaves it (track, pause, seek, stall ≥ 400 ms, or 2.5 ms of
+  drift). An element routed through the Web Audio graph is heard AFTER it — lookahead, two
+  compressors (their lookahead measured once per browser, `latency.js`) and the context's output
+  latency — so that is subtracted. The player itself is untouched; it hands over its element and
+  its own plan for the next track (`Player.svelte#partyPlan`, which must follow exactly the rules
+  of `maybeCrossfade`/`maybeTrimEnding`/`loadTrack`).
+- **The next track is announced**: where this track hands over (`at`), the next one's trimmed
+  start, the crossfade, and `gap` — how late this player usually is to actually start it, learnt
+  from its own previous handovers. Guests start it on the beat instead of a poll late; a cut ends
+  the old track at `at`, a crossfade fades it from `at`.
+- **Audio as CHUNKS, not a stream, not whole files.** `/party/<id>/chunk/<track>/<k>` is
+  `[k·6 s, (k+1)·6 s + 50 ms)` cut by ffmpeg, Ogg Opus 192k (FLAC at the device's rate when
+  `decodeAudioData` refuses Opus — the first refusal decides, remembered). Measured, `-ss` before
+  `-i` lands at ZERO lag on FLAC, Ogg and MP4 — and 32 ms off on a VBR MP3 whatever `-usetoc` says,
+  so an MP3 (every podcast) is first re-encoded into an exact-seek Ogg master in the background
+  (1 sample off, measured). Joining costs one chunk, memory is flat whatever the length, and each
+  seam is crossfaded IN TIME over the overlap — which makes every seam a point where the guest
+  re-aligns to the shared clock, so two devices' audio clocks never drift apart by more than one
+  chunk's worth.
+- **The guest engine** (`engine.js`) schedules `AudioBufferSourceNode.start(when, offset)` on the
+  AudioContext clock. Voices (one run of one track, own gain) and nodes (one chunk, own seam
+  envelope). Corrections follow ONE rule (`timeline.correctionFor`): ≤ 3 ms nothing, ≤ 30 ms at the
+  next seam, behind → jump forward now, **ahead → fall silent and resume the SAME audio, never
+  repeat what the room heard** (also what a resume after an overshot pause does).
+- **The audio-clock mapping is measured, and it MOVES** (`makeClockBridge`). Both lessons came from
+  the real-browser run, not the simulation: the first `getOutputTimestamp()` after creation is
+  ~140 ms off and a starting context's clock stands still (so only readings from a running,
+  advancing context count, median of recent ones, outliers dropped, nothing scheduled before
+  three agree); and a mapping that held to ±0.2 ms **stepped by exactly 20 ms** three seconds in
+  and stayed there. Chunks already placed on the old mapping were then 20 ms off until a seam that
+  could not absorb it. `PartyEngine.checkMapping` re-places them: every node remembers the server
+  instant it was placed for; stale future nodes are dropped and placed again, the playing one is
+  re-placed at once past `MAP_NOW_MS` (8 ms). The listener's latency setting is the same path.
+- **The id is the capability**: 128 random bits, and it opens only what the host published
+  (current + next + a few previous tracks, vetted as the HOST — a private upload the host may
+  read, never anything else), their art (`cover_response(vetted=True)`) and their chunks. Guests
+  never control anything; they see each other's names, never each other's listener ids (which
+  authorise `leave`). One party per host; one TAB publishes (Web Locks); a restarted server is
+  handled by the host re-creating the party under the same id (`resume`), so guests' links live on.
+- Measured end to end (Chromium, host and guest in separate contexts, real server, positions
+  compared on the shared clock): joining ~0.4 s; |error| ≤ 0.6 ms steady, after a seek (back in
+  sync in 0.3 s), after pause/resume and across a handover. Physical output latency is outside
+  what any browser reports — Bluetooth — which is what the guest's *Décalage* setting is for.
+  `window.__nsParty.host()` / `.guest()` expose those positions for exactly this check.
+
 ## Database / schema
 
 Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260919`); bump it
@@ -1351,4 +1408,12 @@ the normal install): the vectors it reads are written by `struct`, so the whole 
 shipping path is exercised on a stock server. It also covers the extractor's upload/delete round
 trip and that the operator's `embed_model` is never deleted. Its "a head that does not fit is
 refused" test deliberately logs a traceback — that is the refusal working.
+`tests/test_party.py` pins the listen party's capability model (only what the host plays is
+reachable, a guest never learns another's listener id) and cuts real noise audio with ffmpeg to
+check every chunk lands at zero lag and every seam's overlap is sample-identical (skipped without
+ffmpeg). `webapp/test/party.test.mjs` drives the guest scheduler in virtual time against a recording
+AudioContext (`test/partymock.mjs` replays the automation the way the audio thread does) and asserts
+on what is AUDIBLE at each server instant: seams, re-anchors, pause/resume without replay, predicted
+handovers, crossfades, late chunks, mapping steps, repeat-one; and the clock estimator under
+simulated asymmetric, heavy-tailed queueing and 60 ppm skew, held to the measured numbers.
 Add a test alongside these when touching the proxy or `/api`.
