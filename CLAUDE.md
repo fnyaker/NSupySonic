@@ -583,10 +583,15 @@ stand in for an event.
 `webapp/src/lib/genre/`, `routes/Genres.svelte`) is the answer to "the classifier does not know MY
 genres". The heuristic above knows the styles it was written with; this teaches it yours.
 
-- **The studio opens onto the engine's own vocabulary.** The first admin visit seeds a `GenreTag`
-  per family in `analysis.FAMILIES` (label, colour, archetype) — fifty-odd, from ambient to
-  speedcore, rap to psytrance — so tagging starts by CONFIRMING a guess instead of typing the
-  vocabulary first. It is additive and version-aware (a `Meta` value remembers how many the engine
+- **The studio opens onto a vocabulary WIDER than the detector.** The first admin visit seeds a
+  `GenreTag` per entry in `analysis.known_genres()` — the ~54 families the live classifier can name
+  (`FAMILIES`) plus `EXTRA_GENRES`, ~170 sub-genres it cannot, from detroit to drumfunk and from
+  rawphase to bossa nova — so tagging starts by CONFIRMING a guess instead of typing the vocabulary
+  first, and a sub-genre the heuristic could never guess is still one click away. Nothing in
+  `EXTRA_GENRES` is ever *returned* by `classify`; it is there to be hand-applied and then predicted
+  by the trained head. Every label is chosen so the animation engine resolves it
+  (`viz/skins.js#skinId` lowercases and strips everything but letters and digits), and a test in
+  `webapp/test/viz.test.mjs` reads this Python list and fails if any label has no skin. It is additive and version-aware (a `Meta` value remembers how many the engine
   knew): a release that adds families re-syncs them on the next admin visit, a genre you delete
   stays deleted as long as the vocabulary has not changed, and the *Genres du moteur* button brings
   back just the missing ones. Only the admin seeds; a guest reading `/genre/status` writes nothing.
@@ -844,8 +849,8 @@ guitars, four more keyed to the `look` vector. That is the right shape for blend
 and the wrong shape for the question being asked: every genre came out of the same primitives at
 different strengths, so frenchcore and ambient were the same soft radial vocabulary at different
 brightness. The classifier's `dominant` family now chooses a **WORLD** — a complete, self-contained
-scene with its own motif, motion, background and trail (`lib/viz/worlds/`, one file each). Thirteen
-of them, drawn from what the genres themselves look like, covering all fifty-odd families:
+scene with its own motif, motion, background and trail (`lib/viz/worlds/`, one file each). Eighteen
+of them, drawn from what the genres themselves look like:
 
 | world | motif | families |
 |---|---|---|
@@ -861,13 +866,50 @@ of them, drawn from what the genres themselves look like, covering all fifty-odd
 | `horizon` | the banded sun over a perspective floor grid | synthwave, lofi |
 | `bloom` | soft blooms from every emission point, confetti on the downbeat | pop, dance, house, disco, funk, soul, R&B, afro, amapiano, indie |
 | `smoke` | a brush stroke per note attack, drifting | jazz, blues, folk, country, reggae |
-| `nebula` | clouds, and no event in it anywhere | ambient, strings |
+| `nebula` | clouds, and no event in it anywhere | ambient, strings, drone, shoegaze |
+| `cathedral` | shafts of light down a nave, a rose window on the harmony | classical, orchestral, choral, opera, film score, gospel |
+| `carnival` | concentric rings of beads on patterns of different lengths, meeting every few bars | salsa, samba, afrobeat, reggae, reggaeton, amapiano, ska |
+| `pixels` | a coarse lit grid with sprites walking on it and rows tearing | chiptune, IDM, breakcore, hyperpop, glitch, grime |
+| `ocean` | swells re-drawn as a delay line, receding or bouncing | dub, trip-hop, downtempo, cloud rap, dub techno |
+| `neon` | tubes of bent glass over a wet street, VHS tracking across it | vaporwave, city pop, synthpop, italo disco |
 
 The `look` vector is still read INSIDE each world, which is what keeps hardstyle from looking
 exactly like hardtekk: `chaos` widens the cracks in `shatter` and the tears in `breakgrid`,
 `motion` sets how fast the shards turn and the stars travel, `punch` how far a kick throws them,
 `melodic` whether the saw lead is drawn at all. The coarse answer — the thing you recognise across
 the room — is the world; the fine one is still a blend.
+
+**A world is machinery; a SKIN is what one genre does with it** (`lib/viz/skins.js`). Eighteen
+worlds cannot dress two hundred sub-genres on their own, and the layer engine's failure repeats one
+level down if they try: hardstyle and zaag both land on `hardbounce`, and without a skin they are
+the same picture in two colours. So the catalogue holds **227 rows**, one per genre, each naming its
+world, how its palette leans (`hue` / `sat` / `light`, applied by `palette.js#setSkin` on top of the
+source the user picked, never replacing it), its `speed` and `energy`, and a bag of world
+parameters. `skinFor(name, archetype)` normalises whatever it is handed — an id, a French label from
+the classifier, a hand-typed tag with spaces, accents or hyphens — through `ALIASES` and falls back
+to the archetype's anchor row when nothing matches, so an unknown name still gets a considered
+picture rather than the default one.
+
+**The `p` bag carries two kinds of parameter, and only one of them is worth the table's length.**
+A *scaling* parameter (`shards`, `dots`, `beams`) says how MUCH of the motif there is; a catalogue
+of nothing but those is two hundred brightness settings. A *shape* parameter changes what the motif
+IS, and every world has a few — `wobble`'s `wave` picks a sine, a square or a saw LFO (melodic
+dubstep, riddim and brostep are that difference in the music, so they are that difference on
+screen); `breakgrid`'s `axis` turns the strips into falling columns; `hardbounce`'s `lead` draws the
+lead as a streak, a staircase or a triangle wave (zaag is Dutch for saw); `stagelights`'s `backlit`
+moves the rig behind the band so doom and black metal are silhouettes; `tunnel`'s `dir` −1 sends the
+corridor away from the viewer; `vinyl`'s `arm` puts a tonearm on the deck and `hats` a machine
+hi-hat over it; `kaleido`'s `mirror` 0 makes a pinwheel out of a kaleidoscope. Each world's header
+comment lists its own vocabulary, and a world states a default for every one of them, so a new
+sub-genre costs one line. The four anchor rows (techno, house, ambient, electronic) override almost
+nothing on purpose: they ARE the default each world was written around.
+
+**The studio's vocabulary is the same vocabulary** (`analysis.EXTRA_GENRES` + `known_genres()`).
+The live classifier honestly separates ~54 families, so a *tag* is where a sub-genre name comes
+from — and a label the studio offers that the animation cannot resolve is a track somebody tagged
+carefully and then watched get animated generically. The two lists are written in different
+languages and a test reads the Python one and resolves every label through `skinId` (it caught a
+misspelled `popunk` and a missing `jerseyclub` the day it was written).
 
 **Nothing hard-switches**, which is the property the layer engine had and this must not lose. Two
 things protect it: style.js already refuses to rename the dominant family until a challenger has led
@@ -884,9 +926,123 @@ because a sky is not a trail. That also sets each world's alpha budget: additive
 at roughly `alpha / trail`, so nebula's clouds are drawn at a tenth of what a normal world would use.
 `webapp/test/viz.test.mjs` drives every scene against a recording 2D context and pins that each one
 reaches all four edges of a 16:9 frame, that under a centred cover less than a quarter of its drawing
-lands behind it, that every family in style.js has a world, that thirteen named genres each land on
-their own one AND draw in measurably different places (an 8×8 ink histogram), and that a change of
-genre is a dissolve rather than a cut.
+lands behind it, that every family in style.js has a skin, that thirteen named genres each land on
+their own world AND draw in measurably different places (an 8×8 ink histogram), that a change of
+genre is a dissolve rather than a cut, and that **eleven pairs sharing a world separate on the shape
+switch alone** — both sides painted with the SAME look vector and archetype, so the classifier is
+telling the two worlds an identical story and only the skin is left. `vinyl` is deliberately absent
+from that list: its motif is one disc filling the frame, so a tonearm or a ring of hi-hat spokes
+cannot move the footprint an 8×8 histogram measures, and boom bap against trap is pinned on ink
+VOLUME instead. Fitting the spatial threshold to the pair it cannot judge would have cost the other
+eleven their teeth.
+
+**`geometry.place` returns ONE shared array**, reused on every call so a 94 Hz loop does not make a
+few thousand short-lived pairs a frame. A caller holding two results at once is therefore holding
+the same array twice, the segment between them collapses to a point, and the motif silently stops
+being there — no error, no warning, nothing in the log. It cost a dashed corridor, a tonearm, a
+hi-hat ring, a set of spokes and a web before anyone noticed. Read the first point's numbers out
+before asking for the second (`const p0 = place(...); const x0 = p0[0], y0 = p0[1];`), which is what
+the older scenes already do; the contract is pinned by a test.
+
+**Everything above is what a scene DRAWS; `lib/viz/post.js` is what makes it look lit.** The scenes
+were putting flat additive strokes straight on the output — hairlines on black, hard edges, visible
+banding — and none of that is any one scene's fault or fixable eighteen times over inside them. What
+separates a 1998 canvas demo from a modern visualizer is the pass that runs AFTER the drawing, on
+the whole frame: **bloom** (bright areas bleed, which is what makes a stroke read as light rather
+than as ink), a **chromatic fringe** on the wide halo, and **grain** — a dither first and a mood
+second, since an 8-bit canvas cannot hold a smooth dark gradient. Deliberately **no vignette**:
+darkening the edges is the other half of the stock recipe and it would undo the thing the geometry
+work exists for.
+
+- **The bloom is a SECOND, SMALL canvas over the first, blended by CSS** — not a composite onto the
+  output. The obvious build (render to an offscreen buffer, copy it out, add the bloom) measured
+  45–52 ms a frame against 0.26 ms for the scene itself. Bisected, none of it was the blur (0.21 ms
+  — it is a 260×150 buffer); it was **full-frame canvas traffic**: 27 ms to read the scene canvas
+  and 14 ms for the full-size upscale. So the scene still draws straight onto the visible canvas
+  exactly as it always did, the bloom is built at a fifth of the size, and the compositor does the
+  upscale and the blend on the GPU. One full-frame read a frame instead of three.
+- **Every `filter` runs on a small buffer; every full-size draw has `filter = "none"`.**
+  `ctx.filter` applies over the area drawn INTO, so a hue-rotate on the upscale is a full-frame
+  filter pass however small the source was — doing that three times a frame is where the first
+  113 ms went.
+- **The scene gives back exactly what the bloom adds** (`SCENE_GAIN`, applied by `withPostGain`).
+  Every world was calibrated to a frame mean of 0.05–0.20 with a bloom nowhere in the picture, and
+  switching one on does not redistribute that light, it ADDS to it: techno went from 0.113 to 0.292
+  with 4% of the frame clipped. So `preset.glow` comes down by the order the halo puts back and the
+  exposure stays where 227 skins were tuned to sit. The bright pass is deliberately a HIGH threshold
+  with **no saturation boost** — saturating a frame the palette has already coloured is what
+  collapsed every world to the same magenta.
+- **It measures itself**, because none of those numbers transfer. These are all canvas-to-canvas
+  blits: free on a GPU, hopeless on a software rasteriser, and nothing available in the page says
+  which one the user has. `run` times its own first frames and steps DOWN a level (ultra → high →
+  medium → off) rather than straight off, with a fast path for frames several times over budget so
+  a bad device loses five frames and not a second. That check has a useful property: timing canvas
+  calls normally measures only how long they took to QUEUE, so on an accelerated device it reads ~0
+  and never trips — it reads true only when something forces the pipeline to synchronise, which is
+  exactly the case where the pass is too expensive. A tier the user selects outranks whatever it
+  stepped itself down to, and a bail-out rebuilds the scene at full `glow` rather than leaving it
+  dimmed for a halo that is no longer coming.
+- `webapp/test/post.test.mjs` pins the exposure contract, that the pass never writes into the canvas
+  the scene washes over (that feedback would go to white in about a second), that the frame is read
+  exactly once, and the whole step-down ladder.
+
+**A genre may bring its OWN animation** (`lib/viz/genres/`, one file each). A world plus a skin is a
+shared motif with a genre's numbers poured into it: the right answer for the long tail and the wrong
+one for a genre somebody actually listens to, because no parameter turns a bouncing core into a
+sawtooth waveform. `smart.js` prefers a dedicated file whenever the resolved genre has one and falls
+back to the world for everything else, so the catalogue fills in a genre at a time without a flag
+day, and the crossfade does not care which kind it is dissolving between. Eight so far — frenchcore,
+tribecore, raggatek, gabber, speedcore, hardtekk, zaag, uptempo — plus five musical neighbours that
+share a file.
+
+**These genres are not one scene, and the first version of that directory said they were.** Tribe,
+hardtek and raggatek do come out of the European sound-system and teknival world. Everything else
+does not: gabber is Rotterdam and Thunderdome and a commercial industry from the start; uptempo is a
+festival and club genre with its own labels; zaag is a Dutch hardstyle KICK DESIGN out of the
+Q-dance lineage (the name is the sound, not a place); hardtekk is the German club scene; speedcore is
+a label-and-festival world; frenchcore began in the French free party scene and has been a festival
+genre for two decades. Filing them all under "free party" is inaccurate and dismissive of scenes that
+are large and organised. The animations are built from what each genre SOUNDS like — the kick, the
+swing, the tempo, the lead — which is the honest basis for a picture and the one that does not put
+words in a scene's mouth.
+
+**No constant that should be musical** (`lib/viz/musical.js`). The animations were full of numbers
+that knew nothing about the music — `spin += dt * 0.05`, `if (s.age > 3.4)` — and a scene written
+that way turns at one rate through a 90 BPM intro and a 200 BPM drop, holds a trail for 3.4 seconds
+whether that is half a bar or six, and has one character however the track moves under it. So
+nothing downstream expresses a duration in seconds or a rate in "per second": `m.overBeats(n)` is a
+lifetime, `m.perBeat(n)` / `m.sweep(turns)` are rates, `m.ease(v, target, beats, dt)` is a smoothing,
+and the shape of the moment comes off `m.drive` / `m.weight` / `m.air` / `m.tension` / `m.calm`.
+`webapp/test/musical.test.mjs` drives every dedicated animation at 90 and at 180 BPM over the same
+wall clock and fails any that does not move materially more at the second — a hard-coded rate scores
+~1.0 and is invisible in review, which is the only reason this line can be held. A second test drives
+a drop against a breakdown at one tempo and fails anything that draws them the same. Both caught real
+regressions the day they were written (a ring that reversed direction every phrase moved LESS the
+harder the track drove, scoring 0.27).
+
+**ANALYSIS AND RENDERING ARE DIFFERENT THINGS, and `lib/viz/bridge.js` is the line between them.**
+The sound is analysed ONCE, in the tab that has the audio — one beat tracker, one classifier — so
+the genre, the tempo and the grid are decided once and both screens agree by construction. What
+crosses the channel is that analysis. What each side does with it is its own business: the player
+and the projector pick their own scene (`vizMode` / `vizScreenMode`), their own quality tier and
+their own frame rate, and neither waits for the other. The player can sit on "Aucune" while the
+projector runs, which is a supported arrangement and now has a button for it.
+
+The level the analysis runs AT is the only thing that must be shared, and it is **the most demanding
+of the two**: the viewer announces what its scene needs (`lv` on its hello, re-announced when the
+projector's mode changes), `host.js` subscribes at that level, and the engine's own
+`recomputeLevel` maxes it with whatever this tab wants — so the rule falls out of machinery that
+already existed.
+
+**Why the two screens used to drift apart** — it was never a clock problem, it was a sampling one.
+The engine runs at ~94 Hz and the channel publishes at 45, so a beat, which is true on exactly ONE
+analysis frame, had a better than even chance of landing in a frame the throttle dropped: the
+projector was missing about half of every track's beats, kicks and downbeats. Continuous values can
+be sampled; **events have to be latched**. `beat`, `downbeat`, `kickHit`, the style kick's `hit` and
+the peak `onset` are accumulated across the dropped frames and cleared once sent. `kickHit` was also
+simply absent from the payload, so every animation that fires on a kick never fired at all on the
+second screen — which is all of `lib/viz/genres/`. `webapp/test/bridge.test.mjs` pins both halves:
+no event lost to the throttle, and no event reported twice.
 
 **The projector window** (`routes/Viz.svelte`, `lib/viz/bridge.js`, `lib/viz/host.js`) is the same
 SPA on `#/viz`, opened in a second tab to be dragged onto a beamer. It plays **nothing**: a second

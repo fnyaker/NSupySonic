@@ -11,8 +11,17 @@ import { approach, clamp, envelope, hsl, lerp, rng } from "../util.js";
 const TAU = Math.PI * 2;
 const ARCS = 5;
 
-export function createStarfieldWorld(preset, opts) {
-  const N = Math.max(60, Math.min(340, preset.particles * 1.6));
+export function createStarfieldWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  const SPEED = skin.speed ?? 1;
+  const ARCS_K = p.arcs ?? 1;
+  // `spiral` bends every star's path as it travels, so the field becomes a
+  // vortex instead of a rush — uplifting trance turns, progressive does not.
+  // `dot` drops the streak and leaves the point: a still sky, which is what a
+  // slow melodic track should be looking at.
+  const SPIRAL = p.spiral ?? 0;
+  const DOT = clamp(p.dot ?? 0, 0, 1);
+  const N = Math.max(40, Math.min(420, Math.round(preset.particles * 1.6 * (p.stars ?? 1))));
   const st = new Float32Array(N * 3); // angle, radial, speed factor
   const rand = rng(90210);
   for (let i = 0; i < N; i++) {
@@ -34,12 +43,15 @@ export function createStarfieldWorld(preset, opts) {
       // The build: how loud this moment is against the track's own loud
       // reference, eased slowly so the acceleration is felt over bars.
       const dyn = f.dynamics ?? 1;
-      rush = approach(rush, 0.22 + dyn * dyn * 1.05, 0.55, dt);
+      rush = approach(rush, (0.22 + dyn * dyn * 1.05) * SPEED, 0.55, dt);
       glow = envelope(glow, clamp((f.kick || 0) * 0.8 + (f.level || 0) * 0.5, 0, 1), dt, 0.02, 0.4);
 
       for (let i = 0; i < N; i++) {
         const j = i * 3;
         st[j + 1] += dt * rush * st[j + 2] * 0.55;
+        // The curl is strongest near the middle and eases off outward, which is
+        // what makes it read as a vortex rather than as the whole field turning.
+        if (SPIRAL) st[j] += dt * SPIRAL * 0.9 * st[j + 2] / (0.25 + st[j + 1]);
         if (st[j + 1] > 1.25) {
           st[j + 1] = 0.02;
           st[j] = rand() * TAU;
@@ -49,7 +61,7 @@ export function createStarfieldWorld(preset, opts) {
 
       // An arc per harmony change — the one event in trance worth drawing big.
       const chord = f.chordChange || 0;
-      if (chord > 0.25 && chord > prevChord * 1.4) {
+      if (ARCS_K > 0.05 && chord > 0.25 / ARCS_K && chord > prevChord * 1.4) {
         const a = arcs[(arcNext = (arcNext + 1) % ARCS)];
         a.age = 0;
         a.a = rand() * TAU;
@@ -77,7 +89,7 @@ export function createStarfieldWorld(preset, opts) {
         const r = st[j + 1];
         if (r <= 0.02) continue;
         const a = st[j];
-        const tail = Math.min(r - 0.01, 0.03 + r * 0.16 * rush);
+        const tail = Math.min(r - 0.01, (0.03 + r * 0.16 * rush) * lerp(1, 0.12, DOT));
         const p0 = geom.place(a, r - tail);
         const x0 = p0[0];
         const y0 = p0[1];
@@ -100,7 +112,7 @@ export function createStarfieldWorld(preset, opts) {
       for (const a of arcs) {
         if (a.age < 0) continue;
         const t = a.age / 1.6;
-        const alpha = Math.sin(Math.PI * t) * 0.2 * w.energy * preset.glow;
+        const alpha = Math.sin(Math.PI * t) * 0.2 * ARCS_K * w.energy * preset.glow;
         if (alpha < 0.005) continue;
         g.strokeStyle = hsl(pal.low + 20, pal.sat, 0.74, alpha);
         g.lineWidth = Math.max(2, geom.rMin * 0.02 * (1 - t));
@@ -124,7 +136,6 @@ export function createStarfieldWorld(preset, opts) {
       g.fillStyle = cg;
       g.fillRect(0, 0, geom.w, geom.h);
       g.globalCompositeOperation = "source-over";
-      void lerp;
     },
   };
 }

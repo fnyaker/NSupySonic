@@ -14,7 +14,7 @@
   import { onMount, onDestroy } from "svelte";
   import { vizScreenMode, vizScreenQuality, vizPalette, vizIntensity } from "../lib/stores.js";
   import { createSubscriber } from "../lib/viz/bridge.js";
-  import { MODES } from "../lib/viz/index.js";
+  import { MODES, levelFor } from "../lib/viz/index.js";
   import { TIERS } from "../lib/viz/quality.js";
   import Visualizer from "../components/Visualizer.svelte";
   import Icon from "../components/Icon.svelte";
@@ -66,6 +66,11 @@
     }
   }
 
+  // The projector picks its own scene, so it also decides its own analysis
+  // needs — and tells the playing tab, which runs the engine at the most
+  // demanding of the two. Changing the scene here re-announces at once.
+  $: sub?.setLevel(levelFor($vizScreenMode));
+
   onMount(() => {
     sub = createSubscriber(
       onFrame,
@@ -79,7 +84,8 @@
         live = st.alive;
         playing = st.playing;
         loaded = st.loaded;
-      }
+      },
+      levelFor($vizScreenMode)
     );
     supported = sub.supported;
     showUI();

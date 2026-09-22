@@ -34,7 +34,8 @@
   import { PALETTES } from "../lib/viz/palette.js";
   import { TIERS, autoTier } from "../lib/viz/quality.js";
   import { LEVEL, subscribeFrames, readout } from "../lib/audio/engine.js";
-  import { WORLDS, worldFor } from "../lib/viz/worlds/index.js";
+  import { WORLDS } from "../lib/viz/worlds/index.js";
+  import { SKINS, skinId } from "../lib/viz/skins.js";
   import { LOOKAHEAD_MAX } from "../lib/audio/graph.js";
   import { openProjector } from "../lib/viz/host.js";
   import { FAMILY_LIST } from "../lib/audio/style.js";
@@ -82,7 +83,11 @@
 
   $: styleName =
     FAMILY_LIST.find((f) => f.id === $readout.style)?.label || $readout.styleLabel || "—";
-  $: worldName = WORLDS[worldFor($readout.style, $readout.archetype)]?.label || "—";
+  // What the engine actually resolved: the genre's own skin, then the world
+  // that skin dresses. Two sub-genres sharing a world is normal and is
+  // exactly what this readout is for — it names the row that was matched.
+  $: skinKey = skinId($readout.style, $readout.archetype);
+  $: worldName = WORLDS[(SKINS[skinKey] || {}).world]?.label || "—";
 </script>
 
 <section class="card">
@@ -358,9 +363,22 @@
     grand écran et à passer en plein écran. Rien n'y est lu : c'est cet onglet qui
     joue et qui lui envoie son analyse, au même instant.
   </p>
-  <button class="primary" on:click={openScreen}>
-    <Icon name="maximize" size={16} /> Ouvrir l'écran d'animation
-  </button>
+  <div class="row-actions">
+    <button class="primary" on:click={openScreen}>
+      <Icon name="maximize" size={16} /> Ouvrir l'écran d'animation
+    </button>
+    {#if $vizMode !== "off"}
+      <button class="ghost" on:click={() => vizMode.set("off")}>
+        <Icon name="minimize" size={16} /> Couper l'animation ici
+      </button>
+    {/if}
+  </div>
+  <p class="sub muted tight">
+    Les deux sont séparés : le lecteur peut être sur <em>Aucune</em> pendant que
+    l'écran dédié tourne. L'analyse du son, elle, n'a lieu qu'UNE fois — dans cet
+    onglet, au niveau du plus exigeant des deux — donc le genre, le tempo et la
+    grille sont les mêmes des deux côtés, par construction.
+  </p>
 
   <div class="block">
     <div class="block-head">
@@ -649,6 +667,36 @@
     height: 100%;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
     transition: width 0.3s ease;
+  }
+  /* The projector's two actions sit side by side: opening the second screen
+     and muting this one are the same decision seen from two ends. */
+  .row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+  .sub.tight {
+    margin-top: 12px;
+    margin-bottom: 0;
+  }
+  .ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 14px;
+    border-radius: 11px;
+    border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+    background: transparent;
+    color: var(--fg, #e8e4f0);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .ghost:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.24);
   }
   .primary {
     display: inline-flex;

@@ -9,13 +9,28 @@
 //
 // The core is a DISC normally and a RIM when there is artwork in the way, which
 // is the same object seen around the cover rather than a second design.
+//
+// What separates the fourteen genres on this world is their LEAD, because that
+// is what separates them in the music: `lead` 0 draws it as diagonal streaks
+// (hardstyle's screech), 1 as a stepped staircase (pieep's arpeggio, which is
+// heard as steps and has to be seen as them), 2 as a triangle wave — zaag is
+// Dutch for "saw" and the sound is literally its shape. `spike` swaps the
+// squashing disc for a star that stabs outward, which is what a rawstyle kick
+// does to a room and what a euphoric one never does.
 
 import { approach, clamp, envelope, hsl, lerp } from "../util.js";
 
 const TAU = Math.PI * 2;
 
-export function createHardbounceWorld(preset, opts) {
-  const BARS = Math.max(28, Math.min(72, preset.bars));
+export function createHardbounceWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  const BARS = Math.max(16, Math.min(96, Math.round(preset.bars * (p.bars ?? 1))));
+  const SQUASH = p.squash ?? 1;
+  const SAW = p.saw ?? 1;
+  const RING = p.ring ?? 1;
+  const LEAD = Math.max(0, Math.min(2, Math.round(p.lead ?? 0)));
+  const SPIKE = clamp(p.spike ?? 0, 0, 1);
+  const SPEED = skin.speed ?? 1;
   const bar = new Float32Array(BARS);
   let squash = 0; // >0 wide and flat, <0 tall and narrow
   let bounce = 0;
@@ -42,7 +57,7 @@ export function createHardbounceWorld(preset, opts) {
         clock - lastHit > 0.09;
       if (hit) {
         lastHit = clock;
-        bounce = lerp(0.35, 1, punch) * (0.65 + det * 0.5);
+        bounce = lerp(0.35, 1, punch) * (0.65 + det * 0.5) * SQUASH;
       }
       // The squash is a damped spring, not an envelope: a kick this size has to
       // overshoot on the way back or it reads as a fade rather than as a hit.
@@ -61,7 +76,7 @@ export function createHardbounceWorld(preset, opts) {
         bar[i] = envelope(bar[i], m, dt, 0.02, 0.16);
       }
       const barLen = beat.locked ? beat.period * beat.beatsPerBar : 3;
-      spin += (dt / (barLen * 6)) * TAU;
+      spin += ((dt * SPEED) / (barLen * 6)) * TAU;
       void geom;
     },
 
@@ -75,7 +90,7 @@ export function createHardbounceWorld(preset, opts) {
         const v = bar[i];
         if (v < 0.02) continue;
         const a = spin + (i / BARS) * TAU;
-        const base = 0.36 + squash * 0.12;
+        const base = 0.36 * RING + squash * 0.12;
         const p0 = geom.place(a, base);
         const x0 = p0[0];
         const y0 = p0[1];
@@ -107,15 +122,30 @@ export function createHardbounceWorld(preset, opts) {
         cg.addColorStop(1, hsl(pal.low, pal.sat, 0.5, 0));
         g.fillStyle = cg;
         g.beginPath();
-        g.arc(0, 0, Math.max(1, rx), 0, TAU);
+        if (SPIKE > 0.05) {
+          // A star rather than a disc: the same mass, arriving as points. The
+          // spikes grow with the bounce, so the hit stabs instead of spreading.
+          const pts = 10;
+          const reach = 1 + bounce * SPIKE * 1.4;
+          for (let i = 0; i < pts * 2; i++) {
+            const a = (i / (pts * 2)) * TAU - Math.PI / 2;
+            const rr = Math.max(1, rx * (i % 2 === 0 ? reach : lerp(1, 0.42, SPIKE)));
+            const x = Math.cos(a) * rr;
+            const y = Math.sin(a) * rr;
+            i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+          }
+          g.closePath();
+        } else {
+          g.arc(0, 0, Math.max(1, rx), 0, TAU);
+        }
         g.fill();
         g.restore();
       }
 
       // The lead. Zaag is literally "saw": diagonal streaks that lean the way
       // the energy is moving, and only for the styles whose lead is one.
-      if (saw > 0.03 && melodic > 0.35) {
-        const n = 3 + Math.floor(saw * preset.layers * 1.5);
+      if (SAW > 0.05 && saw > 0.03 && melodic * SAW > 0.3) {
+        const n = 3 + Math.floor(saw * preset.layers * 1.5 * SAW);
         g.lineCap = "round";
         for (let i = 0; i < n; i++) {
           const t = (i + 0.5) / n;
@@ -131,8 +161,32 @@ export function createHardbounceWorld(preset, opts) {
           g.strokeStyle = gr;
           g.lineWidth = Math.max(2, geom.h * 0.008 * (0.5 + saw));
           g.beginPath();
-          g.moveTo(x - lean, y0 + len / 2);
-          g.lineTo(x + lean, y0 - len / 2);
+          if (LEAD === 1) {
+            // A staircase: flat, up, flat, up. An arpeggio is heard as discrete
+            // steps and a smooth diagonal is the one shape that denies it.
+            const steps = 4;
+            let cx2 = x - lean;
+            let cy2 = y0 + len / 2;
+            g.moveTo(cx2, cy2);
+            for (let k = 0; k < steps; k++) {
+              cx2 += (lean * 2) / steps;
+              g.lineTo(cx2, cy2);
+              cy2 -= len / steps;
+              g.lineTo(cx2, cy2);
+            }
+          } else if (LEAD === 2) {
+            // A triangle wave. "Zaag" is Dutch for saw, and the lead is one.
+            const teeth = 5;
+            g.moveTo(x - lean, y0 + len / 2);
+            for (let k = 1; k <= teeth; k++) {
+              const tx = x - lean + ((lean * 2) * k) / teeth;
+              const ty = y0 + (k % 2 === 0 ? len / 2 : -len / 2);
+              g.lineTo(tx, ty);
+            }
+          } else {
+            g.moveTo(x - lean, y0 + len / 2);
+            g.lineTo(x + lean, y0 - len / 2);
+          }
           g.stroke();
         }
       }

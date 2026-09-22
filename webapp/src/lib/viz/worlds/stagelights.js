@@ -5,13 +5,28 @@
 // the mid band (the guitars), and a white slash on the snare. It is the only
 // world lit from the TOP rather than from the middle, which is what makes it
 // read as a room rather than as an effect.
+//
+// Twenty-odd genres play on this stage, so the skin re-lights it rather than
+// only re-colouring it. `teeth` is the silhouette's profile — smooth hills for
+// a big band, a saw for thrash. `haze` fills the room with smoke, which is the
+// difference between a club and a cathedral of doom. `backlit` moves the rig
+// BEHIND the band and shines it up at the audience, so the players go black
+// against the light: black metal and doom are lit that way and punk never is.
 
 import { approach, clamp, envelope, hsl, lerp, rng } from "../util.js";
 
 const SLASH = 5;
 
-export function createStagelightsWorld(preset, opts) {
-  const BEAMS = Math.max(3, Math.min(6, preset.layers + 1));
+export function createStagelightsWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  const BEAMS = Math.max(2, Math.min(9, Math.round((preset.layers + 1) * (p.beams ?? 1))));
+  const WALL_K = p.wall ?? 1;
+  const STROBE = p.strobe ?? 1;
+  const SWING = p.swing ?? 1;
+  const TEETH = clamp(p.teeth ?? 1, 0, 2);
+  const HAZE = clamp(p.haze ?? 0, 0, 1.5);
+  const BACKLIT = clamp(p.backlit ?? 0, 0, 1);
+  const SPEED = skin.speed ?? 1;
   const WALL = 72;
   const wall = new Float32Array(WALL);
   const rand = rng(5150);
@@ -50,7 +65,7 @@ export function createStagelightsWorld(preset, opts) {
 
       const lvl = f.level || 0;
       for (const bm of beam) {
-        bm.phase += dt * bm.speed * lerp(0.6, 1.8, chaos);
+        bm.phase += dt * bm.speed * SWING * SPEED * lerp(0.6, 1.8, chaos);
         bm.lit = envelope(bm.lit, clamp(lvl * 1.2, 0, 1), dt, 0.05, 0.35);
       }
 
@@ -69,8 +84,8 @@ export function createStagelightsWorld(preset, opts) {
         if (s.age > 0.3) s.age = -1;
       }
 
-      if (!opts.reducedMotion && beat.downbeat && chaos > 0.45)
-        strobe = 0.4 * opts.intensity;
+      if (!opts.reducedMotion && beat.downbeat && chaos * STROBE > 0.4)
+        strobe = 0.4 * opts.intensity * Math.min(1.6, STROBE);
       strobe = approach(strobe, 0, 0.05, dt);
     },
 
@@ -83,33 +98,50 @@ export function createStagelightsWorld(preset, opts) {
       g.globalCompositeOperation = "lighter";
 
       // The beams. Each is a cone from a point above the top edge down to the
-      // floor, swinging; a trapezoid, which is all a spotlight ever is.
+      // floor, swinging; a trapezoid, which is all a spotlight ever is. Lit
+      // from behind the band instead, the same trapezoid points the other way
+      // and the silhouette below stops being a shape in the light and becomes
+      // the thing blocking it.
       for (const bm of beam) {
         const a = bm.lit;
         if (a < 0.02) continue;
         const originX = bm.x * wdt;
-        const originY = -h * 0.06;
+        const originY = BACKLIT > 0.5 ? floor + h * 0.02 : -h * 0.06;
+        const target = BACKLIT > 0.5 ? -h * 0.1 : floor;
         const swing = Math.sin(bm.phase) * wdt * 0.28;
         const halfTop = wdt * 0.006;
         const halfBottom = wdt * (0.035 + a * 0.035);
         const landX = originX + swing;
-        const gr = g.createLinearGradient(originX, originY, landX, floor);
+        const gr = g.createLinearGradient(originX, originY, landX, target);
         gr.addColorStop(0, hsl(pal.high, pal.sat * 0.5, 0.9, 0.1 * a * w.energy * preset.glow));
         gr.addColorStop(1, hsl(pal.mid, pal.sat * 0.7, 0.6, 0));
         g.fillStyle = gr;
         g.beginPath();
         g.moveTo(originX - halfTop, originY);
         g.lineTo(originX + halfTop, originY);
-        g.lineTo(landX + halfBottom, floor);
-        g.lineTo(landX - halfBottom, floor);
+        g.lineTo(landX + halfBottom, target);
+        g.lineTo(landX - halfBottom, target);
         g.closePath();
         g.fill();
         // The pool of light where it lands.
-        const pg = g.createRadialGradient(landX, floor, 0, landX, floor, halfBottom * 2.2);
+        const pg = g.createRadialGradient(landX, target, 0, landX, target, halfBottom * 2.2);
         pg.addColorStop(0, hsl(pal.high, pal.sat * 0.4, 0.86, 0.1 * a * w.energy * preset.glow));
         pg.addColorStop(1, hsl(pal.high, pal.sat * 0.4, 0.7, 0));
         g.fillStyle = pg;
-        g.fillRect(landX - halfBottom * 2.2, floor - halfBottom * 2.2, halfBottom * 4.4, halfBottom * 4.4);
+        g.fillRect(landX - halfBottom * 2.2, target - halfBottom * 2.2, halfBottom * 4.4, halfBottom * 4.4);
+      }
+
+      // Smoke. A beam only reads as a beam through something, and how much of
+      // it is in the room is a genre's own decision — doom is played inside a
+      // cloud, punk under a bare bulb. Drawn as one wash from the rig toward
+      // the floor rather than per beam, which would cost one gradient each and
+      // still look like haze.
+      if (HAZE > 0.02) {
+        const hz = g.createLinearGradient(0, BACKLIT > 0.5 ? floor : 0, 0, BACKLIT > 0.5 ? 0 : floor);
+        hz.addColorStop(0, hsl(pal.mid, pal.sat * 0.45, 0.6, 0.05 * HAZE * w.energy * preset.glow));
+        hz.addColorStop(1, hsl(pal.low, pal.sat * 0.4, 0.4, 0));
+        g.fillStyle = hz;
+        g.fillRect(0, 0, wdt, floor);
       }
 
       // The slashes: a cymbal or a snare, thrown across the stage.
@@ -146,8 +178,10 @@ export function createStagelightsWorld(preset, opts) {
         // A band silhouette, not a dune: every other point is pulled down so
         // the outline has teeth at the resolution of the spectrum rather than
         // being smoothed into hills.
-        const jag = i % 2 === 0 ? 1 : 0.55;
-        g.lineTo(x, floor - wall[i] * (h - floor) * 1.7 * jag - h * 0.015);
+        // Smooth hills, the default teeth, or a saw: a big band's silhouette is
+        // a row of shoulders and a thrash band's is a wall of headstocks.
+        const jag = i % 2 === 0 ? 1 : lerp(1, 0.25, TEETH);
+        g.lineTo(x, floor - wall[i] * (h - floor) * 1.7 * WALL_K * jag - h * 0.015);
       }
       g.lineTo(wdt, h);
       g.closePath();

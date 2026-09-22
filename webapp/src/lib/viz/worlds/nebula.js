@@ -10,12 +10,21 @@
 // It is also the longest exposure in the set (`trail: 0.12`), so a full turn of
 // the picture takes the better part of a minute.
 
-import { approach, clamp, hsl, lerp, rng } from "../util.js";
+import { approach, clamp, hsl, rng } from "../util.js";
 
 const TAU = Math.PI * 2;
 
-export function createNebulaWorld(preset, opts) {
-  const CLOUDS = Math.max(4, Math.min(8, preset.layers + 3));
+export function createNebulaWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  const CLOUDS = Math.max(2, Math.min(14, Math.round((preset.layers + 3) * (p.clouds ?? 1))));
+  const BAND = p.band ?? 1;
+  // `veil` draws the clouds as tall soft curtains rather than as round puffs —
+  // drone and dark ambient are vertical, standing things, and a sky of circles
+  // is the wrong object for them. `fall` sends the motes down instead of up,
+  // which is the difference between ash and embers.
+  const VEIL = clamp(p.veil ?? 0, 0, 1);
+  const FALL = (p.fall ?? 0) > 0.5 ? -1 : 1;
+  const SPEED = skin.speed ?? 1;
   const rand = rng(1971);
   const cloud = [];
   for (let i = 0; i < CLOUDS; i++)
@@ -27,7 +36,7 @@ export function createNebulaWorld(preset, opts) {
       k: rand(),
       size: 0.5 + rand() * 0.7,
     });
-  const MOTES = Math.max(10, Math.floor(preset.particles * 0.25));
+  const MOTES = Math.max(4, Math.floor(preset.particles * 0.25 * (p.motes ?? 1)));
   const mote = new Float32Array(MOTES * 4); // x, y, speed, seed
   for (let i = 0; i < MOTES; i++) {
     mote[i * 4] = rand();
@@ -50,15 +59,15 @@ export function createNebulaWorld(preset, opts) {
       tonal = approach(tonal, f.tonal || 0, 2.2, dt);
       pitch = approach(pitch, f.melodyPitch ?? 0.5, 2.8, dt);
       for (const c of cloud) {
-        c.a += dt * c.va;
+        c.a += dt * c.va * SPEED;
         c.r += dt * c.vr;
         if (c.r < 0.12 || c.r > 1.05) c.vr = -c.vr;
       }
       for (let i = 0; i < MOTES; i++) {
         const j = i * 4;
-        mote[j + 1] -= dt * mote[j + 2];
-        if (mote[j + 1] < -0.05) {
-          mote[j + 1] = 1.05;
+        mote[j + 1] -= dt * mote[j + 2] * FALL;
+        if (FALL > 0 ? mote[j + 1] < -0.05 : mote[j + 1] > 1.05) {
+          mote[j + 1] = FALL > 0 ? 1.05 : -0.05;
           mote[j] = rand();
         }
         mote[j] += Math.sin(clock * 0.3 + mote[j + 3] * 9) * 0.004 * dt;
@@ -83,16 +92,28 @@ export function createNebulaWorld(preset, opts) {
         gr.addColorStop(0.6, hsl(hue + 12, pal.sat * 0.7, 0.5, a * 0.35));
         gr.addColorStop(1, hsl(hue + 24, pal.sat * 0.6, 0.4, 0));
         g.fillStyle = gr;
-        g.beginPath();
-        g.arc(p[0], p[1], rad, 0, TAU);
-        g.fill();
+        if (VEIL > 0.05) {
+          // The same gradient stretched tall: a curtain, not a cloud. Scaled
+          // rather than re-authored, so the two shapes share one light budget.
+          g.save();
+          g.translate(p[0], p[1]);
+          g.scale(Math.max(0.12, 1 - VEIL * 0.78), 1 + VEIL * 1.6);
+          g.beginPath();
+          g.arc(0, 0, rad, 0, TAU);
+          g.fill();
+          g.restore();
+        } else {
+          g.beginPath();
+          g.arc(p[0], p[1], rad, 0, TAU);
+          g.fill();
+        }
       }
 
       // A band of light at the height the sustained energy sits, stretched the
       // full width. It is the closest this world comes to an event: it moves
       // when the music changes register, over seconds.
       const y = geom.h * clamp(0.85 - pitch * 0.6, 0.12, 0.88);
-      const thick = geom.h * (0.06 + tonal * 0.12);
+      const thick = geom.h * (0.06 + tonal * 0.12) * BAND;
       const bg = g.createLinearGradient(0, y - thick, 0, y + thick);
       bg.addColorStop(0, hsl(pal.high, pal.sat * 0.7, 0.62, 0));
       bg.addColorStop(0.5, hsl(pal.mid, pal.sat * 0.8, 0.66, (0.012 + tonal * 0.022) * w.energy * preset.glow));
@@ -111,7 +132,6 @@ export function createNebulaWorld(preset, opts) {
         g.fill();
       }
       g.globalCompositeOperation = "source-over";
-      void lerp;
     },
   };
 }

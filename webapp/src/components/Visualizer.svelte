@@ -1,10 +1,18 @@
 <script>
   // Canvas host for the animation scenes.
   //
-  // It owns four things the scenes should not have to care about: the canvas
+  // It owns five things the scenes should not have to care about: the canvas
   // and its device-pixel backing, the render loop and its frame-rate ceiling,
-  // the palette, and the quality governor that steps the scene down a tier if a
-  // device cannot keep up.
+  // the palette, the quality governor that steps the scene down a tier if a
+  // device cannot keep up, and the POST PASS — the bloom, fringe and grain that
+  // turn what a scene drew into something that looks lit rather than inked
+  // (lib/viz/post.js).
+  //
+  // The post pass is a SECOND, SMALL canvas over the first rather than a
+  // composite onto it. Measured, the composite build cost 45 ms a frame against
+  // 0.26 ms for the scene — all of it full-frame canvas traffic, none of it the
+  // blur — and it would also have fed the bloom back into the trail the scene
+  // washes over. See lib/viz/post.js.
   //
   // ANALYSIS AND RENDERING ARE SEPARATE RATES on purpose. The engine ticks at
   // ~94 Hz off the audio thread and every tick calls scene.update() — that is
@@ -23,6 +31,7 @@
   import { createGeometry } from "../lib/viz/geometry.js";
   import { createPalette } from "../lib/viz/palette.js";
   import { resolveTier, tierPreset, createGovernor } from "../lib/viz/quality.js";
+  import { createPost, grainDataUrl, withPostGain, POST } from "../lib/viz/post.js";
 
   export let mode = "bars";
   export let quality = "auto";
@@ -53,10 +62,29 @@
   let canvas;
   let box;
   let g = null;
+  let bloomCanvas;
+  let grainUrl = "";
+  const post = createPost();
+  let posting = false;
+  // The pass can decide on its own that this device cannot afford it (see
+  // post.js): that drops the two layers and leaves the scene exactly as it was,
+  // rather than stepping the whole tier down and taking the particles with it.
+  post.onDisabled = () => {
+    posting = false;
+    // The scene was built dimmed on the understanding that a halo would make
+    // up the difference. With the halo gone it has to be rebuilt at full
+    // strength, or the picture simply stays too dark.
+    preset = tierPreset(tier);
+    buildScene();
+    sizeCanvas();
+  };
   let scene = null;
   let pal = createPalette(palette);
   let tier = resolveTier(quality);
-  let preset = tierPreset(tier);
+  // Dimmed by what the bloom will hand back — see SCENE_GAIN in post.js. The
+  // scene has to be built knowing this, because a world reads `preset.glow`
+  // once, when it is made.
+  let preset = withPostGain(tierPreset(tier), tier);
   let governor = null;
   let unsub = null;
   let raf = 0;
@@ -128,12 +156,26 @@
     }
     g = canvas.getContext("2d", { alpha: true });
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    posting = post.resize(canvas, bloomCanvas, pw, ph, tier);
+    ensureGrain();
     // A scene keeps trails by washing over the previous frame, so a resize —
     // which clears the backing store — has to start from a clean state rather
     // than from whatever garbage the new dimensions left.
     g.clearRect(0, 0, w, h);
+    post.clear();
     geometry.set(w, h, measureOccluder());
     scene?.resize(w, h, preset, geometry.out);
+  }
+
+  // Built once per session, on the first tier that asks for it: it is a 96 px
+  // PNG, and re-encoding it on every resize would be pure waste.
+  function ensureGrain() {
+    if (grainUrl || !posting || !POST[tier]?.grain) return;
+    try {
+      grainUrl = grainDataUrl();
+    } catch {
+      grainUrl = ""; // a canvas that will not export is not worth a broken layer
+    }
   }
 
   function startLoop() {
@@ -157,12 +199,16 @@
     lastPaint = now;
     const t0 = performance.now();
     scene.draw(g, cssW, cssH, pal.out, geometry.out);
+    post.run();
+    // The post pass is inside the measured cost on purpose: if a device cannot
+    // afford the bloom, dropping a tier is exactly the right answer and the
+    // next tier down asks for less of it.
     governor?.sample(performance.now() - t0, fps > 0 ? 1000 / fps : 16.7);
   }
 
   function onTier(next) {
     tier = next;
-    preset = tierPreset(next);
+    preset = withPostGain(tierPreset(next), next);
     buildScene();
     sizeCanvas();
   }
@@ -200,8 +246,13 @@
     detach();
     stopLoop();
     // Leave nothing behind: a resume fades IN over a blank canvas rather than
-    // over the last frame of the previous session.
-    if (g && cssW) g.clearRect(0, 0, cssW, cssH);
+    // over the last frame of the previous session. Both buffers — the scene
+    // keeps its trail in its own, and that is what the next frame would wash
+    // over and bring back.
+    if (g && cssW) {
+      g.clearRect(0, 0, cssW, cssH);
+      post.clear();
+    }
   }
 
   onMount(() => {
@@ -290,6 +341,19 @@
 
 <div class="viz-host" bind:this={box} class:hidden={mode === "off"}>
   <canvas bind:this={canvas} class:dim={dimmed} aria-hidden="true"></canvas>
+  <!-- The bloom, drawn at a fifth of the size and stretched by the compositor.
+       Hidden rather than unmounted when the tier has no post, so a tier change
+       does not have to rebuild the element it is about to write to. -->
+  <canvas
+    bind:this={bloomCanvas}
+    class="bloom"
+    class:dim={dimmed}
+    class:off={!posting}
+    aria-hidden="true"
+  ></canvas>
+  {#if posting && grainUrl}
+    <div class="grain" class:dim={dimmed} style="background-image:url({grainUrl})"></div>
+  {/if}
 </div>
 
 <style>
@@ -298,23 +362,70 @@
     inset: 0;
     overflow: hidden;
     pointer-events: none;
+    /* The bloom blends with the scene under it and with nothing else on the
+       page: without this, `mix-blend-mode` would reach through to whatever the
+       player happens to be sitting on. */
+    isolation: isolate;
   }
   .viz-host.hidden {
     display: none;
   }
   canvas {
+    position: absolute;
+    inset: 0;
     display: block;
     width: 100%;
     height: 100%;
     opacity: 1;
     transition: opacity 0.6s ease;
   }
-  canvas.dim {
+  canvas.dim,
+  .grain.dim {
     opacity: 0;
+  }
+  /* The bloom is a fifth of the frame, stretched back over it. The browser's
+     own scaling is a smooth interpolation, which is why a 3 px blur down there
+     arrives as a soft 15 px halo up here — the upscale is part of the effect,
+     not a compromise for it. `screen` rather than `plus-lighter` because it is
+     supported everywhere and over a dark scene the two are near enough. */
+  canvas.bloom {
+    mix-blend-mode: screen;
+    will-change: transform;
+  }
+  canvas.bloom.off {
+    display: none;
+  }
+  /* Grain, as a tiled layer the compositor owns. It is nudged by a fraction of
+     a tile on a slow loop: static grain reads as a dirty lens, moving grain
+     reads as film, and a transform is the one animation that costs the main
+     thread nothing. */
+  .grain {
+    position: absolute;
+    inset: -96px;
+    background-repeat: repeat;
+    mix-blend-mode: screen;
+    opacity: 0.05;
+    pointer-events: none;
+    animation: grain-drift 0.6s steps(6, end) infinite;
+    transition: opacity 0.6s ease;
+    will-change: transform;
+  }
+  @keyframes grain-drift {
+    0% { transform: translate3d(0, 0, 0); }
+    20% { transform: translate3d(-13px, 7px, 0); }
+    40% { transform: translate3d(9px, -11px, 0); }
+    60% { transform: translate3d(-5px, -6px, 0); }
+    80% { transform: translate3d(11px, 4px, 0); }
+    100% { transform: translate3d(0, 0, 0); }
   }
   @media (prefers-reduced-motion: reduce) {
     canvas {
       transition-duration: 0.2s;
+    }
+    /* A field of noise jumping six times a second is exactly what this setting
+       exists to stop. The texture stays; the movement goes. */
+    .grain {
+      animation: none;
     }
   }
 </style>

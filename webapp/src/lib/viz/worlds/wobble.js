@@ -9,10 +9,23 @@
 //
 // Deliberately the only world with a single subject: dubstep is one enormous
 // sound at a time, and a busy picture is the wrong answer to it.
+//
+// `wave` is the LFO's own shape and it is what tells these genres apart, since
+// it is what tells them apart in the music: 0 is a sine (the bend melodic
+// dubstep is made of), 1 a square — riddim is gated on and off and the band has
+// to jump, not travel — and 2 a saw, which is brostep's scream. Anything else
+// here is a scaling; this is the sound.
 
 import { approach, clamp, envelope, hsl, lerp } from "../util.js";
 
-export function createWobbleWorld(preset, opts) {
+export function createWobbleWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  const RATE = p.rate ?? 1;
+  const SPLIT = p.split ?? 1;
+  const BAND = p.band ?? 1;
+  const TEAR = p.tear ?? 1;
+  const WAVE = Math.max(0, Math.min(2, Math.round(p.wave ?? 0)));
+  const SPEED = skin.speed ?? 1;
   let phase = 0;
   let amp = 0;
   let wob = 0;
@@ -35,26 +48,34 @@ export function createWobbleWorld(preset, opts) {
       // stepped by how hard the bass is pushing — which is what a dubstep
       // producer is doing with their hand on the LFO knob.
       const period = beat.locked ? beat.period : 0.5;
-      const rate = lerp(2, 6, sub) / Math.max(0.05, period);
+      const rate = (lerp(2, 6, sub) * RATE * SPEED) / Math.max(0.05, period);
       phase += dt * rate;
       wob = envelope(wob, clamp((f.kick || 0) + sub * 0.5, 0, 1), dt, 0.008, 0.18);
       // The tear: level and kick together, which only happens at a drop.
       const drop = clamp((f.level || 0) * (f.kick || 0) * 2.2, 0, 1);
-      tear = envelope(tear, drop, dt, 0.01, 0.35);
+      tear = envelope(tear, drop * TEAR, dt, 0.01, 0.35);
     },
 
     draw(g, geom, pal, w) {
       const h = geom.h;
       const cy = geom.cy;
+      // The oscillator. Square and saw are computed from the same phase as the
+      // sine, so changing `wave` changes the SHAPE and never the rate.
+      const osc =
+        WAVE === 1
+          ? (x) => (Math.sin(x) >= 0 ? 1 : -1)
+          : WAVE === 2
+            ? (x) => 1 - 2 * (((x / (Math.PI * 2)) % 1 + 1) % 1)
+            : Math.sin;
       g.globalCompositeOperation = "lighter";
       const steps = Math.max(40, Math.min(160, Math.floor(geom.w / 9)));
       // Thin. A wobble is a line being bent, and a band a third of the screen
       // deep stops being a line and becomes a colour field.
-      const band = h * (0.022 + amp * 0.04 + wob * 0.06);
+      const band = h * (0.022 + amp * 0.04 + wob * 0.06) * BAND;
       const swing = h * (0.06 + wob * 0.24 + tear * 0.22);
       // Three copies, offset sideways: the chromatic split. The offset grows
       // with the tear, so the picture literally comes apart on the drop.
-      const split = geom.w * 0.004 * (1 + tear * 6) * (0.4 + chaos);
+      const split = geom.w * 0.004 * SPLIT * (1 + tear * 6) * (0.4 + chaos);
       const copies = [
         { dx: -split, hue: pal.low, a: 0.1 },
         { dx: split, hue: pal.high, a: 0.1 },
@@ -73,8 +94,8 @@ export function createWobbleWorld(preset, opts) {
           // a single sine is a ripple, and dubstep is not a ripple.
           const y =
             cy +
-            Math.sin(phase + t * 7.5) * swing +
-            Math.sin(phase * 0.34 - t * 2.3) * swing * 0.5;
+            osc(phase + t * 7.5) * swing +
+            osc(phase * 0.34 - t * 2.3) * swing * 0.5;
           i === 0 ? g.moveTo(x, y - band / 2) : g.lineTo(x, y - band / 2);
         }
         for (let i = steps; i >= 0; i--) {
@@ -82,8 +103,8 @@ export function createWobbleWorld(preset, opts) {
           const x = t * geom.w + c.dx;
           const y =
             cy +
-            Math.sin(phase + t * 7.5) * swing +
-            Math.sin(phase * 0.34 - t * 2.3) * swing * 0.5;
+            osc(phase + t * 7.5) * swing +
+            osc(phase * 0.34 - t * 2.3) * swing * 0.5;
           g.lineTo(x, y + band / 2);
         }
         g.closePath();

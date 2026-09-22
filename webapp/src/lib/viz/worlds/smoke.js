@@ -13,8 +13,19 @@ import { approach, clamp, envelope, hsl, lerp, rng } from "../util.js";
 
 const TAU = Math.PI * 2;
 
-export function createSmokeWorld(preset, opts) {
-  const MAX = Math.max(8, Math.min(22, preset.layers * 5));
+// `ink` is the brush: wet at 0, which is the long smeared stroke jazz and blues
+// get, and dry at 1, which breaks the same stroke into separate marks — folk,
+// bluegrass and country are PLUCKED, and a plucked note is not a smear.
+// `stave` rules horizontal lines behind them, so the pitch the stroke is
+// drawn at reads as a pitch rather than as a position.
+export function createSmokeWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  const MAX = Math.max(5, Math.min(34, Math.round(preset.layers * 5 * (p.strokes ?? 1))));
+  const DRIFT = p.drift ?? 1;
+  const CURVE = p.curve ?? 1;
+  const INK = clamp(p.ink ?? 0, 0, 1);
+  const STAVE = clamp(p.stave ?? 0, 0, 1);
+  const SPEED = skin.speed ?? 1;
   const rand = rng(1959);
   const stroke = [];
   for (let i = 0; i < MAX; i++)
@@ -37,7 +48,7 @@ export function createSmokeWorld(preset, opts) {
       // The sway is a swing, not a pulse: one slow cycle per bar, which is how
       // this music moves.
       const barLen = beat.locked ? beat.period * beat.beatsPerBar : 2.6;
-      sway += (dt / barLen) * TAU * 0.5;
+      sway += ((dt * SPEED) / barLen) * TAU * 0.5;
 
       const flux = f.melodyFlux || 0;
       const attack = flux > 0.01 && flux > prevFlux * 1.5;
@@ -52,7 +63,7 @@ export function createSmokeWorld(preset, opts) {
         s.x = 0.1 + rand() * 0.8;
         s.len = 0.18 + rand() * 0.4 + level * 0.2;
         s.tilt = (rand() - 0.5) * 0.5;
-        s.curve = (rand() - 0.5) * 0.3;
+        s.curve = (rand() - 0.5) * 0.3 * CURVE;
         s.p = clamp(0.35 + flux * 30, 0.3, 1);
         s.hue = (rand() - 0.5) * 44;
       }
@@ -60,7 +71,7 @@ export function createSmokeWorld(preset, opts) {
         if (s.age < 0) continue;
         s.age += dt;
         // Drifting up and apart as they dissolve, like smoke off a stage.
-        s.y -= dt * 0.012;
+        s.y -= dt * 0.012 * DRIFT;
         s.len += dt * 0.05;
         if (s.age > 3.4) s.age = -1;
       }
@@ -90,9 +101,42 @@ export function createSmokeWorld(preset, opts) {
         gr.addColorStop(1, hsl(hue + 14, pal.sat * 0.9, 0.62, 0));
         g.strokeStyle = gr;
         g.lineWidth = Math.max(2, H * 0.02 * (0.4 + s.p) * (1 - t * 0.5));
+        if (INK > 0.05) {
+          // A dry brush: the same curve, sampled as separate marks that thin
+          // out along it. Drawn as short segments rather than dots so the
+          // stroke still has a direction.
+          const marks = 5 + Math.round((1 - INK) * 6);
+          g.beginPath();
+          for (let k = 0; k < marks; k++) {
+            const u0 = k / marks;
+            const u1 = u0 + (1 / marks) * lerp(0.9, 0.34, INK);
+            for (const [u, move] of [[u0, true], [u1, false]]) {
+              const mx = lerp(cx - half, cx + half, u);
+              const my =
+                lerp(cy - dy, cy + dy, u) + s.curve * H * 0.16 * 2 * u * (1 - u);
+              move ? g.moveTo(mx, my) : g.lineTo(mx, my);
+            }
+          }
+          g.stroke();
+        } else {
+          g.beginPath();
+          g.moveTo(cx - half, cy - dy);
+          g.quadraticCurveTo(cx, cy + s.curve * H * 0.16, cx + half, cy + dy);
+          g.stroke();
+        }
+      }
+
+      // The stave: five faint rules across the picture. A stroke's height has
+      // always been its pitch here; this is what says so.
+      if (STAVE > 0.05) {
+        g.strokeStyle = hsl(pal.mid, pal.sat * 0.5, 0.6, 0.035 * STAVE * w.energy);
+        g.lineWidth = Math.max(1, H * 0.0015);
         g.beginPath();
-        g.moveTo(cx - half, cy - dy);
-        g.quadraticCurveTo(cx, cy + s.curve * H * 0.16, cx + half, cy + dy);
+        for (let i = 0; i < 5; i++) {
+          const y = H * (0.3 + i * 0.1);
+          g.moveTo(W * 0.04, y);
+          g.lineTo(W * 0.96, y);
+        }
         g.stroke();
       }
 

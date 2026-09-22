@@ -11,13 +11,32 @@
 // pushes the per-shard jitter (speedcore and krach come apart, hardcore does
 // not), `punch` sets how far a kick throws them, and `motion` sets how fast the
 // disc turns between hits.
+//
+// And on the skin's own SHAPE switches, which is what tells two genres apart
+// when `look` cannot: `even` makes every shard the same length (gabber is seven
+// clean slabs, speedcore is twenty splinters of every size), `edge` notches the
+// outer rim so a piece ends in a splinter rather than a straight cut, `drift`
+// turns the whole disc continuously instead of only snapping on the kick
+// (tribe and raggatek roll, hardcore hammers), and `flash` decides whether the
+// downbeat strobe is white (gabber) or the track's own colour (frenchcore).
 
 import { approach, clamp, envelope, hsl, lerp, rng } from "../util.js";
 
 const TAU = Math.PI * 2;
 
-export function createShatterWorld(preset, opts) {
-  const N = Math.max(7, Math.min(18, 8 + preset.layers * 2));
+export function createShatterWorld(preset, opts, skin = {}) {
+  const p = skin.p || {};
+  // Gabber is seven big slabs and a strobe; speedcore is twenty splinters.
+  const N = Math.max(5, Math.min(28, Math.round((8 + preset.layers * 2) * (p.shards ?? 1))));
+  const JAG = p.jag ?? 1;
+  const SPIN = p.spin ?? 1;
+  const STROBE = p.strobe ?? 1;
+  const CORE = p.core ?? 1;
+  const EVEN = clamp(p.even ?? 0, 0, 1);
+  const EDGE = clamp(p.edge ?? 0, 0, 1);
+  const DRIFT = p.drift ?? 0;
+  const FLASH = clamp(p.flash ?? 1, 0, 1);
+  const SPEED = skin.speed ?? 1;
   const rand = rng(1337);
   // Per shard: its resting angle, its current outward throw, and the jitter it
   // was given by the last hit.
@@ -34,9 +53,12 @@ export function createShatterWorld(preset, opts) {
       // offset of its own. Shards that all begin at the middle and span the
       // same angle draw a rising-sun flag; what makes a picture read as BROKEN
       // is that no two pieces line up.
-      inner: 0.04 + rand() * 0.3,
-      len: 0.5 + rand() * 0.55,
-      skew: (rand() - 0.5) * 0.5,
+      inner: lerp(0.04 + rand() * 0.3, 0.1, EVEN),
+      len: lerp(0.5 + rand() * 0.55, 0.82, EVEN),
+      skew: (rand() - 0.5) * 0.5 * (1 - EVEN),
+      // Where the outer rim breaks, when the skin asks for a splintered one.
+      // Fixed per shard: a rim re-randomised every frame is noise, not a break.
+      notch: [rand(), rand(), rand()],
       seed: rand(),
     });
   let rot = 0;
@@ -67,17 +89,25 @@ export function createShatterWorld(preset, opts) {
         lastHit = clock;
         // One notch of rotation per hit, alternating direction on the downbeat
         // so a bar reads as a bar rather than as a continuous spin.
-        rotTarget += (TAU / N) * (beat.downbeat ? -1 : 1) * lerp(0.4, 1.6, motion);
+        rotTarget += (TAU / N) * (beat.downbeat ? -1 : 1) * lerp(0.4, 1.6, motion) * SPIN;
         const force = lerp(0.18, 0.55, hardness) * (0.6 + det * 0.6);
         for (const s of shard) {
           s.throw = force * (0.7 + rand() * 0.6);
           s.jitter = (rand() - 0.5) * chaos * 0.5;
         }
-        if (!opts.reducedMotion && beat.downbeat) strobe = 0.5 * opts.intensity;
+        if (!opts.reducedMotion && beat.downbeat) strobe = 0.5 * opts.intensity * STROBE;
       }
       punch = envelope(punch, clamp(det * 1.2, 0, 1), dt, 0.005, 0.12);
       strobe = approach(strobe, 0, 0.06, dt);
-      rot = approach(rot, rotTarget, 0.055, dt);
+      // A continuous roll under the notched rotation. The genres that dance
+      // rather than hammer (tribe, raggatek, hardtek) read as turning; the ones
+      // that hammer only ever move when something hits.
+      if (DRIFT) {
+        const roll = DRIFT * dt * lerp(0.1, 0.5, motion) * SPEED;
+        rot += roll;
+        rotTarget += roll;
+      }
+      rot = approach(rot, rotTarget, 0.055 / Math.max(0.2, SPEED), dt);
       for (const s of shard) {
         s.throw = approach(s.throw, 0, 0.16, dt);
         s.jitter = approach(s.jitter, 0, 0.22, dt);
@@ -89,7 +119,7 @@ export function createShatterWorld(preset, opts) {
       const tint = frameTint(pal);
       // The crack between two shards: a hair at rest, a real gap when the genre
       // is chaotic. It is what stops the disc reading as one solid wheel.
-      const gap = lerp(0.1, 0.42, chaos) * (TAU / N) * 0.5;
+      const gap = lerp(0.1, 0.42, chaos) * JAG * (TAU / N) * 0.5;
 
       for (let i = 0; i < N; i++) {
         const s = shard[i];
@@ -109,9 +139,6 @@ export function createShatterWorld(preset, opts) {
         const p1 = geom.place(a0, r1);
         const x1 = p1[0];
         const y1 = p1[1];
-        const p2 = geom.place(a1, r1);
-        const x2 = p2[0];
-        const y2 = p2[1];
         const p3 = geom.place(a1, r0);
         const gr = g.createLinearGradient(x0, y0, x1, y1);
         gr.addColorStop(0, hsl(hue, pal.sat, 0.68, a));
@@ -120,7 +147,18 @@ export function createShatterWorld(preset, opts) {
         g.beginPath();
         g.moveTo(x0, y0);
         g.lineTo(x1, y1);
-        g.lineTo(x2, y2);
+        // The outer rim. Flat is a cut piece; stepped is a broken one, and the
+        // steps are the shard's own fixed notches so the break stays put.
+        if (EDGE > 0.02) {
+          for (let k = 0; k < 3; k++) {
+            const t = (k + 1) / 4;
+            const rr = r1 * (1 - EDGE * 0.45 * s.notch[k]);
+            const pk = geom.place(lerp(a0, a1, t), rr);
+            g.lineTo(pk[0], pk[1]);
+          }
+        }
+        const p2 = geom.place(a1, r1);
+        g.lineTo(p2[0], p2[1]);
         g.lineTo(p3[0], p3[1]);
         g.closePath();
         g.fill();
@@ -130,7 +168,7 @@ export function createShatterWorld(preset, opts) {
       // times and not only on the hit — the middle of the frame is where every
       // shard's inner edge points, and leaving it dark made the picture read as
       // a hole rather than as a source.
-      const core = 0.16 + punch * (0.5 + hardness * 0.6);
+      const core = (0.16 + punch * (0.5 + hardness * 0.6)) * CORE;
       if (core > 0.02) {
         const r0 = geom.hole ? Math.min(geom.hw, geom.hh) * 0.85 : 0;
         const cr = r0 + geom.rMin * (0.3 + core * 0.7);
@@ -142,7 +180,9 @@ export function createShatterWorld(preset, opts) {
       }
 
       if (strobe > 0.004) {
-        g.fillStyle = hsl(pal.high, 0.12, 0.92, strobe * 0.3 * w.energy);
+        // White for the genres whose strobe IS white light, the track's colour
+        // for the ones whose flash is part of the picture.
+        g.fillStyle = hsl(pal.high, lerp(0.55, 0.12, FLASH), lerp(0.72, 0.92, FLASH), strobe * 0.3 * w.energy);
         g.fillRect(0, 0, geom.w, geom.h);
       }
       g.globalCompositeOperation = "source-over";

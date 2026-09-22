@@ -36,6 +36,16 @@
 //   smoke        brush strokes appearing on the notes and drifting — jazz,
 //                blues, folk, country, reggae.
 //   nebula       slow clouds, no beat markers at all — ambient, strings.
+//   cathedral    shafts of light through a nave over a rose window — classical,
+//                orchestral, opera, choral, film score, gospel.
+//   carnival     concentric rings of different lengths going in and out of
+//                phase — salsa, afrobeats, amapiano, reggae, reggaeton, ska.
+//   pixels       a coarse lit grid with sprites on it, tearing into offset rows
+//                — chiptune, hyperpop, breakcore, IDM, glitch, grime.
+//   ocean        every event re-drawn behind itself at a decay: a dub delay,
+//                drawn — dub, dub techno, trip-hop, downtempo, cloud rap.
+//   neon         tubes hanging in the dark over a wet reflection, through a VHS
+//                tracking error — vaporwave, city pop, synthpop, future funk.
 //
 // Each world still reads the `look` vector inside itself (style.js LOOK_KEYS),
 // which is what keeps hardstyle from looking exactly like hardtekk — but the
@@ -59,6 +69,11 @@ import { createHorizonWorld } from "./horizon.js";
 import { createBloomWorld } from "./bloom.js";
 import { createSmokeWorld } from "./smoke.js";
 import { createNebulaWorld } from "./nebula.js";
+import { createCathedralWorld } from "./cathedral.js";
+import { createCarnivalWorld } from "./carnival.js";
+import { createPixelsWorld } from "./pixels.js";
+import { createOceanWorld } from "./ocean.js";
+import { createNeonWorld } from "./neon.js";
 
 // `trail` is how much of the previous frame each world keeps: the compositor
 // washes with it, so a world states its own smear rather than inheriting one
@@ -77,82 +92,17 @@ export const WORLDS = {
   bloom: { label: "Éclosion", trail: 0.4, make: createBloomWorld },
   smoke: { label: "Fumée", trail: 0.18, make: createSmokeWorld },
   nebula: { label: "Nébuleuse", trail: 0.12, make: createNebulaWorld },
+  cathedral: { label: "Nef", trail: 0.16, make: createCathedralWorld },
+  carnival: { label: "Carnaval", trail: 0.3, make: createCarnivalWorld },
+  pixels: { label: "Pixels", trail: 0.5, make: createPixelsWorld },
+  ocean: { label: "Océan", trail: 0.14, make: createOceanWorld },
+  neon: { label: "Néon", trail: 0.28, make: createNeonWorld },
 };
 
-// Every family the classifier can name, and the world it belongs to. Kept as
-// one flat table on purpose: adding a family to style.js and forgetting to
-// place it here is a one-line fix, and `worldFor` falls back by archetype in
-// the meantime rather than breaking.
-export const FAMILY_WORLD = {
-  // --- machine -------------------------------------------------------------
-  techno: "tunnel",
-  hardtechno: "tunnel",
-  industrial: "tunnel",
-  electronic: "tunnel",
-  // --- hard ----------------------------------------------------------------
-  hardcore: "shatter",
-  frenchcore: "shatter",
-  uptempo: "shatter",
-  speedcore: "shatter",
-  krach: "shatter",
-  tribecore: "shatter",
-  hardstyle: "hardbounce",
-  rawstyle: "hardbounce",
-  hardtekk: "hardbounce",
-  zaag: "hardbounce",
-  hardpingpong: "hardbounce",
-  germanparty: "hardbounce",
-  pieep: "hardbounce",
-  // --- melodic electronic --------------------------------------------------
-  psytrance: "kaleido",
-  trance: "starfield",
-  // --- breaks --------------------------------------------------------------
-  dnb: "breakgrid",
-  breakbeat: "breakgrid",
-  garage: "breakgrid",
-  dubstep: "wobble",
-  // --- urban ---------------------------------------------------------------
-  hiphop: "vinyl",
-  rap: "vinyl",
-  trap: "vinyl",
-  phonk: "vinyl",
-  reggaeton: "vinyl",
-  dancehall: "vinyl",
-  // --- band ----------------------------------------------------------------
-  rock: "stagelights",
-  hardrock: "stagelights",
-  metal: "stagelights",
-  brutal: "stagelights",
-  punk: "stagelights",
-  // --- retro ---------------------------------------------------------------
-  synthwave: "horizon",
-  lofi: "horizon",
-  // --- bright --------------------------------------------------------------
-  pop: "bloom",
-  vocalPop: "bloom",
-  dance: "bloom",
-  house: "bloom",
-  afrohouse: "bloom",
-  amapiano: "bloom",
-  disco: "bloom",
-  funk: "bloom",
-  soul: "bloom",
-  rnb: "bloom",
-  indie: "bloom",
-  // --- played --------------------------------------------------------------
-  jazz: "smoke",
-  blues: "smoke",
-  folk: "smoke",
-  country: "smoke",
-  reggae: "smoke",
-  // --- still ---------------------------------------------------------------
-  ambient: "nebula",
-  strings: "nebula",
-};
-
-// When the classifier has not named a family yet — the first seconds of a
-// track, or a device that never reached the smart level — the archetype is
-// still a better guess than one fixed default.
+// When nothing names a genre at all — the first seconds of a track, or a device
+// that never reached the smart level — the archetype is still a better guess
+// than one fixed default. Genre → world is decided by `lib/viz/skins.js`, which
+// also carries each genre's parameters; this is only the floor under it.
 const ARCHETYPE_WORLD = {
   sustain: "nebula",
   voice: "bloom",
@@ -161,15 +111,17 @@ const ARCHETYPE_WORLD = {
   rock: "stagelights",
 };
 
-export function worldFor(family, archetype) {
-  return (
-    FAMILY_WORLD[family] ||
-    ARCHETYPE_WORLD[archetype] ||
-    "bloom"
-  );
+export function worldFor(archetype) {
+  return ARCHETYPE_WORLD[archetype] || "bloom";
 }
 
-export function makeWorld(id, preset, opts) {
+export function makeWorld(id, preset, opts, skin = {}) {
   const def = WORLDS[id] || WORLDS.bloom;
-  return { id, def, impl: def.make(preset, opts) };
+  // The skin is handed to the world at CONSTRUCTION, not per frame: how many
+  // shards a genre has or how coarse its grid is decides the size of the arrays
+  // it allocates, and re-deciding that every frame would be both wasteful and
+  // impossible to animate. A genre change builds a new instance and the
+  // compositor crossfades to it, which is what it already does for a world
+  // change — the two are the same event.
+  return { id, def, skin, impl: def.make(preset, opts, skin) };
 }
