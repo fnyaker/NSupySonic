@@ -3758,6 +3758,180 @@ class TrackAnalysisTestCase(unittest.TestCase):
         # The banner is not the reason and must not crowd out the one that is.
         self.assertNotIn("ffmpeg version", reason)
 
+    # -- ffmpeg aborting on its own bug ------------------------------------
+    @staticmethod
+    def _aspectralstats(n):
+        """n frames of aspectralstats metadata, as ametadata prints them."""
+        return "".join(
+            f"lavfi.aspectralstats.centroid={1200 + (i % 97)}\n"
+            f"lavfi.aspectralstats.spread={800 + (i % 51)}\n"
+            f"lavfi.aspectralstats.flatness=0.{100 + (i % 800):03d}\n"
+            f"lavfi.aspectralstats.entropy=0.{500 + (i % 400):03d}\n"
+            f"lavfi.aspectralstats.rolloff={4000 + (i % 300)}\n"
+            f"lavfi.aspectralstats.flux=0.{10 + (i % 80):03d}\n"
+            for i in range(n)
+        ).encode()
+
+    @staticmethod
+    def _ebur128_abort():
+        """stderr of a run that measured the whole track and then aborted.
+
+        Verbatim in shape from a real one: ebur128's per-frame readout right
+        to the end of the file, then ffmpeg's own assertion as it flushes.
+        """
+        progress = "".join(
+            f"[Parsed_ebur128_0 @ 0x75e4ac003340] t: {t / 10:.6f} TARGET:-23 "
+            f"LUFS M: -39.8 S: -32.3 I: -10.3 LUFS LRA: 9.5 LU\n"
+            for t in range(1900, 1913)
+        )
+        return (
+            "ffmpeg version 7.1 Copyright (c) 2000-2024\n"
+            "  built with gcc 14\n"
+            "Input #0, flac, from '/archive/x/02 - Steal Your Heart.flac':\n"
+            "  Duration: 00:03:11.20, bitrate: 913 kb/s\n"
+            + progress
+            + "Assertion best_input >= 0 failed at "
+              "src/fftools/ffmpeg_filter.c:2122\n"
+        ).encode()
+
+    def test_ffmpeg_aborting_at_eof_does_not_lose_the_measurement(self):
+        """SIGABRT after measuring the whole track is not a failed measurement.
+
+        Some ffmpeg builds trip `av_assert0(best_input >= 0)` in the CLI's
+        filtergraph scheduler while flushing at end of stream. The process dies
+        having already printed every frame of a perfectly healthy file, and
+        judging the run by its exit code threw a COMPLETE measurement away and
+        called the track broken.
+        """
+        from supysonic.deezer import analysis as ana
+
+        class Aborted:
+            returncode = -6  # SIGABRT
+
+        Aborted.stdout = self._aspectralstats(2050)
+        Aborted.stderr = self._ebur128_abort()
+
+        runs = []
+        orig = ana.subprocess.run
+        ana.subprocess.run = lambda cmd, **k: (runs.append(cmd), Aborted())[1]
+        try:
+            feats = ana._spectral("/archive/x/02 - Steal Your Heart.flac")
+        finally:
+            ana.subprocess.run = orig
+
+        self.assertEqual(feats["frames"], 2050)
+        # ebur128 prints the integrated loudness and the range on every line,
+        # so the figures the missing Summary would have carried are still there.
+        self.assertEqual(feats["lufs"], -10.3)
+        self.assertEqual(feats["lra"], 9.5)
+        # And it cost ONE decode: a salvage that re-read the file would undo
+        # the reason both measurements share a pass in the first place.
+        self.assertEqual(len(runs), 1)
+
+    def test_a_crash_with_nothing_measured_retries_without_the_loudness_meter(self):
+        """Keep the filter there is no verdict without; drop the one with a default."""
+        from supysonic.deezer import analysis as ana
+
+        class Aborted:
+            returncode = -6
+            stdout = b""
+
+        Aborted.stderr = self._ebur128_abort()
+
+        class Retried:
+            returncode = 0
+            stderr = b""
+
+        Retried.stdout = self._aspectralstats(900)
+
+        runs = []
+
+        def fake(cmd, **k):
+            runs.append(cmd)
+            return Aborted() if len(runs) == 1 else Retried()
+
+        orig = ana.subprocess.run
+        ana.subprocess.run = fake
+        try:
+            feats = ana._spectral("/archive/x/y.flac")
+        finally:
+            ana.subprocess.run = orig
+
+        self.assertEqual(len(runs), 2)
+        self.assertIn("ebur128", " ".join(runs[0]))
+        self.assertNotIn("ebur128", " ".join(runs[1]))
+        self.assertIn("aspectralstats", " ".join(runs[1]))
+        self.assertEqual(feats["frames"], 900)
+        # No loudness meter, so no loudness — and `analyze_track` defaults it.
+        self.assertIsNone(feats["lra"])
+
+    def test_a_crash_that_measured_almost_nothing_is_still_a_failure(self):
+        """Salvage is for a run that finished the track, not one that died early.
+
+        Two frames is an intro, and medians taken over it would describe
+        nothing. A verdict built from that is worse than no verdict.
+        """
+        from supysonic.deezer import analysis as ana
+
+        class Aborted:
+            returncode = -6
+
+        Aborted.stdout = self._aspectralstats(3)
+        Aborted.stderr = self._ebur128_abort()
+
+        orig = ana.subprocess.run
+        ana.subprocess.run = lambda cmd, **k: Aborted()
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                ana._spectral("/archive/x/y.flac")
+        finally:
+            ana.subprocess.run = orig
+
+        # ...and it still says exactly what happened.
+        self.assertIn("Assertion best_input", str(caught.exception))
+        self.assertIn("-6", str(caught.exception))
+
+    def test_a_clean_run_reads_the_summary_not_the_running_line(self):
+        """The Summary block is authoritative where it exists."""
+        from supysonic.deezer import analysis as ana
+
+        class Ok:
+            returncode = 0
+
+        Ok.stdout = self._aspectralstats(500)
+        Ok.stderr = (
+            "[Parsed_ebur128_0 @ 0x1] t: 10.000000 TARGET:-23 LUFS "
+            "M: -20.0 S: -20.0 I: -9.9 LUFS LRA: 1.1 LU\n"
+            "[Parsed_ebur128_0 @ 0x1] Summary:\n"
+            "\n"
+            "  Integrated loudness:\n"
+            "    I:          -7.5 LUFS\n"
+            "    Threshold:  -17.6 LUFS\n"
+            "\n"
+            "  Loudness range:\n"
+            "    LRA:         4.2 LU\n"
+        ).encode()
+
+        orig = ana.subprocess.run
+        ana.subprocess.run = lambda cmd, **k: Ok()
+        try:
+            feats = ana._spectral("/archive/x/y.flac")
+        finally:
+            ana.subprocess.run = orig
+
+        self.assertEqual(feats["lufs"], -7.5)
+        self.assertEqual(feats["lra"], 4.2)
+
+    def test_the_read_limit_stops_the_demuxer_not_the_output(self):
+        """`-t` before `-i` ends the input cleanly instead of trimming after
+        the filter graph — less decoding, and an ordinary end of stream for
+        the filters to flush from."""
+        from supysonic.deezer import analysis as ana
+
+        cmd = ana._spectral_cmd("/archive/x/y.flac")
+        self.assertLess(cmd.index("-t"), cmd.index("-i"))
+        self.assertEqual(cmd[cmd.index("-t") + 1], str(ana.MAX_SECONDS))
+
     def test_ffmpeg_tail_keeps_the_error_and_drops_the_banner(self):
         """ffmpeg always says what went wrong; the banner never does."""
         from supysonic.deezer import analysis as ana
@@ -3779,6 +3953,13 @@ class TrackAnalysisTestCase(unittest.TestCase):
         self.assertLessEqual(len(ana.ffmpeg_tail("x" * 5000)), 400)
         self.assertEqual(ana.ffmpeg_tail(""), "")
         self.assertEqual(ana.ffmpeg_tail(None), "")
+
+        # A filter's per-frame readout is telemetry, and ebur128 prints one
+        # every 100 ms — keeping the last lines verbatim buried the assertion
+        # that actually explained the crash under two progress dumps.
+        tail = ana.ffmpeg_tail(self._ebur128_abort().decode())
+        self.assertIn("Assertion best_input >= 0", tail)
+        self.assertNotIn("TARGET:-23", tail)
 
     def test_a_killed_backfill_resumes_where_it_stopped(self):
         """A library job runs for hours on a thread inside the web server. A

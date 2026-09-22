@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "pretest": "node test/preflight.mjs",
     "test": "node --test \"test/*.test.mjs\""
   },
   "devDependencies": {
