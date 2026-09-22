@@ -33,6 +33,7 @@
 
 import {
   KEEP_MS,
+  WAIT_MAX_MS,
   chunkIndex,
   correctionFor,
   lastChunk,
@@ -56,6 +57,15 @@ const LATE = 0.02; // s: a start closer than this to "now" is treated as late
 // reported delay settling, measured at 20 ms) is worth a 12 ms fade; the clock
 // estimate's own refinements stay far below it and never cut anything.
 const MAP_NOW_MS = 8;
+// A host timeline this far from the one predicted for the next track is not
+// that prediction coming true: it is the host getting there some other way (a
+// skip, long before the planned handover). The prediction is then dropped, not
+// promoted — promoting it is what left the old track playing to its planned
+// end, minutes after the host had moved on.
+const PROMOTE_TOL = 3; // s
+// The old track's planned end stands only if the new one really starts after
+// it, give or take this; a host that started it earlier ended the old one then.
+const HANDOVER_TOL = 0.05; // s
 
 // Normalisation, exactly as the host's graph computes it (lib/audio/graph.js),
 // so a track sits at the same relative level on every device in the room.
@@ -186,27 +196,24 @@ export class PartyEngine {
       const ep = Math.abs(positionAt(this.pending.tl, sref) - target);
       const ec =
         this.cur && this.cur.id === tl.id ? Math.abs(positionAt(this.cur.tl, sref) - target) : Infinity;
-      if (ep < ec) {
-        const old = this.cur;
-        if (old && !old.stopAt && old.plannedEnd) {
-          // It is already fading out on the schedule planNext gave it.
-          old.stopAt = old.plannedEnd.at;
-          old.ends = old.plannedEnd.ends;
-        }
-        this.cur = this.pending;
-        this.pending = null;
-      }
+      if (ep < ec && ep <= PROMOTE_TOL) this.promote(tl, now);
     }
 
     if (!tl.playing) {
+      const st = this.stopped;
       if (this.cur && !this.cur.stopAt) {
-        const at = S + LEAD * 1000;
-        this.stopped = { id: this.cur.id, pos: positionAt(this.cur.tl, at) };
-        this.stopVoice(this.cur, now + LEAD, EDGE * 2);
+        // Where THIS device falls silent, and where the host said it paused:
+        // a resume from that same point carries on from here, not from where
+        // the room is (see below).
+        this.stopped = { id: this.cur.id, pos: positionAt(this.cur.tl, sref), hostP: tl.p };
+      } else if (st && (st.id !== tl.id || Math.abs(st.hostP - tl.p) > 0.05)) {
+        // The host moved while paused (a seek, another track): it will resume
+        // somewhere else, and where we stopped means nothing any more.
+        this.stopped = null;
       }
-      if (this.pending) this.stopVoice(this.pending, now + LEAD, EDGE * 2);
-      this.cur = null;
-      this.pending = null;
+      // EVERY voice, not just the current one: a track still fading out of a
+      // crossfade is as audible as the one fading in.
+      this.silence(now + LEAD, EDGE * 2);
       this.setStatus("pause");
       return;
     }
@@ -221,6 +228,7 @@ export class PartyEngine {
         v.tl = tl;
         this.unscheduleFuture(v, now);
       } else if (c === "jump") {
+        // Behind — or so far ahead that the host went back (a rewind).
         this.stopVoice(v, now + LEAD, EDGE);
         this.cur = this.startVoice(tl, state.track, positionAt(tl, sref), EDGE);
       } else {
@@ -232,14 +240,16 @@ export class PartyEngine {
       }
     } else {
       // Another track: a skip, a join, or a handover we did not see coming.
-      if (v) {
-        const fade = state.xfade > 0.1 ? Math.min(state.xfade, 4) : SKIP_FADE;
-        this.stopVoice(v, now + LEAD, fade, fade > SKIP_FADE);
-      }
+      // Whatever else is still sounding goes with it — a crossfade tail, a
+      // prediction that did not come true.
+      const fade = v && state.xfade > 0.1 ? Math.min(state.xfade, 4) : SKIP_FADE;
+      if (v) this.stopVoice(v, now + LEAD, fade, fade > SKIP_FADE);
+      this.silence(now + LEAD, SKIP_FADE, v);
       let from = positionAt(tl, sref);
       const st = this.stopped;
-      // Resuming after a pause we overshot: carry on from where WE stopped.
-      if (st && st.id === tl.id && st.pos > from && st.pos - from < 8) from = st.pos;
+      // Resuming after a pause we overshot: carry on from where WE stopped —
+      // as long as that is a stall's worth, not a different place altogether.
+      if (st && st.id === tl.id && st.pos > from && (st.pos - from) * 1000 < WAIT_MAX_MS) from = st.pos;
       this.cur = this.startVoice(tl, state.track, from, v && state.xfade > 0.1 ? Math.min(state.xfade, 4) : EDGE);
     }
     this.stopped = null;
@@ -249,6 +259,38 @@ export class PartyEngine {
 
   isStarted(v, now) {
     return this.toCtx(serverTimeAt(v.tl, v.from)) <= now + LATE;
+  }
+
+  // The predicted next track is now the host's current one. The old track ends
+  // where the HOST ended it: on a predicted handover that is the cut or fade
+  // planNext already scheduled; but when the new track really starts before
+  // that (a skip in the last seconds, a host early on its own prediction), the
+  // old one ended then, and it goes now.
+  promote(tl, now) {
+    const old = this.cur;
+    const next = this.pending;
+    this.cur = next;
+    this.pending = null;
+    if (!old || old === next) return;
+    const pe = old.plannedEnd;
+    const starts = this.toCtx(serverTimeAt(tl, next.from));
+    if (pe && starts >= pe.at - HANDOVER_TOL) {
+      if (!old.stopAt) {
+        // Already fading out on the schedule planNext gave it.
+        old.stopAt = pe.at;
+        old.ends = pe.ends;
+      }
+    } else {
+      this.stopVoice(old, Math.max(now + LEAD, Math.min(starts, pe ? pe.at : Infinity)), SKIP_FADE);
+    }
+  }
+
+  // Fade out every voice but `keep` by `at + fade` at the latest (one already
+  // ending sooner keeps its own ending), and forget the plan.
+  silence(at, fade, keep = null) {
+    for (const v of this.voices) if (v !== keep) this.stopVoice(v, at, fade);
+    if (this.cur !== keep) this.cur = null;
+    if (this.pending !== keep) this.pending = null;
   }
 
   // Called on a timer (and whenever a chunk lands).
@@ -343,6 +385,21 @@ export class PartyEngine {
     return null;
   }
 
+  // Diagnostics: every track this device is making audible right now, with
+  // its gain as the audio thread computes it — not just the current one, which
+  // is how a track left playing underneath another stays invisible.
+  sounding() {
+    const now = this.ctx.currentTime;
+    const out = [];
+    for (const v of this.voices) {
+      let on = false;
+      for (const n of v.nodes.values()) if (n.start <= now && now < n.end) on = true;
+      const g = v.out.gain.value;
+      if (on && g > 0.001) out.push({ id: v.id, g: Math.round(g * 1000) / 1000 });
+    }
+    return out;
+  }
+
   stop() {
     this.stopAll(this.ctx.currentTime, EDGE * 2);
     this.state = null;
@@ -379,9 +436,12 @@ export class PartyEngine {
   }
 
   // Fade a voice out from ctx time `at`, and never schedule anything past it.
+  // A voice already stopping is only ever brought FORWARD: one whose end was
+  // planned far out (the cut at the end of its track) is silenced by
+  // `at + fade`, one that goes quiet sooner than that is left to finish.
   stopVoice(v, at, fade, power = false) {
-    if (v.stopAt && v.stopAt <= at) return;
     const t = Math.max(this.ctx.currentTime, at);
+    if (v.stopAt && v.ends <= t + fade + 0.01) return;
     hold(v.out.gain, t);
     ramp(v.out.gain, v.out.gain.value, 0, t, fade, power);
     v.stopAt = t;
@@ -396,9 +456,7 @@ export class PartyEngine {
   }
 
   stopAll(now, fade) {
-    for (const v of this.voices) if (!v.stopAt) this.stopVoice(v, now + 0.005, fade);
-    this.cur = null;
-    this.pending = null;
+    this.silence(now + 0.005, fade);
   }
 
   // Take back every chunk of `v` that has not started yet; the next tick

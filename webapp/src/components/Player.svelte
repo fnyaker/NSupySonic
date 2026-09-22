@@ -125,6 +125,9 @@
     // The listen party watches this player; it never drives it.
     bindPartySource({
       element: () => audio,
+      // The track the active element actually carries — null between a skip
+      // and the new source being attached, when it still plays the old one.
+      loaded: () => (loadingTrack ? null : curId),
       xfading: () => (xfade && xfade.phase === "fading" ? xfade.fade : 0),
       plan: partyPlan,
     });
@@ -901,6 +904,9 @@
     // gate onTime so a late timeupdate from the old source can't write it back.
     loadingTrack = true;
     player.setProgress(resumeAt, track.duration || 0);
+    // A listen party announces the change now, not at its next look: guests
+    // stop the old track a quarter of a second sooner.
+    partyPoke();
 
     // A manual skip cuts hard by default. With the crossfade on, soften it:
     // a ramp short enough to be inaudible as a delay, long enough to kill the

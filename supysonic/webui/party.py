@@ -156,6 +156,9 @@ class Party:
         self.state = {
             "track": None,
             "playing": False,
+            # Not playing because the host is LOADING (a skip, a rebuffer),
+            # not because it paused: guests say so, and look again sooner.
+            "buf": False,
             "anchor": None,
             "xfade": 0.0,
             "next": None,
@@ -319,6 +322,7 @@ def _public_state(party: Party) -> dict:
         "live": now - party.host_seen < HOST_OFFLINE,
         "track": _public_track(party.id, st.get("track")),
         "playing": bool(st.get("playing")),
+        "buf": bool(st.get("buf")),
         "anchor": st.get("anchor"),
         "xfade": st.get("xfade") or 0.0,
         "next": (
@@ -480,9 +484,11 @@ def party_publish(pid):
             party.allow(track[1])
         if nxt is not None:
             party.allow(cleaned[1])
+        playing = bool(body.get("playing")) and track is not None
         party.state = {
             "track": track[0] if track else None,
-            "playing": bool(body.get("playing")) and track is not None,
+            "playing": playing,
+            "buf": bool(body.get("buf")) and track is not None and not playing,
             "anchor": anchor,
             "xfade": _num(body.get("xfade"), 0, 12, 0.0),
             "next": nxt,

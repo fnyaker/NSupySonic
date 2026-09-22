@@ -46,14 +46,19 @@ export function nextTimeline(tl, next) {
 //  - AHEAD by more: stop now and resume the same audio when the timeline gets
 //    there. Never replay what was just played: a moment of silence is far less
 //    noticeable than a stutter that repeats a beat.
+//  - ahead by more than a stall could ever explain (WAIT_MAX_MS): that is not
+//    the host being late, it is the host going BACK (a rewind, a restart).
+//    Waiting it out was thirty seconds of silence after a thirty-second
+//    rewind; the guest goes back with it, like everyone else in the room.
 export const KEEP_MS = 3;
 export const SEAM_MS = 30;
+export const WAIT_MAX_MS = 2500;
 
 export function correctionFor(errMs) {
   const a = Math.abs(errMs);
   if (a <= KEEP_MS) return "keep";
   if (a <= SEAM_MS) return "seam";
-  return errMs < 0 ? "jump" : "wait";
+  return errMs < 0 || errMs > WAIT_MAX_MS ? "jump" : "wait";
 }
 
 // -- chunks ----------------------------------------------------------------------

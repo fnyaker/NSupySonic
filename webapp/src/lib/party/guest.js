@@ -20,7 +20,7 @@ import { compressorDelay } from "./latency.js";
 import { serverTimeAt } from "./timeline.js";
 
 const POLL_MS = 1000;
-const POLL_FAST_MS = 350; // within HANDOVER_SOON of a predicted handover
+const POLL_FAST_MS = 350; // near a predicted handover, or while the host loads a track
 const HANDOVER_SOON = 4000;
 const TICK_MS = 200;
 const OFFLINE_AFTER = 6000; // no answer this long: tell the listener
@@ -180,7 +180,7 @@ export function joinParty(pid, name) {
     // the console.
     (window.__nsParty = window.__nsParty || {}).guest = () => {
       const S = bridge.serverNow();
-      return { S, heard: engine.heardAt(S), status: engine.status, clock: clockEst, fmt, latency };
+      return { S, heard: engine.heardAt(S), sounding: engine.sounding(), status: engine.status, clock: clockEst, fmt, latency };
     };
     // Learn the audio clock quickly at first (a reading every 50 ms for two
     // seconds), then keep it fresh on the tick.
@@ -274,7 +274,10 @@ export function joinParty(pid, name) {
         }
         patch({ phase: "live", state: st, offline: false });
         const S = bridge && bridge.serverNow();
-        if (S != null && st.playing && st.next && st.anchor) {
+        // The host is loading a track: its line is a moment away, and every
+        // poll of delay is audio this device misses at the start of it.
+        if (st.buf) next = POLL_FAST_MS;
+        else if (S != null && st.playing && st.next && st.anchor) {
           const h = serverTimeAt({ t: st.anchor.t, p: st.anchor.p }, st.next.at);
           if (h - S < HANDOVER_SOON && h - S > -2000) next = POLL_FAST_MS;
         }
