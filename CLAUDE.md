@@ -1410,7 +1410,30 @@ one shared timeline, Web Audio scheduling. What differs, and why:
   AudioContext clock. Voices (one run of one track, own gain) and nodes (one chunk, own seam
   envelope). Corrections follow ONE rule (`timeline.correctionFor`): ≤ 3 ms nothing, ≤ 30 ms at the
   next seam, behind → jump forward now, **ahead → fall silent and resume the SAME audio, never
-  repeat what the room heard** (also what a resume after an overshot pause does).
+  repeat what the room heard** (also what a resume after an overshot pause does) — but only up to
+  `WAIT_MAX_MS` (2.5 s): further ahead than any stall is the host going BACK, and waiting it out
+  was thirty seconds of silence after a thirty-second rewind.
+- **Every voice is accounted for, not just the current one.** The bug a listener reported — skip
+  on the host, and the old track carries on under the new one, through pauses, to its end — was a
+  predicted next track being PROMOTED when the host merely skipped to it: the old track kept the
+  end planned for it minutes away, was no longer `cur`, and pause/stop/new-track only ever
+  silenced `cur` and `pending`. So a prediction is promoted only when the host's line lands within
+  `PROMOTE_TOL` of it (and the old track then ends where the new one really starts, if that is
+  sooner); a pause, a new track or the end silences EVERY voice (`silence`); and `stopVoice` can
+  bring a planned end forward. `engine.sounding()` (in `__nsParty.guest()`) lists every voice
+  audible right now with the gain the audio thread computes — the one diagnostic that sees it.
+- **The host never publishes a track's name with another track's position**
+  (`lib/party/hostrules.js`, pure, tested). On a skip the store names the new track at once while
+  the element still plays the old one (the source is resolved, and on a softened skip faded,
+  first): a reading then published the new track two minutes in. The player hands over the id
+  its element actually CARRIES (`loaded`, null while a source is being attached), and until the
+  element runs it the track goes out as loading (`buf`: guests stop the old one now, say
+  "Chargement chez …" and poll fast). The one exception is the handover guests were TOLD about —
+  they are already playing it on their prediction — which is held, publishing nothing, for up to
+  `HANDOVER_HOLD_MS` until its real line confirms it; a rebuffer of a few hundred ms is held the
+  same way instead of republishing a frozen position. And a line only goes out once three readings
+  40 ms apart agree on it: the first reading after a start was measured 23 ms off (the element
+  says it plays before its clock moves), which guests then played until their next seam.
 - **The audio-clock mapping is measured, and it MOVES** (`makeClockBridge`). Both lessons came from
   the real-browser run, not the simulation: the first `getOutputTimestamp()` after creation is
   ~140 ms off and a starting context's clock stands still (so only readings from a running,
@@ -1428,7 +1451,12 @@ one shared timeline, Web Audio scheduling. What differs, and why:
   handled by the host re-creating the party under the same id (`resume`), so guests' links live on.
 - Measured end to end (Chromium, host and guest in separate contexts, real server, positions
   compared on the shared clock): joining ~0.4 s; |error| ≤ 0.6 ms steady, after a seek (back in
-  sync in 0.3 s), after pause/resume and across a handover. Physical output latency is outside
+  sync in 0.3 s), after pause/resume and across a handover. Skips (to the announced next, any
+  other, back, two in 250 ms), a 25 s rewind and a natural handover: the guest alone on the host's
+  track 0.6–1.3 s after the click, |error| ≤ 0.5 ms, nothing else sounding. With the crossfade on,
+  the host's element is wired into Web Audio and — measured in headless Chromium — its
+  `currentTime` runs 373 ppm fast against both real time and the context clock (a direct element:
+  −12 ppm); the host re-anchors every 2.5 ms of drift and guests sit 2–5 ms off between seams. Physical output latency is outside
   what any browser reports — Bluetooth — which is what the guest's *Décalage* setting is for.
   `window.__nsParty.host()` / `.guest()` expose those positions for exactly this check.
 
@@ -1508,6 +1536,9 @@ check every chunk lands at zero lag and every seam's overlap is sample-identical
 ffmpeg). `webapp/test/party.test.mjs` drives the guest scheduler in virtual time against a recording
 AudioContext (`test/partymock.mjs` replays the automation the way the audio thread does) and asserts
 on what is AUDIBLE at each server instant: seams, re-anchors, pause/resume without replay, predicted
-handovers, crossfades, late chunks, mapping steps, repeat-one; and the clock estimator under
+handovers, crossfades, late chunks, mapping steps, repeat-one, skips to the announced next / mid-fade
+/ through a loading state, rewinds, and a seeded walk through all of them asserting that only the
+host's track is ever audible once the guest has heard of a move; the host's rules against a model
+of what Player.svelte's store and element really do on a skip and a handover; and the clock estimator under
 simulated asymmetric, heavy-tailed queueing and 60 ppm skew, held to the measured numbers.
 Add a test alongside these when touching the proxy or `/api`.

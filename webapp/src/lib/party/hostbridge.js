@@ -16,6 +16,7 @@ let source = null;
 let poke = null;
 
 // What the player gives us (Player.svelte): the element that is audible, the
+// track that element carries (null while a new one is being attached), the
 // crossfade in progress, and its plan for the next track.
 export function bindPartySource(s) {
   source = s;

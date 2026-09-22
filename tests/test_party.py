@@ -276,6 +276,23 @@ class PartyTestCase(unittest.TestCase):
         # ...and it is fetchable before it starts, so guests can preload it.
         self.assertIn("3135556", P._parties[pid].media)
 
+    def test_a_loading_host_is_not_a_paused_one(self):
+        # A skip: the host announces the new track before its element plays it.
+        pid = self._start()
+        t = self._track(write=False)
+        self._publish(pid, t, playing=False, buf=True)
+        s = self.guest.get(f"/api/party/{pid}").get_json()
+        self.assertFalse(s["playing"])
+        self.assertTrue(s["buf"])
+        # Loading and playing at once is not a state: playing wins.
+        self._publish(pid, t, playing=True, buf=True)
+        s = self.guest.get(f"/api/party/{pid}").get_json()
+        self.assertTrue(s["playing"])
+        self.assertFalse(s["buf"])
+        # And a real pause says so.
+        self._publish(pid, t, playing=False)
+        self.assertFalse(self.guest.get(f"/api/party/{pid}").get_json()["buf"])
+
     def test_the_host_payload_is_sanitised(self):
         pid = self._start()
         t = self._track(write=False)

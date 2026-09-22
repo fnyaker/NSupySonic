@@ -100,7 +100,7 @@
     if (v.offline) return { text: "Connexion perdue — la musique continue", tone: "warn" };
     if (!s.live) return { text: `${s.host} s'est absenté`, tone: "warn" };
     if (!s.track) return { text: `En attente de ${s.host}`, tone: "wait" };
-    if (!s.playing) return { text: `En pause chez ${s.host}`, tone: "wait" };
+    if (!s.playing) return { text: s.buf ? `Chargement chez ${s.host}…` : `En pause chez ${s.host}`, tone: "wait" };
     if (!v.clock) return { text: "Synchronisation de l'horloge…", tone: "wait" };
     if (v.status === "load") return { text: "Chargement…", tone: "wait" };
     if (v.status === "sync") {
@@ -180,7 +180,7 @@
           {#if phase === "landing"}
             <p class="invite"><strong>{peek.host}</strong> vous invite à écouter{listeners ? ` avec ${listeners} ${listeners > 1 ? "autres personnes" : "autre personne"}` : ""}</p>
           {:else}
-            <p class="live"><span class="dot" class:paused={!st || !st.playing}></span>En direct avec {st ? st.host : ""}{listeners > 1 ? ` · ${listeners} à l'écoute` : ""}</p>
+            <p class="live"><span class="dot" class:paused={!st || (!st.playing && !st.buf)}></span>En direct avec {st ? st.host : ""}{listeners > 1 ? ` · ${listeners} à l'écoute` : ""}</p>
           {/if}
           <h1 class="title">{track ? track.title : "Rien en lecture pour l'instant"}</h1>
           {#if track && track.artist}<p class="artist">{track.artist}</p>{/if}

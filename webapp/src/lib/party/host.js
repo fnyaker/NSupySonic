@@ -17,7 +17,7 @@
 
 import { get } from "svelte/store";
 import { api } from "../api.js";
-import { current, normalization } from "../stores.js";
+import { current, normalization, player } from "../stores.js";
 import { getContext, isWired, lookaheadSeconds } from "../audio/graph.js";
 import { gainFor } from "../gaincache.js";
 import { artistLine } from "../format.js";
@@ -25,6 +25,7 @@ import { startClock } from "./clock.js";
 import { AnchorFit } from "./anchor.js";
 import { positionAt, serverTimeAt } from "./timeline.js";
 import { compressorDelay } from "./latency.js";
+import { HOLD, elementState, hostState } from "./hostrules.js";
 import { HOST_KEY, onPartyPoke, partyHost, partySource } from "./hostbridge.js";
 
 export { partyHost };
@@ -33,8 +34,18 @@ const MEASURE_MS = 250;
 const HEARTBEAT_MS = 10_000;
 const DRIFT_S = 0.0025; // republish when the player is this far off its line
 const JUMP_S = 0.25; // ...and at once when it is this far (a seek, a stall)
-const STALL_MS = 400; // buffering this long counts as a pause
 const MIN_GAP_MS = 150; // between two publishes of the same track
+// A fresh line — a new track, a seek, a resume — is read QUICK_MS apart until
+// it is trustworthy. The first reading after a start is the worst there is:
+// the element says it plays a render or two before its clock moves, and a line
+// drawn through that one reading was measured 23 ms off — which guests then
+// played until their next chunk seam. So a line only goes out once FIT_FIRST
+// readings agree on it (the median outvotes the stale one), and is corrected
+// on drift once it has FIT_GOOD: a third of a second after the start, where
+// the regular pace took two seconds to get there.
+const QUICK_MS = 40;
+const FIT_FIRST = 3;
+const FIT_GOOD = 8;
 const STORE_KEY = HOST_KEY;
 
 let session = null;
@@ -164,6 +175,7 @@ function stop() {
   if (s.clock) s.clock.stop();
   clearInterval(s.timer);
   clearInterval(s.hb);
+  clearTimeout(s.quick);
   window.removeEventListener("pagehide", onPageHide);
   if (window.__nsParty) delete window.__nsParty.host;
   if (releaseLock) releaseLock();
@@ -250,25 +262,49 @@ function measure() {
   if (id !== s.fitId) {
     s.fit.reset();
     s.fitId = id;
+    s.stallSince = 0;
   }
+  // The crossfade that brought this track in, if one did — read at the change,
+  // while it is still in progress.
+  if (s.xfade.id !== id) s.xfade = { id, v: (source.xfading && source.xfading()) || 0 };
 
-  // Playing, paused, or buffering — and buffering long enough is a pause:
-  // guests should hold rather than run ahead of a player that stopped.
-  const running = !el.paused && !el.ended && el.readyState >= 3;
-  let playing = running;
-  if (!el.paused && !el.ended && !running) {
+  // Does the element carry this track yet? Not between a skip and the new
+  // source being attached — and a position read then is the OLD track's.
+  const loaded = source.loaded ? source.loaded() : track.deezer_id;
+  const onTrack = loaded != null && String(loaded) === id;
+  // Playing, paused, or on its way to playing (loading, rebuffering, or just
+  // past the end of a track the queue is about to move on from).
+  const { running, wants } = elementState({
+    onTrack,
+    paused: el.paused,
+    ended: el.ended,
+    readyState: el.readyState,
+    intent: get(player).playing,
+  });
+  if (wants && !running) {
     if (!s.stallSince) s.stallSince = tNow;
-    playing = tNow - s.stallSince < STALL_MS && !!(s.pub && s.pub.playing);
   } else s.stallSince = 0;
 
   let broke = false;
   if (running) broke = !s.fit.add(at, heard);
   else s.fit.reset();
-  const p = running ? s.fit.positionAt(tNow) : heard;
+  if (running && s.fit.n < FIT_GOOD) quick(s);
+  if (running && s.fit.n < FIT_FIRST) return; // one or two readings are not a line yet
   const t = (running ? tNow : at) + est.offset;
-
-  // The crossfade that brought this track in, if one did.
-  if (s.xfade.id !== id) s.xfade = { id, v: (source.xfading && source.xfading()) || 0 };
+  const pub = s.pub;
+  const st = hostState({
+    pub,
+    id,
+    onTrack,
+    running,
+    wants,
+    waited: s.stallSince ? tNow - s.stallSince : 0,
+    t,
+    heard,
+    fitPos: running ? s.fit.positionAt(tNow) : 0,
+  });
+  if (st === HOLD) return; // guests carry on with what they have
+  const { playing, buf, p, handover } = st;
 
   // A handover we announced has happened: learn how late this player was to
   // start the next track, so the next prediction lands where it will be.
@@ -289,25 +325,25 @@ function measure() {
     : "";
   const norm = get(normalization) || "off";
 
-  const pub = s.pub;
   let need =
     s.retry ||
     !pub ||
     pub.id !== id ||
     pub.playing !== playing ||
+    !!pub.buf !== buf ||
     pub.nextKey !== nextKey ||
     pub.norm !== norm;
   if (!need && playing) {
     const drift = Math.abs(positionAt({ t: pub.t, p: pub.p, playing: true }, t) - p);
     if (broke || drift > JUMP_S) need = true;
-    else if (s.fit.n >= 8 && drift > DRIFT_S && tNow - s.lastSent > MIN_GAP_MS) need = true;
+    else if (s.fit.n >= FIT_GOOD && drift > DRIFT_S && tNow - s.lastSent > MIN_GAP_MS) need = true;
   } else if (!need && !playing && Math.abs(pub.p - p) > 0.05) {
     need = true; // seeked while paused
   }
   if (!need) return;
 
   // Remember what we predicted, to measure the real gap once it happens.
-  if (pub && pub.id !== id && pub.next && pub.next.track.id === id && pub.playing) {
+  if (handover) {
     s.gapProbe = {
       id,
       fade: pub.next.fade > 0,
@@ -320,6 +356,7 @@ function measure() {
     id,
     track: trackInfo(track),
     playing,
+    buf,
     t,
     p,
     xfade: s.xfade.v,
@@ -327,6 +364,15 @@ function measure() {
     nextKey,
     norm,
   });
+}
+
+// Look again soon (a young line), without piling up timers.
+function quick(s) {
+  if (s.quick) return;
+  s.quick = setTimeout(() => {
+    s.quick = null;
+    if (session === s) measure();
+  }, QUICK_MS);
 }
 
 function planNext(s) {
@@ -367,6 +413,7 @@ async function flush(s) {
       : {
           track: st.track,
           playing: st.playing,
+          buf: st.buf,
           t: st.t,
           p: st.p,
           xfade: st.xfade,
