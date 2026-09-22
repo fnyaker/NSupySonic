@@ -948,7 +948,14 @@ cover. Both are answered by two primitives every scene (except `bars`) is writte
   full anisotropy stops reading as a shape and starts reading as a border round the picture.
 - `ringRx/ringRy(t)` — an expanding ring that starts at the artwork's rim and leaves through the
   corners, leaning partway toward the frame's aspect (`RING_ANISO`): fully anisotropic is a squashed
-  oval, fully isotropic never touches the sides of a wide screen while it is still bright.
+  oval, fully isotropic never touches the sides of a wide screen while it is still bright. A
+  receding corridor is the same primitive read backwards, which is what `industrial` uses: built
+  round the centre instead, its far end — where the girders are smallest and densest — landed
+  exactly on the album cover, 36% of the scene's ink.
+- `floorY/floorH` — the band of frame the artwork leaves FREE underneath it (the bottom third when
+  there is none), for anything drawn as a horizon, a floor, a crowd or a mouth. Three scenes were
+  each doing this arithmetic themselves and each getting it wrong in the same direction: they put
+  the motif's *centre* clear of the cover and then let it rise, open or bite back up into it.
 
 The artwork is **measured from the DOM**, never guessed: `Visualizer.svelte` takes an `occluder`
 element (the desktop cover box; the mobile carousel, from which `occluderShape="square"` takes the
@@ -1112,9 +1119,25 @@ shared motif with a genre's numbers poured into it: the right answer for the lon
 one for a genre somebody actually listens to, because no parameter turns a bouncing core into a
 sawtooth waveform. `smart.js` prefers a dedicated file whenever the resolved genre has one and falls
 back to the world for everything else, so the catalogue fills in a genre at a time without a flag
-day, and the crossfade does not care which kind it is dissolving between. Eight so far — frenchcore,
-tribecore, raggatek, gabber, speedcore, hardtekk, zaag, uptempo — plus five musical neighbours that
-share a file.
+day, and the crossfade does not care which kind it is dissolving between. Seventeen so far —
+frenchcore, tribecore, raggatek, gabber, speedcore, hardtekk, zaag, uptempo, hardstyle, rawstyle,
+pieep, hardtechno, krach, hardcore, industrial, hardpingpong, germanparty — plus fourteen musical
+neighbours that share a file (`SAME_AS`, kept explicit because "terrorcore is uptempo" is a
+judgement about the music and belongs somewhere a person can disagree with it).
+
+**Every one of them is held to the same three properties the shared worlds are**, which they were
+not before: `viz.test.mjs` now drives each dedicated animation through `smart` and pins that it
+reaches all four edges of a 16:9 frame and keeps three-quarters of its drawing off a centred cover,
+and `musical.test.mjs` pins that it moves materially more at 180 BPM than at 90 and draws a drop
+differently from a breakdown. `SCENES` in that suite is the mode registry — off / bars / pulse /
+aurora / smart — so what `smart` actually draws for most of this library was never being asked. It
+found four scenes putting a quarter to a third of their ink behind the artwork (gabber's crowd,
+rawstyle's mouth, industrial's hall, hardpingpong's rally), one timed in seconds (krach's tear was
+a shove, and a shove travels velocity × time, so at twice the tempo each one moved half as far
+twice as often), and two faults in the benches themselves: the recorder had no `strokeRect`, so
+`industrial` took the suite down rather than being measured, and it recorded a rectangle only by
+its CENTRE, which makes a scene built on centred bars invisible — `hardcore`'s wall of columns, the
+animation of which is their height, scored 0.00 movement at both tempos.
 
 **These genres are not one scene, and the first version of that directory said they were.** Tribe,
 hardtek and raggatek do come out of the European sound-system and teknival world. Everything else

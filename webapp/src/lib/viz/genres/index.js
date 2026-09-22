@@ -51,6 +51,15 @@ import * as speedcore from "./speedcore.js";
 import * as hardtekk from "./hardtekk.js";
 import * as zaag from "./zaag.js";
 import * as uptempo from "./uptempo.js";
+import * as hardstyle from "./hardstyle.js";
+import * as rawstyle from "./rawstyle.js";
+import * as pieep from "./pieep.js";
+import * as hardtechno from "./hardtechno.js";
+import * as krach from "./krach.js";
+import * as hardcore from "./hardcore.js";
+import * as industrial from "./industrial.js";
+import * as hardpingpong from "./hardpingpong.js";
+import * as germanparty from "./germanparty.js";
 
 // Keyed by the skin id (`lib/viz/skins.js`), which is what `skinId` resolves
 // any spelling, label or hand-typed tag down to.
@@ -63,6 +72,15 @@ const MODULES = {
   hardtekk,
   zaag,
   uptempo,
+  hardstyle,
+  rawstyle,
+  pieep,
+  hardtechno,
+  krach,
+  hardcore,
+  industrial,
+  hardpingpong,
+  germanparty,
 };
 
 // Genres whose SOUND is close enough that one file draws both. Kept explicit
@@ -77,6 +95,23 @@ const SAME_AS = {
   tekk: "hardtekk",
   ukhardcore: "gabber",
   extratone: "speedcore",
+  // Rawstyle's own neighbourhood: the same kick design taken further, which is
+  // a difference of degree and is what the look vector is for.
+  rawphase: "rawstyle",
+  xtraraw: "rawstyle",
+  // Euphoric hardstyle IS hardstyle with the anthem turned up, and the scene
+  // draws the anthem from `m.melodic` — so it is the same file, honestly.
+  euphoric: "hardstyle",
+  euphorichardstyle: "hardstyle",
+  // Schranz is hard techno's loop-and-distortion end; the scene is built on
+  // exactly the property they share.
+  schranz: "hardtechno",
+  hardgroove: "hardtechno",
+  // Millennium / mainstream hardcore and happy hardcore are the anthem-and-
+  // structure branch this file is written for.
+  happyhardcore: "hardcore",
+  hardcoretechno: "hardcore",
+  makina: "hardcore",
 };
 
 export function genreSceneFor(id) {

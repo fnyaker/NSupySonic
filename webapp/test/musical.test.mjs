@@ -54,8 +54,16 @@ function recorder() {
       lineTo: (x, y) => ink.push(x, y),
       arc: (x, y) => ink.push(x, y),
       rect: (x, y) => ink.push(x, y),
-      fillRect: (x, y, w, h) => ink.push(x + w / 2, y + h / 2),
-      strokeRect: (x, y, w, h) => ink.push(x + w / 2, y + h / 2),
+      // A RECTANGLE IS NOT ITS CENTRE. Recording only the middle makes every
+      // scene built on centred bars invisible to this test: `hardcore` draws a
+      // wall of columns whose height is the animation, and each column's centre
+      // sits at exactly H/2 for ever, so the picture scored 0.00 movement at
+      // both tempos and the ratio came out 0/0. The two mid-edges move when the
+      // bar grows, which is what the eye is actually seeing.
+      fillRect: (x, y, w, h) =>
+        ink.push(x + w / 2, y + h / 2, x + w / 2, y, x + w / 2, y + h),
+      strokeRect: (x, y, w, h) =>
+        ink.push(x + w / 2, y + h / 2, x + w / 2, y, x + w / 2, y + h),
       quadraticCurveTo: (cx, cy, x, y) => ink.push(x, y),
       createLinearGradient: () => grad,
       createRadialGradient: () => grad,

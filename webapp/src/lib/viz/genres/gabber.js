@@ -59,7 +59,12 @@ export function create(preset, opts) {
     draw(g, geom, pal, w, m) {
       const W = geom.w;
       const H = geom.h;
-      const floor = geom.hole ? Math.min(H * 0.98, geom.cy + geom.hh + H * 0.12) : H * 0.92;
+      // The crowd stands in the band of frame the artwork leaves free, and it
+      // is the HEADS that have to clear it, not the feet: placing the floor
+      // line below the cover and then letting the silhouette rise by a tenth
+      // of the frame put a third of this scene's ink behind the artwork.
+      const rise = Math.min(geom.floorH * 0.55, H * (0.1 + m.drive * 0.06));
+      const floor = Math.min(H * 0.99, geom.floorY + geom.floorH * 0.55 + rise);
 
       // THE FLASH. Full frame, flat, no gradient: a strobe does not have a
       // falloff, and giving it one turns it into a glow from somewhere.
@@ -87,7 +92,6 @@ export function create(preset, opts) {
       // THE CROWD, opaque, drawn over the light. Hard edges, no smoothing: it
       // is the one place in the whole set where a jagged outline is the point.
       g.globalCompositeOperation = "source-over";
-      const rise = H * (0.1 + m.drive * 0.06);
       traceLine(g, N, (t) => {
         const i = Math.min(N - 1, Math.floor(t * N));
         return [t * W, floor - (head[i] + jump[i] * 0.5) * rise];
