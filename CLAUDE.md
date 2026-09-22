@@ -707,8 +707,8 @@ smart). Three things in there are load-bearing:
 
 **THE KICK IS FOUR WITNESSES, AND NONE OF THEM IS THE LEVEL.** The detector used to ratio two
 envelopes of the 25-180 Hz band — a 3 ms attack against a 90 ms release — and it failed on exactly
-the music this player exists for. Measured through the full chain on synthetic hardcore (spectra →
-`features.js` → `tempo.js`, pinned by `test/hardgen.mjs` + `test/audio.test.mjs`): techno **1.94
+the music this player exists for. Measured through the full chain on synthesised hardcore (audio →
+`features.js` → `tempo.js`, pinned by `test/synth.mjs` + `test/audio.test.mjs`): techno **1.94
 detections per kick**, frenchcore **2.08**, uptempo **0.40 — sixty per cent missed**, and
 frenchcore under a screech **3.74**. Two assumptions produced all four:
 
@@ -729,7 +729,43 @@ DOWN), **click** (the beater band's step), and **sub** (the bottom two octaves, 
 witness a pure 808 with no beater and no pitch movement brings). A kick is the best-supported
 COMBINATION: **two witnesses are required**, and one alone is capped below the trigger — a hi-hat
 can be several times louder than any kick in the track and used to clip its way over the threshold
-on the click alone. The limiter is removed as a **common mode**: the median of eight octave bands'
+on the click alone.
+
+**Something must have STRUCK, and it must have struck LOW.** Those are the two halves of the
+decision, and which witness may answer each is not interchangeable. *Struck* is **the beater and
+only the beater**: a bass note swelling back between kicks moves the region's pitch (0.88, because
+it is higher than the last kick's tail) and would convict itself on that alone, while its beater
+witness reads 0.14 — a note that fades in has no transient to put up there. *Low* is either energy
+arriving at the bottom (`lift` or `sub` over 0.8) or, when there is no room left down there,
+**the fundamental restarting high with that beater on it**, which is what a kick over its own
+predecessor's tail looks like. The exception is the kick with no beater at all — an 808, a sine
+bass drum — which convicts on the sub alone, at a bar set far above what a pad's own wobble reaches.
+
+**A CENTROID MEASURED ON AN EMPTY REGION IS NOT A MEASUREMENT**, and that is what convicted a
+hi-hat. The other three witnesses are STEPS in decibels: they measure themselves and read zero when
+nothing is there. The pitch witness is a SHAPE, and the shape of the noise floor is noise — it
+wanders by a third of an octave a frame, which normalises into a witness of 0.61 on a techno track
+whose kicks (their centroid moves DOWN as the bottom fills) never produce one at all. Measured,
+techno with hats on every offbeat fired **2.00 per kick**, the extra one on the hat — which is
+4-16 kHz noise with a 24 dB/octave skirt and puts *nothing* in the kick region: at the offbeat that
+region sat **56 dB** below where this track's kicks put it. Every true kick that relies on the
+restart path sits within **15 dB** of its own track's region level, so the witness is faded out
+between 20 and 36 dB down, and the hat reads 1.00 per kick at any hat level.
+
+**The region is read PER OCTAVE, not per bin.** It spans nearly four octaves (28-420 Hz) and an FFT
+is linear, so a plain mean over its bins gave 210-420 Hz half the vote and 28-56 Hz a twenty-eighth
+— the top of the region, where a kick barely lives, outweighing the bottom, where it does. Measured,
+a correctly low-cut 700 Hz hoover whose only residue is the part sitting above the corner moved the
+plain mean by 15 dB on a bar with no kick in it.
+
+**And every adaptive scale has a floor set from the smallest step a real kick makes.** They were set
+low and it showed on the one material with nothing to divide by: an ambient pad of three detuned
+saws, whose partials beat against each other several times a second, so the bottom two octaves
+wobble by 4.6 dB and the beater band by 2.1 — which, against floors of 4.5 and 4, read as a full sub
+witness (1.02) and half a beater (0.52) and held `kick` at its cap for the whole track. A real
+beater step measured 5.7 dB at the very least and 15-30 dB everywhere else.
+
+The limiter is removed as a **common mode**: the median of eight octave bands'
 steps, believed only when the bands agree to within 5 dB, because a gain change moves every band by
 the same number of decibels and no instrument does. And the gate is a **Schmitt trigger**, not a
 refractory window: a 300 ms hardcore tail and a 60 ms roll sit on the same side of any fixed window,
@@ -737,8 +773,17 @@ so the evidence has to fall back through a release level before another attack c
 scales against a **slowly-rising, slowly-falling** estimate of what this track's kicks weigh, never
 a running maximum — a roll's notes are shortened to fit their subdivision, so they step further than
 the ordinary kicks, and with a maximum one bar of sixteenths raised the bar for the whole phrase and
-took uptempo from 1.00 back down to 0.27. All of it now reads **1.00 per kick at 4-17 ms latency**
-across twenty-two cases from trap to speedcore.
+took uptempo from 1.00 back down to 0.27. All of it now reads **1.00-1.01 per kick at 9-17 ms
+latency** across sixteen records of real audio from trap to speedcore, with `pattern.mainKick`
+scoring 97-100% precision on them.
+
+**The limit it does have is stated rather than papered over.** A lead whose residue lands inside the
+kick's region, restarting high with an attack on it, is numerically identical to a kick over a
+saturated low end — a 320 Hz stab reads `lift 0.23, pitch 1.00, click 0.95, sub 0.00` and an uptempo
+kick on a full bottom reads `0.23, 1.39, 0.95, 0.00`. Every attempt to separate them on one frame's
+evidence cost real kicks (a sub veto took uptempo from 1.00 to 0.72). It is separated one layer up,
+where the GRID is known: `features.kickHit` is a percussive-attack detector, `pattern.mainKick` is
+the kick answer, and on that exact case it scores **F1 0.99**.
 
 `tempo.js` is a spectral-flux onset function on a fixed 100 Hz grid, an autocorrelation summed over
 harmonics, and a phase-locked loop. Once locked, beats are **predicted**, not detected, so a scene
@@ -1193,15 +1238,44 @@ excluded from the Docker build context. Never commit them.
 
 ## Tests
 
-`webapp/npm test` (node --test, no dependency to install) is the SPA's suite. Its audio half now
-drives the **whole analysis chain** — synthetic spectra through `features.js` into `tempo.js` into
-`pattern.js` — on twenty-two hard-genre cases, because every fault listed above passed a suite that
-only ever drove one module at a time with material chosen to suit it. `test/hardgen.mjs` is the
-renderer: a pitched, swept, distorted kick with a moving tonal tail, a real mastering limiter, rolls
-shortened to fit their subdivision, reverse bass modelled as the sidechained note it is rather than
-a gated one. **Keep it physical** — every knob corresponds to something a producer does, and a test
-that only passes because the generator is unrealistic is worse than no test. Renders and analyses
-are memoised per options object, which is what keeps the suite at ~26 s.
+**A TEST EXISTS TO SAY HOW THE THING BEHAVES IN REAL CONDITIONS.** Not to say that there is a test.
+Three perfect frames of a sound nobody has ever recorded prove nothing, because no sound is perfect
+— so a test that draws its input is testing its own drawing, and the bar is: understand the music,
+then simulate it the way it is actually made. This applies to everything in this repository, and
+every claim a test makes should be a MEASURED number written down next to the assertion.
+
+`webapp/npm test` (node --test, no dependency to install) is the SPA's suite. Its audio half drives
+the **whole analysis chain** — real audio through a real FFT into `features.js` into `tempo.js` into
+`pattern.js` — on sixteen records, because every fault listed above passed a suite that drove one
+module at a time with material chosen to suit it.
+
+`test/synth.mjs` is the instrument: it writes **samples**, not spectra, and analyses them with an
+iterative radix-2 FFT and a Hann window scaled exactly as `AnalyserNode.getFloatFrequencyData`
+scales it. Drawn spectra have no leakage, no phase, no intermodulation and only the harmonics
+somebody remembered to draw, and every one of those absences hid a fault: a lead's filter transient,
+a hat's skirt, a pad beating against itself. Every source is the production recipe for the sound it
+names — a pitched sine swept and driven into a waveshaper and a clipper, three detuned saws through
+a moving low-pass and a **24 dB/octave** mix low-cut (the order is the part that matters: a lead's
+low end is a filter transient, not a fundamental, and 6 dB/octave does not remove a transient), a
+kick sub layer that outlasts the punch, a real lookahead limiter, rolls shortened to fit their
+subdivision, a reverse bass modelled as the sidechained note it is rather than a gated one.
+
+Three rules hold it together, and each was bought:
+- **Keep it physical.** Every knob corresponds to something a producer does. A test that only passes
+  because the generator is unrealistic is worse than no test — and when the instrument is wrong, fix
+  the instrument FIRST: making the hi-hat a real hi-hat did not stop it being convicted, which is
+  what turned a mystery into a stated fault in `features.js`, where the fix belonged.
+- **Never move the material to make the code pass.** If the two are genuinely inseparable, say so in
+  the test with the measured evidence and assert the layer that *does* resolve it.
+- **Score both ends on the same window.** A detection belongs to the kick it is nearest to and is
+  scored only if that kick is inside the window. Scoring detections over one interval and ground
+  truth over another invents faults at the seam — two of the three outliers in the whole suite were
+  a kick rendered at exactly 30.000 s being dropped from the ground truth while its perfectly good
+  detection at 30.016 s stayed. For the same reason the bench never analyses past the music: a
+  window straddling the end of the buffer is a step function, and the FFT of a step is broadband
+  splatter weighted to the bottom, which the kick detector convicts and is right to.
+
+Renders and analyses are memoised per options object, which is what keeps the suite at ~30 s.
 
 All proxy/web tests run offline with mocks: `tests/test_deezer.py` (mock provider),
 `tests/test_webui.py` (`MockGW` + `MockApi` cover every `/api` route), `tests/test_graphql.py`

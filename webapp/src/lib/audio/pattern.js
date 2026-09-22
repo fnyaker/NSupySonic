@@ -25,11 +25,18 @@
 // event that is true on one frame has to be LATCHED to survive the throttle
 // (see lib/viz/bridge.js), or the second screen silently never sees it.
 
-// How close to a beat a kick has to land to count as being ON the grid, as a
-// fraction of the beat. A twelfth is about 25 ms at 200 BPM: tight enough that
-// an eighth-note roll note is never mistaken for the beat, loose enough for the
-// detector's own few milliseconds of latency and for a track that swings.
+// How close to a beat a kick has to land to count as being ON the grid: a
+// twelfth of a beat, but never tighter than a fixed few milliseconds.
+//
+// THE FLOOR IS THE POINT. A fraction of the beat gets narrower as the music
+// gets faster, while the thing it has to accommodate — the detector's own
+// latency, which is a property of the analyser's 46 ms window and not of the
+// tempo — does not. At 280 BPM a twelfth of a beat is eighteen milliseconds,
+// which is less than the latency itself: measured on synthesised speedcore,
+// a quarter of the main kicks fell outside their own window and were filed as
+// roll notes.
 const ON_GRID = 1 / 12;
+const ON_GRID_MIN = 0.03;
 // Below this fraction of a beat, two kicks in a row are a roll rather than a
 // pattern. Two thirds, so a straight eighth-note pattern (0.5) is a roll and a
 // dotted one (0.75) is not.
@@ -139,10 +146,28 @@ export function createPattern() {
       // beat it starts on — they are the same note — and cannot survive a bar
       // where the kick simply does not play.
       const ph = b.locked ? Math.min(b.phase ?? 0, 1 - (b.phase ?? 0)) : 0;
-      const onGrid = b.locked ? ph <= ON_GRID : true;
+      const grid = Math.max(ON_GRID, ON_GRID_MIN / beat);
+      const onGrid = b.locked ? ph <= grid : true;
       const tight = gap < beat * ROLL_GAP;
 
-      if (tight) {
+      // ON THE GRID WINS OVER CLOSE TOGETHER, and the other order is a bug with
+      // large consequences. A roll LEADS INTO the downbeat — that is what a
+      // roll is for — so the note that lands on the beat almost always has one
+      // a sixteenth behind it, and testing the interval first files the main
+      // kick of every phrase as a roll note. Measured on real audio it was
+      // worse than that: any spurious hit anywhere inside the previous beat
+      // (an offbeat hi-hat, a stab) put the next real kick inside the window
+      // too, and techno, trap and every off-kick pattern reported ZERO main
+      // kicks for the whole track.
+      if (onGrid && !(tight && ph > grid * 0.5)) {
+        // A main kick. `mainRef` tracks what those weigh on this track, rising
+        // slowly so one enormous hit does not make every later one small.
+        rollNotes = 0;
+        mainRef += (power - mainRef) * (power > mainRef ? 0.12 : 0.03);
+        out.mainKick = true;
+        out.mainPower = power;
+        out.bigKick = power >= mainRef * BIG;
+      } else if (tight) {
         // Inside a roll. The division is read from the gap, rounded to the
         // subdivisions anyone actually writes — halves, thirds, quarters,
         // sixths, eighths — so a scene can tell a triplet fill from a
@@ -152,14 +177,6 @@ export function createPattern() {
         rollNotes++;
         rollUntil = clock + beat * ROLL_HOLD;
         out.rollKick = true;
-      } else if (onGrid) {
-        // A main kick. `mainRef` tracks what those weigh on this track, rising
-        // slowly so one enormous hit does not make every later one small.
-        rollNotes = 0;
-        mainRef += (power - mainRef) * (power > mainRef ? 0.12 : 0.03);
-        out.mainKick = true;
-        out.mainPower = power;
-        out.bigKick = power >= mainRef * BIG;
       } else {
         // On no grid position and not tight enough to be a roll: a syncopated
         // hit. Real, and not a main kick.

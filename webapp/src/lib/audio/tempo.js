@@ -187,6 +187,17 @@ const SEED_FLOOR_W = 0.1;
 // different peaks. The ODF is smoothed over ~2 slots, so anything closer is the
 // same peak measured twice.
 const PEAK_SLOTS = 4;
+// How far the PLL's phase may sit from the fold's before it is challenged, and
+// how many consecutive estimates that has to hold.
+//
+// Deliberately WIDE. The PLL owns small errors and corrects them continuously;
+// this exists for the one thing it cannot fix by itself, which is sitting on
+// the wrong PART of the beat. Set it to the detector's own latency instead and
+// it fires on ordinary drift: measured on material with a human feel it snapped
+// the grid every second or so and cost a fifth of the main kicks it had just
+// been fixed to find.
+const PHASE_TOL = 0.19;
+const PHASE_DOUBT = 4;
 // How many candidates are folded. The autocorrelation's shortlist is short:
 // past the fifth peak nothing is a plausible tempo.
 const SHORTLIST = 5;
@@ -264,6 +275,7 @@ export function createBeatTracker() {
   let estCount = 0;
   let octVote = 0;
   let lastOctAt = -1e9;
+  let phaseDoubt = 0; // consecutive estimates the fold has disagreed with the PLL
   let challenger = 0; // lag the challenger is arguing for, 0 when none
   let challengeCount = 0;
   let seedLag = 0; // a tempo measured over the whole track, if there is one
@@ -855,15 +867,57 @@ export function createBeatTracker() {
     }
     bpm = 60 / period;
     if (confidence < 0.12) locked = false;
+    if (locked) auditPhase();
     measureKickPulse();
+  }
+
+  /**
+   * IS THE GRID ON THE RIGHT HALF OF THE BEAT?
+   *
+   * The PLL owns the phase between tempo estimates, and it is pulled by any
+   * onset it believes — so on material with a loud offbeat it can settle a half
+   * beat out and STAY there, because `phaseFromFold` only ever ran when the
+   * tempo itself moved. Measured on real audio, techno with an ordinary offbeat
+   * hi-hat locked the right tempo with its kicks landing at phase 0.45, and a
+   * trap track at 0.60: every animation firing on the beat was firing on the
+   * offbeat, for the whole track, with the readout saying the tempo was right.
+   *
+   * So the fold — which weighs the BASS heavily, and the bass is where the beat
+   * is in every genre this player is pointed at — audits the PLL rather than
+   * merely initialising it. A disagreement has to persist: three consecutive
+   * estimates is most of a bar, long enough that one syncopated phrase cannot
+   * move the grid and short enough that nobody watches a whole track off-beat.
+   */
+  function auditPhase() {
+    const want = phaseFromFold(false);
+    if (want < 0) return;
+    let err = (phase % 1) - want;
+    if (err > 0.5) err -= 1;
+    if (err < -0.5) err += 1;
+    if (Math.abs(err) < PHASE_TOL) {
+      phaseDoubt = 0;
+      return;
+    }
+    if (++phaseDoubt >= PHASE_DOUBT) {
+      phaseDoubt = 0;
+      // Move the grid, not the beat counter: the downbeat is scored separately
+      // and re-finds itself from the bass within a bar.
+      phase = want;
+    }
   }
 
   // Fold the ODF over the current period and take the offset carrying the most
   // energy as the beat. Runs only when the tempo itself moved — between those
   // moments the PLL owns the phase.
-  function phaseFromFold() {
+  /**
+   * Where the beat is, from folding the onset function over the current period.
+   *
+   * `apply` false MEASURES it without moving the grid, which is what lets the
+   * phase be audited every estimate instead of only when the tempo changes.
+   */
+  function phaseFromFold(apply = true) {
     const n = workN;
-    if (!n) return;
+    if (!n) return -1;
     const P = Math.max(2, Math.min(fold.length - 1, Math.round(period * ODF_HZ)));
     fold.fill(0, 0, P);
     // Weight recent history more: the phase we want is the one that is true
@@ -885,7 +939,9 @@ export function createBeatTracker() {
     // `bestK` is the slot index (mod P) a beat falls on; the newest sample sits
     // at index n-1, so the phase now is how far past that beat we are.
     const posNow = (n - 1) % P;
-    phase = ((posNow - bestK + P) % P) / P;
+    const want = ((posNow - bestK + P) % P) / P;
+    if (apply) phase = want;
+    return want;
   }
 
   // Fold the BASS onset function over the current period: if most of its energy
@@ -1229,6 +1285,7 @@ export function createBeatTracker() {
     lastOctAt = -1e9;
     challenger = 0;
     challengeCount = 0;
+    phaseDoubt = 0;
     seedLag = 0;
     seedDoubt = 0;
     // The range is NOT reset: it describes the track about to play, and the

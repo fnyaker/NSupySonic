@@ -95,12 +95,71 @@ const KICK_REFRACTORY = 0.048;
 // analyser's own ~46 ms window smear without reaching into the previous
 // sixteenth at 250 BPM (60 ms).
 const ATTACK_LAG = 0.026;
-const ATK_HIST = 10; // frames kept for that lookback
-// Floors under the three adaptive scales, in their own units. They are what
-// stops a track with no kick in it from normalising its own noise into one.
+const ATK_HIST = 14; // frames kept for those lookbacks
+// SOMETHING HAS TO HAVE BEEN STRUCK, and what says so is the beater. Every true
+// kick measured on real audio reaches about 1 here by construction (the scale
+// is this track's own kicks); a bass note swelling back between them reaches
+// 0.14, because a note that fades in has no transient at all to put up there.
+const STRIKE_MIN = 0.4;
+// ...and it has to have struck LOW: either the bottom gained this much energy,
+// or — when the bottom is already full — the fundamental restarted high with a
+// beater on it, both at least RESTART_MIN.
+const LOW_STRONG = 0.8;
+const RESTART_MIN = 0.28;
+// The one kick with no beater on it at all: a pure sine sub, an 808. It is the
+// only thing that may convict itself, and its bar is set well above what this
+// track's own kicks put down there so a bass note swelling in cannot reach it.
+const SUB_ALONE = 1.6;
+// Floors under the adaptive scales, in their own units. They are what stops a
+// track with no kick in it from normalising its own fluctuation into one, and
+// every one of them is set from the SMALLEST step a real kick was measured to
+// make — below that figure the scale would be dividing by the material's own
+// noise.
+//
+// They were too low and it showed on the one material that has nothing to
+// divide by: a pad of three detuned saws, alone in the mix, which is an ambient
+// track. Its partials beat against each other several times a second, so the
+// bottom two octaves wobble by 4.6 dB and the beater band by 2.1 — and with
+// floors of 4.5 and 4 those read as a full sub witness (1.02) and half a beater
+// (0.52), enough to hold `kick` at the cap for the length of the track. A real
+// kick's beater step measured 5.7 dB at the very least (a rap 808 with barely
+// any beater on it) and 15-30 dB everywhere else.
 const MIN_LIFT_DB = 4.5;
 const MIN_PITCH_OCT = 0.1;
-const MIN_CLICK_DB = 4;
+// Percussivity's scale: flux per unit level, across the gap between a pad
+// (0.006) and a four-on-the-floor (0.040-0.047), both measured on real audio.
+// The level floor is only there so silence cannot divide by zero.
+const PERC_LO = 0.008;
+const PERC_HI = 0.035;
+const PERC_MIN_LEVEL = 1e-4;
+// HOW EMPTY THE KICK REGION HAS TO BE BEFORE ITS CENTROID STOPS MEANING
+// ANYTHING. The other three witnesses are STEPS in decibels: they measure
+// themselves and read zero when nothing is there. The pitch witness is a
+// SHAPE, and the shape of the noise floor is noise — it wanders by a third of
+// an octave from frame to frame, which normalises into a witness of 0.6 on a
+// track whose kicks (a techno kick, whose centroid actually moves DOWN as the
+// bottom fills) never produce one at all.
+//
+// That is what convicted a closed hi-hat. Measured on real audio, techno with
+// hats on every offbeat fired 2.00 times per kick, the extra one landing on the
+// hat — which is 4-16 kHz noise with a 24 dB/octave skirt, so it puts nothing
+// whatsoever in the kick region. It did not need to: at the offbeat the
+// previous kick's 160 ms tail is long gone, the region is 56 dB below where
+// this track's kicks put it, and the detector was reading the centroid of
+// silence.
+//
+// Every true kick measured through the restart path sits within 15 dB of its
+// own track's region level (zaag 14.7, speedcore 11.9, uptempo 9.8, hardstyle
+// 3.8). So: full credit to 20 dB down, nothing at all by 36 dB down.
+const REG_VOICED_DB = 20;
+const REG_MUTE_DB = 36;
+const MIN_CLICK_DB = 6;
+// The sub's own floor, higher than the lift's, because the sub is the one
+// witness allowed to convict alone (SUB_ALONE) and so the one that must never
+// be reading a wobble. Anything that actually strikes the bottom two octaves
+// steps them by far more than a pad beating against itself: a rap 808 measured
+// 60 dB, a techno kick 59.
+const MIN_SUB_DB = 9;
 // A witness at or above this is testifying; two of them is what separates a
 // kick from a bright transient that merely happens to be loud.
 const WITNESS = 0.22;
@@ -218,6 +277,22 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
   // OCTAVES — a pitch move means the same thing at 40 Hz and at 400.
   const log2Hz = new Float32Array(nHi);
   for (let i = 1; i < nHi; i++) log2Hz[i] = Math.log2(i * hzPerBin);
+  // PER OCTAVE, NOT PER BIN. The kick region spans nearly four octaves (28 to
+  // 420 Hz) and an FFT is linear, so a plain mean over its bins gives 210-420 Hz
+  // half the vote and 28-56 Hz a twenty-eighth of it — the top of the region,
+  // where the kick barely lives, outweighing the bottom, where it does.
+  //
+  // Measured: a 700 Hz hoover, correctly low-cut, whose only residue in the
+  // region is the 250-420 Hz part sitting above the corner, moved the region's
+  // plain mean by 15 dB on a bar with no kick in it at all, and was convicted.
+  // Weighting each bin by 1/f makes every octave count the same, which is both
+  // how the ear reads it and what the witness is actually asking about.
+  const regWt = new Float32Array(nHi);
+  let regWtSum = 0;
+  for (let i = REG0; i <= REG1; i++) {
+    regWt[i] = 1 / i;
+    regWtSum += regWt[i];
+  }
 
   let midFast = 0;
   let midSlow = 0;
@@ -233,6 +308,7 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
   let atkHead = 0;
   let liftRef = 0;
   let pitchRef = 0;
+  let regTop = -200;
   let clickRef = 0;
   let subRef = 0;
   let kickPrimed = false;
@@ -458,12 +534,13 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     let regSum = 0;
     let regW = 0;
     for (let i = REG0; i <= REG1; i++) {
-      regSum += mag[i];
-      regW += mag[i] * log2Hz[i];
+      const m = mag[i] * regWt[i];
+      regSum += m;
+      regW += m * log2Hz[i];
     }
     for (let j = 0; j < CM_N; j++)
       cmNow[j] = 20 * Math.log10(Math.max(1e-9, cmSum[j] / cmWidth[j]));
-    const regDb = 20 * Math.log10(Math.max(1e-9, regSum / (REG1 - REG0 + 1)));
+    const regDb = 20 * Math.log10(Math.max(1e-9, regSum / regWtSum));
     const regCent = regSum > 1e-12 ? regW / regSum : log2Hz[REG0];
     const clickDb = 20 * Math.log10(clickLo);
     if (!kickPrimed) {
@@ -485,12 +562,12 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     for (let i = 0; i < ATK_HIST; i++) {
       if (atkT[i] < 0) continue;
       const age = clock - atkT[i];
-      if (age < ATTACK_LAG * 0.55) continue;
-      const err = age - ATTACK_LAG;
-      const e2 = err < 0 ? -err : err;
-      if (e2 < refErr) {
-        refErr = e2;
-        ref = i;
+      if (age >= ATTACK_LAG * 0.55) {
+        const e2 = Math.abs(age - ATTACK_LAG);
+        if (e2 < refErr) {
+          refErr = e2;
+          ref = i;
+        }
       }
     }
     // COMMON MODE OUT. A limiter releasing after a loud stab lifts every band
@@ -577,10 +654,22 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     pitchRef += (pitchOct - pitchRef) * (pitchOct > pitchRef ? upA : dnA);
     clickRef += (clickStepDb - clickRef) * (clickStepDb > clickRef ? upA : dnA);
     subRef += (subStepDb - subRef) * (subStepDb > subRef ? upA : dnA);
+    // How loud this track's kick region gets — same slow consensus as the
+    // witness scales, so one quiet bar cannot make the rest of the track look
+    // empty and one loud stab cannot make it look full.
+    if (regTop < -150) regTop = regDb;
+    regTop += (regDb - regTop) * (regDb > regTop ? upA : dnA);
+    const voiced = Math.max(
+      0,
+      Math.min(1, (REG_MUTE_DB - (regTop - regDb)) / (REG_MUTE_DB - REG_VOICED_DB)),
+    );
     const wLift = Math.max(0, liftDb) / Math.max(MIN_LIFT_DB, liftRef);
-    const wPitch = Math.max(0, pitchOct) / Math.max(MIN_PITCH_OCT, pitchRef);
+    // Gated on there being something down there to have a pitch. This is the
+    // only witness that needs it: the other three read a step and a step over
+    // nothing is nothing.
+    const wPitch = (voiced * Math.max(0, pitchOct)) / Math.max(MIN_PITCH_OCT, pitchRef);
     const wClick = Math.max(0, clickStepDb) / Math.max(MIN_CLICK_DB, clickRef);
-    const wSub = Math.max(0, subStepDb) / Math.max(MIN_LIFT_DB, subRef);
+    const wSub = Math.max(0, subStepDb) / Math.max(MIN_SUB_DB, subRef);
     let votes = 0;
     if (wLift >= WITNESS) votes++;
     if (wPitch >= WITNESS) votes++;
@@ -603,7 +692,56 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     // clip its way back over the threshold on the strength of that alone. It
     // still moves `kick`, because a loud hat is a real event a scene may draw —
     // it just cannot be called a kick.
-    let kickNow = Math.max(0, Math.min(votes >= 2 ? 1 : KICK_ON * 0.9, best));
+    // WHAT A KICK'S EVIDENCE LOOKS LIKE DEPENDS ON WHAT IS ALREADY SOUNDING,
+    // and that is the thing a flat count of witnesses cannot express. Measured
+    // on real audio, true kicks fall into two quite different shapes:
+    //
+    //   over a QUIET low end, the energy arrives: lift and sub both large, and
+    //   the region's centroid actually moves DOWN as the bottom fills, so the
+    //   pitch witness reads nothing at all (0.06 on an isolated uptempo kick);
+    //   over a SATURATED one — which in this music is most of them, because the
+    //   previous kick's tail is still sounding — no energy arrives anywhere:
+    //   lift and sub read 0.00, and all that is left is the fundamental
+    //   restarting high and the beater (pitch 0.67, click 0.46).
+    //
+    // A rule that demands the first shape misses every kick of the second, and
+    // that is exactly what happened: a gate on "where did the new energy go"
+    // threw away HALF the kicks of an off-beat uptempo pattern, the hardest and
+    // most characteristic case there is.
+    //
+    // The false classes each miss a different half, which is what makes them
+    // separable at all — every figure below is measured on real audio:
+    //
+    //   a hi-hat          click 1.90 and pitch 0.61, but lift 0.13, sub 0.00.
+    //                     Bright, and it puts nothing at the bottom. Its pitch
+    //                     witness is an artefact and is gone already: see
+    //                     `voiced` above.
+    //   a reverse bass    lift 0.54 and sub 0.78, but click 0.14 — it swells at
+    //                     the bottom over a tenth of a second and never strikes
+    //   a 320 Hz stab     pitch 1.00 and click 0.95, lift 0.23, sub 0.00 — it
+    //                     restarts high because it IS high, and it has an
+    //                     attack, so it is numerically a saturated-low-end kick
+    //
+    // So: something must have STRUCK — which is the beater, and only the
+    // beater, because that is the witness a note swelling in cannot produce —
+    // and it must have struck LOW, either by putting energy down there or, when
+    // there is no room left, by restarting the fundamental with that beater on
+    // it. The exception is the kick that has no beater at all: an 808, a sine
+    // bass drum. It convicts itself on the sub alone, at a bar set high enough
+    // (SUB_ALONE) that a bass note fading in cannot reach it.
+    //
+    // The third line is the limit this detector has, stated rather than papered
+    // over: a lead whose residue lands in the kick's region, restarting high
+    // with an attack on it, is not separable from a kick on one frame's
+    // evidence. It is separated one layer up, where the GRID is known —
+    // pattern.js scores 0.99 on exactly that case. See test/audio.test.mjs.
+    const lowSide = wLift > wSub ? wLift : wSub;
+    const struck = wClick >= STRIKE_MIN;
+    const low = lowSide >= LOW_STRONG || (wPitch >= RESTART_MIN && wClick >= RESTART_MIN);
+    let kickNow =
+      (struck && low) || wSub >= SUB_ALONE
+        ? Math.max(0, Math.min(votes >= 2 ? 1 : KICK_ON * 0.9, best))
+        : 0;
 
     // A SCHMITT TRIGGER, not a refractory window alone. A fixed window cannot
     // cover a 300 ms hardcore tail without also refusing a 1/16 roll at 250 BPM
@@ -802,10 +940,28 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
       Math.min(1, (Math.log(Math.max(40, sRolloff)) - CENT_LO) / CENT_SPAN)
     );
 
-    // Percussivity: how much of the signal is change rather than sustain.
-    // Calibrated against the synthetic material in test/audio.test.mjs: a
-    // four-on-the-floor pins this near 1, a sustained pad leaves it near 0.
-    const perc = Math.max(0, Math.min(1, out.flux / (0.0015 + out.level * 0.007)));
+    // Percussivity: how much of the signal is CHANGE rather than sustain, which
+    // is flux against level and nothing else.
+    //
+    // It used to be `flux / (0.0015 + level * 0.007)`, and that additive
+    // constant was the whole scale at any realistic level: it made anything
+    // with a flux above about 0.0015 read as substantially percussive however
+    // sustained it was. Calibrated, as its own comment admitted, against a
+    // DRAWN pad whose spectrum was byte-for-byte the same every frame — so the
+    // numerator really was zero and any formula passed.
+    //
+    // On a real pad it does not work: three detuned saws beat against each
+    // other several times a second, and measured, an ambient pad alone in the
+    // mix read 0.60 percussive against frenchcore's 0.62. The classifier is
+    // handed this as a feature, so ambient and hardcore were arriving at it
+    // indistinguishable on the one axis that should separate them outright.
+    //
+    // The ratio itself separates them by a factor of seven — a pad sits at
+    // 0.006 and a four-on-the-floor at 0.040-0.047 — so the scale is set across
+    // that gap instead. Measured after: a pad means 0.03 and peaks at 0.16, a
+    // beat means 0.45-0.58 and peaks at 0.84-0.95.
+    const pRatio = out.flux / Math.max(PERC_MIN_LEVEL, out.level);
+    const perc = Math.max(0, Math.min(1, (pRatio - PERC_LO) / (PERC_HI - PERC_LO)));
     sPerc = perc > sPerc ? perc * 0.35 + sPerc * 0.65 : perc * 0.06 + sPerc * 0.94;
     out.percussivity = sPerc;
 
