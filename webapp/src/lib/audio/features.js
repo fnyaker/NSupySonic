@@ -86,8 +86,39 @@ const HIST = 8; // frames of log-spectrum kept for that lookback
 // Eighteen decibels is about the range between a breakdown and its drop.
 const DYN_RANGE_DB = 18;
 // The shortest gap between two kicks we will believe. 300 BPM sixteenths are
-// 50 ms apart, so this refuses nothing musical and refuses every ring-out.
-const KICK_REFRACTORY = 0.055;
+// 50 ms apart, so this refuses nothing musical. It is a floor under the
+// hysteresis below, not the mechanism: a 300 ms hardcore tail and a 60 ms roll
+// sit on the same side of any fixed window, so a window alone cannot separate
+// them.
+const KICK_REFRACTORY = 0.048;
+// How far back every witness below is compared. Long enough to clear the
+// analyser's own ~46 ms window smear without reaching into the previous
+// sixteenth at 250 BPM (60 ms).
+const ATTACK_LAG = 0.026;
+const ATK_HIST = 10; // frames kept for that lookback
+// Floors under the three adaptive scales, in their own units. They are what
+// stops a track with no kick in it from normalising its own noise into one.
+const MIN_LIFT_DB = 4.5;
+const MIN_PITCH_OCT = 0.1;
+const MIN_CLICK_DB = 4;
+// A witness at or above this is testifying; two of them is what separates a
+// kick from a bright transient that merely happens to be loud.
+const WITNESS = 0.22;
+// How far the eight bands' steps may spread before they stop looking like one
+// gain change. Five decibels: a limiter's own bands track each other to a
+// fraction of one, and any instrument spreads them far wider.
+const CM_SPREAD_DB = 5;
+// The Schmitt trigger. `ON` accepts a hit, `OFF` re-arms it.
+const KICK_ON = 0.52;
+const KICK_OFF = 0.18;
+// How long a witness's scale remembers. Long on purpose: the old reference
+// halved in a second and a half, so a breakdown erased it and the first small
+// movement afterwards read as a full-strength kick.
+const SCALE_TAU = 9;
+// ...and how slowly it rises. A pulse lasts about three frames, so at this rate
+// one event moves the scale by a tenth of the gap and it takes a bar of them to
+// re-scale the track. That asymmetry is the whole robustness of it.
+const SCALE_UP = 0.4;
 
 const PITCH_CLASSES = 12;
 
@@ -123,8 +154,36 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
   const b = (hz) => Math.max(0, Math.min(nHi - 1, Math.round(hz / hzPerBin)));
   const LOW0 = b(25);
   const LOW1 = b(180); // kick territory: an 808's sub through a hardstyle punch
+  // THE KICK REGION, which is not the same thing as the kick band. A hardcore,
+  // frenchcore or uptempo kick's fundamental STARTS at 190-260 Hz and sweeps
+  // down into the band over the next fifty milliseconds; measured on synthetic
+  // uptempo, the 25-180 Hz band is 6 dB DOWN at the attack and only peaks a
+  // fifth of a beat later. Anything that wants to know when the kick landed has
+  // to look where the kick starts.
+  const REG0 = b(28);
+  const REG1 = b(420);
   const CLICK0 = b(1500); // the beater's click on a sampled kick
   const CLICK1 = b(7000);
+  // Eight roughly-octave bands spanning the audible range, for the common-mode
+  // estimate below. Their edges are not critical; having several of them that
+  // no single instrument can occupy at once is.
+  const CM_HZ = [30, 80, 160, 320, 700, 1500, 3500, 8000, 16000];
+  const CM_N = CM_HZ.length - 1;
+  const cmLo = new Int32Array(CM_N);
+  const cmHi = new Int32Array(CM_N);
+  for (let j = 0; j < CM_N; j++) {
+    cmLo[j] = b(CM_HZ[j]);
+    cmHi[j] = Math.max(cmLo[j], b(CM_HZ[j + 1]) - 1);
+  }
+  const cmNow = new Float64Array(CM_N);
+  const cmStep = new Float64Array(CM_N);
+  const cmSum = new Float64Array(CM_N);
+  // bin → band, so the eight sums ride along inside the loop that already
+  // touches every bin instead of costing a second pass over the spectrum.
+  const cmOf = new Int8Array(nHi).fill(-1);
+  for (let j = 0; j < CM_N; j++) for (let i = cmLo[j]; i <= cmHi[j]; i++) cmOf[i] = j;
+  const cmWidth = new Float64Array(CM_N);
+  for (let j = 0; j < CM_N; j++) cmWidth[j] = cmHi[j] - cmLo[j] + 1;
   const MIDF0 = b(180);
   const MIDF1 = b(2000); // snares, claps, guitars, most of a voice
   const HIF0 = b(2000); // hats, cymbals, "pieep" leads, sibilance
@@ -155,16 +214,31 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
   }
   for (let k = 0; k < PITCH_CLASSES; k++) if (classBins[k] < 1) classBins[k] = 1;
 
+  // log2(frequency) per bin, so the kick region's centroid is measured in
+  // OCTAVES — a pitch move means the same thing at 40 Hz and at 400.
+  const log2Hz = new Float32Array(nHi);
+  for (let i = 1; i < nHi; i++) log2Hz[i] = Math.log2(i * hzPerBin);
+
   let midFast = 0;
   let midSlow = 0;
   let modAvg = 0;
-  let kickFast = 0;
-  let kickSlow = 0;
-  let clickFast = 0;
-  let clickSlow = 0;
-  let kickRef = 0;
+  // The three witnesses' recent history, for the lookback below. Parallel typed
+  // arrays rather than an array of objects: this runs on every frame of every
+  // track and allocates nothing after construction.
+  const atkT = new Float64Array(ATK_HIST).fill(-1);
+  const atkReg = new Float64Array(ATK_HIST); // kick-region level, dB
+  const atkCent = new Float64Array(ATK_HIST); // its centroid, octaves
+  const atkClick = new Float64Array(ATK_HIST); // beater band, dB
+  const atkBands = new Float64Array(ATK_HIST * 8); // per-band levels, dB
+  let atkHead = 0;
+  let liftRef = 0;
+  let pitchRef = 0;
+  let clickRef = 0;
+  let subRef = 0;
   let kickPrimed = false;
+  let kickArmed = true;
   let lastKickAt = -1;
+  let lastKickStrength = 0;
   let sLevel = 0;
   let sCentroid = 0;
   let sFlatness = 0;
@@ -192,6 +266,7 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     highFlux: 0,
     kick: 0, // 0..1, how hard the kick is hitting right now (gated)
     kickHit: false, // true only on the frame a kick is accepted
+    kickStrength: 0, // how hard the LAST accepted kick hit, held until the next
     centroid: 0, // Hz
     centroidN: 0, // 0..1, log-mapped over 40 Hz..16 kHz
     flatness: 0, // 0..1
@@ -240,6 +315,7 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     let sum = 0;
     let sumSq = 0;
     let peak = 0;
+    cmSum.fill(0);
     for (let i = 0; i <= TOP; i++) {
       const db = hiData[i] > floorDb ? hiData[i] : floorDb;
       const m = dbToMag(db);
@@ -248,6 +324,8 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
       sum += m;
       sumSq += m * m;
       if (m > peak) peak = m;
+      const bj = cmOf[i];
+      if (bj >= 0) cmSum[bj] += m;
     }
     const n = TOP + 1;
     const mean = sum / n;
@@ -317,7 +395,7 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     hist[histHead].buf.set(logMag.subarray(0, nHi));
     histHead = (histHead + 1) % HIST;
 
-    // --- the kick, in the magnitude domain -----------------------------------
+    // --- the kick: THREE WITNESSES, none of which is the level ---------------
     //
     // The onset function is the right signal for the BEAT TRACKER — it is a
     // difference, and the beat is where the differences are — but it makes a
@@ -325,65 +403,242 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     // several frames, and a 50 Hz kick does not complete three cycles inside
     // it, so one onset arrives as a gentle rise.
     //
-    // So the kick is read from the raw magnitudes, as the ratio between a FAST
-    // and a SLOW envelope of the kick band. A sustained note — the 808 under a
-    // rap track, the bassline under a techno one — drives both envelopes to the
-    // same place whatever its level, so the ratio sits at 1 and nothing fires.
-    // A kick on top of it lifts the fast envelope and leaves the slow one
-    // behind, and that transient is the hit.
+    // THE PREVIOUS DETECTOR RATIOED TWO ENVELOPES of the 25-180 Hz band — a
+    // 3 ms attack against a 90 ms release — and it fails on exactly the music
+    // this player is pointed at. Measured through the full chain on synthetic
+    // hardcore (test/audio.test.mjs pins every figure):
+    //
+    //   techno 128            1.94 hits per kick — a phantom 64 ms after each
+    //   frenchcore 200        2.08 per kick — the tail re-triggering itself
+    //   uptempo 240           0.40 per kick — SIXTY PER CENT MISSED
+    //   frenchcore + screech  3.74 per kick — a lead read as a kick
+    //
+    // Two assumptions produced all four, and both are wrong for this music.
+    //
+    // FIRST, IT ASSUMED THE KICK IS IN THE KICK BAND WHEN IT LANDS. A hardcore,
+    // frenchcore or uptempo kick is a pitched sine driven into a distortion
+    // chain, and it STARTS at 190-260 Hz and sweeps down over the next fifty
+    // milliseconds. Measured on synthetic uptempo, the 25-180 Hz band is 4-6 dB
+    // DOWN at the attack — the fundamental is not in it yet — and does not peak
+    // until a fifth of a beat later, by which time it is indistinguishable from
+    // the previous kick's tail. That is the sixty per cent.
+    //
+    // SECOND, IT ASSUMED THE LEVEL MEANS SOMETHING. These masters are limitered
+    // flat: when a transient arrives the limiter pulls the whole mix down to
+    // hold the ceiling, so the loudest moment in the music can read as a DROP
+    // in every band at once. A detector built on "did it get louder" is reading
+    // the limiter, not the kick.
+    //
+    // So nothing here is a level. Three witnesses, each a step over the same
+    // short lag, each scale-free, each normalised against how big a step THIS
+    // track's kicks actually make:
+    //
+    //   lift   the kick region's energy step, in dB. The whole story for a
+    //          techno or house kick landing in a quiet bar, and near useless
+    //          under a limiter.
+    //   pitch  the region's spectral centroid stepping UP, in octaves. This is
+    //          the fundamental restarting high, and it is the one thing a tail
+    //          can never counterfeit: a tail sweeps DOWN, always.
+    //   click  the beater band's step, in dB.
+    //   sub    the step of the bottom two octaves alone. A pure sub kick — an
+    //          808, a sine bass drum — has no beater and no pitch movement at
+    //          all, so the three above leave it with one witness, and one is
+    //          never enough. Nothing but a drum or a bass note steps down
+    //          there, and a bass note that arrives without an attack (a reverse
+    //          bass, a fade-in) does not step.
+    //
+    // A kick is the best-supported COMBINATION, not any one of them. A kick
+    // over silence brings all three; a frenchcore kick over its own tail brings
+    // pitch and click; a hi-hat or a screech brings click alone — which is why
+    // a second witness is required to reach full strength. The old detector let
+    // the click testify by itself, and that is the 3.74.
     const kickLo = Math.max(1e-9, bandMean(mag, LOW0, LOW1));
     const clickLo = Math.max(1e-9, bandMean(mag, CLICK0, CLICK1));
     const dtc = Math.min(Math.max(dt, 1 / 400), 0.02);
-    const kAtk = 1 - Math.exp(-dtc / 0.003);
-    const kRel = 1 - Math.exp(-dtc / 0.09);
-    if (!kickPrimed) {
-      // Start the envelopes AT the level of the first frame: starting them at
-      // zero makes the first frame of any track a rise from nothing, which is a
-      // kick that never happened.
-      kickPrimed = true;
-      kickFast = kickSlow = kickLo;
-      clickFast = clickSlow = clickLo;
+    let regSum = 0;
+    let regW = 0;
+    for (let i = REG0; i <= REG1; i++) {
+      regSum += mag[i];
+      regW += mag[i] * log2Hz[i];
     }
-    kickFast += (kickLo - kickFast) * kAtk;
-    kickSlow += (kickLo - kickSlow) * kRel;
-    clickFast += (clickLo - clickFast) * kAtk;
-    clickSlow += (clickLo - clickSlow) * kRel;
-
-    // Body and click are not rivals: a rap kick is pure body, a hardstyle kick
-    // is a click wired to a punch. Either can carry a hit.
-    const bodyRise = kickSlow > 1e-9 ? kickFast / kickSlow - 1 : 0;
-    const clickRise = clickSlow > 1e-9 ? clickFast / clickSlow - 1 : 0;
-    const rise = Math.max(bodyRise, clickRise * 0.6);
-    const lowKick = Math.max(bodyRise, 0);
-    // How large the rise is against the rises this track usually produces. The
-    // decay here is deliberately SLOW — the old one halved in a second and a
-    // half, so a breakdown erased the reference and the first small movement
-    // afterwards read as a full kick. Eight seconds keeps the reference from
-    // the music either side of the quiet part, which is what it is for.
-    kickRef = Math.max(rise, kickRef * Math.exp(-dtc / 11.5));
-    const norm = kickRef > 0.02 ? rise / kickRef : 0;
-    let kickNow = Math.max(0, Math.min(1, norm * 1.35));
-    // Two gates the old detector had neither of. A hit inside the refractory
-    // window is the same kick ringing out, and a hit while the music is
-    // eighteen decibels down is not a kick at all.
-    out.kickHit = false;
-    if (kickNow > 0.45) {
-      if (clock - lastKickAt < KICK_REFRACTORY) kickNow = Math.min(kickNow, out.kick);
-      else {
-        lastKickAt = clock;
-        out.kickHit = sDynamics > 0.12;
+    for (let j = 0; j < CM_N; j++)
+      cmNow[j] = 20 * Math.log10(Math.max(1e-9, cmSum[j] / cmWidth[j]));
+    const regDb = 20 * Math.log10(Math.max(1e-9, regSum / (REG1 - REG0 + 1)));
+    const regCent = regSum > 1e-12 ? regW / regSum : log2Hz[REG0];
+    const clickDb = 20 * Math.log10(clickLo);
+    if (!kickPrimed) {
+      // Prime AT the first frame: starting from zero makes the first frame of
+      // any track a rise from nothing, which is a kick that never happened.
+      kickPrimed = true;
+      for (let i = 0; i < ATK_HIST; i++) {
+        atkT[i] = -1;
+        atkReg[i] = regDb;
+        atkCent[i] = regCent;
+        atkClick[i] = clickDb;
+        for (let j = 0; j < CM_N; j++) atkBands[i * 8 + j] = cmNow[j];
       }
     }
+    // The frame ~ATTACK_LAG back, by TIME — this engine's clock is not regular
+    // and a frame count would make the lag drift with the frame rate.
+    let ref = atkHead;
+    let refErr = Infinity;
+    for (let i = 0; i < ATK_HIST; i++) {
+      if (atkT[i] < 0) continue;
+      const age = clock - atkT[i];
+      if (age < ATTACK_LAG * 0.55) continue;
+      const err = age - ATTACK_LAG;
+      const e2 = err < 0 ? -err : err;
+      if (e2 < refErr) {
+        refErr = e2;
+        ref = i;
+      }
+    }
+    // COMMON MODE OUT. A limiter releasing after a loud stab lifts every band
+    // together over its hundred-odd milliseconds, and to a detector reading
+    // levels that is indistinguishable from something arriving — measured, a
+    // frenchcore track with an eighth-note lead over it fired twice per kick,
+    // 150 ms late, every one of the extras being the limiter letting go. A
+    // scalar gain change moves every band by the same number of decibels, so
+    // subtracting the whole mix's own step removes it exactly and leaves what
+    // is DIFFERENTIAL: energy moving between bands, which is the only thing an
+    // instrument can do. The centroid needs no such correction — a gain change
+    // cannot move it at all, which is what makes it the honest witness here.
+    // THE MEDIAN of the eight bands' own steps, not the whole mix's.
+    //
+    // The mix's step is the obvious estimator and it is wrong in the one case
+    // that matters: a kick IS a broadband transient, so it moves the whole
+    // mix's level, and subtracting that from each witness is the kick
+    // suppressing its own evidence. Measured on an idealised kick whose beater
+    // click stood 66 dB clear of everything else, the whole-mix estimate put
+    // the common mode at 60 dB and the detector saw nothing at all.
+    //
+    // A median across bands has exactly the property wanted: an instrument
+    // occupies a few bands, so its own step never reaches the middle of the
+    // sorted list and the median stays near zero; a limiter's gain change moves
+    // every band by the same number of decibels, so the median IS that change.
+    //
+    // Only ever subtracted when it is POSITIVE. A limiter letting go lifts
+    // everything and has to come out; a mix getting quieter must not be ADDED
+    // back in, or the end of a kick in a sparse arrangement reads as an attack
+    // — measured, subtracting it signed took techno from 1.00 hits per kick to
+    // 2.46, every extra one landing 160 ms late, on the decay.
+    for (let j = 0; j < CM_N; j++) cmStep[j] = cmNow[j] - atkBands[ref * 8 + j];
+    // Insertion sort: eight elements, on the stack, every frame.
+    for (let j = 1; j < CM_N; j++) {
+      const v = cmStep[j];
+      let k = j - 1;
+      while (k >= 0 && cmStep[k] > v) {
+        cmStep[k + 1] = cmStep[k];
+        k--;
+      }
+      cmStep[k + 1] = v;
+    }
+    // ...and it is only believed when the bands AGREE. A median alone is not
+    // enough: a kick is broadband, so it can move five of the eight bands and
+    // drag the median with it — measured on an idealised kick with a very loud
+    // beater, the median read 7 dB and cancelled the kick's own 7.4 dB lift to
+    // nothing. What a limiter does that no instrument does is move every band
+    // by the SAME number of decibels, so the spread across the bands is the
+    // test: tight, and this is a gain change to be removed; wide, and it is
+    // music, which must be left alone.
+    const median = (cmStep[(CM_N >> 1) - 1] + cmStep[CM_N >> 1]) / 2;
+    const spread = cmStep[CM_N - 2] - cmStep[1];
+    const uniform = Math.max(0, 1 - spread / CM_SPREAD_DB);
+    const common = Math.max(0, median) * uniform;
+    // The two lowest bands together: the SUB. Taken from `cmNow` and the
+    // history directly, before the sort below scrambles `cmStep`.
+    const subStepDb =
+      (cmNow[0] - atkBands[ref * 8] + (cmNow[1] - atkBands[ref * 8 + 1])) / 2 - common;
+    const liftDb = regDb - atkReg[ref] - common;
+    const pitchOct = regCent - atkCent[ref];
+    const clickStepDb = clickDb - atkClick[ref] - common;
+    atkT[atkHead] = clock;
+    atkReg[atkHead] = regDb;
+    atkCent[atkHead] = regCent;
+    atkClick[atkHead] = clickDb;
+    for (let j = 0; j < CM_N; j++) atkBands[atkHead * 8 + j] = cmNow[j];
+    atkHead = (atkHead + 1) % ATK_HIST;
+
+    // How big a step this track's kicks actually make, per witness, so a soft
+    // acoustic kit and a clipped hardcore kick both reach 1 at full strength.
+    //
+    // NOT a running maximum, which is what this was and which one exceptional
+    // event owns for the next ten seconds. A roll's notes are SHORTENED to fit
+    // their subdivision, so they sweep faster and step further than the track's
+    // ordinary kicks; with a max, one bar of sixteenths raised the bar for the
+    // whole phrase and the plain four-on-the-floor after it fell under the
+    // threshold — measured, that took uptempo from 1.00 hits per kick to 0.27.
+    // Rising slowly and falling slowly asks for a CONSENSUS instead: it takes
+    // several events of a new size to move the scale, and a single outlier
+    // moves it by a tenth of the difference.
+    const upA = 1 - Math.exp(-dtc / SCALE_UP);
+    const dnA = 1 - Math.exp(-dtc / SCALE_TAU);
+    liftRef += (liftDb - liftRef) * (liftDb > liftRef ? upA : dnA);
+    pitchRef += (pitchOct - pitchRef) * (pitchOct > pitchRef ? upA : dnA);
+    clickRef += (clickStepDb - clickRef) * (clickStepDb > clickRef ? upA : dnA);
+    subRef += (subStepDb - subRef) * (subStepDb > subRef ? upA : dnA);
+    const wLift = Math.max(0, liftDb) / Math.max(MIN_LIFT_DB, liftRef);
+    const wPitch = Math.max(0, pitchOct) / Math.max(MIN_PITCH_OCT, pitchRef);
+    const wClick = Math.max(0, clickStepDb) / Math.max(MIN_CLICK_DB, clickRef);
+    const wSub = Math.max(0, subStepDb) / Math.max(MIN_LIFT_DB, subRef);
+    let votes = 0;
+    if (wLift >= WITNESS) votes++;
+    if (wPitch >= WITNESS) votes++;
+    if (wClick >= WITNESS) votes++;
+    // The sub's bar is higher than the others'. It is here to rescue the one
+    // kick the other three cannot see — a pure sine sub with no beater and no
+    // pitch movement — not to be a routine fourth vote: a swept hardcore kick
+    // fills the sub on its way down and would otherwise be convicted twice.
+    if (wSub >= WITNESS * 1.8) votes++;
+    // The strongest witness carries it; a second one confirms it. One witness
+    // alone is held below the trigger however loud it is, which is what a hat,
+    // a clap and a screech are.
+    // The strength comes from the first three. The sub witness only ever votes
+    // — for the kick it exists for it is measuring the same step `lift` is.
+    let best = wLift;
+    if (wPitch > best) best = wPitch;
+    if (wClick > best) best = wClick;
+    // One witness is CAPPED below the trigger rather than merely scaled down: a
+    // hi-hat can be several times louder than any kick in the track and would
+    // clip its way back over the threshold on the strength of that alone. It
+    // still moves `kick`, because a loud hat is a real event a scene may draw —
+    // it just cannot be called a kick.
+    let kickNow = Math.max(0, Math.min(votes >= 2 ? 1 : KICK_ON * 0.9, best));
+
+    // A SCHMITT TRIGGER, not a refractory window alone. A fixed window cannot
+    // cover a 300 ms hardcore tail without also refusing a 1/16 roll at 250 BPM
+    // (60 ms apart) — the two are on the same side of any threshold. Hysteresis
+    // asks the right question instead: the evidence has to fall back through a
+    // release level before another attack counts, so one kick's own decay can
+    // never fire twice however long it takes, while a genuinely new attack on
+    // top of a tail does, because it is a fresh step.
+    out.kickHit = false;
+    if (kickArmed) {
+      if (kickNow > KICK_ON && clock - lastKickAt >= KICK_REFRACTORY) {
+        kickArmed = false;
+        lastKickAt = clock;
+        lastKickStrength = kickNow;
+        out.kickHit = sDynamics > 0.12;
+      }
+    } else if (kickNow < KICK_OFF) {
+      kickArmed = true;
+    }
+    if (!out.kickHit && !kickArmed) kickNow = Math.min(kickNow, lastKickStrength);
     kickNow *= sDynamics;
     // Fast attack, slow release: an onset is one frame, and a scene reading it
     // on a single frame flickers.
     out.kick = kickNow > out.kick ? kickNow : out.kick * Math.max(0, 1 - dtc / 0.16);
+    // How hard the last accepted kick hit, held flat until the next one. A
+    // scene asking "was that a big one" must not read the decaying envelope,
+    // which says more about when it looked than about the kick.
+    out.kickStrength = lastKickStrength;
     // The beat tracker wants the same evidence in the shape it consumes, and
     // UNGATED: the grid must survive a breakdown even when the animation does
     // not. It straddles the two domains on purpose — SuperFlux for the onset,
-    // raw magnitude for the body — which is the split that makes it work on
-    // both techno and rap.
-    out.lowFlux = lowOdf + 0.09 * lowKick;
+    // the kick region's own step for the body — which is the split that makes
+    // it work on both techno and rap.
+    out.lowFlux = lowOdf + 0.0025 * Math.max(0, liftDb);
+    void kickLo;
 
     // --- sustained vs struck, and the melody in the sustained half -----------
     // One exponential average per bin. A quarter of a second is long enough
@@ -586,11 +841,20 @@ export function createFeatureExtractor({ sampleRate, fftHi, floorDb = -100 }) {
     chromaRef.fill(0);
     chromaRefAt = 0;
     midFast = midSlow = modAvg = 0;
-    kickFast = kickSlow = clickFast = clickSlow = kickRef = 0;
+    atkT.fill(-1);
+    atkReg.fill(0);
+    atkCent.fill(0);
+    atkClick.fill(0);
+    atkBands.fill(0);
+    atkHead = 0;
+    liftRef = pitchRef = clickRef = subRef = 0;
     kickPrimed = false;
+    kickArmed = true;
     lastKickAt = -1;
+    lastKickStrength = 0;
     out.kick = 0;
     out.kickHit = false;
+    out.kickStrength = 0;
     sLevel = sCentroid = sFlatness = sPerc = sRolloff = 0;
     loudRef = floorDb;
     sDynamics = sTonal = sMelody = sChord = melPitch = 0;

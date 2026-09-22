@@ -53,7 +53,8 @@ import {
 import { buildBandPlan, buildEnergyPlan, readBands, readEnergy, ENERGY_BANDS } from "./spectrum.js";
 import { createFeatureExtractor } from "./features.js";
 import { createBeatTracker } from "./tempo.js";
-import { createStyleClassifier, familyLook, LOOK_KEYS } from "./style.js";
+import { createStyleClassifier, familyLook, tempoRangeFor, LOOK_KEYS } from "./style.js";
+import { createPattern } from "./pattern.js";
 
 // 120 log-spaced bands over 22 Hz..18 kHz — about 20 per octave, so roughly
 // half a semitone. Fixed rather than per-view: scenes that want fewer bars
@@ -77,6 +78,11 @@ let plans = null;
 let features = null;
 let beatTracker = null;
 let classifier = null;
+let pattern = null;
+// The genre the tempo range was last set from, so it is not re-applied on every
+// frame — `setTempoRange` is cheap, but the guard also documents that the range
+// is a per-track decision rather than a per-frame one.
+let rangeFrom = "";
 let loData = null;
 let hiData = null;
 let lastT = 0;
@@ -180,6 +186,9 @@ export const frame = {
   energyDb,
   features: null,
   beat: shownBeat,
+  // The MUSICAL reading: main kick vs roll note, drop, build, breakdown. See
+  // lib/audio/pattern.js. Null until the engine is running at rhythm level.
+  pattern: null,
   style: null,
   level: LEVEL.SPECTRUM,
   silent: true,
@@ -206,6 +215,7 @@ function ensureState() {
   features = createFeatureExtractor({ sampleRate, fftHi: FFT_HI, floorDb: FLOOR_DB });
   beatTracker = createBeatTracker();
   classifier = createStyleClassifier();
+  pattern = createPattern();
   return true;
 }
 
@@ -213,6 +223,10 @@ function resetAnalysis() {
   features?.reset();
   beatTracker?.reset();
   classifier?.reset();
+  pattern?.reset();
+  frame.pattern = null;
+  rangeFrom = "";
+  beatTracker?.setTempoRange();
   onsetQueue.length = 0;
   prevShownIndex = -1;
   verdict = null;
@@ -255,8 +269,36 @@ function adoptVerdict(id, late = false) {
   if (!v) return;
   verdict = v;
   verdictSeeded = true;
-  if (v.bpm && beatTracker && !beatTracker.isLocked())
-    beatTracker.seed(v.bpm, v.bpmConfidence ?? 0.9);
+  // THE TEMPO RANGE FIRST, because it changes what the tracker finds plausible
+  // and the seed is read against it. The genre is the one piece of information
+  // that settles the octave question, which no amount of signal processing can:
+  // 250 BPM uptempo and 125 BPM house produce the same autocorrelation.
+  applyTempoRange(v.style || v.styleLabel || "");
+  // ...and the figure itself, WHETHER OR NOT the grid has already locked. It
+  // used to be applied only to an unlocked tracker, which in practice meant
+  // almost never: the verdict comes over the network, behind the audio in the
+  // request ladder, so by the time it lands the grid has been locked for
+  // seconds — on three seconds of whatever the intro happened to be. See
+  // tempo.js#seed for what a late seed does and why it cannot make the
+  // animation jump.
+  if (v.bpm && beatTracker) beatTracker.seed(v.bpm, v.bpmConfidence ?? 0.9);
+}
+
+/**
+ * Point the tracker at the tempi this genre is written in.
+ *
+ * Called from the served verdict when there is one, and from the live
+ * classifier otherwise — the classifier's own reading is worth having here even
+ * though it is less certain, because being told "this is hardcore" is enough to
+ * stop a 200 BPM track being read at 100 even when nobody measured it.
+ */
+function applyTempoRange(name) {
+  const id = String(name || "");
+  if (!id || id === rangeFrom || !beatTracker) return;
+  const range = tempoRangeFor(id);
+  if (!range) return;
+  rangeFrom = id;
+  beatTracker.setTempoRange(range[0], range[1]);
 }
 
 // A verdict that lands late — the server had to measure the track first, or an
@@ -304,6 +346,7 @@ function tick(now) {
   if (analysisLevel >= LEVEL.RHYTHM) {
     const b = beatTracker.process(f.flux, f.lowFlux, dt);
     projectBeat(b, now);
+    frame.pattern = pattern.update(frame, dt);
     if (analysisLevel >= LEVEL.SMART) {
       const live = classifier.process(f, b, energyLin, now, dt);
       // Where the server has measured the track, ITS verdict is the authority:
@@ -311,6 +354,11 @@ function tick(now) {
       // kick stays the live reading either way — that is a per-event property
       // and no whole-file average can stand in for it.
       frame.style = verdict ? merged(live, verdict) : live;
+      // With nothing served, the live classifier is still the best available
+      // answer to "which kind of record is this", and the tracker wants it for
+      // the octave. Only once it is confident, and only while nothing better
+      // has arrived.
+      if (!verdict && live && live.confidence > 0.5) applyTempoRange(live.dominant);
     }
   } else if (shownBeat.locked || frame.style) {
     // Dropped out of rhythm analysis: park the grid rather than leave a stale
@@ -320,6 +368,7 @@ function tick(now) {
     shownBeat.downbeat = false;
     shownBeat.onset = 0;
     frame.style = null;
+    frame.pattern = null;
   }
 
   if (analysisLevel >= LEVEL.RHYTHM) publishReadout(now);

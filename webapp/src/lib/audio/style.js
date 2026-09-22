@@ -765,6 +765,216 @@ export function familyLook(id) {
   return FAMILY_LOOK.get(id) || null;
 }
 
+/**
+ * The tempo range a genre is actually written in, as [lo, hi] BPM.
+ *
+ * THIS IS THE ANSWER TO THE OCTAVE PROBLEM, and there is no other one. An
+ * autocorrelation cannot tell 250 BPM uptempo from 125 BPM house: the two
+ * produce the same peaks, at the same lags, in the same proportions, and every
+ * beat tracker ever written gets this wrong without outside help. What decides
+ * it is knowing which record is playing — the published work on tempo octave
+ * errors in electronic music says exactly that, and this table is that
+ * knowledge, written down.
+ *
+ * The figures are the genres' own, from how the music is made rather than from
+ * what a detector happens to like: frenchcore is 180-210 and a producer writing
+ * it puts a kick on every quarter note; uptempo runs 180-220 and its terror
+ * lane pushes past that; hardtekk is 150-170; hardstyle and rawstyle sit at
+ * 150-160; drum & bass is 160-180 with the half-time feel on top of it.
+ *
+ * Ranges are deliberately WIDE — they set a plateau, not a target, and the
+ * music still decides inside them. What they are for is making the octave
+ * either side implausible, which is all the tracker needs.
+ *
+ * MAINTAINING THIS: add a row when a family is added to FAMILIES above, or when
+ * a served genre name turns out to be read often and to sit outside its
+ * family's range. A missing row is not a bug — the tracker falls back to the
+ * default plateau, which is what it always used to have.
+ */
+const TEMPO_BANDS = {
+  // --- the hard end, which is the whole reason this table exists -------------
+  frenchcore: [170, 230],
+  uptempo: [170, 260],
+  speedcore: [200, 300],
+  krach: [170, 260],
+  hardcore: [160, 250],
+  tribecore: [170, 230],
+  gabber: [160, 230],
+  terrorcore: [190, 280],
+  extratone: [220, 300],
+  zaag: [140, 200],
+  hardstyle: [140, 165],
+  rawstyle: [145, 170],
+  hardtekk: [140, 180],
+  hardpingpong: [140, 185],
+  germanparty: [140, 180],
+  pieep: [150, 200],
+  hardtechno: [140, 175],
+  industrial: [130, 200],
+  // --- everything else ------------------------------------------------------
+  techno: [120, 150],
+  house: [118, 132],
+  afrohouse: [115, 128],
+  amapiano: [108, 118],
+  disco: [110, 130],
+  dance: [120, 135],
+  trance: [130, 145],
+  psytrance: [138, 150],
+  dnb: [160, 180],
+  breakbeat: [125, 160],
+  garage: [125, 140],
+  dubstep: [135, 150],
+  synthwave: [95, 125],
+  electronic: [100, 150],
+  hiphop: [80, 105],
+  rap: [80, 105],
+  trap: [130, 160],
+  phonk: [130, 160],
+  reggaeton: [88, 102],
+  dancehall: [90, 110],
+  reggae: [65, 95],
+  rock: [100, 160],
+  hardrock: [110, 165],
+  punk: [150, 200],
+  metal: [120, 200],
+  brutal: [150, 250],
+  funk: [95, 120],
+  soul: [70, 110],
+  rnb: [60, 100],
+  blues: [60, 120],
+  jazz: [80, 200],
+  country: [80, 140],
+  folk: [70, 130],
+  pop: [90, 130],
+  vocalPop: [84, 138],
+  indie: [90, 140],
+  lofi: [70, 95],
+  ambient: [60, 120],
+  strings: [50, 160],
+};
+
+/**
+ * Look a genre name up in the table above, tolerating whatever shape it
+ * arrives in: a family id from the live classifier, a served genre, a
+ * hand-typed tag with spaces, accents or hyphens.
+ *
+ * Returns null when nothing matches, which means "use the default plateau" —
+ * never a guess, because a wrong range is worse than no range.
+ */
+export function tempoRangeFor(name) {
+  if (!name) return null;
+  const raw = String(name);
+  if (TEMPO_BANDS[raw]) return TEMPO_BANDS[raw];
+  const flatten = (v) =>
+    v
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]/g, "");
+  const id = flatten(raw);
+  const direct = TEMPO_BANDS[id] || TEMPO_BANDS[TEMPO_ALIASES[id]];
+  if (direct) return direct;
+  // A compound name puts the SPECIFIC genre first and its family after it —
+  // "uptempo hardcore", "raw hardstyle", "melodic dubstep", "tech house" — so
+  // the first word that names something wins. Taking the longest match instead
+  // reads "uptempo hardcore" as hardcore, which is a different record.
+  for (const word of raw.split(/[^\p{L}\p{N}]+/u)) {
+    const w = flatten(word);
+    if (!w) continue;
+    const hit = TEMPO_BANDS[w] || TEMPO_BANDS[TEMPO_ALIASES[w]];
+    if (hit) return hit;
+  }
+  // Last resort, for a name written without separators. Longest match, so
+  // "hardtechno" is not read as "techno".
+  let best = null;
+  let bestLen = 0;
+  for (const key of Object.keys(TEMPO_BANDS))
+    if (key.length > bestLen && id.includes(key)) {
+      best = TEMPO_BANDS[key];
+      bestLen = key.length;
+    }
+  return best;
+}
+
+// Names that are read often and are spelled nothing like their family.
+const TEMPO_ALIASES = {
+  drumandbass: "dnb",
+  drumnbass: "dnb",
+  drumbass: "dnb",
+  jungle: "dnb",
+  liquid: "dnb",
+  neurofunk: "dnb",
+  jumpup: "dnb",
+  happyhardcore: "hardcore",
+  ukhardcore: "hardcore",
+  hardcoretechno: "hardcore",
+  makina: "hardcore",
+  hardtek: "tribecore",
+  tribe: "tribecore",
+  raggatek: "tribecore",
+  acidcore: "tribecore",
+  tekk: "hardtekk",
+  tekno: "hardtekk",
+  schranz: "hardtechno",
+  hardgroove: "hardtechno",
+  splittercore: "extratone",
+  flashcore: "speedcore",
+  frenchtek: "frenchcore",
+  rawphase: "rawstyle",
+  xtraraw: "rawstyle",
+  euphoric: "hardstyle",
+  dubtechno: "techno",
+  minimal: "techno",
+  deephouse: "house",
+  techhouse: "house",
+  progressivehouse: "house",
+  bigroom: "dance",
+  hardance: "dance",
+  eurodance: "dance",
+  hyperpop: "dance",
+  future: "dance",
+  riddim: "dubstep",
+  brostep: "dubstep",
+  grime: "garage",
+  ukgarage: "garage",
+  jerseyclub: "garage",
+  footwork: "breakbeat",
+  breakcore: "breakbeat",
+  bassline: "garage",
+  boombap: "hiphop",
+  drill: "trap",
+  cloudrap: "trap",
+  afrobeat: "afrohouse",
+  afrobeats: "afrohouse",
+  salsa: "funk",
+  samba: "funk",
+  ska: "reggae",
+  dub: "reggae",
+  triphop: "lofi",
+  downtempo: "lofi",
+  chillout: "ambient",
+  drone: "ambient",
+  shoegaze: "ambient",
+  vaporwave: "lofi",
+  citypop: "pop",
+  synthpop: "synthwave",
+  italodisco: "disco",
+  orchestral: "strings",
+  classical: "strings",
+  choral: "strings",
+  opera: "strings",
+  filmscore: "strings",
+  gospel: "soul",
+  chiptune: "dance",
+  idm: "breakbeat",
+  glitch: "breakbeat",
+  deathmetal: "brutal",
+  blackmetal: "brutal",
+  doom: "metal",
+  thrash: "metal",
+  hardrockband: "hardrock",
+};
+
 // --- the kick ---------------------------------------------------------------
 // A kick is classified from its SHAPE, not its level: how fast it arrives, how
 // much broadband click rides on top of it, how noisy it is, and how long it

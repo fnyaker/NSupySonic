@@ -27,6 +27,28 @@ function ok(res) {
   return res && res.ok && res.status === 200;
 }
 
+// Everything the build emitted, from the manifest the build writes next to it
+// (see vite.config.js). Scraping index.html finds only what Vite statically
+// preloads and MISSES every code-split chunk, so a build with a lazily loaded
+// route or animation engine would install, go offline, and then fail the first
+// time somebody opened that part of the app. Best-effort on purpose: an older
+// server without the manifest still works, on the HTML's own list.
+async function manifestUrls() {
+  try {
+    const res = await fetch("/app/version.json", {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    if (!ok(res)) return [];
+    const j = await res.json();
+    return Array.isArray(j.assets)
+      ? j.assets.filter((u) => typeof u === "string" && u.startsWith("/app/"))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 // The /app/... URLs an index.html references (hashed JS/CSS, icons, fonts).
 function assetUrls(html) {
   const urls = new Set();
@@ -63,7 +85,9 @@ async function stageBuild() {
   } catch {
     return false;
   }
-  const urls = assetUrls(html);
+  // The manifest is the authority; the HTML's own list is the fallback and the
+  // belt-and-braces (icons and the manifest file itself live only there).
+  const urls = [...new Set([...assetUrls(html), ...(await manifestUrls())])];
   // Sequential-ish but parallel enough: a handful of files, and doing them all
   // at once on a phone's link is how you starve the audio stream sharing it.
   const results = [];

@@ -173,12 +173,26 @@ function styleOf(arche, look, dominant = "techno") {
   };
 }
 
+
+// The scene modules are CODE-SPLIT in the app (lib/viz/index.js loads them on
+// demand so a launch with animations off does not parse a third of a megabyte
+// of them), which makes `createScene` a promise. These checks are about what
+// the scenes DRAW, not about how they are fetched, so they load once here and
+// stay synchronous. The loader's own contract is pinned separately, below.
+const SCENE_FACTORY = {
+  bars: (await import("../src/lib/viz/scenes/bars.js")).createBarsScene,
+  pulse: (await import("../src/lib/viz/scenes/pulse.js")).createPulseScene,
+  aurora: (await import("../src/lib/viz/scenes/aurora.js")).createAuroraScene,
+  smart: (await import("../src/lib/viz/scenes/smart.js")).createSmartScene,
+};
+const makeScene = (mode, opts) => (SCENE_FACTORY[mode] ? SCENE_FACTORY[mode](opts) : null);
+
 // Run a scene for a while and return where it drew.
 function paint(mode, { w, h, occl = null, style = null, tier = "high", seconds = 6 } = {}) {
   const preset = tierPreset(tier);
   const geometry = createGeometry();
   geometry.set(w, h, occl);
-  const scene = createScene(mode, { preset, layout: "full", intensity: 0.8 });
+  const scene = makeScene(mode, { preset, layout: "full", intensity: 0.8 });
   scene.resize(w, h, preset, geometry.out);
   const pal = createPalette("neon");
   const g = recorder(w, h);
@@ -550,7 +564,7 @@ test("a change of genre is a dissolve, never a cut", () => {
   const preset = tierPreset("high");
   const geometry = createGeometry();
   geometry.set(1280, 720, null);
-  const scene = createScene("smart", { preset, layout: "full", intensity: 0.8 });
+  const scene = makeScene("smart", { preset, layout: "full", intensity: 0.8 });
   const pal = createPalette("neon");
   const g = recorder(1280, 720);
   const dt = 1 / 60;
@@ -623,4 +637,42 @@ test("the mode registry stays consistent with what the scenes can do", () => {
   assert.equal(effectiveMode("smart", true, true), "off");
   assert.equal(effectiveMode("smart", false, false), "aurora");
   assert.equal(effectiveMode("bars", false, false), "bars");
+});
+
+test("the scene loader hands back the same scenes, on demand", async () => {
+  // The app never imports a scene statically: `createScene` fetches the module
+  // the first time a mode is asked for. What must hold is that every mode in
+  // the registry can still be built, that the promise resolves to a real scene,
+  // and that "off" stays the one mode with nothing behind it — a launch with
+  // animations off must not fetch anything at all.
+  for (const m of MODES) {
+    const p = createScene(m.id, { preset: tierPreset("high"), layout: "full", intensity: 0.8 });
+    if (m.id === "off") {
+      assert.equal(p, null, "the off mode must not load a scene");
+      continue;
+    }
+    assert.ok(p && typeof p.then === "function", `${m.id} did not return a promise`);
+    const scene = await p;
+    assert.equal(typeof scene?.update, "function", `${m.id} has no update()`);
+    assert.equal(typeof scene?.draw, "function", `${m.id} has no draw()`);
+  }
+  // Asked for twice, the module is fetched once: the second call resolves to a
+  // NEW scene built from the SAME factory, not to a second download.
+  const opts = { preset: tierPreset("high"), layout: "full", intensity: 0.8 };
+  const [a, b] = await Promise.all([createScene("smart", opts), createScene("smart", opts)]);
+  assert.ok(a && b && a !== b, "each call must build its own scene");
+});
+
+test("every world in the registry is in the catalogue, and the reverse", async () => {
+  // The registry (worlds/index.js, which pulls in all eighteen scene modules)
+  // and the catalogue (worlds/catalogue.js, which is just names and trails) are
+  // separate files so that naming a world costs nothing. They have to agree.
+  const { WORLDS } = await import("../src/lib/viz/worlds/index.js");
+  const { WORLD_META } = await import("../src/lib/viz/worlds/catalogue.js");
+  assert.deepEqual(Object.keys(WORLDS).sort(), Object.keys(WORLD_META).sort());
+  for (const [id, w] of Object.entries(WORLDS)) {
+    assert.equal(w.label, WORLD_META[id].label, `${id}: the labels differ`);
+    assert.equal(w.trail, WORLD_META[id].trail, `${id}: the trails differ`);
+    assert.equal(typeof w.make, "function", `${id} has no factory`);
+  }
 });

@@ -21,7 +21,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createGeometry } from "../src/lib/viz/geometry.js";
-import { createScene } from "../src/lib/viz/index.js";
+// Loaded directly: the app code-splits the scenes (lib/viz/index.js), and
+// these checks are about what a scene draws rather than how it is fetched.
+import { createSmartScene } from "../src/lib/viz/scenes/smart.js";
 import { tierPreset } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
 import { createMusical } from "../src/lib/viz/musical.js";
@@ -116,7 +118,7 @@ function frameAt(t, { bpm, loud = 1, genre = "frenchcore", arche = { hard: 0.9 }
 function travel({ bpm, seconds, loud = 1, genre, arche }) {
   const geometry = createGeometry();
   geometry.set(W, H, null);
-  const scene = createScene("smart", {
+  const scene = createSmartScene({
     preset: tierPreset("high"), layout: "full", intensity: 0.8,
   });
   const pal = createPalette("neon");

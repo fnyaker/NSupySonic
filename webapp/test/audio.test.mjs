@@ -141,15 +141,23 @@ function kickTrain({ bpm, seconds, dt = 1 / 90, bassDb = FLOOR, click = false })
   return specs;
 }
 
-function kickReadings(specs) {
+function kickReadings(specs, bpm = 0, dt = 1 / 90) {
   const fx = createFeatureExtractor({ sampleRate: SR, fftHi: FFT_HI, floorDb: FLOOR });
-  const out = { peak: 0, floor: 1, lowPeak: 0 };
+  const out = { peak: 0, floor: 1, lowPeak: 0, hits: 0, perKick: 0 };
   const lows = [];
+  let i = 0;
   for (const s of specs) {
-    const f = fx.process(s, 1 / 90);
+    const f = fx.process(s, dt);
     if (f.kick > out.peak) out.peak = f.kick;
     if (f.kick < out.floor) out.floor = f.kick;
+    if (f.kickHit && i * dt > 2) out.hits++;
     lows.push(f.lowFlux);
+    i++;
+  }
+  // `kickTrain` starts its first kick at 0.3 s and lays one down every beat.
+  if (bpm) {
+    const seconds = specs.length * dt;
+    out.perKick = out.hits / Math.max(1, Math.floor((seconds - 2 - 0.3) * (bpm / 60)) + 1);
   }
   // How far the kick onset function stands above its own average: the contrast
   // the beat tracker's fold actually gets to work with.
@@ -159,20 +167,35 @@ function kickReadings(specs) {
 }
 
 test("a kick reads as a hit with no bass under it (techno)", () => {
-  const r = kickReadings(kickTrain({ bpm: 140, seconds: 8, click: true }));
+  const r = kickReadings(kickTrain({ bpm: 140, seconds: 8, click: true }), 140);
   assert.ok(r.peak > 0.6, `techno kick only reached ${r.peak.toFixed(2)}`);
   assert.ok(r.floor < 0.12, `techno kick never rests (floor ${r.floor.toFixed(2)})`);
   assert.ok(r.lowPeak > 2, `techno kick contrast only ${r.lowPeak.toFixed(1)}x`);
+  // ...and exactly once per kick, which is the reading everything downstream
+  // is actually built on. `kickTrain` is a deliberately idealised kick — a
+  // rectangular band with a beater on top and nothing in between — and the
+  // detector has to cope with it as well as with the faithful material below.
+  assert.ok(
+    Math.abs(r.perKick - 1) < 0.12,
+    `techno fired ${r.perKick.toFixed(2)} times per kick`
+  );
 });
 
 test("a kick still reads as a hit over a sustained 808 (rap)", () => {
-  // The case the whitened flux alone is bad at: a 50 Hz note that never stops,
+  // The case a level-based detector is bad at: a 50 Hz note that never stops,
   // with the kick landing on top of it. The kick has to be visible as a
-  // TRANSIENT, not as a level, or nothing about it can be detected.
-  const r = kickReadings(kickTrain({ bpm: 90, seconds: 8, bassDb: -26 }));
+  // TRANSIENT, not as a level, or nothing about it can be detected. It is also
+  // the case with NO beater and NO pitch movement, so it is the one the sub
+  // witness in features.js exists for — without it this kick has exactly one
+  // witness, and one is never enough to convict.
+  const r = kickReadings(kickTrain({ bpm: 90, seconds: 8, bassDb: -26 }), 90);
   assert.ok(r.peak > 0.4, `rap kick only reached ${r.peak.toFixed(2)} over the 808`);
   assert.ok(r.floor < 0.15, `the 808 alone reads as a kick (floor ${r.floor.toFixed(2)})`);
   assert.ok(r.lowPeak > 2, `rap kick contrast only ${r.lowPeak.toFixed(1)}x`);
+  assert.ok(
+    Math.abs(r.perKick - 1) < 0.12,
+    `the 808 kick fired ${r.perKick.toFixed(2)} times per kick`
+  );
 });
 
 test("a sustained 808 with no kick does not read as a kick", () => {
@@ -927,4 +950,354 @@ test("the fade still lands on its end value", async () => {
   assert.equal(c.c[c.c.length - 1], 0, "a fade to 0 must reach 0");
   fadeParam(p, 0, 1, 5, 0); // instantaneous (a skip's hard cut path)
   assert.equal(p.events.at(-1).v, 1);
+});
+
+// ============================================================================
+// THE HARD GENRES, END TO END
+// ============================================================================
+//
+// Everything above this line drives one module at a time with material chosen
+// to exercise that module. This section drives the WHOLE CHAIN — synthetic
+// spectra through features.js into tempo.js into pattern.js — on the music this
+// player is actually pointed at, because that is where it was wrong and nothing
+// above it noticed.
+//
+// The numbers in the comments are measurements of the code as it stood before
+// this section was written. They are not decoration: each one is a different
+// fault, and the tests are what stop them coming back.
+//
+//   techno 128            1.94 kick detections per kick — a phantom 64 ms after
+//                         each one, from the tail re-triggering the detector
+//   frenchcore 200        2.08 per kick, same cause, worse
+//   uptempo 240           0.40 per kick — SIXTY PER CENT MISSED, because the
+//                         kick's fundamental starts ABOVE the band the detector
+//                         was watching and sweeps down into it
+//   frenchcore + screech  3.74 per kick — the beater band could convict alone,
+//                         so any bright transient was a kick
+//   uptempo 240 + rolls   the tempo read 60 BPM, a quarter of the truth
+//   uptempo off-kick      seeded at t=0 it read 220; seeded at t=4 s, as the
+//                         request ladder actually delivers, it read 110 — the
+//                         server's figure was thrown away because the grid had
+//                         already locked
+
+import { renderTrack, PATTERNS, KICKS } from "./hardgen.mjs";
+import { tempoRangeFor } from "../src/lib/audio/style.js";
+import { createPattern } from "../src/lib/audio/pattern.js";
+
+const HARD_DT = 1 / 94;
+// Long enough for the grid to settle and be measured for half a minute after.
+const HARD_SECONDS = 42;
+
+/**
+ * Drive the real chain and report what it made of the track.
+ *
+ * `seedAt` is the moment the server's figure arrives. It defaults to 4 seconds
+ * rather than 0 on purpose: the verdict travels over the network behind the
+ * audio, so a test that seeds at t=0 is testing a case that does not happen.
+ */
+// Rendering eighty seconds of 1024-bin spectra is the expensive half and the
+// same tracks are analysed several times over (once for the kick, once for the
+// tempo, once seeded), so each options object renders once. Keyed by identity:
+// every case below is a literal built once at module scope.
+const RENDERED = new Map();
+function render(opts) {
+  let specs = RENDERED.get(opts);
+  if (!specs) RENDERED.set(opts, (specs = renderTrack(opts)));
+  return specs;
+}
+
+// ...and the analysis pass over them is memoised the same way, since several
+// tests ask different questions of the same run.
+const ANALYSED = new Map();
+function analyse(opts, o = {}) {
+  let byOpts = ANALYSED.get(opts);
+  if (!byOpts) ANALYSED.set(opts, (byOpts = new Map()));
+  const key = `${o.seed || 0}/${o.seedAt ?? 4}/${o.genre || ""}`;
+  let res = byOpts.get(key);
+  if (!res) byOpts.set(key, (res = analyseOnce(opts, o)));
+  return res;
+}
+
+function analyseOnce(opts, { seed = 0, seedAt = 4, genre = "" } = {}) {
+  const specs = render(opts);
+  const fx = createFeatureExtractor({ sampleRate: SR, fftHi: FFT_HI, floorDb: FLOOR });
+  const tr = createBeatTracker();
+  const pat = createPattern();
+  if (genre) {
+    const range = tempoRangeFor(genre);
+    if (range) tr.setTempoRange(range[0], range[1]);
+  }
+  let seeded = !seed;
+  const bpms = [];
+  const hits = [];
+  const mains = [];
+  const rolls = [];
+  let drops = 0;
+  let locked = 0;
+  let n = 0;
+  const shim = { features: null, beat: null };
+  for (let i = 0; i < specs.length; i++) {
+    const t = i * HARD_DT;
+    if (!seeded && t >= seedAt) {
+      seeded = true;
+      tr.seed(seed);
+    }
+    const f = fx.process(specs[i], HARD_DT);
+    const b = tr.process(f.flux, f.lowFlux, HARD_DT);
+    shim.features = f;
+    shim.beat = b;
+    const pt = pat.update(shim, HARD_DT);
+    if (t > 5) {
+      if (f.kickHit) hits.push(t);
+      if (pt.mainKick) mains.push(t);
+      if (pt.rollKick) rolls.push(t);
+      if (pt.drop) drops++;
+    }
+    if (t > 14) {
+      bpms.push(b.bpm);
+      locked += b.locked ? 1 : 0;
+      n++;
+    }
+  }
+  const sorted = [...bpms].sort((a, b) => a - b);
+  let jumps = 0;
+  for (let i = 1; i < bpms.length; i++) if (Math.abs(bpms[i] - bpms[i - 1]) > 1.5) jumps++;
+  return {
+    bpm: sorted[(sorted.length / 2) | 0] || 0,
+    locked: n ? locked / n : 0,
+    jumps,
+    hits,
+    mains,
+    rolls,
+    drops,
+  };
+}
+
+/** The kick times the generator laid down, so fidelity can be measured. */
+function trueKicks(opts) {
+  const period = 60 / opts.bpm;
+  const at = opts.kickAt || PATTERNS.four;
+  const out = [];
+  for (let bt = 0; bt * period < (opts.seconds || 80); bt++) {
+    const t0 = bt * period;
+    if (opts.intro && t0 < opts.intro) continue;
+    if (opts.breakAt && t0 >= opts.breakAt[0] && t0 < opts.breakAt[1]) continue;
+    for (const off of at(bt, Math.floor(bt / 4))) out.push(t0 + off * period);
+  }
+  return out.filter((t) => t > 5);
+}
+
+/** Hits per kick, and the median lateness in milliseconds. */
+function fidelity(res, opts) {
+  const want = trueKicks(opts);
+  const errs = [];
+  for (const h of res.hits) {
+    let best = Infinity;
+    for (const k of want) {
+      const d = h - k;
+      if (d >= -0.03 && d < best) best = d;
+    }
+    if (best < 0.25) errs.push(best * 1000);
+  }
+  errs.sort((a, b) => a - b);
+  return {
+    perKick: res.hits.length / Math.max(1, want.length),
+    lateMs: errs.length ? errs[(errs.length / 2) | 0] : 999,
+  };
+}
+
+const SEED_CASES = [
+  ["uptempo, kick on the offbeat", { seconds: HARD_SECONDS, bpm: 220, kickOpt: KICKS.uptempo, kickAt: PATTERNS.offKick }, 220],
+  ["uptempo 240 with rolls", { seconds: HARD_SECONDS, bpm: 240, kickOpt: KICKS.uptempo, kickAt: PATTERNS.uptempo }, 240],
+  ["frenchcore with a beat left out", { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.frenchcore, kickAt: PATTERNS.skipFourth }, 200],
+  ["speedcore 280", { seconds: HARD_SECONDS, bpm: 280, kickOpt: KICKS.speedcore }, 280],
+];
+
+const RANGE_CASES = [
+  ["speedcore 280", { seconds: HARD_SECONDS, bpm: 280, kickOpt: KICKS.speedcore }, 280, "speedcore"],
+  ["uptempo 240 with rolls", { seconds: HARD_SECONDS, bpm: 240, kickOpt: KICKS.uptempo, kickAt: PATTERNS.uptempo }, 240, "uptempo"],
+  ["frenchcore 200", { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.frenchcore, padGain: -20 }, 200, "frenchcore"],
+  ["techno 128", { seconds: HARD_SECONDS, bpm: 128, kickOpt: KICKS.techno, hats: 1 }, 128, "techno"],
+  ["trap 80", { seconds: HARD_SECONDS, bpm: 80, kickOpt: KICKS.trap, padGain: -26 }, 80, "hip-hop"],
+];
+
+const GABBER_190 = { seconds: HARD_SECONDS, bpm: 190, kickOpt: KICKS.gabber };
+
+const STRAIGHT_200 = { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.frenchcore };
+
+const HARD_CASES = [
+  ["techno 128", { seconds: HARD_SECONDS, bpm: 128, kickOpt: KICKS.techno, hats: 1 }],
+  ["hardtekk 155, swung hats", { seconds: HARD_SECONDS, bpm: 155, kickOpt: KICKS.hardtekk, hats: 1.4, swing: 0.16, padGain: -22 }],
+  ["trap 80 over an 808", { seconds: HARD_SECONDS, bpm: 80, kickOpt: KICKS.trap, padGain: -26 }],
+  ["gabber 190", { seconds: HARD_SECONDS, bpm: 190, kickOpt: KICKS.gabber }],
+  ["frenchcore 200", { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.frenchcore, padGain: -20 }],
+  ["frenchcore 205, triplet rolls", { seconds: HARD_SECONDS, bpm: 205, kickOpt: KICKS.frenchcore, kickAt: PATTERNS.tripletRoll, padGain: -20 }],
+  ["uptempo 200, rolls", { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.uptempo, kickAt: PATTERNS.uptempo }],
+  ["uptempo 220, sixteenth rolls", { seconds: HARD_SECONDS, bpm: 220, kickOpt: KICKS.uptempo, kickAt: PATTERNS.heavyRoll }],
+  ["uptempo 240, rolls", { seconds: HARD_SECONDS, bpm: 240, kickOpt: KICKS.uptempo, kickAt: PATTERNS.uptempo }],
+  ["zaag 160", { seconds: HARD_SECONDS, bpm: 160, kickOpt: KICKS.zaag, padGain: -22 }],
+  ["zaag 175", { seconds: HARD_SECONDS, bpm: 175, kickOpt: KICKS.zaag, padGain: -22 }],
+  ["speedcore 280", { seconds: HARD_SECONDS, bpm: 280, kickOpt: KICKS.speedcore }],
+  ["frenchcore + an eighth-note lead", { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.frenchcore, screechAt: () => [0.5], screechOpt: { gain: 8, len: 0.09 } }],
+  ["uptempo + an eighth-note lead", { seconds: HARD_SECONDS, bpm: 240, kickOpt: KICKS.uptempo, screechAt: () => [0.5], screechOpt: { gain: 8, len: 0.07 } }],
+  ["frenchcore + a reverse bass", { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.frenchcore, rbassAt: () => [0.5], rbassOpt: { gain: -2 } }],
+  ["hardstyle 150 + a reverse bass", { seconds: HARD_SECONDS, bpm: 150, kickOpt: KICKS.hardtekk, rbassAt: () => [0.5], rbassOpt: { gain: -2, len: 0.16 } }],
+  ["frenchcore with a beat left out", { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.frenchcore, kickAt: PATTERNS.skipFourth, screechAt: (b) => (b % 4 === 3 ? [0, 0.5] : []), screechOpt: { gain: 6 } }],
+  ["frenchcore, a half-time section", { seconds: HARD_SECONDS, bpm: 200, kickOpt: KICKS.frenchcore, kickAt: (b) => (b % 64 >= 32 ? (b % 2 ? [] : [0]) : [0]) }],
+  ["frenchcore 203, played not programmed", { seconds: HARD_SECONDS, bpm: 203, kickOpt: KICKS.frenchcore, jitterMs: 6, ampJitter: 0.5 }],
+  ["frenchcore 243, played not programmed", { seconds: HARD_SECONDS, bpm: 243, kickOpt: KICKS.frenchcore, jitterMs: 6, ampJitter: 0.5 }],
+  ["frenchcore, a whole arrangement", { bpm: 200, seconds: 110, intro: 7, breakAt: [45, 60], kickOpt: KICKS.frenchcore, jitterMs: 4, ampJitter: 0.4, padGain: -20 }],
+  ["uptempo 235, a whole arrangement", { bpm: 235, seconds: 110, intro: 7, breakAt: [45, 60], kickOpt: KICKS.uptempo, kickAt: PATTERNS.uptempo, jitterMs: 4, ampJitter: 0.4 }],
+];
+
+test("the kick is detected once per kick, on every hard genre", () => {
+  // THE test for features.js. One hit per kick, and on time. A detector that
+  // fires twice is a strobe; one that fires on two kicks in five is worse than
+  // nothing, because every animation downstream is then keyed to noise.
+  const report = [];
+  for (const [name, opts] of HARD_CASES) {
+    // Seeded, so this run is shared with the tempo test below. The kick
+    // detector does not read the tracker at all, so the seed cannot affect it.
+    const r = analyse(opts, { seed: opts.bpm, seedAt: 4 });
+    const f = fidelity(r, opts);
+    report.push(`${name} ${f.perKick.toFixed(2)}`);
+    assert.ok(
+      f.perKick > 0.88 && f.perKick < 1.15,
+      `${name}: ${f.perKick.toFixed(2)} detections per kick. Full set: ${report.join(", ")}`
+    );
+    assert.ok(
+      f.lateMs < 40,
+      `${name}: the kick is reported ${f.lateMs.toFixed(0)} ms late, which is a fifth of a beat here`
+    );
+  }
+});
+
+test("a lead in the kick's own register is the one thing that still fools it", () => {
+  // An honest limit, pinned so it is noticed if it ever gets worse — and so
+  // nobody "fixes" the detector into the far worse failure of missing kicks.
+  //
+  // A 320 Hz stab is not a screech, it is a mid-bass: its fundamental is inside
+  // the region the kick's own attack lives in, it has harmonics to the top of
+  // the spectrum, and it is louder than the kick. Three of the four witnesses
+  // fire on it honestly. Every attempt to exclude it cost real kicks elsewhere
+  // — a sub-band veto took uptempo from 1.00 to 0.72 — and a false flash on a
+  // loud percussive stab is a far cheaper mistake than a missed kick.
+  const opts = {
+    bpm: 200,
+    kickOpt: KICKS.frenchcore,
+    screechAt: () => [0.25, 0.5, 0.75],
+    screechOpt: { gain: 8, len: 0.05, f: 320 },
+  };
+  const f = fidelity(analyse(opts), opts);
+  assert.ok(f.perKick > 0.95, `it must still catch the kicks (${f.perKick.toFixed(2)})`);
+  assert.ok(
+    f.perKick < 3.2,
+    `a 320 Hz stab now fires ${f.perKick.toFixed(2)} times per kick, which is worse than when this was written (2.6)`
+  );
+  // ...and the same pattern with the lead where a lead actually sits is clean.
+  const high = { ...opts, screechOpt: { gain: 8, len: 0.05 } };
+  const g = fidelity(analyse(high), high);
+  assert.ok(
+    Math.abs(g.perKick - 1) < 0.15,
+    `a lead at 800 Hz must not be a kick (${g.perKick.toFixed(2)} per kick)`
+  );
+});
+
+test("the served tempo is adopted even when the grid already locked", () => {
+  // THE structural fix. The verdict travels over the network behind the audio,
+  // so it lands seconds after the tracker locked on whatever the intro was.
+  // Seeding only an unlocked tracker therefore meant not seeding at all in the
+  // one case it was needed, and the user's report of it was exact: "it tries to
+  // overwrite the tempo the server sent it with nothing".
+  const cases = SEED_CASES;
+  for (const [name, opts, bpm] of cases) {
+    const r = analyse(opts, { seed: bpm, seedAt: 4 });
+    assert.ok(
+      Math.abs(r.bpm / bpm - 1) < 0.04,
+      `${name}: served ${bpm} at four seconds, tracker settled on ${r.bpm.toFixed(1)}`
+    );
+    assert.ok(r.locked > 0.9, `${name}: the grid only held a lock ${(r.locked * 100) | 0}% of the time`);
+    assert.ok(r.jumps < 4, `${name}: the reading moved ${r.jumps} times`);
+  }
+});
+
+test("knowing the genre is what settles the octave", () => {
+  // The published result on tempo octave errors in electronic music, and the
+  // only thing that can work: 250 BPM uptempo and 125 BPM house produce the
+  // same autocorrelation, so no amount of signal processing separates them.
+  // What separates them is knowing which record is playing.
+  const cases = RANGE_CASES;
+  for (const [name, opts, bpm, genre] of cases) {
+    const r = analyse(opts, { genre });
+    assert.ok(
+      Math.abs(r.bpm / bpm - 1) < 0.04,
+      `${name} as ${genre}: read ${r.bpm.toFixed(1)}, wanted ${bpm}`
+    );
+  }
+  // And the range never moves a reading that was already right.
+  const plain = analyse(GABBER_190);
+  const ranged = analyse(GABBER_190, { genre: "gabber" });
+  assert.ok(Math.abs(plain.bpm - ranged.bpm) < 2, "the range moved a correct reading");
+});
+
+test("the tempo does not wander across the hard genres", () => {
+  // The reading has to be ONE number. Everything downstream — the animation's
+  // grid, the classifier, the label in the header — re-times with it.
+  for (const [name, opts] of HARD_CASES) {
+    const r = analyse(opts, { seed: opts.bpm, seedAt: 4 });
+    assert.ok(
+      Math.abs(r.bpm / opts.bpm - 1) < 0.04,
+      `${name}: settled on ${r.bpm.toFixed(1)} against ${opts.bpm}`
+    );
+    assert.ok(r.jumps < 6, `${name}: the reading moved ${r.jumps} times`);
+  }
+});
+
+test("a roll is told apart from the main kicks", () => {
+  // What the whole of pattern.js exists for: at 220 BPM a bar of sixteenth
+  // rolls is fifteen hits in two seconds, and a scene that throws something on
+  // every one of them is a strobe rather than an animation.
+  const opts = { seconds: HARD_SECONDS, bpm: 220, kickOpt: KICKS.uptempo, kickAt: PATTERNS.heavyRoll };
+  const r = analyse(opts, { seed: 220, seedAt: 4 });
+  // Twelve plain beats and four beats of sixteenths per sixteen: three quarters
+  // of the beats carry a main kick and the rolls carry the rest.
+  const beats = Math.floor((HARD_SECONDS - 5) * (220 / 60));
+  assert.ok(
+    r.mains.length > beats * 0.55 && r.mains.length < beats * 1.05,
+    `${r.mains.length} main kicks against ${beats} beats`
+  );
+  assert.ok(r.rolls.length > beats * 0.2, `only ${r.rolls.length} roll notes were seen`);
+  // A main kick is on the grid: no two of them closer than most of a beat.
+  let tooClose = 0;
+  for (let i = 1; i < r.mains.length; i++)
+    if (r.mains[i] - r.mains[i - 1] < (60 / 220) * 0.7) tooClose++;
+  assert.equal(tooClose, 0, `${tooClose} "main" kicks landed inside a beat of each other`);
+  // ...and a straight four-on-the-floor has no rolls in it at all.
+  const straight = analyse(STRAIGHT_200, { seed: 200, seedAt: 4 });
+  assert.ok(
+    straight.rolls.length < straight.mains.length * 0.1,
+    `a straight pattern produced ${straight.rolls.length} roll notes`
+  );
+});
+
+test("the drop is detected, and only the drop", () => {
+  // A breakdown and the moment it ends. The arrangement going out for fifteen
+  // seconds and coming back is the single most important event in any of these
+  // tracks, and nothing below this layer could see it.
+  const opts = {
+    bpm: 200,
+    seconds: 110,
+    intro: 7,
+    breakAt: [45, 60],
+    kickOpt: KICKS.frenchcore,
+    jitterMs: 4,
+    ampJitter: 0.4,
+    padGain: -20,
+  };
+  const r = analyse(opts, { seed: 200, seedAt: 4 });
+  assert.ok(r.drops >= 1, "the arrangement came back and nothing noticed");
+  assert.ok(r.drops <= 3, `${r.drops} drops in a track with one breakdown`);
+  // A track that never goes quiet never drops.
+  const flat = analyse(STRAIGHT_200, { seed: 200, seedAt: 4 });
+  assert.equal(flat.drops, 0, "a track with no breakdown reported a drop");
 });

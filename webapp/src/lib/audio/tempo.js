@@ -113,11 +113,19 @@ const HARMONICS = 3;
 // wide enough to swallow the grid's own quantisation error at any tempo in
 // range, narrow enough that two hits 60 ms apart are still two hits.
 const ODF_SIGMA = 2;
+// The default tempo plateau, used until something tells the tracker what kind
+// of music this is. See `setTempoRange`.
+const DEFAULT_PRIOR_LO = 90;
+const DEFAULT_PRIOR_HI = 200;
+const PRIOR_SIGMA = 0.42;
 
 // --- ODF conditioning -------------------------------------------------------
 // The local mean a transient has to beat. Long enough to cover a kick and its
 // ring-out, short enough that it cannot follow the onsets themselves.
 const MEAN_TAU = 0.12;
+// ...and the same window expressed in beats, which is what actually governs it
+// above ~200 BPM. Whichever is longer wins.
+const MEAN_BEATS = 1.5;
 // The track's own onset scale. Seconds, so it spans bars rather than beats: a
 // scale that followed the beat would flatten the beat.
 const SCALE_TAU = 2.5;
@@ -136,6 +144,10 @@ const INCUMBENT = 0.35;
 // beatable, so a wrong figure is corrected rather than obeyed for ever.
 const SEED_BONUS = 0.7;
 const SEED_OCTAVE = 0.22;
+// The confidence a grid keeps while it agrees with a seed. Enough to stay
+// locked and to keep the readout honest, low enough that a scene reading
+// confidence still knows this is not a strongly self-evident pulse.
+const SEED_FLOOR = 0.45;
 // The width, in log-lag, of those two bonuses. 6% is about a beat of drift
 // across a bar, which is the point at which two readings stop being the same
 // tempo measured twice.
@@ -148,6 +160,33 @@ const CHALLENGE_NEEDED = 5;
 const OCT_SMOOTH = 0.3;
 const OCT_ON = 0.55;
 const OCT_COOLDOWN = 2.5;
+// How much better the music has to fit a NEIGHBOURING metrical level before
+// that counts as evidence, and over what span the vote ramps up. A level that
+// merely ties is no reason to move; one that fits half again as well is.
+const LEVEL_EDGE = 1.15;
+const LEVEL_SPAN = 0.3;
+// ...and how much worse a level has to fit before the fold is not allowed to
+// vote for it at all. Below this ratio the fold is reading something other
+// than the metre.
+const LEVEL_VETO = 0.85;
+// How long the music has to contradict the seed's metrical level, at full
+// strength, before the anchor itself is moved an octave. Twenty seconds is
+// several phrases: long enough that no breakdown, fill or intro can spend it,
+// short enough that a track published at half its tempo is right for most of
+// its length.
+const SEED_DOUBT = 20;
+// The width, in octaves, of the seed's own plausibility bell. Narrow: the
+// point of a whole-track measurement is that it settles the metrical level, so
+// half of it and twice it must both be strongly disfavoured.
+const SEED_SIGMA = 0.18;
+// What a level the seed says nothing about is still worth, as a fraction of the
+// ordinary prior. Ten per cent: enough that an octave of the seed is strongly
+// disfavoured, far enough above zero that the music can still be heard there.
+const SEED_FLOOR_W = 0.1;
+// The smallest gap, in grid slots, between two candidates that count as
+// different peaks. The ODF is smoothed over ~2 slots, so anything closer is the
+// same peak measured twice.
+const PEAK_SLOTS = 4;
 // How many candidates are folded. The autocorrelation's shortlist is short:
 // past the fifth peak nothing is a plausible tempo.
 const SHORTLIST = 5;
@@ -228,6 +267,9 @@ export function createBeatTracker() {
   let challenger = 0; // lag the challenger is arguing for, 0 when none
   let challengeCount = 0;
   let seedLag = 0; // a tempo measured over the whole track, if there is one
+  // Seconds the music has spent contradicting the seed's metrical level at full
+  // strength. See `octBar`.
+  let seedDoubt = 0;
 
   // Per-beat-position bass scores, for the downbeat.
   const barScore4 = new Float32Array(4);
@@ -321,25 +363,71 @@ export function createBeatTracker() {
     buf.set(smoothTmp.subarray(0, n));
   }
 
-  // A plateau across the tempi a beat grid is normally written in, rolling off
+  // A PLATEAU across the tempi a beat grid is normally written in, rolling off
   // outside it. Deliberately not a bell on 120: the roll-off is what keeps a
   // 300 BPM reading from being invented out of noise, and a bell would instead
   // spend its slope halving the genres this player exists for.
-  const PRIOR_LO = 90;
-  const PRIOR_HI = 200;
-  const PRIOR_SIGMA = 0.42;
+  //
+  // Its EDGES MOVE WITH THE GENRE, which is the one thing a fixed prior cannot
+  // do and the reason a fixed one cannot serve both halves of this library. A
+  // hardcore track at 250 BPM and a house track at 125 are the same reading
+  // twice over as far as an autocorrelation is concerned, and no amount of
+  // signal processing separates them — what separates them is knowing which
+  // kind of record is playing, which the engine does know (the server measured
+  // the track, or the live classifier named a family). Published work on
+  // exactly this problem reaches the same conclusion: octave errors in
+  // electronic music come down by feeding the style estimate back into the
+  // tempo prior. `setTempoRange` is that feedback, and it is the ONLY thing in
+  // this file that another module gets to move.
+  let priorLo = DEFAULT_PRIOR_LO;
+  let priorHi = DEFAULT_PRIOR_HI;
   function tempoPrior(b) {
     let d = 0;
-    if (b < PRIOR_LO) d = Math.log(b / PRIOR_LO);
-    else if (b > PRIOR_HI) d = Math.log(b / PRIOR_HI);
+    if (b < priorLo) d = Math.log(b / priorLo);
+    else if (b > priorHi) d = Math.log(b / priorHi);
     else return 1;
     return Math.exp(-(d * d) / (2 * PRIOR_SIGMA * PRIOR_SIGMA));
+  }
+
+  /**
+   * How plausible a METRICAL LEVEL is, before the music is consulted.
+   *
+   * When something has measured the whole track, that is the answer and the
+   * prior steps aside: an eight-second window deciding it disagrees with a
+   * measurement made over four minutes is the single most common way this
+   * tracker used to be wrong, and it is what "it overwrites the tempo the
+   * server sent with nothing" means. The seed stays BEATABLE — the bell is
+   * finite and the music's own fit is multiplied through it — so a wrong figure
+   * is still corrected rather than obeyed for ever.
+   */
+  function levelPrior(lag) {
+    const base = tempoPrior(lagToBpm(lag));
+    if (seedLag <= 0) return base;
+    // A NARROW bell over a FLOOR, not a broad bell on its own. A broad one
+    // behaves badly exactly when the seed is wrong: seeded at 117 on a 175 BPM
+    // track, half of 175 sits closer to the seed in log-tempo than 175 does, so
+    // the bell quietly recommends 87.5 — the tracker then obeys a figure that
+    // is wrong in a way the music never suggested. Narrow, the seed says
+    // something strong about its own neighbourhood and nothing at all about
+    // anywhere else, and where it says nothing the ordinary prior and the music
+    // decide between them. That is what makes it an anchor rather than a fog.
+    const d = Math.log2(lag / seedLag);
+    return Math.max(base * SEED_FLOOR_W, Math.exp(-(d * d) / (2 * SEED_SIGMA * SEED_SIGMA)));
   }
 
   // Everything that is known about a candidate BEFORE the music is consulted:
   // the tempo prior, the tempo somebody already measured over the whole track,
   // and the one the grid is currently running on.
   function weightFor(lag) {
+    // The ORDINARY prior here, not the seed-anchored one. The two questions are
+    // different and want different amounts of the seed in them: which metrical
+    // LEVEL the grid runs at is genuinely ambiguous in the signal, so a
+    // whole-track measurement should all but settle it (`levelPrior`, used by
+    // everything octave-related below); which TEMPO it is is not ambiguous, and
+    // a served figure that is simply wrong — 117 on a 175 BPM track — has to be
+    // overruled by the music rather than obeyed. Putting the seed bell in here
+    // as well made a wrong figure unbeatable, which is the opposite failure to
+    // the one all this exists to fix and just as bad.
     let w = tempoPrior(lagToBpm(lag));
     if (seedLag > 0) {
       w *=
@@ -349,6 +437,30 @@ export function createBeatTracker() {
     }
     if (locked) w *= 1 + INCUMBENT * bump(lag / (period * ODF_HZ));
     return w;
+  }
+
+  /**
+   * How well the music fits a metrical level, on the same terms `estimate`
+   * judges a candidate by: how much the tempogram supports it, how cleanly the
+   * onsets fold onto it, and how plausible a tempo it is.
+   *
+   * This exists because the octave question used to be decided ENTIRELY by
+   * folding the bass, and folding cannot separate "a kick every beat with an
+   * offbeat hat" from "a kick and a snare alternating on the beat" — the fold
+   * looks identical and the right answers are an octave apart. Measured on
+   * synthetic techno with a prominent offbeat hat, the tempogram named 128 BPM
+   * clearly (0.540 against 0.312 for 256) on every single estimate, and the
+   * grid sat at 256 for the whole track anyway: `correctOctave` re-expressed
+   * each correct estimate at the level the grid was already on, so the reading
+   * that knew the answer was the one being discarded. Asking the tempogram
+   * directly is the other half of the vote, and it is the recommendation the
+   * literature gives for octave errors — score the level, its half and its
+   * double against the onset envelope, and keep the best fit.
+   */
+  function levelScore(lag) {
+    const l = Math.round(lag);
+    if (l < LAG_MIN || l > LAG_MAX) return 0;
+    return Math.max(0, tg[l]) * (0.45 + 0.55 * gridQuality(l)) * levelPrior(l);
   }
 
   // How well the ODF folds onto a grid of period `p`: the share of its energy
@@ -429,18 +541,43 @@ export function createBeatTracker() {
   // in -1..+1: positive says the grid is running at twice the rate the kick is
   // (halve the tempo, double the lag), negative says the opposite.
   function octaveEvidence(lagF) {
+    // TWO WITNESSES, and the second one has a veto.
+    //
+    // The fold asks a local question — is there anything at the halfway point,
+    // in the bass or across the band — and it is fooled whenever one beat of
+    // the bar is simply louder than the others, which in this music is most of
+    // them. Measured on synthetic uptempo with rolls on the last beat of every
+    // other bar, the fold voted steadily to HALVE a perfectly correct 240 BPM
+    // grid, purely because the rolled beat outweighed the plain ones and so
+    // became the fold's reference peak.
+    //
+    // The score asks a global one — does the music actually fit that level
+    // better, on the same terms `estimate` judges every candidate by. It cannot
+    // be fooled that way, because a level that catches every onset in one
+    // window per cycle scores high however unevenly they are weighted.
+    //
+    // So the fold PROPOSES and the score DISPOSES: a fold vote toward a level
+    // the score says is measurably worse is suppressed outright, while the
+    // score can move the grid on its own. That asymmetry is deliberate — the
+    // score is the objective the whole estimate is built on, and the fold is a
+    // heuristic about where the bass lands.
+    const here = levelScore(lagF);
+    const rSlow = lagF * 2 <= LAG_MAX && here > 1e-9 ? levelScore(lagF * 2) / here : 0;
+    const rFast = lagF / 2 >= LAG_MIN && here > 1e-9 ? levelScore(lagF / 2) / here : 0;
     let v = 0;
     if (lagF * 2 <= LAG_MAX) {
       const dbl = foldHalfRatio(lagF * 2, true);
       // Folding at twice this lag does NOT show two comparable peaks → nothing
       // at all happens halfway → the beat is the slower one.
-      if (dbl >= 0) v += rampDown(dbl, 0.45, 0.22);
+      if (dbl >= 0) v += rampDown(dbl, 0.45, 0.22) * (1 - rampDown(rSlow, LEVEL_VETO, 0.25));
+      v += rampUp(rSlow, LEVEL_EDGE, LEVEL_SPAN);
     }
     if (lagF / 2 >= LAG_MIN) {
       const half = foldHalfRatio(lagF);
       // Folding at this lag shows the bass hitting halfway through as hard as
       // on the beat → the beat is the faster one.
-      if (half >= 0) v -= rampUp(half, 0.72, 0.22);
+      if (half >= 0) v -= rampUp(half, 0.72, 0.22) * (1 - rampDown(rFast, LEVEL_VETO, 0.25));
+      v -= rampUp(rFast, LEVEL_EDGE, LEVEL_SPAN);
     }
     return Math.max(-1, Math.min(1, v));
   }
@@ -456,22 +593,59 @@ export function createBeatTracker() {
   // onto the eighth-note grid in its first three seconds used to stay there for
   // the rest of the track: every later estimate found the right lag and the
   // dead band quietly folded it back.
+  /**
+   * How strong the vote has to be to move the grid from one level to another.
+   *
+   * Symmetric thresholds are what let a locked, correct grid be talked out of
+   * itself. Moving TOWARD the level a whole-track measurement named should be
+   * easy; moving AWAY from it can be put beyond the vote's reach entirely —
+   * the bar is allowed to exceed 1 and the vote is clamped to it, so no amount
+   * of eight-second evidence can re-level a grid the server anchored.
+   *
+   * That is not the same as making the seed unfalsifiable. The vote saturating
+   * against the bar is itself recorded (`seedDoubt` below), and a seed the
+   * music has contradicted at full strength for twenty seconds is moved to the
+   * level the music insists on — it stays an anchor, at the octave it should
+   * have named. A published tempo that is half the real one, which is common
+   * enough in this catalogue for exactly the genres this file exists for, is
+   * therefore corrected, but by the track rather than by one window of it.
+   */
+  function octBar(from, to) {
+    const g = levelPrior(to) / Math.max(1e-9, levelPrior(from));
+    return Math.max(0.3, Math.min(2.5, OCT_ON * Math.pow(g, -0.35)));
+  }
+
   function correctOctave(lagF) {
     const ref = locked ? period * ODF_HZ : lagF;
     octVote += (octaveEvidence(ref) - octVote) * OCT_SMOOTH;
     const cooled = clock - lastOctAt > OCT_COOLDOWN;
     let level = ref;
     let moved = false;
-    if (cooled && octVote > OCT_ON && ref * 2 <= LAG_MAX) {
+    if (cooled && octVote > octBar(ref, ref * 2) && ref * 2 <= LAG_MAX) {
       level = ref * 2;
       moved = true;
-    } else if (cooled && octVote < -OCT_ON && ref / 2 >= LAG_MIN) {
+    } else if (cooled && octVote < -octBar(ref, ref / 2) && ref / 2 >= LAG_MIN) {
       level = ref / 2;
       moved = true;
     }
     if (moved) {
       lastOctAt = clock;
       octVote = 0;
+    } else if (seedLag > 0) {
+      // Held back by the bar rather than by the music: remember for how long,
+      // and move the anchor if the music never lets up.
+      const wantSlow = octVote > OCT_ON && ref * 2 <= LAG_MAX;
+      const wantFast = octVote < -OCT_ON && ref / 2 >= LAG_MIN;
+      if (wantSlow || wantFast) {
+        seedDoubt += EST_EVERY;
+        if (seedDoubt >= SEED_DOUBT) {
+          seedLag = wantSlow ? seedLag * 2 : seedLag / 2;
+          seedDoubt = 0;
+          octVote = 0;
+        }
+      } else if (seedDoubt > 0) {
+        seedDoubt = Math.max(0, seedDoubt - EST_EVERY * 2);
+      }
     }
     if (!locked) return level;
     // Express the fresh estimate on the level we settled on, whenever it is an
@@ -576,7 +750,16 @@ export function createBeatTracker() {
     const shortlist = [];
     for (const lag of list) {
       if (shortlist.length >= SHORTLIST) break;
-      if (shortlist.some((l) => Math.abs(Math.log(lag / l)) < BUMP_W)) continue;
+      // Two separations, and the second one only matters at the top of the
+      // range. A 6% log distance is four whole slots at 120 BPM and barely one
+      // and a half at 240, so up there the shoulder of a peak was being
+      // shortlisted as a rival to the peak itself — which does not change which
+      // tempo wins, but does collapse the confidence margin, and confidence
+      // falling under the floor is what UNLOCKS the grid. Measured on
+      // synthetic uptempo it unlocked a correct, seeded 240 BPM grid after ten
+      // seconds and re-locked it at a quarter of the tempo.
+      if (shortlist.some((l) => Math.abs(Math.log(lag / l)) < BUMP_W || Math.abs(lag - l) < PEAK_SLOTS))
+        continue;
       shortlist.push(lag);
     }
     if (!shortlist.length) shortlist.push(bestLag);
@@ -616,6 +799,19 @@ export function createBeatTracker() {
     const margin = runnerUp > 0 ? Math.max(0, (winnerScore - runnerUp) / (winnerScore + 1e-6)) : 1;
     const conf = Math.max(0, Math.min(1, tg[winner] * 2.2)) * (0.35 + 0.65 * margin);
     confidence = confidence * 0.55 + conf * 0.45;
+    // A WHOLE-TRACK MEASUREMENT IS A REASON TO STAY LOCKED. Confidence is read
+    // from eight seconds of autocorrelation, and there is material whose
+    // autocorrelation at its own beat is genuinely poor for eight seconds at a
+    // time — rolls, a half-time passage, a bar of one held note. On such a
+    // track a grid sitting exactly on the server's figure used to lose
+    // confidence estimate by estimate until it fell through the floor,
+    // UNLOCK, and re-lock somewhere else entirely, with the winner having been
+    // correct on every single estimate along the way. So while the grid agrees
+    // with the seed, the seed floors the confidence: nothing about the music
+    // has contradicted it, and the tracker is not entitled to forget a better
+    // measurement than the one it can make.
+    if (seedLag > 0 && Math.abs(Math.log(period * ODF_HZ / seedLag)) < BUMP_W)
+      confidence = Math.max(confidence, SEED_FLOOR);
 
     // Adopt a new tempo carefully. A small change is a refinement of the same
     // pulse and is eased in; an octave is the same grid at another metrical
@@ -788,7 +984,20 @@ export function createBeatTracker() {
     // Local mean out, then compressed against the track's own onset scale. See
     // the file header: this is what makes a riser stop being a beat and an FX
     // explosion stop being twenty of them.
-    const aMean = 1 - Math.exp(-dt / MEAN_TAU);
+    // THE LOCAL MEAN'S WINDOW HAS TO BE LONGER THAN A BEAT, and a fixed 120 ms
+    // is not, once the music goes past about 200 BPM. At 240 BPM the beat is
+    // 250 ms, so a mean with a 120 ms time constant tracks the beat itself and
+    // subtracts most of it: measured on synthetic uptempo, the running
+    // tempogram at the TRUE lag fell from 0.364 to 0.084 as the estimators
+    // converged, the confidence fell with it, and the grid unlocked after ten
+    // seconds and re-locked a quarter of the tempo away. The reading was right
+    // the whole time and the tracker threw it away for lack of confidence.
+    //
+    // So it scales with the grid: a window over a beat long cannot follow the
+    // beat, and at any tempo it is still far shorter than the risers, sweeps
+    // and reverb washes it exists to remove, which last seconds.
+    const meanTau = Math.max(MEAN_TAU, MEAN_BEATS * period);
+    const aMean = 1 - Math.exp(-dt / meanTau);
     const aScale = 1 - Math.exp(-dt / SCALE_TAU);
     fluxMean += (flux - fluxMean) * aMean;
     lowMean += (lowFlux - lowMean) * aMean;
@@ -893,13 +1102,61 @@ export function createBeatTracker() {
    * evidence to the contrary still wins, so a wrong figure is corrected rather
    * than obeyed for ever.
    */
+  /**
+   * Hand the tracker a tempo somebody measured over the WHOLE track.
+   *
+   * This may be called at any time, including in the middle of a locked grid,
+   * and that is a deliberate change from how it used to work. The engine only
+   * seeded an unlocked tracker, on the reasoning that re-seeding a locked grid
+   * would make the animation jump for no accuracy gain. Both halves of that
+   * were wrong. The verdict arrives over the network, behind the audio in the
+   * request ladder, so by the time it lands the grid has been locked for
+   * seconds — on three seconds of whatever the intro happened to be. And the
+   * gain is not small: measured on synthetic uptempo with the kick moving onto
+   * the offbeat, seeding at t=0 gave 220 BPM and seeding at t=4 s gave 110, for
+   * the whole track, because the seed was simply discarded. "It tries to
+   * overwrite the tempo the server sent it with nothing" is this line.
+   *
+   * What it does depends on where the grid already is:
+   *   - within 6% of the seed → nothing to move, just record the anchor;
+   *   - within 6% of an OCTAVE of it → the same grid counted differently, so
+   *     the level moves and the PHASE IS KEPT (the beats do not shift, only
+   *     their name), which is why this cannot make the animation jump;
+   *   - anywhere else → the seed becomes a standing prior and the ordinary
+   *     adoption rules decide, so a wrong figure is still beatable.
+   */
   function seed(seedBpm, seedConfidence = 0.9) {
     const b = +seedBpm;
     if (!Number.isFinite(b) || b < MIN_BPM || b > MAX_BPM) return false;
+    const conf = Math.min(1, +seedConfidence || 0.9);
+    seedLag = bpmToLag(b);
+    seedDoubt = 0;
+    if (locked) {
+      const near = Math.abs(Math.log2((60 / b) / period));
+      // On the seed, or one or two octaves off it: the same grid counted
+      // differently, so take the seed's level. (Two, because a grid that ended
+      // up on the BAR rather than the beat is exactly as recoverable as one on
+      // the half-beat, and just as common on material with rolls in it.)
+      // Further than that and the seed is only a prior — it has already been
+      // recorded above, and `weightFor`, `levelPrior` and the octave vote all
+      // read it from there.
+      if (near < 0.09 || Math.abs(near - 1) < 0.09 || Math.abs(near - 2) < 0.09) {
+        period = 60 / b;
+        bpm = b;
+        confidence = Math.max(confidence, conf);
+        challenger = 0;
+        challengeCount = 0;
+        // Moving the LEVEL does not move the beats, so the phase stays as it
+        // is; re-folding here would throw away a lock the PLL has been holding.
+        out.bpm = bpm;
+        out.confidence = confidence;
+        out.period = period;
+      }
+      return true;
+    }
     period = 60 / b;
     bpm = b;
-    seedLag = bpmToLag(b);
-    confidence = Math.max(confidence, Math.min(1, +seedConfidence || 0.9));
+    confidence = Math.max(confidence, conf);
     locked = true;
     challenger = 0;
     challengeCount = 0;
@@ -915,6 +1172,36 @@ export function createBeatTracker() {
     out.period = period;
     out.locked = true;
     return true;
+  }
+
+  /**
+   * Tell the tracker what kind of record this is, as the tempo range the genre
+   * is written in. Everything in this file that has to choose between a tempo
+   * and half of it consults it.
+   *
+   * This is the ONE thing another module gets to move, and it is here because
+   * the octave question is not answerable from the signal alone — a 250 BPM
+   * uptempo track and a 125 BPM house track produce the same autocorrelation,
+   * and which one it is depends on which record is playing. The engine knows
+   * that (the server measured the track, or the live classifier named a
+   * family), so it can say. Published work on tempo octave errors in
+   * electronic music reaches the same place: feed the style estimate back into
+   * the tempo prior.
+   *
+   * Called with nothing, it restores the default plateau. It never moves the
+   * grid on its own — it changes what the NEXT estimate finds plausible, so a
+   * genre arriving mid-track cannot make the animation jump.
+   */
+  function setTempoRange(lo, hi) {
+    const a = +lo;
+    const b = +hi;
+    if (!(a > 0) || !(b > a)) {
+      priorLo = DEFAULT_PRIOR_LO;
+      priorHi = DEFAULT_PRIOR_HI;
+      return;
+    }
+    priorLo = Math.max(MIN_BPM, Math.min(a, MAX_BPM));
+    priorHi = Math.max(priorLo + 1, Math.min(b, MAX_BPM));
   }
 
   function reset() {
@@ -943,6 +1230,9 @@ export function createBeatTracker() {
     challenger = 0;
     challengeCount = 0;
     seedLag = 0;
+    seedDoubt = 0;
+    // The range is NOT reset: it describes the track about to play, and the
+    // engine sets it at the track change, which may be before or after this.
     barScore4.fill(0);
     barScore3.fill(0);
     beatEnergy = 0;
@@ -961,5 +1251,5 @@ export function createBeatTracker() {
     return locked;
   }
 
-  return { process, reset, seed, isLocked, out };
+  return { process, reset, seed, setTempoRange, isLocked, out };
 }

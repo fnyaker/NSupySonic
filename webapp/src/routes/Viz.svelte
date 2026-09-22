@@ -14,7 +14,7 @@
   import { onMount, onDestroy } from "svelte";
   import { vizScreenMode, vizScreenQuality, vizPalette, vizIntensity } from "../lib/stores.js";
   import { createSubscriber } from "../lib/viz/bridge.js";
-  import { MODES, levelFor } from "../lib/viz/index.js";
+  import { MODES, levelFor } from "../lib/viz/modes.js";
   import { TIERS } from "../lib/viz/quality.js";
   import Visualizer from "../components/Visualizer.svelte";
   import Icon from "../components/Icon.svelte";

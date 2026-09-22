@@ -49,7 +49,7 @@
     vizShowStyle,
     ecoMode,
   } from "../lib/stores.js";
-  import { effectiveMode, MODE_BY_ID } from "../lib/viz/index.js";
+  import { effectiveMode, MODE_BY_ID } from "../lib/viz/modes.js";
   import { readout } from "../lib/audio/engine.js";
   import { servedStyleLabel } from "../lib/trackverdict.js";
   import Visualizer from "./Visualizer.svelte";

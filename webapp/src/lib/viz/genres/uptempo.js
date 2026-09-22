@@ -14,6 +14,15 @@
 // The fall time is a beat and a half, always — so at 210 BPM a slab falls for
 // 430 ms and at 250 for 360, and the sense of "heavier, faster, harder" comes
 // out of the tempo rather than out of a number in this file.
+//
+// SLABS FALL ON THE MAIN KICKS, NOT ON EVERY KICK. That distinction is the
+// whole reason lib/audio/pattern.js exists. Uptempo is full of rolls — a bar of
+// sixteenths at 230 BPM is fifteen hits in two seconds — and dropping a slab on
+// each of them turns a forge into a hailstorm: the picture saturates, nothing
+// lands, and the one moment that should hit hardest looks like all the others.
+// So the slabs are the main kicks and the rolls are the SPARKS: a roll rattles
+// the die and throws metal without dropping anything new, which is what a roll
+// sounds like. The drop itself gets a slab across the whole frame.
 
 import { clamp, hsl, lerp } from "../util.js";
 import { pool, quad } from "./kit.js";
@@ -22,21 +31,48 @@ export const meta = { label: "Uptempo", trail: 0.52 };
 
 export function create(preset, opts) {
   const FALL = 1.5; // beats from release to impact
-  const slabs = pool(6, () => ({ age: -1, x: 0.5, wide: 0.3, power: 0 }));
+  const slabs = pool(6, () => ({ age: -1, x: 0.5, wide: 0.3, power: 0, drop: false, landed: false }));
   const sparks = pool(20, () => ({ age: -1, x: 0, vx: 0, power: 0 }));
   const SPARK_LIFE = 1.2; // beats
   let ring = 0;
 
   return {
     update(frame, dt, geom, m) {
-      if (m.hit || (m.onBeat && m.kick > 0.28)) {
+      // A MAIN kick drops a slab. Before the musical layer existed this fired
+      // on `m.hit`, which is every kick including every note of every roll.
+      // `m.mainKick` falls back to nothing when the layer is unavailable, so
+      // the grid is the second answer: a beat with a kick on it is a main one.
+      const main = m.mainKick || (!m.rollKick && m.onBeat && m.kick > 0.28);
+      if (main || m.drop) {
         const s = slabs.take();
         s.age = 0;
-        s.power = clamp(0.5 + m.kick * 0.7, 0, 1.3);
-        // Across the frame rather than always in the middle: a forge line, and
-        // it keeps the picture from being one column.
-        s.x = 0.16 + ((m.barPhase * 4) % 1) * 0.68;
-        s.wide = lerp(0.14, 0.32, m.weight) * (0.7 + s.power * 0.5);
+        // `mainPower` is held flat until the next main kick, so it says how
+        // hard THAT kick hit rather than where the envelope happens to be.
+        const power = m.mainPower || m.kick;
+        s.power = clamp(0.5 + power * 0.7, 0, 1.3) * (m.bigKick ? 1.18 : 1);
+        // The drop drops the whole frame at once, and it is the one slab that
+        // is not on the forge line.
+        s.drop = m.drop;
+        s.x = m.drop ? 0.5 : 0.16 + ((m.barPhase * 4) % 1) * 0.68;
+        s.wide = m.drop
+          ? 1.15
+          : lerp(0.14, 0.32, m.weight) * (0.7 + s.power * 0.5) * (m.bigKick ? 1.25 : 1);
+        if (m.drop) s.power = 1.35;
+      }
+      // A ROLL rattles the die instead. Sparks and a brightening, no new metal:
+      // a roll is the same hit repeated, not a new thing arriving each time.
+      if (m.rollKick) {
+        ring = clamp(ring + 0.16 + m.roll * 0.22, 0, 1.4);
+        const n = 1 + Math.round(m.roll * 3);
+        for (let i = 0; i < n; i++) {
+          const k = sparks.take();
+          k.age = 0;
+          // Along the die, following the roll rather than sitting under one
+          // slab: a roll travels.
+          k.x = 0.2 + ((m.beatPhase * Math.max(2, m.rollDiv)) % 1) * 0.6;
+          k.vx = (i / n - 0.5) * lerp(1.6, 4.2, m.chaos) * (0.5 + m.roll);
+          k.power = 0.3 + m.roll * 0.5;
+        }
       }
       slabs.age(dt, m.beat, FALL + 0.6);
 
@@ -48,17 +84,22 @@ export function create(preset, opts) {
         if (s.age >= FALL) {
           s.landed = true;
           ring = clamp(ring + s.power * 0.7, 0, 1.4);
-          const n = 3 + Math.round(m.chaos * 5);
+          // The drop lands across the whole die, so it throws along all of it.
+          const n = (s.drop ? 9 : 3) + Math.round(m.chaos * 5);
           for (let i = 0; i < n; i++) {
             const k = sparks.take();
             k.age = 0;
-            k.x = s.x;
+            k.x = s.drop ? 0.08 + (i / n) * 0.84 : s.x;
             k.vx = (i / n - 0.5) * lerp(1.2, 3.4, m.chaos) * (0.6 + s.power);
             k.power = s.power * (0.4 + (i % 3) / 3);
           }
         }
       }
-      for (const s of slabs.items) if (s.age < 0) s.landed = false;
+      for (const s of slabs.items)
+        if (s.age < 0) {
+          s.landed = false;
+          s.drop = false;
+        }
       sparks.age(dt, m.beat, SPARK_LIFE);
       ring = m.ease(ring, 0, 0.6, dt);
     },

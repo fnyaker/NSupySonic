@@ -1,5 +1,6 @@
 <script>
   import Router from "svelte-spa-router";
+  import { wrap } from "svelte-spa-router/wrap";
   import { onMount } from "svelte";
   import { user, authChecked, nowPlayingOpen, player } from "./lib/stores.js";
   import { api } from "./lib/api.js";
@@ -39,10 +40,20 @@
   import Library from "./routes/Library.svelte";
   import Podcasts from "./routes/Podcasts.svelte";
   import Show from "./routes/Show.svelte";
-  import Settings from "./routes/Settings.svelte";
-  import Genres from "./routes/Genres.svelte";
-  import Viz from "./routes/Viz.svelte";
 
+  // THE HEAVY SCREENS LOAD WHEN THEY ARE OPENED, not at launch.
+  //
+  // Everything else here is what you see in the first second and is worth
+  // having in the main bundle. These three are not: Réglages carries the whole
+  // animation catalogue (eighteen worlds, eight dedicated genre scenes, a
+  // 227-row skin table), the genre studio carries a WebAssembly trainer, and
+  // the projector is a screen most people never open. Together they were about
+  // a third of the bundle every visitor downloaded, parsed and compiled before
+  // the first note played, which is the "everything got slower" this answers.
+  //
+  // Offline still works: the service worker stages every file the build emits,
+  // not only the ones index.html points at (see vite.config.js and public/sw.js
+  // — the manifest exists for exactly this).
   const routes = {
     "/": Home,
     "/search": Search,
@@ -54,9 +65,15 @@
     "/library": Library,
     "/podcasts": Podcasts,
     "/podcast/:id": Show,
-    "/settings": Settings,
-    "/genres": Genres,
+    "/settings": wrap({ asyncComponent: () => import("./routes/Settings.svelte") }),
+    "/genres": wrap({ asyncComponent: () => import("./routes/Genres.svelte") }),
   };
+
+  // The projector renders outside the router (it is a screen, not a route), so
+  // it is loaded by hand when this tab turns out to be one.
+  let VizScreen = null;
+  $: if (isDisplay && !VizScreen)
+    import("./routes/Viz.svelte").then((m) => (VizScreen = m.default));
 
   // The projector window is a SCREEN, not a second copy of the app: no sidebar,
   // no nav, and above all no <Player> — a second player would be a second
@@ -207,7 +224,11 @@
 <svelte:window on:keydown={onKey} />
 
 {#if isDisplay}
-  <Viz />
+  {#if VizScreen}
+    <svelte:component this={VizScreen} />
+  {:else}
+    <div class="loading">…</div>
+  {/if}
 {:else if !$authChecked}
   <div class="loading">…</div>
 {:else if !$user}

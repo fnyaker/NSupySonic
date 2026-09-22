@@ -10,7 +10,7 @@
   // whole claim is that it understands what it is listening to; showing the
   // tempo it locked, the style it settled on and what it made of the kick is
   // how that claim becomes checkable instead of a promise.
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import {
     vizMode,
     vizQuality,
@@ -30,12 +30,10 @@
     isAdmin,
   } from "../lib/stores.js";
   import { push } from "svelte-spa-router";
-  import { MODES, effectiveMode } from "../lib/viz/index.js";
+  import { MODES, effectiveMode } from "../lib/viz/modes.js";
   import { PALETTES } from "../lib/viz/palette.js";
   import { TIERS, autoTier } from "../lib/viz/quality.js";
   import { LEVEL, subscribeFrames, readout } from "../lib/audio/engine.js";
-  import { WORLDS } from "../lib/viz/worlds/index.js";
-  import { SKINS, skinId } from "../lib/viz/skins.js";
   import { LOOKAHEAD_MAX } from "../lib/audio/graph.js";
   import { openProjector } from "../lib/viz/host.js";
   import { FAMILY_LIST } from "../lib/audio/style.js";
@@ -86,8 +84,28 @@
   // What the engine actually resolved: the genre's own skin, then the world
   // that skin dresses. Two sub-genres sharing a world is normal and is
   // exactly what this readout is for — it names the row that was matched.
-  $: skinKey = skinId($readout.style, $readout.archetype);
-  $: worldName = WORLDS[(SKINS[skinKey] || {}).world]?.label || "—";
+  // The animation catalogue — eighteen worlds and 227 skin rows, about 180 kB
+  // of source — is loaded ON DEMAND, purely to name the world the engine
+  // resolved. Importing it statically made this settings panel a static
+  // dependency of the catalogue, which put the whole thing back in the main
+  // bundle even though the scenes themselves are code-split: Rollup hoists a
+  // module two chunks share into their common parent, and that parent is the
+  // entry. One readout line is not worth a third of a megabyte at launch.
+  let catalogue = null;
+  onMount(async () => {
+    try {
+      const [worlds, skins] = await Promise.all([
+        import("../lib/viz/worlds/catalogue.js"),
+        import("../lib/viz/skins.js"),
+      ]);
+      catalogue = { WORLDS: worlds.WORLD_META, SKINS: skins.SKINS, skinId: skins.skinId };
+    } catch {
+      /* offline mid-deploy: the readout says "—", everything else still works */
+    }
+  });
+  $: worldName = catalogue
+    ? catalogue.WORLDS[(catalogue.SKINS[catalogue.skinId($readout.style, $readout.archetype)] || {}).world]?.label || "—"
+    : "—";
 </script>
 
 <section class="card">
