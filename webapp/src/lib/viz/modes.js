@@ -42,6 +42,15 @@ export const MODES = [
     fullBleed: true,
   },
   {
+    id: "scope",
+    label: "Oscilloscope",
+    hint:
+      "Le signal lui-même, une trace par canal, déclenchée comme sur un vrai " +
+      "oscilloscope. La précision suit le niveau de détail.",
+    rhythm: false,
+    fullBleed: true,
+  },
+  {
     id: "aurora",
     label: "Aurore",
     hint: "Rubans lents. L'option calme, et la plus légère en plein écran.",
@@ -78,4 +87,13 @@ export function levelFor(mode) {
   if (mode === "smart") return SMART;
   if (mode === "pulse") return RHYTHM;
   return SPECTRUM;
+}
+
+// Which modes need the RAW SAMPLES, per channel. Orthogonal to the level above:
+// the scope wants the waveform and none of the analysis ladder, and everything
+// else wants the ladder and none of the waveform. Kept here, with the rest of
+// the registry, so a view can decide what to subscribe to without importing a
+// scene — which is this file's whole reason for existing.
+export function needsWave(mode) {
+  return mode === "scope";
 }

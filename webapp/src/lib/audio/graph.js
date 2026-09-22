@@ -582,6 +582,153 @@ export function getContext() {
   return ctx;
 }
 
+// --- the stereo scope tap ---------------------------------------------------
+//
+// The two analysers above are USELESS for an oscilloscope, and not by a little:
+// an AnalyserNode downmixes whatever it is fed to mono before it measures
+// anything. The entire point of two traces is that the two channels are NOT the
+// same signal — a wide pad, a hard-panned stab, a mono bass under a stereo lead
+// — and a summed reading cannot say any of that. So the scope gets its own tap:
+// a ChannelSplitter after the output and one analyser per channel, read with
+// getFloatTimeDomainData rather than getFloatFrequencyData.
+//
+// It taps `outputNode`, BEFORE the look-ahead delay, exactly like the spectrum
+// analysers: the scope has to be drawing the same instant of audio the rest of
+// the engine is reading, or a scene showing both would show them a third of a
+// second apart.
+//
+// REFCOUNTED and built on demand, like everything else in this file. Two more
+// analysers copy every render quantum into their ring buffers whether or not
+// anybody reads them, and a session that never opens the scope should never pay
+// for that. `requestScope` / `releaseScope` are the pair; the engine holds the
+// only reference.
+let scopeSplitter = null;
+let scopeAnL = null;
+let scopeAnR = null;
+let scopeRefs = 0;
+let scopeWant = 4096; // the fftSize asked for, before the graph exists
+// The buffers live here rather than in the caller: they have to match the
+// analysers' fftSize, which this file owns, and there is exactly one reader.
+const scopeOut = { left: null, right: null, size: 0, sampleRate: 48000 };
+
+// An AnalyserNode's time-domain buffer is exactly `fftSize` samples long, and
+// fftSize is a power of two in [32, 32768].
+const SCOPE_MIN = 1024;
+const SCOPE_MAX = 32768;
+function scopePow2(n) {
+  let v = SCOPE_MIN;
+  while (v < n && v < SCOPE_MAX) v *= 2;
+  return v;
+}
+
+function buildScope() {
+  if (scopeAnL || !ensureGraph()) return;
+  try {
+    // A ChannelSplitter's channelCount is fixed at its output count and its
+    // mode at "explicit", so a MONO source is up-mixed rather than leaving
+    // output 1 dead: a mono track shows two identical traces, which is what a
+    // real scope with both probes on one signal shows — not one trace and a
+    // flat line.
+    scopeSplitter = ctx.createChannelSplitter(2);
+    scopeAnL = ctx.createAnalyser();
+    scopeAnR = ctx.createAnalyser();
+    for (const a of [scopeAnL, scopeAnR]) {
+      a.fftSize = scopeWant;
+      // Smoothing is an IIR over successive FFT frames; it does not touch
+      // getFloatTimeDomainData at all. Kept at 0 for the same reason as the
+      // others: nothing here wants the analyser's own opinion.
+      a.smoothingTimeConstant = 0;
+    }
+    outputNode.connect(scopeSplitter);
+    scopeSplitter.connect(scopeAnL, 0);
+    scopeSplitter.connect(scopeAnR, 1);
+    allocScope();
+  } catch {
+    teardownScope();
+  }
+}
+
+function allocScope() {
+  const n = scopeAnL ? scopeAnL.fftSize : 0;
+  if (!n) return;
+  if (!scopeOut.left || scopeOut.left.length !== n) {
+    scopeOut.left = new Float32Array(n);
+    scopeOut.right = new Float32Array(n);
+  }
+  scopeOut.sampleRate = ctx ? ctx.sampleRate : 48000;
+}
+
+function teardownScope() {
+  // The connection INTO the splitter belongs to `outputNode`, so the splitter
+  // disconnecting itself only drops its own outputs and leaves the output node
+  // still feeding it. Opening and closing the scope a few times would then
+  // leave a chain of splitters hanging off it, each one still being rendered
+  // into. Drop it from the source side first.
+  try {
+    if (scopeSplitter) outputNode?.disconnect(scopeSplitter);
+  } catch {
+    /* already gone */
+  }
+  for (const n of [scopeSplitter, scopeAnL, scopeAnR]) {
+    try {
+      n?.disconnect();
+    } catch {
+      /* ignore */
+    }
+  }
+  scopeSplitter = scopeAnL = scopeAnR = null;
+  scopeOut.left = scopeOut.right = null;
+  scopeOut.size = 0;
+}
+
+/**
+ * Turn the per-channel time-domain tap on and ask for at least `samples` of
+ * history (rounded up to a power of two). Refcounted — pair every call with
+ * `releaseScope`. Raising the window while it is already running is free: an
+ * analyser's fftSize can be reassigned in place.
+ */
+export function requestScope(samples = 4096) {
+  scopeRefs++;
+  setScopeWindow(samples);
+  if (!scopeAnL) buildScope();
+  requestAnalyser();
+}
+
+export function releaseScope() {
+  scopeRefs = Math.max(0, scopeRefs - 1);
+  if (!scopeRefs) teardownScope();
+}
+
+/** Grow (or shrink) the tap's window. No-op when nothing is tapping. */
+export function setScopeWindow(samples) {
+  const want = scopePow2(Math.max(SCOPE_MIN, +samples || 0));
+  if (want === scopeWant) return;
+  scopeWant = want;
+  if (!scopeAnL) return;
+  try {
+    scopeAnL.fftSize = want;
+    scopeAnR.fftSize = want;
+    allocScope();
+  } catch {
+    /* an engine that refused the size keeps the one it had */
+  }
+}
+
+/**
+ * The most recent `fftSize` samples of each channel, oldest first.
+ *
+ * Returns a SHARED object whose arrays are overwritten on every call — read it
+ * inside the frame, exactly like the engine's own frame object. Null when
+ * nothing is tapping yet (no graph, or the scene is not on screen).
+ */
+export function readScope() {
+  if (!scopeAnL || !scopeAnR || !scopeOut.left) return null;
+  scopeAnL.getFloatTimeDomainData(scopeOut.left);
+  scopeAnR.getFloatTimeDomainData(scopeOut.right);
+  scopeOut.size = scopeOut.left.length;
+  return scopeOut;
+}
+
 // How far (seconds) the analysers currently run ahead of the speakers.
 export function lookaheadSeconds() {
   return lookaheadNode ? lookaheadNode.delayTime.value : 0;

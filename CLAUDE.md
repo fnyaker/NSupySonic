@@ -967,13 +967,99 @@ through and change back at the drop. The classifier's adaptation rate is therefo
 `dynamics²`: at half level it only slows a little, at a twentieth it all but freezes and holds what
 it knows until there is something to form an opinion from.
 
-**Animations** (`webapp/src/lib/viz/`): a scene registry (`off`, `bars`, `pulse`, `aurora`, `smart`),
+**Animations** (`webapp/src/lib/viz/`): a scene registry (`off`, `bars`, `pulse`, `scope`, `aurora`,
+`smart`),
 a palette whose SOURCE the user picks (cover art / the spectrum itself / fixed schemes), and quality
 tiers that `auto`-resolve from the device and **step down on their own** when a frame overruns its
 budget. `Visualizer.svelte` hosts the canvas: `scene.update()` runs on every analysis frame (~94 Hz,
 so a beat is never missed) and `scene.draw()` on rAF under the user's frame cap — the two rates are
 separate on purpose. Réglages → Animations configures all of it around a live preview and a readout
 of what the engine currently believes.
+
+**The oscilloscope** (`lib/viz/scenes/scope.js`, `scope` in the registry) is the one scene that draws the music rather than
+something *about* it, and that changes what "good" means: a scope is only worth looking at if it is
+STABLE and HONEST. Four things carry that, and each was measured.
+
+- **IT IS TRIGGERED.** Drawing the newest N samples every frame makes the waveform slide sideways at
+  the difference between the frame rate and the music's own period — unreadable within a second.
+  Each frame hunts backwards for the last rising zero crossing and starts its window there.
+  Measured on a sustained tone, the trace moves **0.007 px a frame triggered against 86.5 px
+  free-running**.
+- **The trigger is LOW-PASSED** (one pole at 320 Hz), which is what makes it lock to the music
+  instead of to the cymbals: a bright master's raw zero crossings are dominated by a top end that
+  has no stable period at all. Same idea as a scope's HF-reject coupling. The gate is a Schmitt one
+  whose hysteresis scales with the trigger signal's own weight, so it is not a number that suits one
+  master.
+- **ONE TIMEBASE FOR BOTH CHANNELS.** The trigger runs on the mono sum and its offset is applied to
+  both traces, because the whole point of two traces is reading one against the other — a
+  hard-panned stab, a mono bass under a stereo lead, a phase problem. Two independent triggers would
+  slide the channels against each other and destroy the only thing they are there to show.
+- **The tap is PER CHANNEL, and it had to be new.** An `AnalyserNode` downmixes to mono before it
+  measures anything, so the engine's two existing analysers cannot answer this at all.
+  `graph.js#requestScope` adds a `ChannelSplitter` after the output with one analyser per channel,
+  read with `getFloatTimeDomainData`. It taps BEFORE the look-ahead delay like the others (both
+  screens must draw the same instant), it is **refcounted and built on demand** — two analysers copy
+  every render quantum into their ring buffers whether or not anyone reads them — and a mono source
+  is up-mixed rather than left with a dead second output, so it shows two identical traces, which is
+  what a real scope with both probes on one signal shows.
+
+**PRECISION is the quality setting; the TIMEBASE is not.** Every tier shows the same ~42 ms slice,
+because eight times as much waveform at ultra would not be more precision, it would be an unreadable
+picture. What the tier moves (`scope` in `quality.js`) is how much of that slice survives to the
+screen: the trigger's search room (25 ms → 250 ms, and more of it is strictly more stable — it is
+what still finds an edge under a held pad), the column ceiling (**256 / 512 / 2048 / 4044** columns
+measured on a 4K-wide lane), per-column **min/max** instead of peak-preserving decimation, and the
+sub-sample trigger. That last one is where the trap was: `exact` takes min/max over the whole samples
+in each column, and `ceil()` rounded the fractional trigger straight back off, so `fine` did nothing
+until the column's **fractional ends** were read by interpolation too. That is now the entire
+difference between the tiers that interpolate the trigger and the tiers that do not — **1.03 px of
+frame-to-frame drift against 0.007 px**, a factor of 158 — and it closes the hairline gap between one
+column and the next for free.
+
+Everything else follows the house rules. The **auto-range compresses rather than normalises**
+(`gain = (target/ref)^0.6`): raising a quiet passage to full height would throw away the one thing a
+waveform is best at showing, so 20 dB down draws at 40% of the loud part instead of 10% — visibly
+quieter, never a dead line. It is **shared between the channels**, or a mix that is louder on one
+side would look centred. And its reference is deliberately **not the peak**: a peak envelope is a
+scale set by the loudest instant and held there, which measured out at a reference of 0.85 while most
+windows held 0.09 and drew the trace at six per cent of its lane — honest, unreadable. A **slow
+attack** (0.35 s) fixes it with the envelope that already existed: a 0.15 s kick can only pull it
+part of the way up, so the scale lands on what the music spends its time at (measured, 0.53 of full
+deflection on average) and the transients clip to the rails, which is what a scope does and what they
+should look like. The phosphor is a **time constant**, and the stroke alphas are multiplied by the
+wash they settle against (steady state is `alpha/wash` on a trace that redraws in the same place), so
+persistence and exposure are identical at a 30 fps cap and at 144. The two lanes take the **free
+strips around the artwork** — above and below it, or beside it — the same answer aurora gives its
+ribbons and for the same reason.
+
+**The beam does not dim with the tier, and that is the one place this scene parts company with the
+others.** Their `preset.glow` is a brightness ladder (0.45 at low against 1.25 at ultra) because what
+it scales is atmosphere; here it would scale the SIGNAL, and at 0.45 with no post pass behind it
+(`POST.low` is null) the trace was very nearly invisible. So `glow` is read as the halo budget it
+really is — the part the bloom duplicates anyway — floored, and the core and the graticule are the
+same at every tier. The beam does get **wider as the columns get coarser** (by the square root of the
+ratio): the same alpha laid along 256 long diagonal segments puts far less ink on any one pixel than
+along 1548 short ones, so a low tier drew a trace that was there and could not be seen — and a coarse
+trace *should* read as a fatter, softer beam, which is exactly what a scope with less resolution
+looks like.
+
+**Two settings, in Réglages → Animations, shown when the scope is the scene on either screen**:
+the **orientation** (two bands stacked, or two columns side by side) and how the **two channels are
+coloured** (the palette's two ends, one hue, or the hue walking along the trace exactly as it walks
+across the bars). Both are a LEAN on the palette SOURCE the user already picked, never a replacement,
+and both are pushed into the live scene rather than rebuilding it — flipping the orientation should
+move the lanes, not restart a trigger lock and an auto-range that took a second to settle.
+
+**The raw samples are not an analysis LEVEL, they are orthogonal to all three.** A scope wants the
+waveform and none of the ladder; a smart scene wants the whole ladder and no waveform. So
+`subscribeFrames(fn, level, { wave: samples })` asks for them per subscriber and the engine takes the
+largest window anyone wants, exactly as it takes the deepest level — two scopes on screen share one
+splitter. On the projector the window crosses the channel **whole**, as Int16: a waveform reduced
+before it crosses is one the projector cannot trigger. It is strictly opt-in and sized by the VIEWER
+(`wv` on its hello), so a projector on any other scene still costs the ~800 bytes a frame it always
+did and one on the scope costs up to 32 kB — a memcpy inside one browser process. A viewer that does
+not ask is sent nothing; a publisher that cannot answer leaves the projector's scope with no probe on
+it, drawing its graticule and a flat line, which is the truth rather than a broken picture.
 
 **A scene draws on the FRAME, never on `min(w, h)`** (`lib/viz/geometry.js`). Building everything
 around an inscribed circle produced the same fault twice: on a 16:9 beamer a third of the picture
@@ -1097,7 +1183,15 @@ lands behind it, that every family in style.js has a skin, that thirteen named g
 their own world AND draw in measurably different places (an 8×8 ink histogram), that a change of
 genre is a dissolve rather than a cut, and that **eleven pairs sharing a world separate on the shape
 switch alone** — both sides painted with the SAME look vector and archetype, so the classifier is
-telling the two worlds an identical story and only the skin is left. `vinyl` is deliberately absent
+telling the two worlds an identical story and only the skin is left. The recorder tags every point with the compositing mode it was drawn
+under, which is what lets the oscilloscope's tests measure its TRACE (the only thing it draws
+additively) apart from the graticule it is drawn on — otherwise a scope that drew its face and
+nothing else would pass the frame-coverage tests. On that separation they pin the trace against
+real samples: that it deflects with the signal and goes flat ON the zero line in silence rather
+than blanking, that the right channel reads 1.26x the left's mean deflection on material panned
+that way (a scope fed one summed signal reads exactly 1.00), that the trigger holds a steady tone
+still, that the column ladder climbs with the tier and the sub-sample trigger is worth a factor of
+158 on its own, and that both orientations route around the cover. `vinyl` is deliberately absent
 from that list: its motif is one disc filling the frame, so a tonearm or a ring of hi-hat spokes
 cannot move the footprint an 8×8 histogram measures, and boom bap against trap is pinned on ink
 VOLUME instead. Fitting the spatial threshold to the pair it cannot judge would have cost the other

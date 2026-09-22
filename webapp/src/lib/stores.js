@@ -136,6 +136,15 @@ export const vizFps = persisted("viz.fps", 60);
 // Let a scene paint the whole background of the full-screen player rather than
 // only its own strip.
 export const vizFullBleed = persisted("viz.fullBleed", true);
+// The oscilloscope's own two settings, shared by the player and the projector
+// (the SCENE is per screen; how the instrument is laid out and coloured is a
+// preference about the instrument, not about the screen it is on).
+// "horizontal" = two bands stacked · "vertical" = two columns side by side.
+export const vizScopeOrientation = persisted("viz.scope.orientation", "horizontal");
+// How the two channels are coloured, on top of whatever palette SOURCE is
+// picked above: "duo" (the palette's two ends), "mono", "sweep" (the hue walks
+// along the trace, exactly as it walks across the bars).
+export const vizScopeColour = persisted("viz.scope.colour", "duo");
 // The separate projector window keeps its own scene + effort, because a big
 // screen wants a different answer from a phone.
 export const vizScreenMode = persisted("viz.screen.mode", "smart");

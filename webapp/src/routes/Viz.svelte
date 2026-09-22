@@ -12,10 +12,17 @@
   // the animation, so the title card and the controls fade out a few seconds
   // after the last pointer movement and come back on the next one.
   import { onMount, onDestroy } from "svelte";
-  import { vizScreenMode, vizScreenQuality, vizPalette, vizIntensity } from "../lib/stores.js";
+  import {
+    vizScreenMode,
+    vizScreenQuality,
+    vizPalette,
+    vizIntensity,
+    vizScopeOrientation,
+    vizScopeColour,
+  } from "../lib/stores.js";
   import { createSubscriber } from "../lib/viz/bridge.js";
-  import { MODES, levelFor } from "../lib/viz/modes.js";
-  import { TIERS } from "../lib/viz/quality.js";
+  import { MODES, levelFor, needsWave } from "../lib/viz/modes.js";
+  import { TIERS, resolveTier, tierPreset } from "../lib/viz/quality.js";
   import Visualizer from "../components/Visualizer.svelte";
   import Icon from "../components/Icon.svelte";
 
@@ -69,7 +76,14 @@
   // The projector picks its own scene, so it also decides its own analysis
   // needs — and tells the playing tab, which runs the engine at the most
   // demanding of the two. Changing the scene here re-announces at once.
-  $: sub?.setLevel(levelFor($vizScreenMode));
+  //
+  // The oscilloscope needs one thing more: the raw samples, at ITS tier's
+  // trigger window. The playing tab has no idea what is on this screen, so this
+  // is the only place that number can come from.
+  $: screenWave = needsWave($vizScreenMode)
+    ? tierPreset(resolveTier($vizScreenQuality)).scope?.buffer || 4096
+    : 0;
+  $: sub?.setLevel(levelFor($vizScreenMode), screenWave);
 
   onMount(() => {
     sub = createSubscriber(
@@ -85,7 +99,10 @@
         playing = st.playing;
         loaded = st.loaded;
       },
-      levelFor($vizScreenMode)
+      levelFor($vizScreenMode),
+      needsWave($vizScreenMode)
+        ? tierPreset(resolveTier($vizScreenQuality)).scope?.buffer || 4096
+        : 0
     );
     supported = sub.supported;
     showUI();
@@ -131,6 +148,8 @@
     external
     paused={!playing}
     coverRgb={meta.rgb}
+    scopeOrientation={$vizScopeOrientation}
+    scopeColour={$vizScopeColour}
   />
 
   {#if !supported}

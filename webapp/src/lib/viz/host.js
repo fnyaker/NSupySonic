@@ -22,6 +22,10 @@ let unsub = null;
 // "the most demanding of the two decides" needs no arbitration here — one
 // subscription per consumer, and the engine already maxes them.
 let wantLevel = LEVEL.SMART;
+// ...and the same for the raw samples, which are orthogonal to the level: a
+// projector showing the oscilloscope wants the waveform and none of the ladder,
+// so it asks for the two separately.
+let wantWave = 0;
 let stopStores = [];
 let pruneTimer = null;
 
@@ -61,7 +65,7 @@ function sendMeta() {
 function syncEngine() {
   const want = !!pub && pub.viewers > 0 && get(playing);
   if (want && !unsub) {
-    unsub = subscribeFrames((f) => pub.send(f), wantLevel);
+    unsub = subscribeFrames((f) => pub.send(f), wantLevel, { wave: wantWave });
     sendMeta();
   } else if (!want && unsub) {
     unsub();
@@ -69,11 +73,13 @@ function syncEngine() {
   }
 }
 
-/** The projector changed what it needs: re-subscribe at the new level. */
-function setLevel(lv) {
+/** The projector changed what it needs: re-subscribe at the new level/window. */
+function setNeeds(lv, wv) {
   const next = Number.isFinite(lv) ? lv : LEVEL.SMART;
-  if (next === wantLevel) return;
+  const wave = Math.max(0, wv | 0);
+  if (next === wantLevel && wave === wantWave) return;
   wantLevel = next;
+  wantWave = wave;
   if (unsub) {
     unsub();
     unsub = null;
@@ -89,8 +95,8 @@ function detach() {
 export function initVizHost() {
   if (pub) return;
   pub = createPublisher({
-    onViewers(count, level) {
-      setLevel(level);
+    onViewers(count, level, wave) {
+      setNeeds(level, wave);
       syncEngine();
       void count;
     },
