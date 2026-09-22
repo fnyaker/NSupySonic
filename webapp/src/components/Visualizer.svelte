@@ -112,9 +112,31 @@
     scene.update(f, f.dt, geometry.out);
   }
 
+  // The scene MODULE is fetched on demand (lib/viz/index.js), so building one
+  // is asynchronous and the mode can change again while it is in flight. A
+  // token per build is what keeps a late arrival from replacing a newer scene:
+  // switching modes twice quickly used to be a race with no referee.
+  let sceneToken = 0;
   function buildScene() {
-    scene = createScene(mode, { preset, layout, intensity, reducedMotion: reduced });
-    if (scene && cssW) scene.resize(cssW, cssH, preset, geometry.out);
+    const token = ++sceneToken;
+    const wanted = mode;
+    const p = createScene(wanted, { preset, layout, intensity, reducedMotion: reduced });
+    if (!p) {
+      scene = null;
+      return;
+    }
+    p.then((built) => {
+      // Stale: a newer build started, or the component went away.
+      if (token !== sceneToken || !built) return;
+      scene = built;
+      if (cssW) scene.resize(cssW, cssH, preset, geometry.out);
+      scene.setOptions?.({ intensity, reducedMotion: reduced });
+    }).catch(() => {
+      // The chunk could not be fetched (offline mid-deploy, a failed update).
+      // Leave the canvas empty rather than throwing: the next mode change, or
+      // the next launch, tries again.
+      if (token === sceneToken) scene = null;
+    });
   }
 
   // The artwork's box, in canvas coordinates. Measured rather than assumed, and
@@ -279,6 +301,10 @@
     clearTimeout(idleTimer);
     stopLoop();
     ro?.disconnect();
+    // Invalidate any scene still being fetched, so it cannot arrive after the
+    // component has gone and hold the whole module graph alive.
+    sceneToken++;
+    scene = null;
   });
 
   // Rebuild only for the three things that change a scene's SHAPE. Intensity

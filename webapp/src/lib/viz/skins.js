@@ -64,7 +64,10 @@
 // handed (an id, a French label, a spelling with spaces or hyphens) before
 // looking it up.
 
-import { WORLDS } from "./worlds/index.js";
+// The catalogue, NOT the registry: this file only needs to know that a world
+// id is real, and importing the registry would drag all eighteen scene modules
+// in behind it (see worlds/catalogue.js).
+import { WORLD_META } from "./worlds/catalogue.js";
 
 // --- the catalogue ----------------------------------------------------------
 export const SKINS = {
@@ -493,7 +496,7 @@ export function skinFor(name, archetype = "") {
   const s = (id && SKINS[id]) || EMPTY;
   // A skin naming a world that does not exist would render nothing at all,
   // which is a much worse failure than rendering the wrong one.
-  return WORLDS[s.world] ? s : { ...s, world: "bloom" };
+  return WORLD_META[s.world] ? s : { ...s, world: "bloom" };
 }
 
 /** How many genres the animation engine can dress differently. */

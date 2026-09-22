@@ -74,46 +74,34 @@ import { createCarnivalWorld } from "./carnival.js";
 import { createPixelsWorld } from "./pixels.js";
 import { createOceanWorld } from "./ocean.js";
 import { createNeonWorld } from "./neon.js";
+import { WORLD_META, worldFor } from "./catalogue.js";
 
-// `trail` is how much of the previous frame each world keeps: the compositor
-// washes with it, so a world states its own smear rather than inheriting one
-// tuned for somebody else's motif.
+// The registry: each world's metadata (./catalogue.js) plus the factory that
+// draws it. Importing THIS file pulls in all eighteen scene modules, which is
+// why anything that only needs a name or a trail imports the catalogue instead.
 export const WORLDS = {
-  tunnel: { label: "Corridor", trail: 0.42, make: createTunnelWorld },
-  shatter: { label: "Éclats", trail: 0.55, make: createShatterWorld },
-  hardbounce: { label: "Rebond", trail: 0.5, make: createHardbounceWorld },
-  kaleido: { label: "Kaléidoscope", trail: 0.34, make: createKaleidoWorld },
-  starfield: { label: "Champ d'étoiles", trail: 0.3, make: createStarfieldWorld },
-  breakgrid: { label: "Découpe", trail: 0.6, make: createBreakgridWorld },
-  wobble: { label: "Wobble", trail: 0.5, make: createWobbleWorld },
-  vinyl: { label: "Vinyle", trail: 0.45, make: createVinylWorld },
-  stagelights: { label: "Projecteurs", trail: 0.4, make: createStagelightsWorld },
-  horizon: { label: "Horizon", trail: 1, make: createHorizonWorld },
-  bloom: { label: "Éclosion", trail: 0.4, make: createBloomWorld },
-  smoke: { label: "Fumée", trail: 0.18, make: createSmokeWorld },
-  nebula: { label: "Nébuleuse", trail: 0.12, make: createNebulaWorld },
-  cathedral: { label: "Nef", trail: 0.16, make: createCathedralWorld },
-  carnival: { label: "Carnaval", trail: 0.3, make: createCarnivalWorld },
-  pixels: { label: "Pixels", trail: 0.5, make: createPixelsWorld },
-  ocean: { label: "Océan", trail: 0.14, make: createOceanWorld },
-  neon: { label: "Néon", trail: 0.28, make: createNeonWorld },
+  tunnel: { ...WORLD_META.tunnel, make: createTunnelWorld },
+  shatter: { ...WORLD_META.shatter, make: createShatterWorld },
+  hardbounce: { ...WORLD_META.hardbounce, make: createHardbounceWorld },
+  kaleido: { ...WORLD_META.kaleido, make: createKaleidoWorld },
+  starfield: { ...WORLD_META.starfield, make: createStarfieldWorld },
+  breakgrid: { ...WORLD_META.breakgrid, make: createBreakgridWorld },
+  wobble: { ...WORLD_META.wobble, make: createWobbleWorld },
+  vinyl: { ...WORLD_META.vinyl, make: createVinylWorld },
+  stagelights: { ...WORLD_META.stagelights, make: createStagelightsWorld },
+  horizon: { ...WORLD_META.horizon, make: createHorizonWorld },
+  bloom: { ...WORLD_META.bloom, make: createBloomWorld },
+  smoke: { ...WORLD_META.smoke, make: createSmokeWorld },
+  nebula: { ...WORLD_META.nebula, make: createNebulaWorld },
+  cathedral: { ...WORLD_META.cathedral, make: createCathedralWorld },
+  carnival: { ...WORLD_META.carnival, make: createCarnivalWorld },
+  pixels: { ...WORLD_META.pixels, make: createPixelsWorld },
+  ocean: { ...WORLD_META.ocean, make: createOceanWorld },
+  neon: { ...WORLD_META.neon, make: createNeonWorld },
 };
 
-// When nothing names a genre at all — the first seconds of a track, or a device
-// that never reached the smart level — the archetype is still a better guess
-// than one fixed default. Genre → world is decided by `lib/viz/skins.js`, which
-// also carries each genre's parameters; this is only the floor under it.
-const ARCHETYPE_WORLD = {
-  sustain: "nebula",
-  voice: "bloom",
-  groove: "tunnel",
-  hard: "hardbounce",
-  rock: "stagelights",
-};
 
-export function worldFor(archetype) {
-  return ARCHETYPE_WORLD[archetype] || "bloom";
-}
+export { WORLD_META, worldFor };
 
 export function makeWorld(id, preset, opts, skin = {}) {
   const def = WORLDS[id] || WORLDS.bloom;

@@ -58,8 +58,12 @@ from ..db import GenreTag, Track, TrackAnalysis, now
 
 logger = logging.getLogger(__name__)
 
-# Bump to re-measure everything: a stored row whose version is older is stale.
-ANALYSIS_VERSION = 1
+# Bump to re-measure everything: a stored row whose version is older is stale,
+# so `deezer analyze` (and the Étiquetage button) measure it again rather than
+# skip it. Bump it whenever a stored verdict would come out differently today.
+#   2  the published tempo's octave is cross-checked against the file, and
+#      bpm_source records where the TEMPO came from rather than the style.
+ANALYSIS_VERSION = 2
 
 # Never analyse more than this much of a file. Ten minutes is far more than any
 # verdict needs, and it is what stops a two-hour DJ set costing two hours of
@@ -915,6 +919,43 @@ def _deezer_bpm(provider, track):
     return bpm if MIN_BPM <= bpm <= MAX_BPM else None
 
 
+# How far two readings may differ and still be the same tempo. Six per cent is
+# about a beat of drift across a bar, which is where two figures stop being one
+# tempo measured twice.
+_SAME = 0.06
+# ...and how sure the file has to be before it may move Deezer's octave. High:
+# Deezer is right far more often than not, and the cost of moving a correct
+# figure is a whole track animated at the wrong speed.
+_OCTAVE_CONF = 0.55
+
+
+def _reconcile_octave(published, measured, measured_conf, published_conf, source):
+    """Keep Deezer's figure, but let the file decide its OCTAVE.
+
+    Deezer publishes a bpm per track and it is exact for most of the library —
+    which is why it is taken outright. The exception is the half of this
+    catalogue the rest of the world does not index well: a frenchcore or uptempo
+    track at 200 BPM is very often published at 100, and that figure is then
+    served to every client, seeded into the live tracker as an anchor, and used
+    to pick the genre. One wrong number, everywhere.
+
+    The file is already being measured in the same pass, so the check is free.
+    It is deliberately one-sided and narrow: the measurement may only move the
+    published figure by exactly one octave, only upward (the measurement's own
+    prior leans low, so it halving a correct figure says nothing), and only when
+    it is confident. Everything else keeps Deezer's number, including its
+    precision — this returns the published value doubled, not the measured one,
+    because Deezer's two decimal places are better than an eight-second window's.
+    """
+    if not published or not measured or measured_conf < _OCTAVE_CONF:
+        return published, published_conf, source
+    ratio = measured / published
+    if abs(ratio - 2) < 2 * _SAME and 2 * published <= MAX_BPM:
+        # The file says twice what was published, and means it.
+        return round(published * 2, 2), min(published_conf, 0.8), "deezer+octave"
+    return published, published_conf, source
+
+
 def analyze_track(track: Track, provider=None, force: bool = False):
     """Measure one archived track and store the verdict. Returns the row."""
     return analyze_track_verbose(track, provider, force=force)[0]
@@ -962,13 +1003,21 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         return None, f"spectral pass: {exc}"
 
     bpm = _deezer_bpm(provider, track)
-    source = "deezer" if bpm else None
+    # Where the TEMPO came from, which is not where the style came from. One
+    # variable used to carry both, and since the style is decided later it
+    # simply overwrote this: every row in the table says its bpm came from the
+    # "heuristic", whatever actually produced it.
+    bpm_source = "deezer" if bpm else None
     bpm_conf = 0.95 if bpm else 0.0
     pulse = 0.0
     try:
         measured, conf, pulse = _measure_tempo(track.path)
         if not bpm and measured:
-            bpm, bpm_conf, source = measured, conf, "measured"
+            bpm, bpm_conf, bpm_source = measured, conf, "measured"
+        elif bpm and measured:
+            bpm, bpm_conf, bpm_source = _reconcile_octave(
+                bpm, measured, conf, bpm_conf, bpm_source
+            )
     except Exception as exc:
         # Not fatal: a track with no tempo is still worth a style verdict.
         logger.warning(
@@ -1061,7 +1110,7 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
     row.analyzed = now()
     row.bpm = bpm
     row.bpm_confidence = bpm_conf
-    row.bpm_source = source
+    row.bpm_source = bpm_source
     row.style = style
     row.style_confidence = style_conf
     row.archetype = arch
@@ -1076,7 +1125,7 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         return None, f"database: {exc}"
     logger.info(
         "analysed %s: %s bpm (%s), %s (%.2f) in %.1fs",
-        track.path, bpm, source, style, style_conf, payload["took"],
+        track.path, bpm, bpm_source, style, style_conf, payload["took"],
     )
     return row, None
 

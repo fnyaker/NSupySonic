@@ -15,15 +15,33 @@ const BUILD_ID =
 
 function buildStamp() {
   let outDir = "dist";
+  let assets = [];
   return {
     name: "nsupysonic-build-stamp",
     configResolved(config) {
       outDir = config.build.outDir;
     },
+    // EVERY file the build emitted, not just the ones index.html points at.
+    //
+    // The service worker used to discover a build's assets by scraping href=
+    // and src= out of index.html, which is exactly the set of files Vite
+    // statically preloads — and says nothing about a chunk reached through a
+    // dynamic import(). The moment anything is code-split (a route, the
+    // animation engine), those chunks exist, are needed, and would never be
+    // staged: the app installs, goes offline, and the first navigation to a
+    // split route fails. So the manifest is written here, where the whole
+    // bundle is known, and sw.js stages what it lists.
+    generateBundle(_options, bundle) {
+      assets = Object.keys(bundle)
+        .map((k) => bundle[k].fileName)
+        .filter((f) => f && f !== "index.html")
+        .map((f) => `/app/${f}`)
+        .sort();
+    },
     closeBundle() {
       writeFileSync(
         join(outDir, "version.json"),
-        JSON.stringify({ build: BUILD_ID, version: pkg.version, ts: Date.now() })
+        JSON.stringify({ build: BUILD_ID, version: pkg.version, ts: Date.now(), assets })
       );
     },
   };

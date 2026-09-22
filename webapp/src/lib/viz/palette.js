@@ -14,7 +14,27 @@
 // updated once per analysis frame. Scenes read it; nothing allocates.
 
 import { approach, approachAngle, clamp, mixAngle, rgbToHsl } from "./util.js";
-import { skinFor } from "./skins.js";
+// THE SKIN CATALOGUE IS LOADED ON DEMAND. It is 227 rows and it only affects
+// how far the palette leans toward the genre's own temperament — a subtle
+// thing, and one that cannot matter before a scene is drawing anyway, at which
+// point the scene's own chunk has already pulled this in. Importing it
+// statically made the palette (which every visualizer needs from its first
+// frame) a static dependency of the catalogue, and Rollup then hoisted the
+// catalogue into the entry chunk where everyone paid for it at launch.
+let skinFor = null;
+let skinLoading = null;
+function loadSkins() {
+  if (skinFor || skinLoading) return;
+  skinLoading = import("./skins.js")
+    .then((m) => {
+      skinFor = m.skinFor;
+    })
+    .catch(() => {
+      // Offline mid-deploy: the palette keeps the source the user picked,
+      // un-leaned, which is exactly what it did before skins existed.
+      skinLoading = null;
+    });
+}
 
 export const PALETTES = [
   { id: "cover", label: "Pochette" },
@@ -83,7 +103,10 @@ export function createPalette(mode = "cover") {
     const name = style ? `${style.dominant}|${style.archetype}` : "";
     if (name === lastName) return;
     lastName = name;
-    setSkin(style ? skinFor(style.dominant, style.archetype) : null);
+    if (!skinFor) {
+      loadSkins();
+      setSkin(null);
+    } else setSkin(style ? skinFor(style.dominant, style.archetype) : null);
   }
 
   // The cover's dominant colour, as [r,g,b]. Called when the track changes.

@@ -1,84 +1,64 @@
 // The scene registry: what the user can pick, what each one costs, and how to
 // build it.
+//
+// THE SCENES ARE LOADED ON DEMAND. `createScene` is async and imports the scene
+// module when a scene is actually asked for, which is the first moment anything
+// in here is needed. Before that split the whole animation tree — four scenes,
+// eighteen worlds, eight dedicated genre animations and a 227-row skin
+// catalogue, about a third of a megabyte of source — sat in the main bundle
+// because the now-playing screens import `effectiveMode` from this file. Every
+// launch of the app parsed all of it, including the launches with animations
+// switched off entirely.
+//
+// The registry itself is in `./modes.js`, which imports nothing. Anything that
+// only needs to know which modes exist should import THAT, not this.
 
-import { LEVEL } from "../audio/engine.js";
-import { createBarsScene } from "./scenes/bars.js";
-import { createPulseScene } from "./scenes/pulse.js";
-import { createAuroraScene } from "./scenes/aurora.js";
-import { createSmartScene } from "./scenes/smart.js";
+export { MODES, MODE_BY_ID, effectiveMode, levelFor } from "./modes.js";
 
-export const MODES = [
-  {
-    id: "off",
-    label: "Aucune",
-    hint: "Le lecteur seul, rien d'animé. Aucun coût.",
-    rhythm: false,
-    fullBleed: false,
-  },
-  {
-    id: "bars",
-    label: "Barres",
-    hint: "Le spectre, avec une vraie résolution dans les graves.",
-    rhythm: false,
-    fullBleed: false,
-  },
-  {
-    id: "pulse",
-    label: "Pulsations",
-    hint: "Couleurs au tempo, une lobe par bande de fréquence, ondes sur chaque temps.",
-    rhythm: true,
-    fullBleed: true,
-  },
-  {
-    id: "aurora",
-    label: "Aurore",
-    hint: "Rubans lents. L'option calme, et la plus légère en plein écran.",
-    rhythm: false,
-    fullBleed: true,
-  },
-  {
-    id: "smart",
-    label: "Moteur intelligent",
-    hint:
-      "Une animation par genre : corridor pour la techno, éclats pour la frenchcore, " +
-      "kaléidoscope pour la psytrance, vinyle pour le rap, horizon pour la synthwave…",
-    rhythm: true,
-    fullBleed: true,
-  },
-];
+// One promise per mode, so a scene module is fetched once however many views
+// ask for it and a switch back to a mode already used is synchronous-ish.
+const loading = new Map();
 
-export const MODE_BY_ID = new Map(MODES.map((m) => [m.id, m]));
-
-// A mode that needs rhythm analysis while it is switched off would draw nothing
-// but its idle state, which looks broken. Degrade to the nearest mode that
-// works instead of showing a dead canvas. Eco mode overrides everything: it
-// means none, and none is not a scene to degrade to a cheaper one.
-export function effectiveMode(mode, beatDetect, eco = false) {
-  if (eco) return "off";
-  if (!MODE_BY_ID.has(mode)) return "bars";
-  if (beatDetect) return mode;
-  if (mode === "smart") return "aurora";
-  if (mode === "pulse") return "aurora";
-  return mode;
-}
-
-export function levelFor(mode) {
-  if (mode === "smart") return LEVEL.SMART;
-  if (mode === "pulse") return LEVEL.RHYTHM;
-  return LEVEL.SPECTRUM;
-}
-
-export function createScene(mode, opts) {
+function load(mode) {
+  let p = loading.get(mode);
+  if (p) return p;
   switch (mode) {
     case "bars":
-      return createBarsScene(opts);
+      p = import("./scenes/bars.js").then((m) => m.createBarsScene);
+      break;
     case "pulse":
-      return createPulseScene(opts);
+      p = import("./scenes/pulse.js").then((m) => m.createPulseScene);
+      break;
     case "aurora":
-      return createAuroraScene(opts);
+      p = import("./scenes/aurora.js").then((m) => m.createAuroraScene);
+      break;
     case "smart":
-      return createSmartScene(opts);
+      p = import("./scenes/smart.js").then((m) => m.createSmartScene);
+      break;
     default:
       return null;
   }
+  // A failed fetch must not be remembered as a failure for ever — offline, or
+  // mid-deploy, the next attempt should be allowed to work.
+  p.catch(() => loading.delete(mode));
+  loading.set(mode, p);
+  return p;
+}
+
+/**
+ * Build a scene. Returns a PROMISE of one, or null for a mode with no scene.
+ *
+ * Callers must cope with the scene arriving a frame or two late and with the
+ * mode having changed again in the meantime — see components/Visualizer.svelte,
+ * which discards a scene whose mode is no longer the one on screen.
+ */
+export function createScene(mode, opts) {
+  const p = load(mode);
+  return p ? p.then((make) => make(opts)) : null;
+}
+
+/** Start fetching a scene without building it. Fire-and-forget. */
+export function preloadScene(mode) {
+  const p = load(mode);
+  if (p) p.catch(() => {});
 }

@@ -78,6 +78,16 @@ export function createGeometry() {
     hy: 0,
     hw: 0,
     hh: 0,
+    // THE BAND OF FRAME LEFT FREE UNDER THE ARTWORK, which is where anything
+    // drawn as a horizon, a floor, a crowd or a mouth belongs. Several scenes
+    // were each doing this arithmetic themselves and each getting it slightly
+    // wrong in the same direction: they placed the motif's CENTRE clear of the
+    // cover and then let it open, jump or bite upward into it. `floorY` is the
+    // top of that band and `floorH` is how much of it there is, so a scene can
+    // size its motif to the room it actually has. With no artwork the band is
+    // the bottom third of the frame, which is where a floor goes anyway.
+    floorY: 0,
+    floorH: 0,
     nodes: [], // emission points spread over the usable area, strongest first
     place,
     edgeAt,
@@ -201,6 +211,14 @@ export function createGeometry() {
       out.hw = 0;
       out.hh = 0;
       out.hole = 0;
+    }
+
+    if (out.hole > 0) {
+      out.floorY = Math.min(h - 8, out.cy + out.hh);
+      out.floorH = Math.max(8, h - out.floorY);
+    } else {
+      out.floorY = h * 0.66;
+      out.floorH = h * 0.34;
     }
 
     endRx = out.rMax + (out.rx * RING_OUT - out.rMax) * RING_ANISO;

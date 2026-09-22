@@ -115,5 +115,57 @@ class EngineGenresTestCase(unittest.TestCase):
         self.assertGreater(weights["sustain"], 0.6)
 
 
+class PublishedTempoTestCase(unittest.TestCase):
+    """Deezer's bpm is taken outright — except for its octave.
+
+    It is exact for most of the library, which is why it wins. The exception is
+    the half of this catalogue nobody else indexes well: a frenchcore or uptempo
+    track at 200 BPM is very often published at 100, and that one number is then
+    served to every client, seeded into the live beat tracker as an anchor, and
+    used to pick the genre. The file is measured in the same pass anyway, so the
+    cross-check costs nothing.
+    """
+
+    def test_a_confident_file_doubles_a_halved_figure(self):
+        bpm, conf, source = ana._reconcile_octave(100.0, 200.4, 0.8, 0.95, "deezer")
+        self.assertEqual(bpm, 200.0)
+        self.assertEqual(source, "deezer+octave")
+        # ...and says so: the figure is no longer purely Deezer's.
+        self.assertLess(conf, 0.95)
+
+    def test_the_published_precision_is_kept(self):
+        # Deezer's two decimals beat an eight-second window's, so the answer is
+        # the PUBLISHED figure doubled, never the measured one.
+        bpm, _conf, _src = ana._reconcile_octave(101.5, 202.9, 0.9, 0.95, "deezer")
+        self.assertEqual(bpm, 203.0)
+
+    def test_an_unsure_measurement_changes_nothing(self):
+        self.assertEqual(
+            ana._reconcile_octave(100.0, 200.4, 0.3, 0.95, "deezer"),
+            (100.0, 0.95, "deezer"),
+        )
+
+    def test_it_never_halves(self):
+        # The measurement's own prior leans low, so it reading half of a
+        # published figure says nothing about the published figure.
+        self.assertEqual(
+            ana._reconcile_octave(200.0, 100.1, 0.95, 0.95, "deezer"),
+            (200.0, 0.95, "deezer"),
+        )
+
+    def test_it_only_ever_moves_one_octave(self):
+        for measured in (300.5, 133.0, 149.0, 260.0):
+            bpm, _c, src = ana._reconcile_octave(100.0, measured, 0.95, 0.95, "deezer")
+            self.assertEqual(bpm, 100.0, f"{measured} moved the published figure")
+            self.assertEqual(src, "deezer")
+
+    def test_it_stays_inside_the_searchable_range(self):
+        # Doubling 180 is 360, which no tracker on either side can represent.
+        self.assertEqual(
+            ana._reconcile_octave(180.0, 360.0, 0.95, 0.95, "deezer"),
+            (180.0, 0.95, "deezer"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

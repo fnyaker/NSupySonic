@@ -450,9 +450,30 @@ measuring the page being left.
 
 **Offline & versioning** (the SPA is an *install*, not a page — treat it as one):
 - `public/sw.js` serves the shell **cache-first** (an instant launch on any network) and stages a new
-  build on demand: it fetches the new `index.html` + every asset it references and only then
-  publishes the shell, so an interrupted update leaves the previous *complete* build in place. It
-  never touches `/api` or audio.
+  build on demand: it fetches the new `index.html` + every asset **the build manifest lists** and
+  only then publishes the shell, so an interrupted update leaves the previous *complete* build in
+  place. It never touches `/api` or audio. The manifest (`assets` in `dist/version.json`, written by
+  `vite.config.js#buildStamp` from the emitted bundle) is what makes code-splitting safe: scraping
+  `href=`/`src=` out of `index.html` finds only what Vite statically preloads and says nothing about
+  a chunk reached through a dynamic `import()`, so a lazily-loaded route would install, go offline,
+  and then fail the first time somebody opened it. The HTML scrape is kept as the fallback, for an
+  older server whose `version.json` has no `assets`.
+
+**The heavy screens load when they are opened.** Everything on the first screen is in the main
+bundle and worth being there; three things are not, and together they were a third of what every
+visitor downloaded, parsed and compiled before the first note played — which is the "the whole app
+got slower" this answers. **Réglages** carries the animation catalogue, **the genre studio** carries
+a WebAssembly trainer, and **the projector** is a screen most people never open, so all three are
+`wrap({ asyncComponent })` routes. The scene modules are split the same way: `lib/viz/index.js`
+imports a scene on demand and `createScene` returns a PROMISE (a caller must cope with the scene
+arriving late and with the mode having changed again — `Visualizer.svelte` holds a token per build
+for exactly that). Two files exist only to keep the catalogue OFF the critical path:
+`lib/viz/modes.js` is the registry with no scene imports (the now-playing screens were dragging
+eighteen worlds in for two constants) and `lib/viz/worlds/catalogue.js` is each world's name and
+trail without the code that draws it, because `skins.js` only needs to know an id is real. Rollup
+hoists a module two chunks share into their common parent, so ONE static importer left in the main
+graph puts the whole tree back: `palette.js` therefore loads `skins.js` dynamically too. Measured,
+main bundle **656 kB → 450 kB** (223 → 155 kB gzipped), CSS **128 kB → 85 kB**.
 - `lib/appversion.js` is the other half: the bundle's own id (`__APP_BUILD__`, injected by
   `vite.config.js`, also written to `dist/version.json`) is compared with the server's
   (`/app/version.json`, never cached). Different → stage in the background → reload (automatically
@@ -720,11 +741,85 @@ smart). Three things in there are load-bearing:
   how many bins land on each pitch class: an FFT is linear and pitch is logarithmic, so raw energy
   gave flat noise a strongly peaked chroma and it read as a clear melody, exactly backwards.
 
-The kick keeps its fast/slow envelope ratio (a sustained 808 drives both envelopes together and
-fires nothing; a kick on top of it does not), and gains what it had neither of: a **refractory
-window** so a ring-out is not a second hit, and the level gate above. Its reference decays over
-~11 s rather than 1.5 s — the old one was erased by any breakdown, so the first small movement
-afterwards read as a full-strength kick.
+**THE KICK IS FOUR WITNESSES, AND NONE OF THEM IS THE LEVEL.** The detector used to ratio two
+envelopes of the 25-180 Hz band — a 3 ms attack against a 90 ms release — and it failed on exactly
+the music this player exists for. Measured through the full chain on synthesised hardcore (audio →
+`features.js` → `tempo.js`, pinned by `test/synth.mjs` + `test/audio.test.mjs`): techno **1.94
+detections per kick**, frenchcore **2.08**, uptempo **0.40 — sixty per cent missed**, and
+frenchcore under a screech **3.74**. Two assumptions produced all four:
+
+- *It assumed the kick is in the kick band when it lands.* A hardcore, frenchcore or uptempo kick is
+  a pitched sine driven into a distortion chain; it **starts at 190-260 Hz** and sweeps down over
+  the next fifty milliseconds. Measured, the 25-180 Hz band is 4-6 dB **down** at the attack and
+  does not peak until a fifth of a beat later, by which time it is indistinguishable from the
+  previous kick's tail. That is the sixty per cent.
+- *It assumed the level means something.* These masters are limitered flat, so when a transient
+  arrives the limiter pulls the whole mix down to hold the ceiling and the loudest moment in the
+  music reads as a **drop** in every band at once.
+
+So nothing in it is a level. Four witnesses, each a step over the same 26 ms lag, each scale-free:
+**lift** (the 28-420 Hz region's energy step in dB — the whole story for a techno kick in a quiet
+bar, near useless under a limiter), **pitch** (that region's centroid stepping UP, in octaves — the
+fundamental restarting high, the one thing a tail cannot counterfeit because a tail always sweeps
+DOWN), **click** (the beater band's step), and **sub** (the bottom two octaves, which is the only
+witness a pure 808 with no beater and no pitch movement brings). A kick is the best-supported
+COMBINATION: **two witnesses are required**, and one alone is capped below the trigger — a hi-hat
+can be several times louder than any kick in the track and used to clip its way over the threshold
+on the click alone.
+
+**Something must have STRUCK, and it must have struck LOW.** Those are the two halves of the
+decision, and which witness may answer each is not interchangeable. *Struck* is **the beater and
+only the beater**: a bass note swelling back between kicks moves the region's pitch (0.88, because
+it is higher than the last kick's tail) and would convict itself on that alone, while its beater
+witness reads 0.14 — a note that fades in has no transient to put up there. *Low* is either energy
+arriving at the bottom (`lift` or `sub` over 0.8) or, when there is no room left down there,
+**the fundamental restarting high with that beater on it**, which is what a kick over its own
+predecessor's tail looks like. The exception is the kick with no beater at all — an 808, a sine
+bass drum — which convicts on the sub alone, at a bar set far above what a pad's own wobble reaches.
+
+**A CENTROID MEASURED ON AN EMPTY REGION IS NOT A MEASUREMENT**, and that is what convicted a
+hi-hat. The other three witnesses are STEPS in decibels: they measure themselves and read zero when
+nothing is there. The pitch witness is a SHAPE, and the shape of the noise floor is noise — it
+wanders by a third of an octave a frame, which normalises into a witness of 0.61 on a techno track
+whose kicks (their centroid moves DOWN as the bottom fills) never produce one at all. Measured,
+techno with hats on every offbeat fired **2.00 per kick**, the extra one on the hat — which is
+4-16 kHz noise with a 24 dB/octave skirt and puts *nothing* in the kick region: at the offbeat that
+region sat **56 dB** below where this track's kicks put it. Every true kick that relies on the
+restart path sits within **15 dB** of its own track's region level, so the witness is faded out
+between 20 and 36 dB down, and the hat reads 1.00 per kick at any hat level.
+
+**The region is read PER OCTAVE, not per bin.** It spans nearly four octaves (28-420 Hz) and an FFT
+is linear, so a plain mean over its bins gave 210-420 Hz half the vote and 28-56 Hz a twenty-eighth
+— the top of the region, where a kick barely lives, outweighing the bottom, where it does. Measured,
+a correctly low-cut 700 Hz hoover whose only residue is the part sitting above the corner moved the
+plain mean by 15 dB on a bar with no kick in it.
+
+**And every adaptive scale has a floor set from the smallest step a real kick makes.** They were set
+low and it showed on the one material with nothing to divide by: an ambient pad of three detuned
+saws, whose partials beat against each other several times a second, so the bottom two octaves
+wobble by 4.6 dB and the beater band by 2.1 — which, against floors of 4.5 and 4, read as a full sub
+witness (1.02) and half a beater (0.52) and held `kick` at its cap for the whole track. A real
+beater step measured 5.7 dB at the very least and 15-30 dB everywhere else.
+
+The limiter is removed as a **common mode**: the median of eight octave bands'
+steps, believed only when the bands agree to within 5 dB, because a gain change moves every band by
+the same number of decibels and no instrument does. And the gate is a **Schmitt trigger**, not a
+refractory window: a 300 ms hardcore tail and a 60 ms roll sit on the same side of any fixed window,
+so the evidence has to fall back through a release level before another attack counts. Each witness
+scales against a **slowly-rising, slowly-falling** estimate of what this track's kicks weigh, never
+a running maximum — a roll's notes are shortened to fit their subdivision, so they step further than
+the ordinary kicks, and with a maximum one bar of sixteenths raised the bar for the whole phrase and
+took uptempo from 1.00 back down to 0.27. All of it now reads **1.00-1.01 per kick at 9-17 ms
+latency** across sixteen records of real audio from trap to speedcore, with `pattern.mainKick`
+scoring 97-100% precision on them.
+
+**The limit it does have is stated rather than papered over.** A lead whose residue lands inside the
+kick's region, restarting high with an attack on it, is numerically identical to a kick over a
+saturated low end — a 320 Hz stab reads `lift 0.23, pitch 1.00, click 0.95, sub 0.00` and an uptempo
+kick on a full bottom reads `0.23, 1.39, 0.95, 0.00`. Every attempt to separate them on one frame's
+evidence cost real kicks (a sub veto took uptempo from 1.00 to 0.72). It is separated one layer up,
+where the GRID is known: `features.kickHit` is a percussive-attack detector, `pattern.mainKick` is
+the kick answer, and on that exact case it scores **F1 0.99**.
 
 `tempo.js` is a spectral-flux onset function on a fixed 100 Hz grid, an autocorrelation summed over
 harmonics, and a phase-locked loop. Once locked, beats are **predicted**, not detected, so a scene
@@ -754,16 +849,68 @@ got 54 of 74 cases exactly right with 381 tempo jumps between them, this one get
 - a shortlist of candidates is then scored on how well the ODF actually **folds onto each one's
   grid**, normalised by what a window that size would catch from noise — autocorrelation cannot tell
   a tempo from twice that tempo, and a half-empty grid can;
-- the octave is arbitrated by **folding the bass**, as a graded vote held over several estimates with
-  a dead band and a cooldown, asked about **the level the grid is on** rather than about whatever the
-  fresh autocorrelation peaked at. To go *faster* only the bass may answer (an offbeat hi-hat is not
-  a beat); to go *slower* the whole band is asked, or a 140 BPM track with a kick every other beat
-  reports 70;
+- the octave is arbitrated by **two witnesses, and the second one has a veto**. The fold asks a
+  local question (is there anything at the halfway point, in the bass or across the band) and is
+  fooled whenever one beat of the bar is simply louder than the others — measured on uptempo with
+  rolls on the last beat of every other bar, it voted steadily to halve a perfectly correct 240 BPM
+  grid. So `levelScore` asks the global one: does the music actually **fit** that level better, on
+  the same terms every candidate is judged by. The fold PROPOSES and the score DISPOSES — a fold
+  vote toward a level the score says is measurably worse is suppressed outright, while the score
+  can move the grid on its own. Within the fold the old asymmetry stands: to go *faster* only the
+  bass may answer (an offbeat hi-hat is not a beat); to go *slower* the whole band is asked, or a
+  140 BPM track with a kick every other beat reports 70;
 - nothing moves the grid without **persistence**: a candidate that is neither the current tempo nor
-  an octave of it must win five consecutive estimates, and the incumbent carries a bonus. A tempo
-  somebody measured over the whole track (Deezer's `bpm`, via `seed`) stays in play as a prior on
-  every later estimate rather than only as a starting point — beatable, so a wrong figure is still
-  corrected.
+  an octave of it must win five consecutive estimates, and the incumbent carries a bonus.
+- **the local mean's window is longer than a beat**, which a fixed 120 ms is not above ~200 BPM. At
+  240 the beat is 250 ms, so the mean tracked the beat and subtracted most of it: measured, the
+  running tempogram at the TRUE lag fell from 0.364 to 0.084 as the estimators converged, confidence
+  fell with it, and the grid unlocked after ten seconds and re-locked a quarter of the tempo away —
+  with the winner having been correct on every single estimate. It now scales with the grid
+  (`MEAN_BEATS`), still far shorter than the risers and reverb washes it exists to remove;
+- and **two candidates four grid slots apart are the same peak**. A 6% log distance is four whole
+  slots at 120 BPM and barely one and a half at 240, so up there the shoulder of a peak was
+  shortlisted as a rival to the peak itself. That never changed which tempo won, but it collapsed
+  the confidence margin — and confidence under the floor is what UNLOCKS the grid.
+
+**THE SERVED TEMPO IS AN ANCHOR, NOT A HINT.** Somebody measured the whole track; an eight-second
+window deciding it disagrees is the single most common way this tracker was wrong, and the user's
+report of it was exact: *"it tries to overwrite the tempo the server sent it with nothing"*. Three
+things were wrong and all three are fixed:
+
+- **the seed was only applied to an UNLOCKED tracker**, which in practice meant almost never. The
+  verdict comes over the network, behind the audio in the request ladder, so by the time it lands
+  the grid has been locked for seconds — on three seconds of whatever the intro happened to be.
+  Measured on uptempo with the kick on the offbeat: seeded at t=0 it read 220 BPM, seeded at t=4 s
+  it read 110, for the whole track. `seed()` now works at any time; on the seed's level or one or
+  two octaves off it, the level moves and **the phase is kept** (the beats do not shift, only their
+  name), so a late seed cannot make the animation jump.
+- **the seed anchors the OCTAVE, not the tempo.** `levelPrior` — a narrow bell over a floor, used by
+  everything octave-related — all but settles which metrical level the grid runs at, and `octBar`
+  puts a move AWAY from it beyond the vote's reach. But `weightFor`, which picks the winner among
+  candidates, uses the ordinary prior: which tempo it is is not ambiguous in the signal, and a
+  served figure that is simply wrong (117 on a 175 BPM track) has to be overruled by the music.
+  Putting the seed in both made a wrong figure unbeatable, which is the opposite failure and just as
+  bad. A seed the music contradicts at full strength for twenty seconds has its own level moved
+  (`seedDoubt`), so a tempo published at half its real value is corrected by the track rather than
+  by one window of it.
+- **a whole-track measurement is a reason to stay locked.** There is material whose autocorrelation
+  at its own beat is genuinely poor for eight seconds at a time — rolls, a half-time passage, a bar
+  of one held note — and a grid sitting exactly on the server's figure used to lose confidence
+  estimate by estimate until it fell through the floor and re-locked somewhere else. While the grid
+  agrees with the seed, the seed floors the confidence.
+
+**KNOWING THE GENRE IS WHAT SETTLES THE OCTAVE, and nothing else can.** A 250 BPM uptempo track and
+a 125 BPM house track produce the same autocorrelation, at the same lags, in the same proportions;
+no amount of signal processing separates them. What separates them is knowing which record is
+playing, which the engine does know — the server measured the track, or the live classifier named a
+family. `style.js#tempoRangeFor` is that knowledge written down (frenchcore 170-230, uptempo
+170-260, hardtekk 140-180, hardstyle 140-165, dnb 160-180…), `tempo.js#setTempoRange` moves the
+prior's plateau to it, and `engine.js#applyTempoRange` feeds it in from the verdict or, failing
+that, from the live classifier once it is confident. The ranges are deliberately WIDE: they set a
+plateau, not a target, and all they are for is making the octave either side implausible. **A
+missing row is not a bug** — the tracker falls back to the default 90-200 plateau. This is the
+published result on tempo octave errors in electronic music, and it is the one table in the audio
+code an operator might reasonably want to extend.
 
 **And a breakdown is not a tempo change.** With no drums in it the last seconds carry no onsets and
 the autocorrelation is reading a pad; the estimate is skipped entirely (both going into the quiet
@@ -779,6 +926,19 @@ test framework to install, though `npm install` must have run — `test/prefligh
 one line rather than letting node abort five files and report them as five DSP failures, which is
 a trap that has already cost one debugging session) — the wall-clock bug it caught would have made
 the tracker drift with the frame rate.
+
+**`pattern.js` — the MUSICAL reading, above the per-frame one.** `features.js` says "a kick landed
+and it was this hard"; `tempo.js` says "the grid is here"; neither answers the questions an
+animation wants to ask. At 200 BPM a frenchcore roll fires five hits inside one beat, so a scene
+that throws something on every `kickHit` is a strobe — the user's words: *the blocks should fall on
+the drop and on the main kicks, so there has to be a way of telling them apart*. It publishes
+`mainKick` (on the grid, outside a roll) with `mainPower` and `bigKick`, `rollKick` with `roll` and
+`rollDiv` (the subdivision, 2/3/4/6/8/12/16 — a triplet fill and a sixteenth run are different
+pictures), and the arrangement: `drop` (the frame the music comes back after being out long enough
+to be missed), `dropped`, `build`, `breakdown` and `energy`. It is O(1) per frame — **0.5 µs,
+measured, against 49 µs for `features.process`** — allocates nothing after construction, and is
+read through `m.mainKick` / `m.roll` / `m.drop` in `lib/viz/musical.js` like everything else. Its
+four events cross the projector channel **latched**, for the same reason every other event does.
 
 `style.js` reads the kick's shape (attack, decay, click, grit → soft / hard / industrial) and a
 smoothed family vector (techno, hardtekk, zaag, frenchcore, uptempo, pieep, krach, rock, metal,
@@ -827,7 +987,14 @@ cover. Both are answered by two primitives every scene (except `bars`) is writte
   full anisotropy stops reading as a shape and starts reading as a border round the picture.
 - `ringRx/ringRy(t)` — an expanding ring that starts at the artwork's rim and leaves through the
   corners, leaning partway toward the frame's aspect (`RING_ANISO`): fully anisotropic is a squashed
-  oval, fully isotropic never touches the sides of a wide screen while it is still bright.
+  oval, fully isotropic never touches the sides of a wide screen while it is still bright. A
+  receding corridor is the same primitive read backwards, which is what `industrial` uses: built
+  round the centre instead, its far end — where the girders are smallest and densest — landed
+  exactly on the album cover, 36% of the scene's ink.
+- `floorY/floorH` — the band of frame the artwork leaves FREE underneath it (the bottom third when
+  there is none), for anything drawn as a horizon, a floor, a crowd or a mouth. Three scenes were
+  each doing this arithmetic themselves and each getting it wrong in the same direction: they put
+  the motif's *centre* clear of the cover and then let it rise, open or bite back up into it.
 
 The artwork is **measured from the DOM**, never guessed: `Visualizer.svelte` takes an `occluder`
 element (the desktop cover box; the mobile carousel, from which `occluderShape="square"` takes the
@@ -991,9 +1158,25 @@ shared motif with a genre's numbers poured into it: the right answer for the lon
 one for a genre somebody actually listens to, because no parameter turns a bouncing core into a
 sawtooth waveform. `smart.js` prefers a dedicated file whenever the resolved genre has one and falls
 back to the world for everything else, so the catalogue fills in a genre at a time without a flag
-day, and the crossfade does not care which kind it is dissolving between. Eight so far — frenchcore,
-tribecore, raggatek, gabber, speedcore, hardtekk, zaag, uptempo — plus five musical neighbours that
-share a file.
+day, and the crossfade does not care which kind it is dissolving between. Seventeen so far —
+frenchcore, tribecore, raggatek, gabber, speedcore, hardtekk, zaag, uptempo, hardstyle, rawstyle,
+pieep, hardtechno, krach, hardcore, industrial, hardpingpong, germanparty — plus fourteen musical
+neighbours that share a file (`SAME_AS`, kept explicit because "terrorcore is uptempo" is a
+judgement about the music and belongs somewhere a person can disagree with it).
+
+**Every one of them is held to the same three properties the shared worlds are**, which they were
+not before: `viz.test.mjs` now drives each dedicated animation through `smart` and pins that it
+reaches all four edges of a 16:9 frame and keeps three-quarters of its drawing off a centred cover,
+and `musical.test.mjs` pins that it moves materially more at 180 BPM than at 90 and draws a drop
+differently from a breakdown. `SCENES` in that suite is the mode registry — off / bars / pulse /
+aurora / smart — so what `smart` actually draws for most of this library was never being asked. It
+found four scenes putting a quarter to a third of their ink behind the artwork (gabber's crowd,
+rawstyle's mouth, industrial's hall, hardpingpong's rally), one timed in seconds (krach's tear was
+a shove, and a shove travels velocity × time, so at twice the tempo each one moved half as far
+twice as often), and two faults in the benches themselves: the recorder had no `strokeRect`, so
+`industrial` took the suite down rather than being measured, and it recorded a rectangle only by
+its CENTRE, which makes a scene built on centred bars invisible — `hardcore`'s wall of columns, the
+animation of which is their height, scored 0.00 movement at both tempos.
 
 **These genres are not one scene, and the first version of that directory said they were.** Tribe,
 hardtek and raggatek do come out of the European sound-system and teknival world. Everything else
@@ -1116,6 +1299,45 @@ the SPA `dist/`, and `*.har` API captures (which contain real session tokens) ar
 excluded from the Docker build context. Never commit them.
 
 ## Tests
+
+**A TEST EXISTS TO SAY HOW THE THING BEHAVES IN REAL CONDITIONS.** Not to say that there is a test.
+Three perfect frames of a sound nobody has ever recorded prove nothing, because no sound is perfect
+— so a test that draws its input is testing its own drawing, and the bar is: understand the music,
+then simulate it the way it is actually made. This applies to everything in this repository, and
+every claim a test makes should be a MEASURED number written down next to the assertion.
+
+`webapp/npm test` (node --test, no dependency to install) is the SPA's suite. Its audio half drives
+the **whole analysis chain** — real audio through a real FFT into `features.js` into `tempo.js` into
+`pattern.js` — on sixteen records, because every fault listed above passed a suite that drove one
+module at a time with material chosen to suit it.
+
+`test/synth.mjs` is the instrument: it writes **samples**, not spectra, and analyses them with an
+iterative radix-2 FFT and a Hann window scaled exactly as `AnalyserNode.getFloatFrequencyData`
+scales it. Drawn spectra have no leakage, no phase, no intermodulation and only the harmonics
+somebody remembered to draw, and every one of those absences hid a fault: a lead's filter transient,
+a hat's skirt, a pad beating against itself. Every source is the production recipe for the sound it
+names — a pitched sine swept and driven into a waveshaper and a clipper, three detuned saws through
+a moving low-pass and a **24 dB/octave** mix low-cut (the order is the part that matters: a lead's
+low end is a filter transient, not a fundamental, and 6 dB/octave does not remove a transient), a
+kick sub layer that outlasts the punch, a real lookahead limiter, rolls shortened to fit their
+subdivision, a reverse bass modelled as the sidechained note it is rather than a gated one.
+
+Three rules hold it together, and each was bought:
+- **Keep it physical.** Every knob corresponds to something a producer does. A test that only passes
+  because the generator is unrealistic is worse than no test — and when the instrument is wrong, fix
+  the instrument FIRST: making the hi-hat a real hi-hat did not stop it being convicted, which is
+  what turned a mystery into a stated fault in `features.js`, where the fix belonged.
+- **Never move the material to make the code pass.** If the two are genuinely inseparable, say so in
+  the test with the measured evidence and assert the layer that *does* resolve it.
+- **Score both ends on the same window.** A detection belongs to the kick it is nearest to and is
+  scored only if that kick is inside the window. Scoring detections over one interval and ground
+  truth over another invents faults at the seam — two of the three outliers in the whole suite were
+  a kick rendered at exactly 30.000 s being dropped from the ground truth while its perfectly good
+  detection at 30.016 s stayed. For the same reason the bench never analyses past the music: a
+  window straddling the end of the buffer is a step function, and the FFT of a step is broadband
+  splatter weighted to the bottom, which the kick detector convicts and is right to.
+
+Renders and analyses are memoised per options object, which is what keeps the suite at ~30 s.
 
 All proxy/web tests run offline with mocks: `tests/test_deezer.py` (mock provider),
 `tests/test_webui.py` (`MockGW` + `MockApi` cover every `/api` route), `tests/test_graphql.py`

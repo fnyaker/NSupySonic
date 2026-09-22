@@ -21,7 +21,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createGeometry } from "../src/lib/viz/geometry.js";
-import { createScene } from "../src/lib/viz/index.js";
+// Loaded directly: the app code-splits the scenes (lib/viz/index.js), and
+// these checks are about what a scene draws rather than how it is fetched.
+import { createSmartScene } from "../src/lib/viz/scenes/smart.js";
 import { tierPreset } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
 import { createMusical } from "../src/lib/viz/musical.js";
@@ -52,8 +54,16 @@ function recorder() {
       lineTo: (x, y) => ink.push(x, y),
       arc: (x, y) => ink.push(x, y),
       rect: (x, y) => ink.push(x, y),
-      fillRect: (x, y, w, h) => ink.push(x + w / 2, y + h / 2),
-      strokeRect: (x, y, w, h) => ink.push(x + w / 2, y + h / 2),
+      // A RECTANGLE IS NOT ITS CENTRE. Recording only the middle makes every
+      // scene built on centred bars invisible to this test: `hardcore` draws a
+      // wall of columns whose height is the animation, and each column's centre
+      // sits at exactly H/2 for ever, so the picture scored 0.00 movement at
+      // both tempos and the ratio came out 0/0. The two mid-edges move when the
+      // bar grows, which is what the eye is actually seeing.
+      fillRect: (x, y, w, h) =>
+        ink.push(x + w / 2, y + h / 2, x + w / 2, y, x + w / 2, y + h),
+      strokeRect: (x, y, w, h) =>
+        ink.push(x + w / 2, y + h / 2, x + w / 2, y, x + w / 2, y + h),
       quadraticCurveTo: (cx, cy, x, y) => ink.push(x, y),
       createLinearGradient: () => grad,
       createRadialGradient: () => grad,
@@ -116,7 +126,7 @@ function frameAt(t, { bpm, loud = 1, genre = "frenchcore", arche = { hard: 0.9 }
 function travel({ bpm, seconds, loud = 1, genre, arche }) {
   const geometry = createGeometry();
   geometry.set(W, H, null);
-  const scene = createScene("smart", {
+  const scene = createSmartScene({
     preset: tierPreset("high"), layout: "full", intensity: 0.8,
   });
   const pal = createPalette("neon");

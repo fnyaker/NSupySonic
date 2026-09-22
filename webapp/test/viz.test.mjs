@@ -25,7 +25,7 @@ import { tierPreset, TIERS } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
 import { LOOK_KEYS, FAMILY_LIST } from "../src/lib/audio/style.js";
 import { WORLDS } from "../src/lib/viz/worlds/index.js";
-import { hasGenreScene } from "../src/lib/viz/genres/index.js";
+import { hasGenreScene, dedicatedIds } from "../src/lib/viz/genres/index.js";
 import { SKINS, skinId, skinFor, skinCount } from "../src/lib/viz/skins.js";
 
 // --- a canvas that remembers where it was drawn on --------------------------
@@ -119,6 +119,36 @@ function recorder(w, h) {
       put(a, b);
       put(a + rw, b + rh);
     },
+    // A recorder that is MISSING a canvas call does not measure the scene
+    // wrongly, it throws — `industrial` draws its frames with `strokeRect` and
+    // took the whole suite down with "g.strokeRect is not a function" the first
+    // time anything asked it to paint.
+    strokeRect(a, b, rw, rh) {
+      if (a <= 0.5 && b <= 0.5 && rw >= w - 1 && rh >= h - 1) return;
+      put(a, b);
+      put(a + rw, b + rh);
+    },
+    roundRect(a, b, rw, rh) {
+      put(a, b);
+      put(a + rw, b + rh);
+    },
+    arcTo(cx, cy, a, b) {
+      put(cx, cy);
+      put(a, b);
+      x = a;
+      y = b;
+    },
+    bezierCurveTo(c1x, c1y, c2x, c2y, a, b) {
+      put(c1x, c1y);
+      put(c2x, c2y);
+      put(a, b);
+      x = a;
+      y = b;
+    },
+    rect(a, b, rw, rh) {
+      put(a, b);
+      put(a + rw, b + rh);
+    },
     ink,
     get lastPoint() {
       return [x, y];
@@ -173,12 +203,26 @@ function styleOf(arche, look, dominant = "techno") {
   };
 }
 
+
+// The scene modules are CODE-SPLIT in the app (lib/viz/index.js loads them on
+// demand so a launch with animations off does not parse a third of a megabyte
+// of them), which makes `createScene` a promise. These checks are about what
+// the scenes DRAW, not about how they are fetched, so they load once here and
+// stay synchronous. The loader's own contract is pinned separately, below.
+const SCENE_FACTORY = {
+  bars: (await import("../src/lib/viz/scenes/bars.js")).createBarsScene,
+  pulse: (await import("../src/lib/viz/scenes/pulse.js")).createPulseScene,
+  aurora: (await import("../src/lib/viz/scenes/aurora.js")).createAuroraScene,
+  smart: (await import("../src/lib/viz/scenes/smart.js")).createSmartScene,
+};
+const makeScene = (mode, opts) => (SCENE_FACTORY[mode] ? SCENE_FACTORY[mode](opts) : null);
+
 // Run a scene for a while and return where it drew.
 function paint(mode, { w, h, occl = null, style = null, tier = "high", seconds = 6 } = {}) {
   const preset = tierPreset(tier);
   const geometry = createGeometry();
   geometry.set(w, h, occl);
-  const scene = createScene(mode, { preset, layout: "full", intensity: 0.8 });
+  const scene = makeScene(mode, { preset, layout: "full", intensity: 0.8 });
   scene.resize(w, h, preset, geometry.out);
   const pal = createPalette("neon");
   const g = recorder(w, h);
@@ -305,6 +349,41 @@ test("every scene keeps its material off the artwork", () => {
   }
 });
 
+test("every dedicated animation fills the frame and stays off the artwork", () => {
+  // The two properties the whole geometry layer exists for, asked of the
+  // scenes that were NOT being asked. `SCENES` above is the mode registry —
+  // off / bars / pulse / aurora / smart — so a dedicated genre animation, which
+  // is what `smart` actually draws for most of this library, was never checked
+  // for either. On a 16:9 beamer a scene built round an inscribed circle leaves
+  // a third of the picture black; in the full-screen player its brightest part
+  // sits behind the album cover.
+  const look = { motion: 0.8, density: 0.7, punch: 0.8, smooth: 0.4, warm: 0.5, melodic: 0.6, chaos: 0.5 };
+  const arche = { hard: 0.8, groove: 0.2 };
+  for (const id of [...new Set(dedicatedIds())]) {
+    const wide = paint("smart", { w: 1920, h: 1080, style: styleOf(arche, look, id) });
+    assert.ok(wide.ink.length > 50, `${id}: drew almost nothing (${wide.ink.length} points)`);
+    const { minX, maxX, minY, maxY } = extent(wide.ink);
+    assert.ok(minX < 1920 * 0.15, `${id}: nothing drawn on the left (min x ${minX.toFixed(0)})`);
+    assert.ok(maxX > 1920 * 0.85, `${id}: nothing drawn on the right (max x ${maxX.toFixed(0)})`);
+    assert.ok(minY < 1080 * 0.2, `${id}: nothing drawn at the top (min y ${minY.toFixed(0)})`);
+    assert.ok(maxY > 1080 * 0.8, `${id}: nothing drawn at the bottom (max y ${maxY.toFixed(0)})`);
+
+    const w = 420;
+    const h = 900;
+    const side = w * 0.72;
+    const occl = { x: (w - side) / 2, y: (h - side) / 2, w: side, h: side };
+    const phone = paint("smart", { w, h, occl, style: styleOf(arche, look, id) });
+    const geom = phone.geom;
+    const inside = phone.ink.filter(
+      (pt) => Math.abs(pt[0] - geom.cx) < geom.hw && Math.abs(pt[1] - geom.cy) < geom.hh
+    ).length;
+    assert.ok(
+      inside / phone.ink.length < 0.25,
+      `${id}: ${((inside / phone.ink.length) * 100) | 0}% of the drawing is behind the cover`
+    );
+  }
+});
+
 test("every genre gets its own animation, not the same one re-weighted", () => {
   // THE complaint this design answers: the old engine drew one visual
   // vocabulary at per-genre strengths, so frenchcore and ambient were the same
@@ -325,7 +404,8 @@ test("every genre gets its own animation, not the same one re-weighted", () => {
     jazz: ["smoke", { motion: 0.4, density: 0.46, warm: 0.7, chaos: 0.2, smooth: 0.66, melodic: 0.85 }, { voice: 0.6, sustain: 0.4 }],
     house: ["bloom", { motion: 0.5, density: 0.55, warm: 0.6, smooth: 0.58, melodic: 0.55 }, { groove: 0.7, voice: 0.3 }],
     zaag: ["zaag", { motion: 0.86, density: 0.78, punch: 0.88, warm: 0.26, melodic: 0.34, chaos: 0.5 }, { hard: 0.88 }],
-    hardstyle: ["hardbounce", { motion: 0.78, punch: 0.95, warm: 0.62, melodic: 0.45, chaos: 0.3 }, { hard: 0.9 }],
+    hardstyle: ["hardstyle", { motion: 0.78, punch: 0.95, warm: 0.62, melodic: 0.45, chaos: 0.3 }, { hard: 0.9 }],
+    hardbass: ["hardbounce", { motion: 0.8, punch: 0.95, warm: 0.6, melodic: 0.3, chaos: 0.35 }, { hard: 0.88 }],
     trance: ["starfield", { motion: 0.62, density: 0.7, warm: 0.3, smooth: 0.72, melodic: 0.84 }, { groove: 0.5, sustain: 0.5 }],
   };
   const sigs = {};
@@ -430,8 +510,11 @@ test("two genres sharing a world still draw differently", () => {
   // seven big slabs and a strobe against twenty splinters — and if that came
   // out identical the catalogue would be decoration.
   const pairs = [
-    [["hardstyle", { chaos: 0.3, motion: 0.78, punch: 0.95 }, { hard: 0.9 }],
-     ["rawstyle", { chaos: 0.45, motion: 0.8, punch: 1 }, { hard: 0.92 }]],
+    // Both still on `hardbounce`: hardstyle and rawstyle have their own files
+    // now, which is the catalogue working as intended — this line is about the
+    // long tail that does not, and hardbass against jumpstyle is exactly that.
+    [["hardbass", { chaos: 0.35, motion: 0.8, punch: 0.95 }, { hard: 0.9 }],
+     ["jumpstyle", { chaos: 0.25, motion: 0.82, punch: 0.9 }, { hard: 0.85 }]],
     [["techno", { chaos: 0.2, motion: 0.66 }, { groove: 0.85 }],
      ["acidtechno", { chaos: 0.35, motion: 0.8 }, { groove: 0.8 }]],
     [["liquiddnb", { chaos: 0.2, motion: 0.85 }, { groove: 0.6, hard: 0.4 }],
@@ -502,7 +585,7 @@ test("a shape switch, not a multiplier, is what separates neighbours", () => {
   const pairs = [
     ["dubstep", "riddim"],        // a sine LFO against a square gate
     ["garage", "breakbeat"],      // columns against strips
-    ["hardstyle", "pieep"],       // a streak lead against a stepped arpeggio
+    ["hardhouse", "hardbass"],    // a streak lead against a triangle wave
 
     ["punk", "doom"],             // lit from the front, or from behind
     ["ambient", "drone"],         // clouds against curtains
@@ -550,7 +633,7 @@ test("a change of genre is a dissolve, never a cut", () => {
   const preset = tierPreset("high");
   const geometry = createGeometry();
   geometry.set(1280, 720, null);
-  const scene = createScene("smart", { preset, layout: "full", intensity: 0.8 });
+  const scene = makeScene("smart", { preset, layout: "full", intensity: 0.8 });
   const pal = createPalette("neon");
   const g = recorder(1280, 720);
   const dt = 1 / 60;
@@ -623,4 +706,42 @@ test("the mode registry stays consistent with what the scenes can do", () => {
   assert.equal(effectiveMode("smart", true, true), "off");
   assert.equal(effectiveMode("smart", false, false), "aurora");
   assert.equal(effectiveMode("bars", false, false), "bars");
+});
+
+test("the scene loader hands back the same scenes, on demand", async () => {
+  // The app never imports a scene statically: `createScene` fetches the module
+  // the first time a mode is asked for. What must hold is that every mode in
+  // the registry can still be built, that the promise resolves to a real scene,
+  // and that "off" stays the one mode with nothing behind it — a launch with
+  // animations off must not fetch anything at all.
+  for (const m of MODES) {
+    const p = createScene(m.id, { preset: tierPreset("high"), layout: "full", intensity: 0.8 });
+    if (m.id === "off") {
+      assert.equal(p, null, "the off mode must not load a scene");
+      continue;
+    }
+    assert.ok(p && typeof p.then === "function", `${m.id} did not return a promise`);
+    const scene = await p;
+    assert.equal(typeof scene?.update, "function", `${m.id} has no update()`);
+    assert.equal(typeof scene?.draw, "function", `${m.id} has no draw()`);
+  }
+  // Asked for twice, the module is fetched once: the second call resolves to a
+  // NEW scene built from the SAME factory, not to a second download.
+  const opts = { preset: tierPreset("high"), layout: "full", intensity: 0.8 };
+  const [a, b] = await Promise.all([createScene("smart", opts), createScene("smart", opts)]);
+  assert.ok(a && b && a !== b, "each call must build its own scene");
+});
+
+test("every world in the registry is in the catalogue, and the reverse", async () => {
+  // The registry (worlds/index.js, which pulls in all eighteen scene modules)
+  // and the catalogue (worlds/catalogue.js, which is just names and trails) are
+  // separate files so that naming a world costs nothing. They have to agree.
+  const { WORLDS } = await import("../src/lib/viz/worlds/index.js");
+  const { WORLD_META } = await import("../src/lib/viz/worlds/catalogue.js");
+  assert.deepEqual(Object.keys(WORLDS).sort(), Object.keys(WORLD_META).sort());
+  for (const [id, w] of Object.entries(WORLDS)) {
+    assert.equal(w.label, WORLD_META[id].label, `${id}: the labels differ`);
+    assert.equal(w.trail, WORLD_META[id].trail, `${id}: the trails differ`);
+    assert.equal(typeof w.make, "function", `${id} has no factory`);
+  }
 });

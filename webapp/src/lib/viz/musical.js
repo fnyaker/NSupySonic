@@ -20,6 +20,11 @@
 // ...and the SHAPE of the moment, each 0..1 and each smoothed over a musically
 // sensible span rather than an arbitrary one:
 //
+//   m.mainKick  the frame a MAIN kick lands — not a roll note (pattern.js)
+//   m.bigKick   ...and one that is big for this track
+//   m.roll      0..1, how much of a roll is going on; m.rollDiv, its subdivision
+//   m.drop      the frame the arrangement comes back; m.dropped decays from it
+//   m.build / m.breakdown   where in the arrangement we are
 //   m.drive     how hard the track is pushing (level x percussivity x dynamics)
 //   m.weight    how much of it is low end
 //   m.air       how bright it is
@@ -77,6 +82,21 @@ export function createMusical() {
     note: 0, // a melodic attack, not a drum
     chord: 0, // harmony moving
     onset: 0,
+    // --- the MUSICAL reading (lib/audio/pattern.js) --------------------------
+    // `hit` is every kick, roll notes included. At 200 BPM a frenchcore roll
+    // fires five of them inside one beat, so a scene that throws something on
+    // every `hit` is a strobe. These separate them.
+    mainKick: false, // the frame a kick lands ON the grid, outside a roll
+    mainPower: 0, // ...and how hard it was, held until the next one
+    bigKick: false, // a main kick that is big for this track
+    rollKick: false, // the frame a roll note or a syncopated hit lands
+    roll: 0, // 0..1, how much of a roll is going on
+    rollDiv: 0, // notes per beat inside it (2, 3, 4, 6, 8...), 0 when none
+    drop: false, // the frame the arrangement comes back
+    dropped: 0, // 1 at the drop, falling away over the next few seconds
+    sinceDrop: 999, // seconds
+    build: 0, // 0..1, it is coming back
+    breakdown: 0, // 0..1, it is out
     // --- shape --------------------------------------------------------------
     drive: 0.3,
     weight: 0.4,
@@ -168,6 +188,22 @@ export function createMusical() {
       // --- events -----------------------------------------------------------
       m.kick = f.kick || 0;
       m.hit = !!f.kickHit;
+      // The musical layer is optional: the engine only runs it at rhythm level
+      // and above, and a stale reading would be worse than none. Everything
+      // here degrades to "there is no roll and no drop", which is what a scene
+      // written before this existed already assumed.
+      const pat = frame.pattern;
+      m.mainKick = !!pat?.mainKick;
+      m.mainPower = pat?.mainPower ?? 0;
+      m.bigKick = !!pat?.bigKick;
+      m.rollKick = !!pat?.rollKick;
+      m.roll = pat?.roll ?? 0;
+      m.rollDiv = pat?.rollDiv ?? 0;
+      m.drop = !!pat?.drop;
+      m.dropped = pat?.dropped ?? 0;
+      m.sinceDrop = pat?.sinceDrop ?? 999;
+      m.build = pat?.build ?? 0;
+      m.breakdown = pat?.breakdown ?? 0;
       m.note = f.melodyFlux || 0;
       m.chord = f.chordChange || 0;
       m.onset = b.onset || 0;

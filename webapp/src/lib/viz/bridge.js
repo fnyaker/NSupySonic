@@ -100,6 +100,11 @@ export function createPublisher({ onViewers, channel } = {}) {
   let hadKick = false;
   let hadStyleHit = false;
   let peakOnset = 0;
+  // The musical layer's events, latched for exactly the same reason.
+  let hadMain = false;
+  let hadBig = false;
+  let hadRollKick = false;
+  let hadDrop = false;
   let transport = { playing: false, loaded: false };
   let beat = null;
 
@@ -180,6 +185,13 @@ export function createPublisher({ onViewers, channel } = {}) {
       if (ff?.kickHit) hadKick = true;
       if (frame.style?.kick?.hit) hadStyleHit = true;
       if (fb.onset > peakOnset) peakOnset = fb.onset;
+      const fp = frame.pattern;
+      if (fp) {
+        if (fp.mainKick) hadMain = true;
+        if (fp.bigKick) hadBig = true;
+        if (fp.rollKick) hadRollKick = true;
+        if (fp.drop) hadDrop = true;
+      }
 
       const now = performance.now();
       if (now - last < 1000 / PUBLISH_HZ) return;
@@ -218,6 +230,14 @@ export function createPublisher({ onViewers, channel } = {}) {
         b: [b.bpm, b.confidence, b.phase, hadBeat ? 1 : 0, b.beatIndex, b.barPos,
             b.beatsPerBar, hadDown ? 1 : 0, peakOnset, b.kickPulse, b.period,
             b.locked ? 1 : 0],
+        // The MUSICAL layer (lib/audio/pattern.js). Its four events are latched
+        // above; the rest are continuous and can be sampled.
+        p: frame.pattern
+          ? [hadMain ? 1 : 0, frame.pattern.mainPower, hadBig ? 1 : 0, hadRollKick ? 1 : 0,
+             frame.pattern.roll, frame.pattern.rollDiv, frame.pattern.rollNotes,
+             hadDrop ? 1 : 0, frame.pattern.sinceDrop, frame.pattern.dropped,
+             frame.pattern.breakdown, frame.pattern.build, frame.pattern.energy]
+          : null,
         s: st
           ? {
               d: st.dominant,
@@ -233,6 +253,7 @@ export function createPublisher({ onViewers, channel } = {}) {
           : null,
       });
       hadBeat = hadDown = hadKick = hadStyleHit = false;
+      hadMain = hadBig = hadRollKick = hadDrop = false;
       peakOnset = 0;
     },
     // Transport state. Sent on every change and, while anyone is watching, as
@@ -282,6 +303,12 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
     beatsPerBar: 4, downbeat: false, onset: 0, kickPulse: 0, period: 0.5, locked: false,
   };
   const kick = { type: "soft", strength: 0, decay: 0.1, hit: false };
+  // The musical layer, rebuilt in the shape lib/audio/pattern.js publishes.
+  const pattern = {
+    mainKick: false, mainPower: 0, bigKick: false, rollKick: false,
+    roll: 0, rollDiv: 0, rollNotes: 0,
+    drop: false, sinceDrop: 999, dropped: 0, breakdown: 0, build: 0, energy: 1,
+  };
   const look = {};
   for (const k of LOOK_KEYS) look[k] = 0;
   const style = {
@@ -290,7 +317,7 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
   const frame = {
     t: 0, dt: 1 / 60,
     bands: new Float32Array(BAND_COUNT),
-    energy, features, beat, style: null, silent: true,
+    energy, features, beat, pattern: null, style: null, silent: true,
   };
   let lastAt = 0;
   let lastBeat = 0;
@@ -381,6 +408,17 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2) {
       beat.beatIndex = b[4]; beat.barPos = b[5]; beat.beatsPerBar = b[6];
       beat.downbeat = !!b[7]; beat.onset = b[8]; beat.kickPulse = b[9];
       beat.period = b[10]; beat.locked = !!b[11];
+      if (m.p) {
+        const a = m.p;
+        // Latched by the publisher across the frames the throttle dropped, so
+        // these are "since the last message" rather than "in this frame".
+        pattern.mainKick = !!a[0]; pattern.mainPower = a[1]; pattern.bigKick = !!a[2];
+        pattern.rollKick = !!a[3]; pattern.roll = a[4]; pattern.rollDiv = a[5];
+        pattern.rollNotes = a[6]; pattern.drop = !!a[7]; pattern.sinceDrop = a[8];
+        pattern.dropped = a[9]; pattern.breakdown = a[10]; pattern.build = a[11];
+        pattern.energy = a[12];
+        frame.pattern = pattern;
+      } else frame.pattern = null;
       if (m.s) {
         style.dominant = m.s.d; style.dominantLabel = m.s.l; style.confidence = m.s.c;
         style.archetypes = m.s.a;
