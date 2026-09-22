@@ -152,6 +152,9 @@ web UI and bundles it into the image, so there are no extra steps.
   original FLAC when they request lossless, or Opus at the bitrate they ask for.
 - **Podcasts** — subscribe to Deezer shows and play episodes; they get their own pages in the web
   player and appear through the Subsonic podcast endpoints.
+- **Listen party** — share a link (or a QR code) and whoever opens it hears what you play, at the
+  same instant, synchronised to the millisecond — no account needed. In one room, every phone
+  becomes another speaker.
 - **Two-way sync** — Deezer → your library on a schedule; starring a track or creating/editing a
   playlist in your client is mirrored back to your Deezer account.
 - **Fully automatic** — a full sync runs on startup and then daily (04:00 by default). No cron, no
@@ -183,6 +186,17 @@ web player, **Podcasts** has its own grid and per-show episode list; in Subsonic
 up through the standard podcast endpoints (`getPodcasts`, `getNewestPodcasts`, …). Unlike music,
 episodes are plain MP3 straight from the podcast host (no FLAC/Opus pipeline) and are archived under
 `archive_dir/Podcasts/<Show>/` on first play.
+
+## Listen party
+
+Press the headphones button in the player, then **Démarrer la party**: you get a link and a QR code
+to share. Guests need no account — they open the link, type a name, tap **Rejoindre l'écoute**, and
+hear exactly what you play, where you are in it: your tracks, your pauses, your seeks and your
+crossfades. Each device syncs its clock with the server and schedules the audio itself, so phones
+in the same room play as one (measured within a millisecond of each other). A speaker the browser
+can't see into — Bluetooth, a soundbar — adds its own delay; each guest can correct it with
+**Décalage**. Guests can only hear what you are playing: the link opens nothing else in your
+library, and **Terminer la party** closes it for everyone.
 
 ## Configuration
 

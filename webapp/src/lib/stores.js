@@ -388,6 +388,15 @@ export function closePlaylistPicker() {
 // { track } | null — the full share UI (whole file or waveform-selected clip).
 // Mounted once in App.svelte, opened from anywhere (menus, players).
 
+// Listen party host controls (components/PartySheet.svelte).
+export const partySheet = writable(false);
+export function openPartySheet() {
+  partySheet.set(true);
+}
+export function closePartySheet() {
+  partySheet.set(false);
+}
+
 export const shareSheet = writable(null);
 export function openShare(track) {
   if (track && track.deezer_id) shareSheet.set({ track });
@@ -502,8 +511,12 @@ const SESSION_KEY = "player.session";
 // It restores the session so it can name what is playing, but it must never
 // write it back: its snapshot is frozen at the moment it opened, and writing
 // that would roll the real player's saved position back to then.
+// A listen party guest (#/party/<id>) is the same: it plays the host's audio
+// through its own engine, and must never touch this device's own session.
 const DISPLAY_ONLY =
-  typeof window !== "undefined" && (window.location.hash || "").startsWith("#/viz");
+  typeof window !== "undefined" &&
+  ((window.location.hash || "").startsWith("#/viz") ||
+    (window.location.hash || "").startsWith("#/party/"));
 // The playhead position lives in its OWN tiny key ({index, id, time}, ~60
 // bytes). During plain playback only this key is refreshed — re-serializing
 // the whole queue (potentially hundreds of KB) 30×/min just to move the

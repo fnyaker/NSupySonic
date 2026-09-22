@@ -308,6 +308,13 @@ export const api = {
     }),
   deleteMarker: (markerId) => req("/podcast/marker/" + markerId, { method: "DELETE" }),
 
+  // listen party — the HOST's side (guests have no session and talk to the
+  // public /api/party/<id>/... endpoints directly, see routes/Party.svelte).
+  partyStart: (opts) => req("/party", { method: "POST", body: body(opts || {}) }),
+  partyMine: () => req("/party/mine"),
+  partyEnd: (id) => req("/party/" + id, { method: "DELETE" }),
+  partyPublish: (id, state) => req("/party/" + id + "/state", { method: "POST", body: body(state) }),
+
   // sharing — waveform peaks + downloadable file/clip URLs (the server sets
   // Content-Disposition, so navigating to them downloads with a nice name).
   waveform: (id) => req("/share/waveform/" + id),

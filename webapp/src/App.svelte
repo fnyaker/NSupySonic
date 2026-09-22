@@ -29,6 +29,8 @@
   import ReplaceSheet from "./components/ReplaceSheet.svelte";
   import GenreTagSheet from "./components/GenreTagSheet.svelte";
   import ExportSheet from "./components/ExportSheet.svelte";
+  import { maybeResumeHosting } from "./lib/party/hostbridge.js";
+  import { partySheet } from "./lib/stores.js";
   import NetworkIndicator from "./components/NetworkIndicator.svelte";
   import Login from "./routes/Login.svelte";
   import Home from "./routes/Home.svelte";
@@ -75,6 +77,19 @@
   $: if (isDisplay && !VizScreen)
     import("./routes/Viz.svelte").then((m) => (VizScreen = m.default));
 
+  // A listen party GUEST is the same kind of screen: whoever opened the link
+  // may have no account here at all, so it renders before (and without) the
+  // login, the layout and the player — it plays through its own engine.
+  $: partyId = $location.startsWith("/party/") ? $location.slice(7).split("/")[0] : null;
+  let PartyScreen = null;
+  $: if (partyId && !PartyScreen)
+    import("./routes/Party.svelte").then((m) => (PartyScreen = m.default));
+  // The host's sheet is loaded the first time it is opened (it carries the QR
+  // encoder), then kept.
+  let PartySheet = null;
+  $: if ($partySheet && !PartySheet)
+    import("./components/PartySheet.svelte").then((m) => (PartySheet = m.default));
+
   // The projector window is a SCREEN, not a second copy of the app: no sidebar,
   // no nav, and above all no <Player> — a second player would be a second
   // stream, a second decode and a second playhead drifting out of sync with the
@@ -97,6 +112,12 @@
   let bootedOffline = false;
 
   onMount(async () => {
+    // A party guest needs none of the app's own machinery (the library, the
+    // offline indexes, the version watch): it is a page, not an install.
+    if (partyId) {
+      authChecked.set(true);
+      return;
+    }
     initConnectivity();
     initQueueFilter();
     initNav(() => mainEl);
@@ -161,6 +182,15 @@
     loadFavorites();
     initPodcastProgress();
     startHealthWatch();
+    startPartyResume();
+  }
+  // A listen party this user was hosting outlives a reload: its guests are
+  // still on the link. Once per session, and only in the tab that plays.
+  let partyResumed = false;
+  function startPartyResume() {
+    if (partyResumed || isDisplay || partyId) return;
+    partyResumed = true;
+    maybeResumeHosting();
   }
   // Watch the Deezer account (an expired ARL is otherwise a silent, total
   // outage). Once per session, not on every $user tick.
@@ -229,6 +259,12 @@
   {:else}
     <div class="loading">…</div>
   {/if}
+{:else if partyId}
+  {#if PartyScreen}
+    <svelte:component this={PartyScreen} id={partyId} />
+  {:else}
+    <div class="loading">…</div>
+  {/if}
 {:else if !$authChecked}
   <div class="loading">…</div>
 {:else if !$user}
@@ -256,7 +292,10 @@
 <ReplaceSheet />
 <GenreTagSheet />
 <ExportSheet />
-<NetworkIndicator />
+{#if !partyId}
+  {#if PartySheet}<svelte:component this={PartySheet} />{/if}
+  <NetworkIndicator />
+{/if}
 
 <style>
   .layout {
