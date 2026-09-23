@@ -6,14 +6,17 @@
 // sides, dragging a comet tail of its own recent path behind it.
 //
 //   THE BALL'S PATH is not simulated, it is a function of the beat clock: its
-//   x is a triangle wave that touches a wall at every whole beat, its y a
-//   bouncing arc whose height is the bar's shape (a lob on the downbeat, a
-//   smash on the off-beats). Because it is a function, the tail is simply the
+//   x is a triangle wave that reaches a paddle at every whole beat, its y a
+//   rally — off the paddle at this strike's height, over the net, one bounce
+//   on the far half, up into the other paddle at the next strike's — whose
+//   arc is the bar's shape (a lob on the downbeat, a smash on the off-beats). Because it is a function, the tail is simply the
 //   same function sampled at the last half beat — exact, at any frame rate,
 //   with no history kept anywhere.
-//   THE WALLS are two blades of light at the frame's edges. Each strike leaves
-//   a ripple travelling along the wall from the point of impact and a spray of
-//   sparks thrown back into the court.
+//   THE PADDLES are two bars of glass with light inside, one at each end. A
+//   paddle is not driven, it is a function of the same clock: it glides from
+//   where it last struck the ball to where it will strike next and arrives on
+//   the beat, so it always meets the ball. Each strike flares it, knocks it
+//   back into its wall for an instant and throws a spray of sparks.
 //   THE COURT is a dark floor in perspective with the ball's reflection
 //   sliding across it, a net of light down the middle.
 //   THE DROP puts three balls in play, each a third of a beat apart.
@@ -31,20 +34,51 @@ const SHARED = `
 float courtX() { return frameHalf().x - 0.06; }
 float ballR() { return 0.028 + 0.012 * uHit.y; }
 
-// Where ball \`b\` is at beat-clock time \`tb\`. A wall strike on every beat.
+// The height at which strike n meets a paddle: every strike a different one,
+// so the paddles have somewhere to go.
+float strikeY(float n) { return -0.42 + 0.06 + 0.3 * hash11(n * 0.731 + 0.17) * (0.6 + 0.4 * uFlow.x); }
+
+// Where ball \`b\` is at beat-clock time \`tb\`. A strike on every beat, the
+// way a rally goes: off the paddle at this strike's height, over the net,
+// ONE bounce on the far half, and up into the other paddle at the next
+// strike's height. The first arc is a lob on the downbeat and flatter after.
 vec2 ballAt(float tb, float b) {
   float x = tb - b / 3.0;
   // Triangle wave: -1 at even beats, +1 at odd ones.
   float tri = abs(fract(x * 0.5) * 2.0 - 1.0) * 2.0 - 1.0;
   float X = -tri * courtX() * 0.94;
-  // One bounce off the floor between the walls: a parabola whose height
-  // follows the bar — a lob on the downbeat, flatter smashes after it.
+  float n = floor(x);
   float f = fract(x);
   float bar = floor(mod(x, 4.0));
-  float h = mix(0.95, 0.55, min(bar, 1.0)) * P_ARC * (0.75 + 0.25 * uFlow.x);
-  float floorY = -0.62;
-  float Y = floorY + h * 4.0 * f * (1.0 - f) * (1.0 - 0.3 * b);
-  return vec2(X, Y + 0.2);
+  float h = mix(0.8, 0.45, min(bar, 1.0)) * P_ARC * (0.75 + 0.25 * uFlow.x) * (1.0 - 0.3 * b);
+  const float fl = -0.42;
+  const float fb = 0.62;
+  float Y;
+  if (f < fb) {
+    float u = f / fb;
+    Y = mix(strikeY(n), fl, u) + h * 4.0 * u * (1.0 - u);
+  } else {
+    float u = (f - fb) / (1.0 - fb);
+    Y = mix(fl, strikeY(n + 1.0), u) + h * 1.4 * u * (1.0 - u);
+  }
+  return vec2(X, Y);
+}
+
+// The paddle on side \`side\` (-1 left, 1 right) at beat-clock time \`tb\`: it
+// glides from where it last struck the ball to where it will strike next,
+// arriving exactly on the beat — so it always meets the ball, and it is never
+// seen to wait for it or to cheat.
+vec3 paddleAt(float tb, float side) {
+  // The left wall is struck on even beats, the right on odd ones.
+  float last = floor(tb);
+  if ((mod(last, 2.0) < 0.5) != (side < 0.0)) last -= 1.0;
+  float next = last + 2.0;
+  float y0 = ballAt(last + 1e-3, 0.0).y;
+  float y1 = ballAt(next + 1e-3, 0.0).y;
+  float u = clamp((tb - last - 0.25) / 1.5, 0.0, 1.0);
+  float y = mix(y0, y1, u * u * (3.0 - 2.0 * u));
+  float age = tb - last;
+  return vec3(side * (courtX() * 0.94 + 0.05), y, age);
 }
 `;
 
@@ -86,26 +120,39 @@ void main() {
   col += mix(uPalMid.rgb, uPalHigh.rgb, 0.4) * (veil * 0.12 + tape * 0.8) * P_NET * (0.5 + 0.5 * uFlow.x);
   // A cone of light from above onto the court, the room's only lamp.
   float cone = smoothstep(0.9, 0.2, abs(p.x) / (0.4 + 0.5 * (1.0 - p.y))) * smoothstep(-0.9, 0.9, p.y);
-  col += mix(uPalLow.rgb, uPalMid.rgb, 0.5) * cone * 0.035 * (0.6 + 0.4 * uMood.y);
+  col += mix(uPalLow.rgb, uPalMid.rgb, 0.5) * cone * 0.06 * (0.6 + 0.4 * uMood.y);
 
-  // --- the walls: blades of light at both edges, rippling from each strike ---
+  // --- the court's edges: faint, the room's boundary and nothing more ---
   for (int side = 0; side < 2; side++) {
     float sx = side == 0 ? -1.0 : 1.0;
     float d = abs(p.x - sx * cx);
-    // The last strike on this wall: odd beats hit the right, even the left.
-    float lastB = floor(tb);
-    if (mod(lastB, 2.0) < 0.5 != (side == 0)) lastB -= 1.0;
-    float age = tb - lastB;
-    vec2 hitAt = ballAt(lastB + 1e-3, 0.0);
-    float along = abs(p.y - hitAt.y);
-    // A ripple running up and down the wall from the impact.
-    float front = age * 1.6;
-    float ripple = exp(-pow((along - front) / 0.05, 2.0)) * exp(-age * 1.6);
-    float flare = exp(-along * 5.0) * exp(-age * 5.0);
-    float blade = exp(-pow(d / (uFrame.w * 1.4), 2.0)) + 0.12 * glow(d, 0.02);
-    vec3 wc = mix(uPalMid.rgb, uPalHigh.rgb, 0.6);
-    col += wc * blade * (0.18 + 0.35 * uFlow.x + 2.2 * ripple + 3.0 * flare);
-    col += wc * glow(d, 0.08) * flare * 0.8;
+    col += mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * exp(-pow(d / (uFrame.w * 1.4), 2.0)) * 0.08;
+  }
+
+  // --- the paddles: two bars of glass with light inside, meeting the ball ---
+  vec3 padC = mix(uPalMid.rgb, uPalHigh.rgb, 0.6);
+  for (int side = 0; side < 2; side++) {
+    float sx = side == 0 ? -1.0 : 1.0;
+    vec3 pd = paddleAt(tb, sx);
+    float flare = exp(-pd.z * 5.0) * (0.6 + 0.4 * amp);
+    // The strike pushes it back into its wall for an instant.
+    vec2 c = vec2(pd.x + sx * 0.012 * exp(-pd.z * 8.0), pd.y);
+    float hh = 0.09 + 0.02 * uFlow.x;
+    float w = 0.016;
+    vec2 q = p - c;
+    float sd = length(vec2(q.x, max(abs(q.y) - hh, 0.0))) - w;
+    float body = smoothstep(uFrame.w, -uFrame.w, sd);
+    // Glass: bright along its face toward the court, a hot core, a rim.
+    float core = exp(-pow(q.x / (w * 0.35), 2.0)) * smoothstep(hh + w, hh * 0.6, abs(q.y));
+    float rim = exp(-pow(sd / (uFrame.w * 1.5), 2.0));
+    col = mix(col, padC * 0.15, body * 0.6);
+    col += padC * (core * (0.8 + 3.0 * flare) + rim * (0.5 + 1.5 * flare)) + mix(padC, vec3(1.0), 0.5) * glow(max(sd, 0.0), 0.05) * (0.12 + 0.9 * flare);
+    // Its reflection in the floor.
+    if (p.y < floorY) {
+      vec2 rq = vec2(p.x - c.x, (2.0 * floorY - p.y) - c.y);
+      float rsd = length(vec2(rq.x, max(abs(rq.y) - hh, 0.0))) - w;
+      col += padC * glow(max(rsd, 0.0), 0.02) * (0.2 + 0.8 * flare) * 0.3 * exp(-(floorY - p.y) * 3.0);
+    }
   }
 
   // --- the balls: a comet each, the tail being their own path ---

@@ -37,7 +37,7 @@ export const WORLD_META = {
   bounce: { group: "hard", label: "Rebond", blurb: "Une bille de gelée lumineuse qui s'écrase sur le kick et rebondit sur le temps." },
   saw: { group: "hard", label: "Scie", blurb: "Une lame qui tourne et des dents de scie laser — le zaag, littéralement." },
   stairs: { group: "hard", label: "Arpège", blurb: "Un escalier de lumière dont chaque marche s'allume sur une note de l'arpège." },
-  pingpong: { group: "hard", label: "Ping-pong", blurb: "Une balle de lumière qui rebondit d'un mur à l'autre en traînant sa comète." },
+  pingpong: { group: "hard", label: "Ping-pong", blurb: "Un échange au néon : deux raquettes de verre qui renvoient une balle de lumière sur chaque temps." },
   soundsystem: { group: "hard", label: "Sound system", blurb: "Un mur d'enceintes dont les membranes pompent sous chaque basse." },
   static: { group: "hard", label: "Parasites", blurb: "Le signal qui se déchire : blocs arrachés, bandes décalées, bruit d'antenne." },
   fireworks: { group: "hard", label: "Feu d'artifice", blurb: "Des bouquets qui éclatent sur les temps forts et retombent en pluie d'or." },
