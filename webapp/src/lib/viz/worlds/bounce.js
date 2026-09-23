@@ -34,12 +34,16 @@ export default {
   look: { exposure: 1.0, bloom: 1.1, threshold: 0.8, saturation: 1.18 },
 
   fragment: `
+// With the artwork in front, the stage is the band under it: the floor low in
+// that band (room for the reflection below it) and the orb sized to jump
+// inside it. The floor used to sit right under the cover, and the orb spent
+// every jump behind it.
 float floorLine() {
-  return uHole.z > 0.0 ? clamp(uHoleR.z - 0.05, -0.95, -0.35) : -0.55;
+  return uHole.z > 0.0 ? clamp(-1.0 + (uHoleR.z + 1.0) * 0.3, -0.95, -0.35) : -0.55;
 }
 float orbSize(float k) {
   float room = uHole.z > 0.0 ? (uHoleR.z + 1.0) : 1.4;
-  float r = clamp(room * 0.28, 0.07, 0.3);
+  float r = clamp(room * (uHole.z > 0.0 ? 0.2 : 0.28), 0.07, 0.3);
   return r * (k > 0.5 ? 0.55 : 1.0);
 }
 
@@ -96,6 +100,7 @@ void main() {
   // The jump: a parabola across each beat, on the floor at the beat itself.
   float ph = uPhase.x;
   float H = (0.12 + 0.28 * drive) * P_HEIGHT * amp * (1.0 - 0.7 * uArc.z);
+  if (uHole.z > 0.0) H = min(H, max(0.03, uHoleR.z - fy - 2.1 * orbSize(0.0)));
   float lift = 4.0 * ph * (1.0 - ph) * H;
   // The squash is the driver's spring (uS0.x), overshoot and all.
   float sq = uS0.x * P_SQUASH;

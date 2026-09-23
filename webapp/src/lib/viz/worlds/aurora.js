@@ -97,9 +97,12 @@ vec3 aurora(vec3 rd, float bars, int steps, float jitter) {
 void main() {
   vec2 p = fragP();
   float bars = uClock.y * uSpeed;
-  // The horizon: a third of the way up with nothing in front of the canvas;
-  // just under the artwork when there is one, so the sky frames the cover.
-  float hz = uHole.z > 0.0 ? clamp(uHoleR.z - 0.04, -0.92, -0.2) : -0.34;
+  // The horizon: a third of the way up with nothing in front of the canvas.
+  // With the artwork in front it runs along the cover's TOP edge: the curtains
+  // hang in the sky above it and the lake mirrors them below it, so the cover
+  // sits on the water between the two. Under the cover, as it once was, put
+  // the whole sky behind the artwork on a phone.
+  float hz = uHole.z > 0.0 ? clamp(uHole.y + uHole.w + 0.02, -0.34, 0.45) : -0.34;
   vec3 rd = normalize(vec3(p.x, p.y - hz, 1.5));
   int n = int(clamp(floor(P_SLICES * uQual.x + 0.5), 8.0, 40.0));
   // Per-pixel jitter of the slice positions, so the stack never shows as
@@ -124,7 +127,9 @@ void main() {
     float depth = -rd.y;
     vec3 rr = vec3(rd.x + gnoise(vec2(p.x * 4.0, depth * 40.0 - bars * 0.9)) * 0.02 * (0.3 + depth * 3.0), depth, rd.z);
     col = uPalBg.rgb * 0.3;
-    col += aurora(normalize(rr), bars, max(8, n / 2), jitter) * bright * 0.45 * P_WATER * exp(-depth * 3.0);
+    // With the horizon on the cover's top edge the visible water is deep, so the
+    // reflection carries further.
+    col += aurora(normalize(rr), bars, max(8, n / 2), jitter) * bright * 0.45 * P_WATER * exp(-depth * (uHole.z > 0.0 ? 1.3 : 3.0));
   }
   // The mountains: a ridge standing on the horizon, black against the sky.
   float ridge = hz + 0.035 + 0.06 * (fbm(vec2(p.x * 1.2, 3.0), 4) + 0.5);
