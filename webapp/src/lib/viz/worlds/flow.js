@@ -89,7 +89,9 @@ void main() {
   // The kick's ring, poured round the middle in the moment it lands.
   float rim = uHole.z > 0.0 ? min(uHole.z, uHole.w) + 0.06 : 0.12;
   float ringK = step(uSince.y, 0.12) * amp;
-  col += mix(uPalHigh.rgb, uPalAcc.rgb, fract(uCount.z * 0.37)) * exp(-pow((length(rp) - rim) / 0.012, 2.0)) * ringK * dtB * 12.0 * P_INK;
+  // In the palette's own light: the complement read as a green hoop drawn
+  // round the middle, before the current had carried it anywhere.
+  col += mix(uPalHigh.rgb, uPalMid.rgb, fract(uCount.z * 0.37)) * exp(-pow((length(rp) - rim) / 0.012, 2.0)) * ringK * dtB * 12.0 * P_INK;
   // Keep the dye in range with a soft limit, not a clamp: a clamp flattens
   // the brightest swirls into plateaus, this lets them fade faster instead.
   // Scaled by the frame's duration like everything else here.

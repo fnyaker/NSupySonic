@@ -42,7 +42,10 @@ const float LAMPH = 3.2;    // lamp height
 const float LAMPX = 4.2;    // lamps' distance from the road's centre
 const float SPACING = 9.0;  // road units between lamps (one beat of travel)
 
-float horizonY() { return 0.12; }
+// The horizon. With the artwork in front it drops to the cover's bottom edge:
+// on a phone the car ahead, the road and its reflections then lie in the band
+// under the cover instead of behind it, and the sky and its stars frame it.
+float horizonY() { return uHole.z > 0.0 ? clamp(uHoleR.z - 0.02, -0.6, 0.12) : 0.12; }
 
 // A world point to the screen.
 vec2 toScreen(vec3 w) { return vec2((w.x - CAMX) / w.z, horizonY() + (w.y - CAMH) / w.z); }

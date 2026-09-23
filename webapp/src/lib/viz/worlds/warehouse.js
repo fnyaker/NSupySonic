@@ -79,7 +79,12 @@ void main() {
   // The camera: dollying forward a bay every four beats, swaying on the bar.
   float travel = uS0.x;
   vec3 ro = vec3(0.25 * sin(bars * PI * 0.5) * amp, -0.15 + 0.05 * sin(bars * PI), travel);
-  vec3 rd = normalize(vec3(p.x, p.y + 0.05, 1.35));
+  // Where the hall vanishes. With the artwork in front, up in its top half:
+  // centred, the lamps, the beams and the pools they throw all fell behind
+  // the cover, and a phone showed a dark frame round it; raised, the wet
+  // floor — where the beams land — fills the band below it.
+  float vpY = uHole.z > 0.0 ? clamp(uHole.y + uHole.w * 0.55, -0.05, 0.6) : -0.05;
+  vec3 rd = normalize(vec3(p.x, p.y - vpY, 1.35));
   rd.xy *= rot(0.03 * sin(bars * PI * 0.5) * amp);
 
   int steps = int(clamp(P_STEPS * uQual.x, 24.0, 96.0));
@@ -217,7 +222,7 @@ void main() {
       for (int k = 0; k < 7; k++) {
         vec3 M = vec3(0.0, -4.05, (b0 + float(k)) * BAY) - ro;
         if (M.z < 0.4) continue;
-        vec2 sp = M.xy / M.z * 1.35 - vec2(0.0, 0.05);
+        vec2 sp = M.xy / M.z * 1.35 + vec2(0.0, vpY);
         float dx = abs(p.x - sp.x);
         // Rough, so each lamp is a soft elongated smear rather than a line,
         // shorter and tighter the further down the hall it is.
