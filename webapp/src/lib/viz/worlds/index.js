@@ -34,6 +34,12 @@ const LOADERS = {
   circuit: () => import("./circuit.js"),
   galaxy: () => import("./galaxy.js"),
   flow: () => import("./flow.js"),
+  chrome: () => import("./chrome.js"),
+  slices: () => import("./slices.js"),
+  vinyl: () => import("./vinyl.js"),
+  halo: () => import("./halo.js"),
+  nightdrive: () => import("./nightdrive.js"),
+  neon: () => import("./neon.js"),
 };
 
 const cache = new Map();
