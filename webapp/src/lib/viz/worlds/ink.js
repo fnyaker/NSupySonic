@@ -104,10 +104,28 @@ void main() {
     // y01, the colour index being the pitch walked along the palette.
     const drop = (s, power, low = false) => {
       const A = clocksNow?.aspect || 16 / 9;
-      const hw = clocksNow?.hole?.[2] || 0;
-      let x = (hashN(n * 5 + 1) * 2 - 1) * (A - 0.25);
-      if (hw > 0 && Math.abs(x) < hw + 0.1) x = Math.sign(x || 1) * (hw + 0.1 + 0.25 * hashN(n + 3));
-      const y01 = low ? 0.15 + 0.15 * hashN(n + 7) : 0.45 + 0.45 * hashN(n + 9);
+      const [hx = 0, hy = 0, hw = 0, hh = 0] = clocksNow?.hole || [];
+      let x;
+      let y01;
+      if (hw > 0 && A - (Math.abs(hx) + hw) < 0.25) {
+        // A phone: the cover spans the width, and a drop pushed out beside it
+        // landed off the screen — the tank looked empty. So the ink pours
+        // above and below the cover instead, mostly below, since it sinks.
+        x = (hashN(n * 5 + 1) * 2 - 1) * (A - 0.12);
+        const below = [-0.92, hy - hh - 0.1];
+        const above = [hy + hh + 0.1, 0.9];
+        const roomB = below[1] - below[0];
+        const roomA = above[1] - above[0];
+        const useBelow = roomB > 0.12 && (low || hashN(n + 11) < 0.65 || roomA < 0.12);
+        const band = useBelow || roomA < 0.12 ? below : above;
+        const y = band[0] + Math.max(0, band[1] - band[0]) * hashN(n + 9);
+        y01 = Math.min(0.999, Math.max(0, (y + 1) / 2));
+      } else {
+        x = (hashN(n * 5 + 1) * 2 - 1) * (A - 0.25);
+        if (hw > 0 && Math.abs(x - hx) < hw + 0.1) x = hx + Math.sign(x - hx || 1) * (hw + 0.1 + 0.25 * hashN(n + 3));
+        x = Math.max(-A + 0.1, Math.min(A - 0.1, x));
+        y01 = low ? 0.15 + 0.15 * hashN(n + 7) : 0.45 + 0.45 * hashN(n + 9);
+      }
       const pitch = clocksNow?.pitch ?? 0.5;
       const colour = Math.max(0, Math.min(15, Math.round(pitch * 15)));
       ring.push(s, power, x, colour + Math.min(0.999, y01));
