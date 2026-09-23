@@ -5,11 +5,11 @@
 // window high at the end of the nave, its coloured light falling in shafts
 // through the dust, the columns standing black against it.
 //
-//   THE WINDOW is drawn as glass and lead: twelve petals round a centre
-//   rose built as a Gothic one is — pointed lancets between stone mullions,
-//   roundels holding quatrefoils, a rosette at the heart — every pane its own
-//   colour off the palette and cut by thin leading into pieces of glass that
-//   are each a little different.
+//   THE WINDOW is drawn as glass and lead, and built as a Gothic rose is —
+//   twelve pointed lancets between stone mullions, roundels holding
+//   quatrefoils, a rosette at the heart — every pane its own colour off the
+//   palette and cut by thin leading into pieces of glass that are each a
+//   little different.
 //   THE SHAFTS are the window's own light carried down the nave: for every
 //   pixel the window is sampled along the line back toward it, so each pane
 //   throws its own coloured beam and the tracery throws its shadow into
