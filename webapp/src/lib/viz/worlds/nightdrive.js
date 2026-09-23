@@ -13,8 +13,12 @@
 //   THE LAMPS stand on both verges, one pair per beat of travel, so the car's
 //   speed IS the tempo. Each is drawn as a streak along its own motion away
 //   from the vanishing point, longer the faster the car goes.
-//   THE TRAFFIC. Tail-lights ahead drifting in their lanes, and now and then
-//   a pair of headlights rushing past on the other carriageway.
+//   THE CAR AHEAD. The one you are following, in your lane: a silhouette lit
+//   along its roof by every lamp it passes under, a light bar across its tail,
+//   brake lights that flare on the kick and on the drop, and its tail lights
+//   lying on the wet road as streaks back toward you.
+//   THE TRAFFIC. Tail-lights further ahead drifting in their lanes, and now
+//   and then a pair of headlights rushing past on the other carriageway.
 //   THE ARRANGEMENT. The drive quickens through a build and surges on the
 //   drop (the lamps smear into lines); a breakdown slows to a cruise and dims
 //   the city; the kick pulses the lamps.
@@ -172,6 +176,56 @@ void main() {
       }
     }
   }
+
+  // --- the car you are following ---
+  // In your lane, a few lengths ahead, drifting nearer and back: a dark
+  // silhouette lit along its roof by the lamps it passes under, a light bar
+  // across its tail, and the brake lights flaring on the kick — the one
+  // thing in the picture that plays the beat as a driver would. Its tail
+  // lights lie on the wet road as streaks running back toward you.
+  {
+    float bars = uClock.y * uSpeed;
+    float cz = 6.2 + 0.8 * sin(bars * 0.37) + 0.4 * sin(bars * 0.91);
+    float brake = 0.55 + 1.3 * uHit.y * amp + 0.6 * uS0.z;
+    vec2 wq = vec2(p.x * cz + CAMX, (p.y - hy) * cz + CAMH);
+    float cxw = CAMX + 0.15 * sin(bars * 0.23);
+    vec2 cq = wq - vec2(cxw, 0.0);
+    float body = sdRound2(cq - vec2(0.0, 0.42), vec2(0.92, 0.3), 0.12);
+    vec2 kq = vec2(abs(cq.x) + (cq.y - 0.72) * 0.45, cq.y - 0.98);
+    float cabin = sdRound2(kq, vec2(0.62, 0.26), 0.1);
+    float car = min(body, cabin);
+    float pxw = px * cz;
+    float cover = smoothstep(pxw, -pxw, car);
+    if (cover > 0.0) {
+      // The lamps it passes under slide along its roof and shoulders.
+      float lampPass = pow(0.5 + 0.5 * cos((travel + cz) / SPACING * TAU), 8.0);
+      float roof = smoothstep(-0.08, 0.0, car) * step(0.3, cq.y);
+      vec3 paint = uPalBg.rgb * 0.08 + sodium * roof * (0.08 + 0.35 * lampPass) * P_LAMPS;
+      // The rear window: darker glass, a sliver of the city in it.
+      float glassW = sdRound2(kq - vec2(0.0, -0.02), vec2(0.5, 0.16), 0.06);
+      paint = mix(paint, uPalMid.rgb * 0.05 + sodium * 0.03 * lampPass, smoothstep(pxw, -pxw, glassW));
+      // The tail: a light bar across the boot, the lamps brighter at its ends.
+      float bar = smoothstep(0.045 + pxw, 0.045 - pxw, abs(cq.y - 0.6)) * smoothstep(0.84 + pxw, 0.84 - pxw, abs(cq.x));
+      float ends = smoothstep(0.1 + pxw, 0.1 - pxw, length(vec2((abs(cq.x) - 0.7) * 0.8, cq.y - 0.6)));
+      vec3 red = vec3(1.0, 0.07, 0.04);
+      paint += red * (bar * 0.9 + ends * 1.6) * brake;
+      col = mix(col, paint, cover);
+    }
+    // The tail's glow in the air, and the plate light.
+    for (int s = 0; s < 2; s++) {
+      vec2 at = toScreen(vec3(cxw + (s == 0 ? -0.72 : 0.72), 0.6, cz));
+      float d = length(p - at);
+      col += vec3(1.0, 0.08, 0.05) * glow(d, 0.05 / cz + px) * 0.35 * brake;
+      // ...and on the wet road, a streak back toward us.
+      vec2 base = toScreen(vec3(cxw + (s == 0 ? -0.72 : 0.72), 0.0, cz));
+      if (p.y < base.y) {
+        float rx = abs(p.x - at.x);
+        float rw = 0.05 / cz + px * 2.0;
+        col += vec3(1.0, 0.1, 0.05) * exp(-rx * rx / (rw * rw)) * exp(-(base.y - p.y) * 2.2) * 0.3 * brake * P_RAIN;
+      }
+    }
+  }
+
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
   col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
   emit(col * mix(1.0, uEnergy, 0.5));
@@ -199,6 +253,8 @@ void main() {
         if (travel > 9 * 512) travel -= 9 * 512;
         state[0] = travel;
         state[1] = speed;
+        // The car ahead brakes hard on the drop and eases off over two bars.
+        state[2] = Math.pow(surge, 3);
       },
     };
   },
