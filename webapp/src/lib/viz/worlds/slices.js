@@ -18,6 +18,9 @@
 //   THE ARRANGEMENT. A roll subdivides the jumps; a breakdown slows the
 //   scroll to a drift; a drop swaps every band's material at once.
 //
+// The bands are layered like cut paper — each strip shadows the one beneath
+// it and catches the light on its own cut edge — with a faint grain in them.
+//
 // Everything is drawn with analytic anti-aliasing at the pixel scale — stripes
 // and dots included — so the bands stay crisp at 4K and do not shimmer.
 //
@@ -105,17 +108,24 @@ void main() {
   float deal = uS0.y;
   float kind = floor(hash11(bi * 3.3 + deal * 17.0) * 7.0);
   vec3 cA = pal(hash11(bi + deal * 5.0));
-  vec3 cB = mix(pal(fract(hash11(bi + deal * 5.0) + 0.45)), uPalAcc.rgb, step(0.6, hash11(bi * 1.9 + deal)));
+  // The complement is an accent, one band in five — on four in ten it turned
+  // every layout into a clash of two equal colours.
+  vec3 cB = mix(pal(fract(hash11(bi + deal * 5.0) + 0.45)), uPalAcc.rgb, step(0.8, hash11(bi * 1.9 + deal)));
   vec3 col = material(kind, vec2(u, v), bandW, px, bi, cA, cB);
   // Levels: the band pulses with its own part of the spectrum.
   float f = fract(bi * 0.137 + 0.3);
   float lvl = texture(uSpec, vec2(f, 0.25)).r;
   col *= 0.35 + 0.5 * lvl + 0.3 * uFlow.x;
-  // The cut lines themselves: a hairline of light, brighter on the kick.
-  float dEdge = min(v, 1.0 - v) * bandW;
-  col = mix(col, uPalBg.rgb * 0.2, smoothstep(px * 2.5, px * 1.0, dEdge));
-  col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * exp(-pow(dEdge / px, 2.0)) * (0.15 + 0.8 * uHit.y * amp);
-  col *= 0.55;
+  // PAPER. The bands are cut strips laid one over the next: each casts a soft
+  // shadow onto the strip beneath it, and its own cut edge catches the light.
+  // Flat bands side by side read as a screen; layered ones read as something
+  // made, which is what motion design is imitating in the first place.
+  float dTop = (1.0 - v) * bandW;   // the edge the strip above overlaps
+  float dBot = v * bandW;           // this strip's own cut edge
+  col *= 1.0 - 0.75 * exp(-dTop / 0.045);
+  col *= 0.95 + 0.05 * gnoise(q * vec2(30.0, 300.0) + bi * 7.0);
+  col += mix(uPalHigh.rgb, vec3(1.0), 0.6) * exp(-dBot / (px * 1.4)) * (0.12 + 0.7 * uHit.y * amp);
+  col *= 0.62;
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
   col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
   emit(col * mix(1.0, uEnergy, 0.5));
