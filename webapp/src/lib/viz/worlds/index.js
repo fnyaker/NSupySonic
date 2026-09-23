@@ -24,6 +24,11 @@ const LOADERS = {
   hyperspace: () => import("./hyperspace.js"),
   kaleido: () => import("./kaleido.js"),
   wobble: () => import("./wobble.js"),
+  stairs: () => import("./stairs.js"),
+  pingpong: () => import("./pingpong.js"),
+  soundsystem: () => import("./soundsystem.js"),
+  static: () => import("./static.js"),
+  fireworks: () => import("./fireworks.js"),
 };
 
 const cache = new Map();

@@ -128,6 +128,38 @@ function label(g, text, x, y) {
   g.fillText(text, x + 12, y + 9);
 }
 
+// A stand-in album cover: what the cover-driven worlds (the living artwork,
+// the torn signal, the record label) need to be judged on. Warm and cool
+// halves, a sun, a hard shape — enough structure that a blur, a warp or a tear
+// is visible, and nothing that suits one world in particular.
+function fakeCover() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 256;
+  const g = c.getContext("2d");
+  const lin = g.createLinearGradient(0, 0, 256, 256);
+  lin.addColorStop(0, "#1b1446");
+  lin.addColorStop(0.55, "#b8336a");
+  lin.addColorStop(1, "#f7b267");
+  g.fillStyle = lin;
+  g.fillRect(0, 0, 256, 256);
+  g.fillStyle = "#ffe9a8";
+  g.beginPath();
+  g.arc(168, 92, 44, 0, Math.PI * 2);
+  g.fill();
+  g.fillStyle = "#0d0b1f";
+  g.beginPath();
+  g.moveTo(0, 256);
+  g.lineTo(90, 150);
+  g.lineTo(150, 210);
+  g.lineTo(200, 170);
+  g.lineTo(256, 230);
+  g.lineTo(256, 256);
+  g.fill();
+  g.fillStyle = "#2ec4b6";
+  g.fillRect(24, 28, 70, 10);
+  return c;
+}
+
 /**
  * Run one world through the track and photograph it.
  *
@@ -150,6 +182,7 @@ async function run(opts) {
     loud = 1,
     cols = 2,
     motionGap = 1 / 30,
+    cover = true,
   } = opts;
   await loadWorld(world);
   const canvas = document.createElement("canvas");
@@ -175,6 +208,7 @@ async function run(opts) {
     flash: "full",
   });
   scene.attach(renderer);
+  if (cover) renderer.setCover(fakeCover());
   const geometry = createGeometry();
   geometry.set(w, h, hole);
   scene.resize(w, h, preset, geometry.out, 1);

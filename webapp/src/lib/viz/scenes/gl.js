@@ -189,7 +189,7 @@ export function createGLScene(opts = {}) {
 
   // What a driver is handed each frame, allocated once. `spec` is the smoothed
   // spectrum (128 bins, 0..1) for the worlds that do per-band work on the CPU.
-  const clocks = { beats: 0, bars: 0, phrases: 0, dt: 0, aspect: 16 / 9, spec: specSmooth };
+  const clocks = { beats: 0, bars: 0, phrases: 0, dt: 0, aspect: 16 / 9, spec: specSmooth, pitch: 0.5, melody: 0, hole: [0, 0, 0, 0] };
 
   // --- the artwork ------------------------------------------------------------------
   let coverUrl = "";
@@ -481,6 +481,8 @@ export function createGLScene(opts = {}) {
       put("uHole", 0, 0, 0, 0);
       put("uHoleR", 0, 0, -1 / 3, 0);
     }
+    // The same geometry for the drivers, which place things clear of it.
+    for (let i = 0; i < 4; i++) clocks.hole[i] = block[O.uHole + i];
     put("uCtl", o.intensity, o.reducedMotion ? 1 : 0, o.layout === "strip" ? 1 : 0, 0);
     const q = gq();
     const tiers = ["low", "medium", "high", "ultra"];
@@ -619,6 +621,10 @@ export function createGLScene(opts = {}) {
     clocks.phrases = phrasesNow;
     clocks.dt = rdt;
     clocks.aspect = cssH ? cssW / cssH : 16 / 9;
+    // The melody, for the worlds that draw the tune itself (a staircase that
+    // climbs with the arpeggio): its pitch 0..1 and how present it is.
+    clocks.pitch = pitch;
+    clocks.melody = melody;
     if (prev?.driver?.step) prev.driver.step(rdt, m, clocks);
     if (cur.driver?.step) cur.driver.step(rdt, m, clocks);
 
