@@ -48,6 +48,9 @@ const LOADERS = {
   stage: () => import("./stage.js"),
   inferno: () => import("./inferno.js"),
   storm: () => import("./storm.js"),
+  nebula: () => import("./nebula.js"),
+  ocean: () => import("./ocean.js"),
+  cathedral: () => import("./cathedral.js"),
 };
 
 const cache = new Map();
