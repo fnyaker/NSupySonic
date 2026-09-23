@@ -31,9 +31,9 @@ export const GROUPS = [
 
 export const WORLD_META = {
   // --- hard ------------------------------------------------------------------
-  forge: { group: "hard", label: "Forge", blurb: "L'enclume frappée à chaque kick, des gerbes d'étincelles, l'hymne en ruban d'or." },
+  forge: { group: "hard", label: "Forge", blurb: "L'enclume frappée à chaque kick, des gerbes d'étincelles qui roulent au sol, l'hymne en ruban d'or." },
   shatter: { group: "hard", label: "Éclats", blurb: "Le cadre vole en éclats de verre qui réfractent la lumière, relancés à chaque kick." },
-  lasers: { group: "hard", label: "Lasers", blurb: "Des nappes laser dans la fumée et des colonnes de flammes sur les gros kicks." },
+  lasers: { group: "hard", label: "Lasers", blurb: "La mainstage vue de la foule : lasers dans la fumée, flammes sur les gros kicks, les mains qui se lèvent sur le drop." },
   bounce: { group: "hard", label: "Rebond", blurb: "Une bille de gelée lumineuse qui s'écrase sur le kick et rebondit sur le temps." },
   saw: { group: "hard", label: "Scie", blurb: "Une lame qui tourne et des dents de scie laser — le zaag, littéralement." },
   stairs: { group: "hard", label: "Arpège", blurb: "Un escalier de lumière dont chaque marche s'allume sur une note de l'arpège." },

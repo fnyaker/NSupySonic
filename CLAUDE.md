@@ -1171,7 +1171,7 @@ own chunk: a session of techno never downloads the frenchcore forge).
 
 | shelf | worlds |
 |---|---|
-| Hard | `forge` (the anvil struck on the kick, spark fountains, the anthem as a gold ribbon), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke, flame columns on big kicks), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong`, `soundsystem` (a speaker wall whose cones pump), `static` (the signal torn apart), `fireworks` (shells aimed at the NEXT beat) |
+| Hard | `forge` (a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong`, `soundsystem` (a speaker wall whose cones pump), `static` (the signal torn apart), `fireworks` (shells aimed at the NEXT beat) |
 | Techno & machines | `tunnel`, `warehouse` (concrete pillars, sodium lamps, strobes), `ridges` (Unknown Pleasures), `lattice`, `circuit` |
 | Trance & psy | `hyperspace`, `kaleido` (line-art KIFS), `galaxy`, `flow` |
 | Bass & breaks | `wobble` (the LFO's own shape), `chrome` (liquid metal), `slices` |
