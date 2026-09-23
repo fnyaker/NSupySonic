@@ -81,15 +81,38 @@ void main() {
   }
 
   // Geometry, in pixels, so the edges are anti-aliased at any bar width.
-  float base = strip ? 0.5 * uRes.y : (uHole.z > 0.0 ? max(0.08, 0.5 + 0.5 * uHoleR.z - 0.02) : 0.3) * uRes.y;
+  float base = strip ? 0.5 * uRes.y : 0.3 * uRes.y;
   float room = strip ? 0.5 * uRes.y - 1.0 : (uRes.y - base) * 0.86;
+  // With the artwork in front, the bars FRAME it rather than growing up
+  // behind it: one bank standing on the floor under the cover, and its mirror
+  // hanging from the top above it. Grown from just under the cover, they
+  // spent 30% of their light where nobody could see it. Where the artwork
+  // leaves no room above or below (a cover beside the bars rather than in
+  // front of them), the floor layout stands and the cover simply dims them.
+  float yy;
+  bool banked = false;
+  if (!strip && uHole.z > 0.0) {
+    float below = (0.5 + 0.5 * uHoleR.z) * uRes.y;
+    float above = (0.5 + 0.5 * (uHole.y + uHole.w + 0.03)) * uRes.y;
+    float floorPx = 0.05 * uRes.y;
+    float ceilPx = 0.95 * uRes.y;
+    float roomLo = (below - floorPx) * 0.92;
+    float roomHi = (ceilPx - above) * 0.92;
+    if (min(roomLo, roomHi) > 0.12 * uRes.y) {
+      banked = true;
+      bool upper = frag.y > 0.5 * (below + above);
+      base = upper ? ceilPx : floorPx;
+      room = upper ? roomHi : roomLo;
+    }
+  }
   float hgt = max(v * room, 1.5);
   float halfW = pitchPx * P_WIDTH * 0.5;
   float cx = (bi + 0.5) * pitchPx;
   float dx = frag.x - cx;
   float y = frag.y - base;
-  // Mirrored about the middle in the strip; standing on the floor otherwise.
-  float yy = strip ? abs(y) : y;
+  // Mirrored about the middle in the strip; hanging from the ceiling in the
+  // upper bank; standing on the floor otherwise.
+  yy = strip ? abs(y) : (banked && base > 0.5 * uRes.y ? -y : y);
   float radius = min(halfW, 3.0);
   vec2 q = vec2(dx, yy - hgt * 0.5);
   float sd = sdRound2(q, vec2(halfW, hgt * 0.5), radius);
@@ -134,7 +157,7 @@ void main() {
 
   // The reflection: the bars upside down in a dark polished floor, fading and
   // softening with depth.
-  if (y < 0.0) {
+  if (y < 0.0 && !banked) {
     float ry = -y;
     float rv = shape(vS, f) * room;
     vec2 rq = vec2(dx, ry - rv * 0.5);

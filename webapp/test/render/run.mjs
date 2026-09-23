@@ -149,18 +149,31 @@ async function main() {
         r.errors = [...(r.errors || []), ...ph.errors];
       }
       if (tempo) {
-        // Same wall-clock stretch of the drop, at 90 and at 180 BPM: how much
-        // does the picture change per second?
+        // The same two seconds of wall clock in the second drop, at 90 and at
+        // 180 BPM: how much does the picture change, frame to frame, on
+        // average? Averaged over the window, not read off one pair of frames —
+        // a single pair right on a kick measures the kick's envelope, and
+        // most worlds scored about 1.0 on it.
         const motion = async (b) => {
           const res = await run({
             world, genre, bpm: b, w: 320, h: 180, tier, palette,
-            shots: ["drop", "dropOff"], motionGap: 1 / 20,
+            shots: ["drop"], motionGap: 1 / 30, motionWindow: 2, grain: false,
           });
-          return res.frames.reduce((a, f) => a + f.m.motion, 0) / res.frames.length;
+          return res.frames[0].m;
         };
         const slow = await motion(90);
         const fast = await motion(180);
-        r.tempo = { slow, fast, ratio: fast / Math.max(1e-6, slow) };
+        // Three readings, and the strongest counts. Frame-to-frame change on
+        // blocks saturates on a fast world (the picture is already new every
+        // frame at both tempos); the change over the whole window does the
+        // opposite, and is what a calm world's slow drift shows up in; and
+        // only the pixel-level reading sees motion finer than a block, like a
+        // sea's small waves. A clock in seconds scores ~1.0 on all three, so
+        // taking the largest cannot let one through.
+        const rPairs = fast.motion / Math.max(1e-6, slow.motion);
+        const rSpan = fast.span / Math.max(1e-6, slow.span);
+        const rFine = fast.fine / Math.max(1e-6, slow.fine);
+        r.tempo = { slow: slow.motion, fast: fast.motion, rPairs, rSpan, rFine, ratio: Math.max(rPairs, rSpan, rFine) };
       }
     } catch (e) {
       r.crash = String(e?.stack || e);

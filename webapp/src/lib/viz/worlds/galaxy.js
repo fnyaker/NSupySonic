@@ -30,9 +30,16 @@ const STARS = 2000;
 const SHARED = `
 float ARMS() { return max(1.0, floor(P_ARMS + 0.5)); }
 float PITCH() { return 0.28; }
-float tiltC() { return mix(0.95, 0.42, clamp(P_TILT, 0.0, 1.0)); }
-// The disk's scale: its arms reach the sides of the frame.
-float diskR() { return 0.95 * max(uFrame.z, 1.0); }
+// With the artwork in front of a portrait frame the disk turns nearly face-on:
+// a tilted disk is a horizontal band, and on a phone that band is exactly
+// where the cover sits — the arms have to reach above and below it instead.
+float tiltC() {
+  float t = mix(0.95, 0.42, clamp(P_TILT, 0.0, 1.0));
+  return uHole.z > 0.0 && uFrame.z < 1.2 ? mix(t, 0.95, 0.7) : t;
+}
+// The disk's scale: its arms reach the sides of the frame, and well past the
+// artwork when there is some — the core is behind it, the spiral is not.
+float diskR() { return max(0.95 * max(uFrame.z, 1.0), uHole.z > 0.0 ? 2.4 * max(uHole.z, uHole.w) : 0.0); }
 // The arm phase at disk radius r (disk units) and angle a.
 float armPhase(float r, float a) {
   return ARMS() * (a - log(max(r, 0.02) / 0.1) / tan(PITCH()) - uS0.x);
@@ -157,7 +164,8 @@ void particle(int id, out vec2 pos, out vec2 axis, out float width, out vec4 col
   float wave = exp(-pow((r - uSince.y * 0.35) / 0.05, 2.0)) * envB(uSince.y, 1.5);
   axis = vec2(0.0015 + 0.003 * bright, 0.0);
   width = axis.x;
-  col = vec4(c * bright * tw * (1.0 + 1.5 * wave) * 1.3, 1.0);
+  // Under the artwork a star is drawn for nobody: dim it like the gas.
+  col = vec4(c * bright * tw * (1.0 + 1.5 * wave) * 1.3 * mix(0.2, 1.0, clearOfHole(pos, 0.05)), 1.0);
 }
 `,
     fragment: `

@@ -84,6 +84,9 @@ void main() {
   // A soft vignette of LIGHT (never a darkening at the edges): the middle glows.
   col += mesh * exp(-dot(p, p) * 0.8) * 0.06;
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.15;
+  // The real artwork is in front of the middle of this one: under it, nothing
+  // is seen, and a glow spent there is a glow taken from the frame around it.
+  col *= mix(0.35, 1.0, clearOfHole(p, 0.06));
   emit(col * mix(1.0, uEnergy, 0.5));
 }
 `,

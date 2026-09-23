@@ -45,6 +45,24 @@
   // has no use for an option that draws nothing.
   const SCREEN_MODES = MODES.filter((m) => m.id !== "off");
 
+  // The world list for the picker, fetched when the window opens rather than
+  // bundled into it: the same catalogue the settings gallery reads, and the
+  // same chunk the engine's skins already share.
+  let worldShelves = [];
+  onMount(async () => {
+    try {
+      const { GROUPS, WORLD_META } = await import("../lib/viz/worlds/catalogue.js");
+      worldShelves = GROUPS.map((g) => ({
+        ...g,
+        worlds: Object.entries(WORLD_META)
+          .filter(([, m]) => m.group === g.id)
+          .map(([id, m]) => ({ id, label: m.label })),
+      })).filter((g) => g.worlds.length);
+    } catch {
+      /* offline mid-deploy: no picker, "auto" keeps working */
+    }
+  });
+
   function showUI() {
     uiVisible = true;
     clearTimeout(uiTimer);
@@ -211,6 +229,26 @@
         >
       {/each}
     </div>
+    {#if $vizScreenMode === "smart" && worldShelves.length}
+      <!-- A native select: on a projector laptop it is a keyboard-driven list,
+           and it keeps forty-seven worlds out of a bar that must stay small. -->
+      <select
+        class="world"
+        value={$vizScreenWorld}
+        on:change={(e) => vizScreenWorld.set(e.currentTarget.value)}
+        aria-label="Monde"
+        title="Le monde de cet écran : auto (le genre choisit) ou épinglé"
+      >
+        <option value="auto">Monde · auto</option>
+        {#each worldShelves as g (g.id)}
+          <optgroup label={g.label}>
+            {#each g.worlds as w (w.id)}
+              <option value={w.id}>{w.label}</option>
+            {/each}
+          </optgroup>
+        {/each}
+      </select>
+    {/if}
     <button class="ic" on:click={toggleFullscreen} aria-label="Plein écran">
       <Icon name={isFull ? "minimize" : "maximize"} size={18} />
     </button>
@@ -349,6 +387,33 @@
   }
   .bar button.sel {
     background: var(--accent);
+    color: #fff;
+  }
+  .bar .world {
+    appearance: none;
+    -webkit-appearance: none;
+    height: 34px;
+    padding: 0 30px 0 13px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background:
+      linear-gradient(45deg, transparent 50%, rgba(255, 255, 255, 0.6) 50%) calc(100% - 15px) 15px / 5px 5px no-repeat,
+      linear-gradient(135deg, rgba(255, 255, 255, 0.6) 50%, transparent 50%) calc(100% - 10px) 15px / 5px 5px no-repeat,
+      rgba(255, 255, 255, 0.04);
+    color: rgba(255, 255, 255, 0.85);
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .bar .world:hover,
+  .bar .world:focus-visible {
+    border-color: rgba(255, 255, 255, 0.28);
+    outline: none;
+  }
+  .bar .world option,
+  .bar .world optgroup {
+    background: #14121c;
     color: #fff;
   }
   .bar .ic {

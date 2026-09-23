@@ -38,6 +38,18 @@ export default {
   params: { slices: 22, height: 1, rays: 1, water: 1, stars: 1, spread: 1 },
   look: { exposure: 1.1, bloom: 1.2, threshold: 0.6, saturation: 1.2 },
 
+  // The only thing the driver does: turn the frame's dt into the temporal
+  // average's blend, so the denoise is the same 60 ms at any frame rate. In
+  // seconds on purpose — how long an average takes to hide noise is about the
+  // eye, not the music.
+  create({ state }) {
+    return {
+      step(dt) {
+        state[0] = 1 - Math.exp(-Math.min(dt, 0.25) / 0.06);
+      },
+    };
+  },
+
   fragment: `
 // The curtains' footprint on the plane of the sky: thin sinuous ridges,
 // stretched left-to-right so they run across the view, drifting on the bar
@@ -46,8 +58,8 @@ export default {
 // into speckle, so a far curtain is drawn softer instead — the cheap low-pass
 // the horizon needs.
 float footprint(vec2 q, float bars, float far) {
-  vec2 w = vec2(fbm(q * 0.22 + vec2(bars * 0.02, 0.0), 3), fbm(q * 0.22 + vec2(5.2, -bars * 0.018), 3));
-  float n = gnoise(q * vec2(0.16, 0.42) * P_SPREAD + w * 1.9 + vec2(0.0, bars * 0.03));
+  vec2 w = vec2(fbm(q * 0.22 + vec2(bars * 0.05, 0.0), 3), fbm(q * 0.22 + vec2(5.2, -bars * 0.045), 3));
+  float n = gnoise(q * vec2(0.16, 0.42) * P_SPREAD + w * 1.9 + vec2(0.0, bars * 0.08));
   return max(0.0, 1.0 - abs(n) * 8.5 / (1.0 + far));
 }
 
@@ -71,7 +83,7 @@ vec3 aurora(vec3 rd, float bars, int steps, float jitter) {
     f *= f * f;
     // Rays: brightness along the line, constant with altitude, so each one is
     // a vertical streak; they shimmer on the hats.
-    float rn = 0.5 + gnoise(vec2(q.x * 1.6 + bars * 0.25, q.y * 0.3));
+    float rn = 0.5 + gnoise(vec2(q.x * 1.6 + bars * 0.5, q.y * 0.3));
     float ray = 0.25 + 1.4 * rn * rn * P_RAYS;
     ray *= 1.0 + 0.4 * uHit2.x;
     // Light is brightest at the hem and fades with altitude, and far curtains
@@ -124,10 +136,11 @@ void main() {
   // with noise. Averaging this frame into the last few turns that noise into
   // the smooth light it was sampling. An aurora moves slowly enough that the
   // average costs no visible smear; a world that moved on the kick could not
-  // afford this.
+  // afford this. The blend is a TIME constant (the driver's), not a per-frame
+  // one: 0.28 a frame was a 60 ms average at 60 fps and a 25 ms one at 144.
   vec2 uv = gl_FragCoord.xy / uRes;
   vec3 last = prev(uv);
-  emit(mix(last, col, 0.28));
+  emit(mix(last, col, uS0.x > 0.0 ? uS0.x : 0.28));
 }
 `,
 };

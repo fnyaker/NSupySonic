@@ -168,14 +168,15 @@ test("the musical layer re-times everything when the tempo changes", () => {
 });
 
 test("every world's driver keeps musical time", () => {
-  // Measured when the catalogue was written, over 16 s of each tempo: every
-  // driver that integrates anything moves 1.85x-2.07x as far at 180 BPM as at
-  // 90 — shatter and bounce sit lowest, because a spring's overshoot is a
-  // property of the spring — except `ocean`, whose waves run at the SQUARE
-  // ROOT of the tempo on purpose (1.41x): a sea twice as fast stops reading as
-  // water. A rate written in seconds scores 1.00. Drivers that integrate
-  // nothing (their shader does all the moving on the beat clock) move under
-  // half a unit and are not asked.
+  // Measured when the catalogue was written, over 16 s of a steady groove at
+  // each tempo: every driver that integrates anything moves 1.82x (flow) to
+  // 2.31x (forge) as far at 180 BPM as at 90 — bounce's spring sits at 1.92,
+  // because an overshoot is a property of the spring, not of the tempo. A
+  // rate written in seconds scores 1.00. `ocean` used to follow only the
+  // square root of the tempo (1.41x) and was moved onto the beat clock:
+  // 140 BPM half-time rolled at barely the speed of a 90 BPM track. Drivers
+  // that integrate nothing (their shader does all the moving on the beat
+  // clock) move under half a unit and are not asked.
   const ratios = [];
   for (const [id, def] of WORLDS) {
     if (!def.create) continue;

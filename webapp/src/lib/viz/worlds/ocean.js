@@ -146,9 +146,13 @@ void main() {
     return {
       step(dt, m) {
         drop(m);
-        // The waves' own clock: seconds, scaled by the wind and the tempo so a
-        // faster track runs a busier sea, integrated so it never jumps.
-        t += dt * (0.55 + 0.35 * m.drive) * (params.wind || 1) * Math.sqrt(0.5 / Math.max(m.beat, 0.2));
+        // The waves' own clock, in beats — pinned to 1 at 120 BPM, where the
+        // swell was tuned — scaled by the wind and the drive, integrated so a
+        // change of tempo never jumps. It used to follow only the square root
+        // of the tempo ("a sea twice as fast stops reading as water"), and a
+        // 140 BPM half-time track then rolled at barely the speed of a 90 BPM
+        // one: the sea is here to breathe with the track, not to be physics.
+        t += (dt / m.beat) * 0.5 * (0.55 + 0.35 * m.drive) * (params.wind || 1);
         glade = Math.max(0, glade - dt / m.overBeats(16));
         state[0] = t;
         state[1] = glade;

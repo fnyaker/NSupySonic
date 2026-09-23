@@ -112,6 +112,32 @@ function metrics(s, holeBox, W, H) {
   };
 }
 
+// Motion is judged on 24x14 blocks, not on pixels: grain, the triangular
+// dither and a world's own per-pixel jitter change every pixel every frame at
+// ANY tempo, and on a calm world they were most of the measured change —
+// aurora read 1.02x at twice the tempo while its curtains were drifting twice
+// as fast. Averaging a block cancels noise and keeps anything that moves.
+function pooled(s, bw = 24, bh = 14) {
+  const out = new Float32Array(bw * bh);
+  const n = new Float32Array(bw * bh);
+  for (let y = 0; y < s.mh; y++)
+    for (let x = 0; x < s.mw; x++) {
+      const k = Math.min(bh - 1, Math.floor((y / s.mh) * bh)) * bw + Math.min(bw - 1, Math.floor((x / s.mw) * bw));
+      out[k] += s.lum[y * s.mw + x];
+      n[k]++;
+    }
+  for (let k = 0; k < out.length; k++) out[k] /= Math.max(1, n[k]);
+  return out;
+}
+
+function motionDiff(a, b) {
+  const pa = pooled(a);
+  const pb = pooled(b);
+  let s = 0;
+  for (let i = 0; i < pa.length; i++) s += Math.abs(pa[i] - pb[i]);
+  return s / pa.length;
+}
+
 function diff(a, b) {
   let s = 0;
   for (let i = 0; i < a.lum.length; i++) s += Math.abs(a.lum[i] - b.lum[i]);
@@ -182,6 +208,14 @@ async function run(opts) {
     loud = 1,
     cols = 2,
     motionGap = 1 / 30,
+    // > 0: measure motion as the mean change between consecutive frames
+    // `motionGap` apart over this many seconds after the shot, instead of one
+    // pair. One pair is an instant — right on a kick it is the kick — and a
+    // tempo comparison built on it measures the envelope, not the motion.
+    motionWindow = 0,
+    // The film grain is noise at ANY tempo; a motion comparison runs without
+    // it, or a calm world's drift is measured against static.
+    grain = true,
     cover = true,
   } = opts;
   // A feedback world is its own history: judge it after it has had time to
@@ -202,6 +236,7 @@ async function run(opts) {
   if (!renderer) throw new Error("no WebGL2");
   let simT = 0;
   const preset = { ...tierPreset(tier), tier };
+  if (!grain) preset.gl = { ...(preset.gl || {}), grain: 0 };
   const scene = createGLScene({
     preset,
     fixed: world,
@@ -274,12 +309,29 @@ async function run(opts) {
     shot.width = w;
     shot.height = h;
     shot.getContext("2d").drawImage(canvas, 0, 0);
-    // The motion measurement: the same scene a frame later.
-    advance(at + motionGap, at);
-    drawAt(at + motionGap);
-    const b = sample(canvas);
+    // The motion measurement: the same scene a frame later — or, over a
+    // window, the mean change from each frame to the next.
     const m = metrics(a, hole, w, h);
-    m.motion = diff(a, b);
+    const pairs = motionWindow > 0 ? Math.max(1, Math.round(motionWindow / motionGap)) : 1;
+    let prevS = a;
+    let sum = 0;
+    let fine = 0;
+    for (let k = 1; k <= pairs; k++) {
+      advance(at + k * motionGap, at + (k - 1) * motionGap);
+      drawAt(at + k * motionGap);
+      const b = sample(canvas);
+      sum += motionDiff(prevS, b);
+      fine += diff(prevS, b);
+      prevS = b;
+    }
+    m.motion = sum / pairs;
+    // The same, pixel by pixel: the only reading that sees motion finer than a
+    // block — a sea's small waves average out of every block they cross.
+    m.fine = fine / pairs;
+    // ...and how far the picture got over the whole window, which is what a
+    // calm world's slow drift shows up in: frame to frame it is under the
+    // noise floor at both tempos.
+    m.span = pairs > 1 ? motionDiff(a, prevS) : m.motion;
     frames.push({ name, shot, m });
   }
 
