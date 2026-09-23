@@ -38,40 +38,40 @@ export const WORLD_META = {
   saw: { group: "hard", label: "Scie", blurb: "Une lame qui tourne et des dents de scie laser — le zaag, littéralement." },
   stairs: { group: "hard", label: "Arpège", blurb: "Un escalier de lumière dont chaque marche s'allume sur une note de l'arpège." },
   pingpong: { group: "hard", label: "Ping-pong", blurb: "Un échange au néon : deux raquettes de verre qui renvoient une balle de lumière sur chaque temps." },
-  soundsystem: { group: "hard", label: "Sound system", blurb: "Un mur d'enceintes dont les membranes pompent sous chaque basse." },
-  static: { group: "hard", label: "Parasites", blurb: "Le signal qui se déchire : blocs arrachés, bandes décalées, bruit d'antenne." },
-  fireworks: { group: "hard", label: "Feu d'artifice", blurb: "Des bouquets qui éclatent sur les temps forts et retombent en pluie d'or." },
+  soundsystem: { group: "hard", label: "Sound system", blurb: "Un mur d'enceintes dont les membranes pompent sous chaque basse, la foule devant." },
+  static: { group: "hard", label: "Parasites", blurb: "La pochette en signal qui se déchire : bandes décalées, pixels triés, blocs corrompus." },
+  fireworks: { group: "hard", label: "Feu d'artifice", blurb: "Des bouquets aux couleurs d'un vrai spectacle, sur les temps forts, au-dessus de la ville et de l'eau." },
 
   // --- techno & machines -------------------------------------------------------
   tunnel: { group: "techno", label: "Corridor", blurb: "Un couloir d'acier éclairé par ses anneaux, une lumière qui file au fond à chaque temps, un sol qui les reflète." },
-  warehouse: { group: "techno", label: "Hangar", blurb: "Piliers de béton dans le brouillard, lampes au sodium et stroboscopes." },
+  warehouse: { group: "techno", label: "Hangar", blurb: "Piliers de béton dans le brouillard, lyres qui balaient la fumée, sol mouillé et stroboscopes." },
   ridges: { group: "techno", label: "Crêtes", blurb: "Le spectre en lignes de crête qui défilent, à la manière d'Unknown Pleasures." },
-  lattice: { group: "techno", label: "Treillis", blurb: "Un treillis de poutres lumineuses infini, traversé au tempo." },
+  lattice: { group: "techno", label: "Treillis", blurb: "Un treillis de chrome infini parcouru de courant, traversé au tempo." },
   circuit: { group: "techno", label: "Circuit", blurb: "Des pistes de circuit imprimé où les impulsions courent sur chaque frappe." },
 
   // --- trance & psy ------------------------------------------------------------
-  hyperspace: { group: "trance", label: "Hyperespace", blurb: "Les étoiles s'étirent, accélèrent pendant la montée et bondissent au drop." },
+  hyperspace: { group: "trance", label: "Hyperespace", blurb: "Les étoiles s'étirent, accélèrent pendant la montée ; au drop, des portes de lumière défilent." },
   kaleido: { group: "trance", label: "Kaléidoscope", blurb: "Une fractale en miroir qui tourne, zoome et fleurit avec le son." },
   galaxy: { group: "trance", label: "Galaxie", blurb: "Une galaxie spirale de milliers d'étoiles qui respire avec la basse." },
   flow: { group: "trance", label: "Flux", blurb: "Un champ de courants colorés qui s'enroule sur lui-même, sans jamais se répéter." },
 
   // --- bass & breaks -----------------------------------------------------------
-  wobble: { group: "bass", label: "Wobble", blurb: "Une membrane de basse qui ondule à la forme du LFO et se déchire au drop." },
+  wobble: { group: "bass", label: "Wobble", blurb: "Un tube de basse à la forme du LFO, son sillage derrière lui, et du courant qui crépite quand ça pousse." },
   chrome: { group: "bass", label: "Chrome", blurb: "Une goutte de métal liquide qui se déforme sous les basses." },
-  slices: { group: "bass", label: "Découpe", blurb: "L'image tranchée en bandes qui glissent et se décalent sur chaque break." },
+  slices: { group: "bass", label: "Découpe", blurb: "Des bandes de papier découpé qui glissent et se décalent sur chaque break." },
 
   // --- urbain -----------------------------------------------------------------
   vinyl: { group: "urban", label: "Vinyle", blurb: "Un disque qui tourne sous la lampe, sa pochette en étiquette." },
-  halo: { group: "urban", label: "Halo", blurb: "Le spectre en couronne autour de la pochette, des poussières de lumière." },
-  nightdrive: { group: "urban", label: "Route de nuit", blurb: "L'autoroute de nuit, les lampadaires qui défilent au tempo." },
+  halo: { group: "urban", label: "Halo", blurb: "Le spectre en couronne de lumière autour de la pochette, dans une fumée que la 808 repousse." },
+  nightdrive: { group: "urban", label: "Route de nuit", blurb: "L'autoroute de nuit derrière une voiture dont les feux stop s'allument sur le kick." },
   neon: { group: "urban", label: "Néon", blurb: "Une rue mouillée sous des enseignes au néon qui se reflètent." },
 
   // --- pop & groove ------------------------------------------------------------
-  bokeh: { group: "groove", label: "Bokeh", blurb: "Des disques de lumière floue qui éclosent sur les temps." },
+  bokeh: { group: "groove", label: "Bokeh", blurb: "Des disques de lumière floue qui éclosent sur les temps, et des paillettes nettes devant." },
   discoball: { group: "groove", label: "Boule à facettes", blurb: "La boule tourne et balaie la salle de ses taches de lumière." },
   silk: { group: "groove", label: "Soie", blurb: "Des rubans de soie qui ondulent au fil de la voix." },
   artwork: { group: "groove", label: "Pochette vivante", blurb: "Les couleurs de la pochette, fondues en un dégradé qui respire." },
-  plasma: { group: "groove", label: "Lampe à lave", blurb: "Des bulles de lumière qui fusionnent et se séparent au groove." },
+  plasma: { group: "groove", label: "Lampe à lave", blurb: "De la cire éclairée de l'intérieur qui monte, fusionne et se sépare au groove." },
 
   // --- rock & metal ------------------------------------------------------------
   stage: { group: "rock", label: "Scène", blurb: "Le groupe en contre-jour devant un mur LED qui montre la pochette, les faisceaux dans la fumée, la foule." },
@@ -82,14 +82,14 @@ export const WORLD_META = {
   nebula: { group: "calm", label: "Nébuleuse", blurb: "Des nuages de gaz et de poussière d'étoiles, sans un seul à-coup." },
   aurora: { group: "calm", label: "Aurore", blurb: "Des rideaux d'aurore boréale au-dessus de l'eau." },
   ocean: { group: "calm", label: "Océan", blurb: "La houle de nuit sous la lune, qui se gonfle avec la basse." },
-  cathedral: { group: "calm", label: "Nef", blurb: "Des rais de lumière à travers un vitrail, la poussière qui danse dedans." },
+  cathedral: { group: "calm", label: "Nef", blurb: "Une rosace gothique et sa lumière dans la poussière, au bout d'une nef de colonnes." },
   ink: { group: "calm", label: "Encre", blurb: "De l'encre qui s'épanouit dans l'eau, une volute par note." },
   rain: { group: "calm", label: "Pluie", blurb: "La pluie sur la vitre, les lumières de la ville floues derrière." },
   fireflies: { group: "calm", label: "Lucioles", blurb: "Une prairie de nuit où les lucioles s'allument sur la mélodie." },
 
   // --- monde -----------------------------------------------------------------
-  carnival: { group: "world", label: "Carnaval", blurb: "Des anneaux de perles qui tournent en polyrythmie et se retrouvent." },
-  tropics: { group: "world", label: "Tropiques", blurb: "Le soleil couchant derrière les palmes, l'air qui ondule de chaleur." },
+  carnival: { group: "world", label: "Carnaval", blurb: "Des anneaux de perles en polyrythmie sous des guirlandes d'ampoules." },
+  tropics: { group: "world", label: "Tropiques", blurb: "Le soleil couchant derrière les cocotiers, la mer qui scintille." },
 
   // --- rétro -----------------------------------------------------------------
   horizon: { group: "retro", label: "Horizon", blurb: "Le soleil rayé sur la grille néon, les montagnes au loin." },
