@@ -9,6 +9,9 @@
 // flares, which is the downbeat made visible, and the rest of the bar is the
 // patterns sliding past one another.
 //
+//   THE PARTY. Festoons of bulbs swagged across the top of the frame, a
+//   light chasing along each strand on the beat and every bulb brightening
+//   on the kick, and the lights of the party out of focus behind.
 //   THE BEADS are glossy spheres: a warm key light from above, a highlight,
 //   a rim, their own colour — and the ones that have just struck glow.
 //   THE RINGS lean toward the frame's shape like every ring in this set, so a
@@ -50,6 +53,42 @@ void main() {
   int nr = int(clamp(P_RINGS, 2.0, 6.0));
   // The room: warm and dark, a glow round the rings.
   vec3 col = uPalBg.rgb * 0.4 + mix(uPalLow.rgb, uPalMid.rgb, 0.4) * exp(-r * 1.2) * 0.04;
+  float A = uFrame.z;
+  vec3 warm = vec3(1.0, 0.72, 0.4);
+
+  // --- the party behind: lights out of focus, drifting ---
+  for (int i = 0; i < 12; i++) {
+    vec3 h = hash31(float(i) * 3.7 + 1.3);
+    vec2 c = vec2((h.x * 2.0 - 1.0) * A, h.y * 1.8 - 0.9) + 0.05 * vec2(sin(bars * 0.3 + h.z * 9.0), cos(bars * 0.23 + h.x * 7.0));
+    float R = 0.08 + 0.12 * h.z;
+    float disc = smoothstep(R, R * 0.85, length(p - c));
+    col += mix(pal(h.z), warm, 0.4) * disc * (0.025 + 0.02 * uFlow.x);
+  }
+
+  // --- festoons: strings of bulbs swagged across the top of the frame ---
+  // Three strands, each a row of scallops between hanging points. A light
+  // runs along every strand on the beat, and the whole string brightens on
+  // the kick.
+  for (int s = 0; s < 3; s++) {
+    float fs = float(s);
+    float span = 0.9 + 0.35 * fs;
+    float xs = mod(p.x + fs * 0.37, span) - span * 0.5;
+    float yEdge = 0.97 - 0.13 * fs;
+    float sag = 0.1 + 0.04 * fs;
+    float wireY = yEdge - sag * (1.0 - pow(2.0 * xs / span, 2.0));
+    col += vec3(0.02) * exp(-pow((p.y - wireY) / (uFrame.w * 1.2), 2.0));
+    float bs = 0.11 + 0.02 * fs;
+    float bi = floor(p.x / bs + 0.5);
+    float bx = bi * bs;
+    float bxs = mod(bx + fs * 0.37, span) - span * 0.5;
+    vec2 bc = vec2(bx, yEdge - sag * (1.0 - pow(2.0 * bxs / span, 2.0)) - 0.014);
+    float db = length((p - bc) * vec2(1.0, 0.85));
+    float chase = exp(-pow(fract(bi * 0.125 - uClock.x * uSpeed * 0.5 + fs * 0.33) - 0.5, 2.0) * 60.0);
+    vec3 bulbC = mod(bi + fs, 3.0) < 1.0 ? warm : mix(pal(fract(bi * 0.21 + fs * 0.3)), warm, 0.3);
+    float on = 0.45 + 0.35 * uFlow.x + 1.2 * chase + 0.6 * uHit.y * amp;
+    col += bulbC * (smoothstep(0.011, 0.007, db) * 1.6 + glow(db, 0.02) * 0.45) * on * (1.0 - 0.3 * fs);
+  }
+
   // The strike line: straight up from the centre, flaring on the kick.
   float strike = exp(-pow(q.x / 0.03, 2.0)) * step(0.0, q.y) * exp(-q.y * 0.6);
   col += mix(uPalHigh.rgb, vec3(1.0), 0.4) * strike * (0.04 + 0.2 * uHit.y * amp);
@@ -120,10 +159,12 @@ void particle(int id, out vec2 pos, out vec2 axis, out float width, out vec4 col
   // A paper square turning: its width shrinks as it turns edge-on.
   float spin = uClock.x * (2.0 + 3.0 * h.z) + j;
   float face = abs(cos(spin));
-  axis = vec2(cos(spin * 0.7), sin(spin * 0.7)) * 0.016;
-  width = 0.011 * (0.15 + 0.85 * face);
-  vec3 c = pal(fract(h.x * 0.9 + h.y * 0.3));
-  col = vec4(c * (0.35 + 0.65 * face) * 0.9, 1.0);
+  axis = vec2(cos(spin * 0.7), sin(spin * 0.7)) * 0.02;
+  width = 0.015 * (0.12 + 0.88 * face);
+  // Paper in the palette, one piece in four gold foil; the face catches the
+  // light as it turns toward us and goes dark edge-on.
+  vec3 c = h.z > 0.75 ? vec3(1.0, 0.78, 0.35) : pal(fract(h.x * 0.9 + h.y * 0.3));
+  col = vec4(c * (0.15 + 0.85 * face * face) * (h.z > 0.75 ? 1.4 : 0.9), 1.0);
 }
 `,
     fragment: `

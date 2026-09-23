@@ -1179,7 +1179,7 @@ own chunk: a session of techno never downloads the frenchcore forge).
 | Pop & groove | `bokeh`, `discoball`, `silk`, `artwork` (the cover's own colours), `plasma` |
 | Rock & metal | `stage` (the band backlit against an LED wall showing the artwork, beams on a lighting desk's cues, the crowd), `inferno`, `storm` (a cloud deck lit from below by the last light, over a lake that mirrors every strike) |
 | Calme | `nebula`, `aurora`, `ocean`, `cathedral`, `ink`, `rain` (every drop a lens refracting the city), `fireflies` (a meadow whose fireflies fall into step on the drop) |
-| Monde | `carnival` (polyrhythm as rings of beads), `tropics` |
+| Monde | `carnival` (polyrhythm as rings of beads, under festoons of bulbs chasing the beat), `tropics` |
 | Rétro | `horizon` (the banded sun over a true ground plane), `pixels` (a CRT raster, a runner on a real gait, a brick equaliser whose caps fall under gravity) |
 | Classiques | `pulse`, `spectrum` — also the fixed `pulse` and `bars` modes |
 
