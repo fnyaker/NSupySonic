@@ -1176,7 +1176,7 @@ own chunk: a session of techno never downloads the frenchcore forge).
 | Trance & psy | `hyperspace`, `kaleido` (line-art KIFS), `galaxy`, `flow` |
 | Bass & breaks | `wobble` (the LFO's own shape), `chrome` (liquid metal), `slices` |
 | Urbain | `vinyl`, `halo` (the spectrum as a breathing crown round the artwork, its echoes going out through smoke the 808 pushes aside), `nightdrive`, `neon` (a wet street under ten real neon signs — a heart, a martini, a bolt, a moon, notes… — laid out on slots the artwork never hides) |
-| Pop & groove | `bokeh`, `discoball`, `silk`, `artwork` (the cover's own colours), `plasma` |
+| Pop & groove | `bokeh` (lens bokeh in a luminous room, with glitter the one thing in focus), `discoball`, `silk`, `artwork` (the cover's own colours), `plasma` |
 | Rock & metal | `stage` (the band backlit against an LED wall showing the artwork, beams on a lighting desk's cues, the crowd), `inferno`, `storm` (a cloud deck lit from below by the last light, over a lake that mirrors every strike) |
 | Calme | `nebula`, `aurora`, `ocean`, `cathedral` (a Gothic rose of pointed lancets and leaded glass, down a nave of fluted columns), `ink`, `rain` (every drop a lens refracting the city), `fireflies` (a meadow whose fireflies fall into step on the drop) |
 | Monde | `carnival` (polyrhythm as rings of beads, under festoons of bulbs chasing the beat), `tropics` |

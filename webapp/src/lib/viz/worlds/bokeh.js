@@ -11,6 +11,11 @@
 //   bokeh look like soap bubbles — and a hair of colour fringing on the edge.
 //   Three layers at three distances, so they drift at three speeds and the
 //   nearest ones are huge and faint while the far ones are small and bright.
+//   THE ROOM is not black: it is the glow of everything out of focus, three
+//   soft pools of the palette drifting on the bar.
+//   THE GLITTER is the one thing in focus: four-rayed glints hanging in
+//   front of the lens, twinkling with the hi-hats — the sharp contrast that
+//   makes the discs read as melted.
 //   THE MUSIC. Every disc belongs to a slice of the spectrum and breathes with
 //   it, so the frame's light is the mix; each beat a scatter of discs swells
 //   and flares; the kick pushes the near layer toward the camera; the drop
@@ -31,9 +36,37 @@ export default {
   fragment: `
 void main() {
   vec2 p = fragP();
-  // The room behind the lights: dark, warmer where most of the light is.
-  vec3 col = uPalBg.rgb * 0.45;
-  col += mix(uPalLow.rgb, uPalMid.rgb, 0.4) * exp(-dot(p * vec2(0.6, 1.2), p * vec2(0.6, 1.2))) * 0.05 * (0.6 + 0.4 * uFlow.x);
+  float bars = uClock.y * uSpeed;
+  float A = uFrame.z;
+  // The room behind the lights is not black: it is the glow of everything out
+  // of focus, three soft pools of the palette drifting on the bar — the
+  // luminous gradient a pop record lives in — breathing with the mix.
+  vec2 b1 = vec2(-0.6 * A + 0.3 * sin(bars * 0.21), 0.35 + 0.25 * cos(bars * 0.17));
+  vec2 b2 = vec2(0.55 * A + 0.3 * cos(bars * 0.19), -0.3 + 0.25 * sin(bars * 0.23));
+  vec2 b3 = vec2(0.2 * A * sin(bars * 0.13), 0.1 * cos(bars * 0.29));
+  float w1 = exp(-dot(p - b1, p - b1) / 0.9);
+  float w2 = exp(-dot(p - b2, p - b2) / 0.9);
+  float w3 = exp(-dot(p - b3, p - b3) / 0.5);
+  vec3 col = uPalBg.rgb * 0.4;
+  col += (uPalLow.rgb * w1 + uPalHigh.rgb * w2 + uPalMid.rgb * w3) * 0.1 * (0.6 + 0.4 * uFlow.x + 0.2 * uMood.y);
+
+  // --- glitter: the one thing in focus ---
+  // Points of light hanging in front of the lens, sharp where everything
+  // behind them is soft: four-rayed glints that twinkle with the hi-hats and
+  // catch the beat. The contrast between them and the discs is what makes
+  // the discs read as out of focus.
+  vec2 gq = p / 0.12 + vec2(0.0, bars * 0.35);
+  vec2 gc = floor(gq);
+  vec3 gh = hash32(gc + 17.0);
+  if (gh.x > 0.9) {
+    vec2 at = gc + 0.3 + 0.4 * gh.yz;
+    vec2 dq = (gq - at) * 0.12;
+    vec2 ad = abs(rot(gh.y * 0.8) * dq);
+    float tw = pow(0.5 + 0.5 * sin(uClock.x * (1.3 + gh.z) * PI + gh.y * 40.0), 6.0);
+    float hit = 0.4 + tw + 1.2 * uHit2.x + 0.8 * envB(fract(uClock.x + gh.z), 0.2) * step(0.6, gh.z);
+    float star = exp(-dot(dq, dq) * 9e4) + 0.5 * (exp(-ad.x * 600.0 - ad.y * 60.0) + exp(-ad.y * 600.0 - ad.x * 60.0));
+    col += mix(pal(gh.z), vec3(1.0), 0.6) * star * hit * 0.5 * clearOfHole(p, 0.03);
+  }
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
   col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
   emit(col * mix(1.0, uEnergy, 0.5));
@@ -100,7 +133,9 @@ vec4 sprite(vec2 q, vec4 c, float k) {
   float inside = smoothstep(1.0, 1.0 - aa * 1.5, d);
   // Brighter at the rim, the way real bokeh is.
   float rim = smoothstep(0.7, 0.97, d);
-  vec3 body = c.rgb * (0.35 + 0.65 * rim) * inside;
+  // ...and faintly ringed inside, like the onion rings a real lens leaves in
+  // its bokeh from the polishing of its elements.
+  vec3 body = c.rgb * (0.35 + 0.65 * rim) * (0.96 + 0.04 * sin(d * 38.0)) * inside;
   // A hair of fringing on the edge: warm outside, cool inside.
   body += vec3(0.06, 0.0, -0.03) * c.rgb * smoothstep(0.92, 1.0, d) * inside * 4.0;
   return vec4(body, 1.0);
