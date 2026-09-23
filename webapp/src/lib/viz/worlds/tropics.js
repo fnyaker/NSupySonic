@@ -11,9 +11,10 @@
 //   THE SEA is a plane in perspective: dark water, swell lines foreshortened
 //   toward the horizon, and the GLITTER — the sun's reflection broken by the
 //   waves into a path of sparks, widest near you, flickering with the hats.
-//   THE PALMS frame the picture from both sides: curved trunks and drooping
-//   fronds built as distance fields, their leaflets cut into the frond's
-//   edge, swaying on the bar in a wind that gusts with the drive.
+//   THE PALMS frame the picture from both sides: curved trunks and fronds
+//   built the way a coconut palm's are — an arching stem with a comb of
+//   leaflets hanging from it — swaying on the bar in a wind that gusts with
+//   the drive.
 //   THE MUSIC. The bass swells the sea; the kick breathes the sun's glow; the
 //   drop flares the sun and throws the glitter wide.
 //
@@ -32,24 +33,46 @@ export default {
   fragment: `
 float horizonY() { return -0.18; }
 
-// A frond: a drooping arc from the crown, its edge cut into leaflets.
+// A frond, as a coconut palm's is: a stem (the rachis) arching out of the
+// crown and drooping, and a COMB of leaflets along it — each one slanting
+// toward the tip, tapering to a point, hanging longer on the underside than
+// the top, shortest at the base and the tip. The first version cut a saw
+// into a thin stroke, and nine thin strokes fanned round a point read as a
+// spider, not a tree.
 float frond(vec2 p, vec2 crown, float ang, float len, float droop) {
+  // Gravity bends every frond: the ones reaching up arc over to their side,
+  // the ones reaching out hang.
+  float bend = sign(cos(ang) + 1e-3) * 0.2 * max(sin(ang), 0.0);
   float best = 1e3;
   float bestT = 0.0;
+  vec2 perp = vec2(0.0, 1.0);
   vec2 a = crown;
-  for (int i = 1; i <= 8; i++) {
-    float t = float(i) / 8.0;
-    vec2 b = crown + vec2(cos(ang), sin(ang)) * len * t + vec2(0.0, -droop * t * t);
-    float d = sdSeg2(p, a, b);
-    if (d < best) { best = d; bestT = t; }
+  for (int i = 1; i <= 10; i++) {
+    float t = float(i) / 10.0;
+    vec2 b = crown + vec2(cos(ang), sin(ang)) * len * t + vec2(bend * t * t, -droop * t * t);
+    vec2 pa = p - a;
+    vec2 ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    float d = length(pa - ba * h);
+    if (d < best) {
+      best = d;
+      bestT = (float(i) - 1.0 + h) / 10.0;
+      vec2 tg = normalize(ba);
+      perp = sign(ba.x * pa.y - ba.y * pa.x) * vec2(-tg.y, tg.x);
+    }
     a = b;
   }
-  // The frond is widest a third of the way out and tapers to a point; the
-  // leaflets are a saw cut into its width along its length.
-  float w = 0.034 * sin(PI * pow(bestT, 0.6)) * (1.0 - 0.35 * bestT);
-  float saw = fract(bestT * 30.0);
-  w *= 0.25 + 0.75 * smoothstep(0.0, 0.7, saw);
-  return best - w;
+  float u = bestT * len;
+  float v = best;
+  float lower = perp.y < 0.0 ? 1.0 : 0.55;
+  float L = 0.14 * sin(PI * pow(clamp(bestT, 0.0, 1.0), 0.7)) * lower * (0.8 + 0.2 * len / 0.45);
+  // The comb: leaflets every P along the stem, slanted toward the tip.
+  const float P = 0.021;
+  float cell = abs(fract((u - v * 0.85) / P) - 0.5) * P;
+  float w = P * 0.34 * (1.0 - smoothstep(0.0, L, v)) + 0.0012;
+  float leaf = max(cell - w, v - L);
+  float rachis = v - 0.006 * (1.0 - bestT) - 0.0015;
+  return min(rachis, leaf);
 }
 
 float palm(vec2 p, vec2 base, float h, float lean, float sway) {
@@ -60,19 +83,23 @@ float palm(vec2 p, vec2 base, float h, float lean, float sway) {
   for (int i = 1; i <= 8; i++) {
     float t = float(i) / 8.0;
     vec2 b = base + vec2(lean * t * t * h + sway * t * t * t * 0.05, h * t);
-    float w = mix(0.022, 0.011, t);
+    float w = mix(0.024, 0.012, t);
     d = min(d, sdSeg2(p, a, b) - w);
     a = b;
     crown = b;
   }
-  // The fronds, fanned round the crown, moving with the wind.
-  // Long fronds arching out and drooping past the horizontal, the way a
-  // coconut palm's crown hangs.
-  for (int k = 0; k < 9; k++) {
+  // Nothing more to do away from the crown: the fronds are the costly part.
+  if (abs(p.x - crown.x) > 0.75 || p.y < crown.y - 0.62 || p.y > crown.y + 0.45) return d;
+  // The knot of the crown, where the fronds and the nuts hang.
+  d = min(d, length((p - crown - vec2(0.0, -0.02)) * vec2(1.0, 1.3)) - 0.03);
+  // Fronds fanned round the crown: a few reaching up, most arching out and
+  // hanging past the horizontal, each moving with the wind.
+  for (int k = 0; k < 11; k++) {
     float fk = float(k);
-    float ang = mix(0.05, PI - 0.05, fk / 8.0) + sway * 0.07 * (1.0 + 0.3 * sin(fk * 2.1));
-    float len = 0.42 + 0.12 * sin(fk * 1.7 + h * 3.0);
-    d = min(d, frond(p, crown, ang, len, 0.28 + 0.08 * cos(fk * 1.3)));
+    float ang = mix(0.12, PI - 0.12, fk / 10.0) + sway * 0.07 * (1.0 + 0.3 * sin(fk * 2.1));
+    float up = sin(ang);
+    float len = (0.36 + 0.12 * sin(fk * 1.7 + h * 3.0)) * (1.0 - 0.25 * up * up);
+    d = min(d, frond(p, crown, ang, len, (0.22 + 0.08 * cos(fk * 1.3)) * (0.7 + 1.1 * (1.0 - up))));
   }
   return d;
 }
