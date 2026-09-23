@@ -6,8 +6,10 @@
 // through the dust, the columns standing black against it.
 //
 //   THE WINDOW is drawn as glass and lead: twelve petals round a centre
-//   rose, two rings of panes, every pane its own colour off the palette and
-//   every one framed by the dark leading and the stone tracery.
+//   rose built as a Gothic one is — pointed lancets between stone mullions,
+//   roundels holding quatrefoils, a rosette at the heart — every pane its own
+//   colour off the palette and cut by thin leading into pieces of glass that
+//   are each a little different.
 //   THE SHAFTS are the window's own light carried down the nave: for every
 //   pixel the window is sampled along the line back toward it, so each pane
 //   throws its own coloured beam and the tracery throws its shadow into
@@ -37,35 +39,77 @@ export default {
   look: { exposure: 1.0, bloom: 1.3, threshold: 0.65, saturation: 1.2 },
 
   fragment: `${SHARED}
-// The rose window's light at q (0 outside it), and how much of it is glass.
+// The rose window's light at q (0 outside it). Drawn as a Gothic rose is
+// built: an outer ring of round-headed LANCETS between stone mullions of a
+// real width, a middle ring of ROUNDELS each holding a quatrefoil, a rosette
+// at the heart — and every pane cut by thin leading into pieces of glass
+// that are each a slightly different colour, which is what makes stained
+// glass read as glass and not as a colour wheel.
 vec3 rose(vec2 q, float hue) {
-  vec2 d = q - roseC();
-  float r = length(d) / roseR();
+  vec2 d = (q - roseC()) / roseR();
+  float r = length(d);
   if (r > 1.0) return vec3(0.0);
+  float px = uFrame.w / roseR();
+  const float N = 12.0;
   float a = atan(d.y, d.x);
-  float petals = 12.0;
-  float sector = floor((a / TAU + 0.5) * petals);
-  float fa = fract((a / TAU + 0.5) * petals);
-  float ring = r < 0.32 ? 0.0 : r < 0.66 ? 1.0 : 2.0;
-  // The pane's colour: a hue off the palette, turned by the chord changes.
-  float h = hash12(vec2(sector * (ring > 0.5 ? 1.0 : 0.0), ring) + 3.1);
+  float u = (a / TAU + 0.5) * N;
+  float sector = floor(u);
+  float fa = fract(u) - 0.5;
+  float across = fa * TAU / N * r;            // across the sector, in radii
+  float ca = ((sector + 0.5) / N - 0.5) * TAU; // the sector's centre angle
+  float glass = 0.0;
+  float ring;
+  float piece;                                 // which piece of glass
+  float lead = 0.0;
+  if (r > 0.57) {
+    // The lancets: straight sides, then a POINTED head — two arcs meeting,
+    // as a Gothic lancet's do (a round head read as an egg).
+    ring = 2.0;
+    const float rh = 0.68;
+    float w = PI / N * rh - 0.022;
+    float Rc = 1.6 * w;
+    float head = max(length(vec2(across + (Rc - w), r - rh)), length(vec2(across - (Rc - w), r - rh))) - Rc;
+    float inside = r < rh ? w - abs(across) : -head;
+    glass = smoothstep(-px, px, inside) * smoothstep(0.585 - px, 0.585 + px, r);
+    // A lancet is glazed in bands.
+    float band = (r - 0.585) * 14.0;
+    piece = floor(band) + sector * 17.0;
+    // ...faded out once the bands are finer than a few pixels, where they
+    // would only be moiré.
+    lead = smoothstep(px * 14.0 * 1.3, 0.0, abs(fract(band) - 0.5) * 2.0 - 1.0 + px * 14.0 * 1.3)
+         * (1.0 - smoothstep(0.12, 0.3, px * 14.0));
+    lead = max(lead, smoothstep(px * 1.2, 0.0, abs(across)) * step(r, rh));
+  } else if (r > 0.28) {
+    // The roundels, one per sector, each with a quatrefoil in its leading.
+    ring = 1.0;
+    vec2 cc = vec2(cos(ca), sin(ca)) * 0.425;
+    vec2 dl = d - cc;
+    float rr = length(dl);
+    glass = smoothstep(px, -px, rr - 0.105);
+    float la = atan(dl.y, dl.x) - ca;
+    float foil = 0.06 + 0.025 * abs(cos(la * 2.0));
+    lead = smoothstep(px * 1.5, 0.0, abs(rr - foil));
+    piece = sector * 3.0 + step(foil, rr);
+  } else {
+    // The rosette at the heart: six lobes round a boss.
+    ring = 0.0;
+    float lobes = 0.55 + 0.35 * abs(cos(a * 3.0));
+    glass = smoothstep(0.27 + px, 0.27 - px, r) * smoothstep(0.06 - px, 0.06 + px, r);
+    lead = smoothstep(px * 1.5, 0.0, abs(r / 0.27 - lobes) * 0.27);
+    piece = step(lobes, r / 0.27) + floor((a / TAU + 0.5) * 6.0) * 2.0;
+  }
+  if (glass <= 0.0) return vec3(0.0);
+  // The pane's colour, a hue off the palette turned by the chord changes; each
+  // piece a little lighter, darker or warmer than its neighbours.
+  float h = hash12(vec2(sector * step(0.5, ring), ring) + 3.1);
   vec3 c = pal(fract(h * 0.8 + hue + ring * 0.13));
   c = mix(c, hue2rgb(fract(h + hue)), 0.35);
-  // The leading and the stone: radial spokes, the ring boundaries, the rim.
-  float px = uFrame.w / roseR();
-  float spoke = abs(fa - 0.5) * 2.0;            // 1 at the spokes
-  float lead = smoothstep(0.86, 0.94, spoke) * step(0.32, r);
-  lead = max(lead, smoothstep(0.03 + px, 0.03 - px * 0.0, abs(r - 0.32)));
-  lead = max(lead, smoothstep(0.025 + px, 0.0, abs(r - 0.66)));
-  lead = max(lead, smoothstep(0.93, 0.97, r));
-  // The centre rose: a small six-lobed flower.
-  if (r < 0.32) {
-    float lobes = abs(cos(a * 3.0));
-    lead = max(lead, smoothstep(0.03, 0.0, abs(r / 0.32 - (0.55 + 0.35 * lobes))));
-  }
-  // Glass is not flat: a little variation in each pane.
-  float grain = 0.75 + 0.25 * gnoise(q * 40.0);
-  return c * (1.0 - lead) * grain;
+  vec3 ph = hash32(vec2(piece, ring + 7.0));
+  c *= 0.7 + 0.5 * ph.x;
+  c = mix(c, c.gbr, 0.12 * ph.y);
+  // Glass is not flat: it has seeds and ripples in it.
+  float grain = 0.8 + 0.2 * gnoise(q * 45.0);
+  return c * glass * (1.0 - 0.85 * lead) * grain;
 }
 
 void main() {
@@ -125,16 +169,33 @@ void main() {
       float w = 0.13 / z;
       float top = 0.9 / z;
       float bottom = floorY / (0.6 + 0.4 * z) - 0.05;
-      float col01 = smoothstep(w + uFrame.w, w - uFrame.w, abs(p.x - x)) * step(bottom, p.y) * step(p.y, top);
-      // The arch springing from the column toward the next one in.
+      // A column is ROUND: shade it across its width as a fluted cylinder lit
+      // from the nave, where the window's light comes down, with a capital
+      // under the arch and a plinth at its foot. A flat box of one colour
+      // read as a cardboard cut-out.
+      float cu = (p.x - x) / w;
+      float capital = smoothstep(top - 0.05 / z, top - 0.04 / z, p.y);
+      float plinth = smoothstep(bottom + 0.06 / z, bottom + 0.05 / z, p.y);
+      float wide = 1.0 + 0.25 * max(capital, plinth);
+      float col01 = smoothstep(wide + uFrame.w / w, wide - uFrame.w / w, abs(cu)) * step(bottom, p.y) * step(p.y, top);
+      float nz = sqrt(max(1.0 - cu * cu / (wide * wide), 0.0));
+      float lambert = max(0.0, -side * cu / wide * 0.75 + 0.35 * nz);
+      float flutes = 0.8 + 0.2 * cos(cu * PI * 5.0) * (1.0 - max(capital, plinth));
+      // The arch springing from the column toward the next one in: a rib
+      // with its own round section, lit on its underside.
       float xn = side * 1.25 / (z + 0.9);
       float ax = (p.x - x) / (xn - x);
       float archY = top + (0.9 / (z + 0.9) - top) * ax + 0.12 / z * sin(clamp(ax, 0.0, 1.0) * PI);
-      float arch = step(0.0, ax) * step(ax, 1.0) * smoothstep(0.035 / z, 0.0, abs(p.y - archY));
-      float solid = max(col01, arch);
-      // Their faces toward the window catch its light a little.
-      vec3 stone = uPalBg.rgb * 0.08 + mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * 0.02 * sun * (1.0 - float(k) * 0.12);
-      col = mix(col, stone, solid);
+      float rw = 0.035 / z;
+      float rv = (p.y - archY) / rw;
+      float arch = step(0.0, ax) * step(ax, 1.0) * smoothstep(1.0 + uFrame.w / rw, 1.0 - uFrame.w / rw, abs(rv));
+      float archL = max(0.0, -rv * 0.6 + 0.4) * sqrt(max(1.0 - rv * rv, 0.0));
+      vec3 light = mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * sun * (1.0 - float(k) * 0.11);
+      vec3 albedo = mix(vec3(0.5, 0.46, 0.42), uPalLow.rgb, 0.25);
+      vec3 stoneC = albedo * (0.025 + light * 0.28 * lambert) * flutes;
+      vec3 archC = albedo * (0.02 + light * 0.22 * archL);
+      col = mix(col, archC, arch);
+      col = mix(col, stoneC, col01);
     }
   }
 
