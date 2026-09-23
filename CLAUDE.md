@@ -1095,7 +1095,7 @@ shader, drawn by one WebGL2 engine in four files:
   **There is no wall-clock time in it.** A world's clocks are beats, bars and phrases (`uClock`), so
   "no constant that should be musical" is a property of the interface rather than a rule to police;
   the one thing that needs seconds, the film grain, lives in the post pass. Also here: the library
-  chunks a world pulls in by name (`uses`: noise, fbm, sdf, voronoi, caustics…, with dependencies),
+  chunks a world pulls in by name (`uses`: noise, fbm, sdf, voronoi, caustics, `crowd` — the person seen from behind that lasers and stage share — …, with dependencies),
   and the assembly of a world's fragment and particle programs.
 - `gl/postfx.js` — what runs after a world has drawn: the **dissolve** between two worlds, the
   **bloom** (the Jimenez/CoD 13-tap downsample with a Karis average on the first step and a tent on
@@ -1177,7 +1177,7 @@ own chunk: a session of techno never downloads the frenchcore forge).
 | Bass & breaks | `wobble` (the LFO's own shape), `chrome` (liquid metal), `slices` |
 | Urbain | `vinyl`, `halo`, `nightdrive`, `neon` |
 | Pop & groove | `bokeh`, `discoball`, `silk`, `artwork` (the cover's own colours), `plasma` |
-| Rock & metal | `stage`, `inferno`, `storm` (a cloud deck lit from below by the last light, over a lake that mirrors every strike) |
+| Rock & metal | `stage` (the band backlit against an LED wall showing the artwork, beams on a lighting desk's cues, the crowd), `inferno`, `storm` (a cloud deck lit from below by the last light, over a lake that mirrors every strike) |
 | Calme | `nebula`, `aurora`, `ocean`, `cathedral`, `ink`, `rain` (every drop a lens refracting the city), `fireflies` (a meadow whose fireflies fall into step on the drop) |
 | Monde | `carnival` (polyrhythm as rings of beads), `tropics` |
 | Rétro | `horizon` (the banded sun over a true ground plane), `pixels` (a CRT raster, a runner on a real gait, a brick equaliser whose caps fall under gravity) |

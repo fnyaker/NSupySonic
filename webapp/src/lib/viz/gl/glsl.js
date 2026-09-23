@@ -475,6 +475,39 @@ vec2 foldSector(vec2 p, float n) {
 }
 `,
   },
+
+  // A person in a crowd, seen from behind, for the worlds that put you in one
+  // (lasers, stage). In units of the head's radius with the head's centre at
+  // the origin: head, neck, shoulders and a back that runs out of the frame,
+  // and two arms that rise from hanging (0) to straight up (1) through a bent
+  // elbow — the way an arm actually goes up, passing out to the side, rather
+  // than a stick rotating about the shoulder.
+  crowd: {
+    deps: ["sdf"],
+    src: `
+vec2 crowdElbow(float sg, float r) { return vec2(1.55 * sg, -2.1) + vec2(0.75 * sg, mix(-2.5, 2.3, r)); }
+vec2 crowdHand(float sg, float r, float lean) { return crowdElbow(sg, r) + vec2(-0.35 * sg + lean, mix(-2.2, 2.4, r)); }
+float crowdPerson(vec2 q, float rL, float rR, float lean) {
+  float d = length(q * vec2(1.0, 0.9)) - 1.0;
+  d = smin(d, sdBox2(q - vec2(0.0, -1.35), vec2(0.5, 0.5)), 0.3);
+  float sh = sdRound2(q - vec2(0.0, -2.6), vec2(2.05, 1.0), 0.9);
+  float back = sdBox2(q - vec2(0.0, -9.0), vec2(1.9, 6.0));
+  d = smin(d, min(sh, back), 0.35);
+  for (int k = 0; k < 2; k++) {
+    float sg = k == 0 ? -1.0 : 1.0;
+    float r = k == 0 ? rL : rR;
+    if (r < 0.02) continue;
+    vec2 S = vec2(1.55 * sg, -2.1);
+    vec2 E = crowdElbow(sg, r);
+    vec2 H = crowdHand(sg, r, lean);
+    d = min(d, sdSeg2(q, S, E) - 0.45);
+    d = min(d, sdSeg2(q, E, H) - 0.37);
+    d = min(d, length(q - H) - 0.52);
+  }
+  return d;
+}
+`,
+  },
 };
 
 function collect(names, out, seen) {

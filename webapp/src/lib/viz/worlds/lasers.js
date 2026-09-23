@@ -42,7 +42,7 @@ import { eventRing, onStamp, hashN } from "./kit.js";
 
 export default {
   id: "lasers",
-  uses: ["noise", "sdf"],
+  uses: ["noise", "crowd"],
   params: { emitters: 5, beams: 7, fire: 1, haze: 1, raw: 0.4, sweep: 1 },
   look: { exposure: 1.0, bloom: 1.35, threshold: 0.7, saturation: 1.18 },
 
@@ -78,33 +78,6 @@ float flame(vec2 q, float age, float h, float seed) {
   float body = smoothstep(w, w * 0.15, abs(x));
   float head = smoothstep(1.35, 0.8, y + turb * 0.35);
   return body * head * fade * (0.6 + 0.6 * turb2 + 0.3);
-}
-
-// One person in the crowd, seen from behind, in units of their head's radius
-// with the head's centre at the origin: head, neck, shoulders and a back that
-// runs out of the frame, and two arms that rise from hanging (0) to straight
-// up (1) through a bent elbow — the way an arm actually goes up, passing out
-// to the side, rather than a stick rotating about the shoulder.
-vec2 elbowAt(float sg, float r) { return vec2(1.55 * sg, -2.1) + vec2(0.75 * sg, mix(-2.5, 2.3, r)); }
-vec2 handAt(float sg, float r, float lean) { return elbowAt(sg, r) + vec2(-0.35 * sg + lean, mix(-2.2, 2.4, r)); }
-float personSd(vec2 q, float rL, float rR, float lean) {
-  float d = length(q * vec2(1.0, 0.9)) - 1.0;
-  d = smin(d, sdBox2(q - vec2(0.0, -1.35), vec2(0.5, 0.5)), 0.3);
-  float sh = sdRound2(q - vec2(0.0, -2.6), vec2(2.05, 1.0), 0.9);
-  float back = sdBox2(q - vec2(0.0, -9.0), vec2(1.9, 6.0));
-  d = smin(d, min(sh, back), 0.35);
-  for (int k = 0; k < 2; k++) {
-    float sg = k == 0 ? -1.0 : 1.0;
-    float r = k == 0 ? rL : rR;
-    if (r < 0.02) continue;
-    vec2 S = vec2(1.55 * sg, -2.1);
-    vec2 E = elbowAt(sg, r);
-    vec2 H = handAt(sg, r, lean);
-    d = min(d, sdSeg2(q, S, E) - 0.45);
-    d = min(d, sdSeg2(q, E, H) - 0.37);
-    d = min(d, length(q - H) - 0.52);
-  }
-  return d;
 }
 
 void main() {
@@ -311,9 +284,9 @@ void main() {
         rR = max(rR, phone);
         vec2 q = (p - vec2(x, y)) / R;
         if (abs(q.x) > 7.0 || q.y > 8.0) continue;
-        float sd = personSd(q, rL, rR, lean);
+        float sd = crowdPerson(q, rL, rR, lean);
         // Rim light on the edges that face up, toward the stage lights.
-        float up = personSd(q + vec2(0.0, 0.4), rL, rR, lean);
+        float up = crowdPerson(q + vec2(0.0, 0.4), rL, rR, lean);
         // Thin and uneven, strongest on heads and raised arms: a silhouette is
         // defined by the light it blocks, and a bright rim on every shoulder
         // turns a crowd into a row of identical arches.
@@ -324,7 +297,7 @@ void main() {
         body = mix(body, col, 0.3 * (1.0 - fr));
         col = mix(col, body, smoothstep(px, -px, sd * R));
         if (phone > 0.01) {
-          vec2 hp2 = vec2(x, y) + handAt(1.0, rR, lean) * R + vec2(0.0, 0.5 * R);
+          vec2 hp2 = vec2(x, y) + crowdHand(1.0, rR, lean) * R + vec2(0.0, 0.5 * R);
           float d = length(p - hp2);
           col += vec3(0.9, 0.95, 1.0) * phone * (glow(d, 0.0035) * 1.2 + glow(d, 0.03) * 0.08);
         }

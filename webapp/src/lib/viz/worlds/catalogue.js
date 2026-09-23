@@ -74,7 +74,7 @@ export const WORLD_META = {
   plasma: { group: "groove", label: "Lampe à lave", blurb: "Des bulles de lumière qui fusionnent et se séparent au groove." },
 
   // --- rock & metal ------------------------------------------------------------
-  stage: { group: "rock", label: "Scène", blurb: "Les projecteurs balaient la fumée au-dessus de la foule." },
+  stage: { group: "rock", label: "Scène", blurb: "Le groupe en contre-jour devant un mur LED qui montre la pochette, les faisceaux dans la fumée, la foule." },
   inferno: { group: "rock", label: "Brasier", blurb: "Des flammes qui rugissent et des braises qui montent." },
   storm: { group: "rock", label: "Orage", blurb: "Un ciel d'orage où la foudre tombe sur les frappes." },
 
