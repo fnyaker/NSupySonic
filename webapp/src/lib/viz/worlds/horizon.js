@@ -30,7 +30,9 @@ export default {
   look: { exposure: 1.0, bloom: 1.35, threshold: 0.6, saturation: 1.3 },
 
   fragment: `
-float horizonY() { return -0.08; }
+// The horizon: a little under the middle, or — with the artwork in front — just
+// under the cover, so the whole floor is in the band the cover leaves free.
+float horizonY() { return uHole.z > 0.0 ? clamp(min(-0.08, uHoleR.z - 0.02), -0.6, -0.08) : -0.08; }
 
 void main() {
   vec2 p = fragP();
@@ -55,8 +57,11 @@ void main() {
   col += pink * exp(-pow((sy - sweep) / 0.01, 2.0)) * step(0.001, sweep) * 0.6;
 
   // --- the sun: slits sliding down it, breathing with the bass ---
-  vec2 sc = vec2(uHole.z > 0.0 ? uHole.x : 0.0, hy + 0.4);
+  // With the artwork in front, the sun rises from behind it: its upper half
+  // above the cover's top edge, the cover standing in front of the rest.
   float R = 0.36 * P_SUN * (1.0 + 0.04 * uBandA.x);
+  vec2 sc = uHole.z > 0.0 ? vec2(uHole.x, min(uHole.y + uHole.w + 0.04, 0.98 - R)) : vec2(0.0, hy + 0.4);
+  float unhid = uHole.z > 0.0 ? smoothstep(0.0, 0.02, holeSd(p)) : 1.0;
   vec2 sd = p - sc;
   float r = length(sd);
   if (sd.y > -R && p.y > hy) {
@@ -66,10 +71,10 @@ void main() {
     float gap = mix(0.45, 0.0, smoothstep(0.0, 0.6, v));
     float cut = step(gap, slit);
     vec3 sunC = mix(pink, gold, smoothstep(0.1, 0.9, v));
-    float disc = smoothstep(R + px, R - px, r) * cut;
+    float disc = smoothstep(R + px, R - px, r) * cut * unhid;
     col = mix(col, sunC * 1.5, disc);
   }
-  col += pink * exp(-max(r - R, 0.0) * 4.0) * 0.18 * (0.8 + 0.3 * uBandA.x) * step(hy, p.y);
+  col += pink * exp(-max(r - R, 0.0) * 4.0) * 0.18 * (0.8 + 0.3 * uBandA.x) * step(hy, p.y) * unhid;
 
   // --- the mountains: far, hazed; near, edged in neon ---
   if (p.y > hy) {
