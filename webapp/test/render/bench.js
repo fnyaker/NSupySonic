@@ -217,6 +217,8 @@ async function run(opts) {
     // it, or a calm world's drift is measured against static.
     grain = true,
     cover = true,
+    // Pinned rather than fixed: the smart engine's own path, skin included.
+    skin = false,
   } = opts;
   // A feedback world is its own history: judge it after it has had time to
   // build one, the way it would have on screen.
@@ -239,7 +241,7 @@ async function run(opts) {
   if (!grain) preset.gl = { ...(preset.gl || {}), grain: 0 };
   const scene = createGLScene({
     preset,
-    fixed: world,
+    ...(skin ? { world } : { fixed: world }),
     intensity: 0.8,
     now: () => simT,
     fps: 60,

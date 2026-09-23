@@ -5,6 +5,7 @@
 //   node test/render/run.mjs --world forge,tunnel --genre frenchcore --bpm 200
 //   node test/render/run.mjs --phone             # the phone player, cover in the middle
 //   node test/render/run.mjs --phone --pscale 2  # ... at twice the size, to read detail
+//   node test/render/run.mjs --world tunnel --genre ebm --skin   # as ebm dresses it
 //   node test/render/run.mjs --check             # fail on the contracts below
 //   node test/render/run.mjs --tempo             # the 90-vs-180 BPM stopwatch
 //
@@ -102,6 +103,11 @@ async function main() {
   const phone = !!arg("phone") || check;
   const tempo = !!arg("tempo") || check;
   const shots = arg("shots") ? String(arg("shots")).split(",") : undefined;
+  // --skin: draw the world the way the smart engine does for --genre — pinned,
+  // so it wears the genre's skin (its palette lean AND, when the genre lives on
+  // this world, its shape parameters). Without it the world runs on its own
+  // defaults, which is what the contracts are about.
+  const skin = !!arg("skin");
 
   const { createServer } = await import("vite");
   const server = await createServer({
@@ -141,7 +147,7 @@ async function main() {
     const t0 = Date.now();
     const r = { world };
     try {
-      const wide = await run({ world, genre, bpm, w, h, tier, palette, shots });
+      const wide = await run({ world, genre, bpm, w, h, tier, palette, shots, skin });
       save(`${world}.png`, wide.sheet);
       r.wide = wide.frames;
       r.cost = wide.costMs;
@@ -149,7 +155,7 @@ async function main() {
       if (phone) {
         const ph = await run({
           world, genre, bpm, w: PHONE.w, h: PHONE.h, hole: phoneHole(), tier, palette,
-          shots: ["breakdown", "drop", "dropOff"], cols: 3,
+          shots: ["breakdown", "drop", "dropOff"], cols: 3, skin,
         });
         save(`${world}-phone.png`, ph.sheet);
         r.phone = ph.frames;

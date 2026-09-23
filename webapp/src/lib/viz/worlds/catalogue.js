@@ -43,7 +43,7 @@ export const WORLD_META = {
   fireworks: { group: "hard", label: "Feu d'artifice", blurb: "Des bouquets qui éclatent sur les temps forts et retombent en pluie d'or." },
 
   // --- techno & machines -------------------------------------------------------
-  tunnel: { group: "techno", label: "Corridor", blurb: "Un couloir de néons qui file vers vous, un anneau de lumière par temps." },
+  tunnel: { group: "techno", label: "Corridor", blurb: "Un couloir d'acier éclairé par ses anneaux, une lumière qui file au fond à chaque temps, un sol qui les reflète." },
   warehouse: { group: "techno", label: "Hangar", blurb: "Piliers de béton dans le brouillard, lampes au sodium et stroboscopes." },
   ridges: { group: "techno", label: "Crêtes", blurb: "Le spectre en lignes de crête qui défilent, à la manière d'Unknown Pleasures." },
   lattice: { group: "techno", label: "Treillis", blurb: "Un treillis de poutres lumineuses infini, traversé au tempo." },

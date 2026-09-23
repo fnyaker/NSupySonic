@@ -1172,7 +1172,7 @@ own chunk: a session of techno never downloads the frenchcore forge).
 | shelf | worlds |
 |---|---|
 | Hard | `forge` (a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong`, `soundsystem` (a speaker wall whose cones pump), `static` (the signal torn apart), `fireworks` (shells aimed at the NEXT beat) |
-| Techno & machines | `tunnel`, `warehouse` (concrete pillars, sodium lamps, strobes), `ridges` (Unknown Pleasures), `lattice`, `circuit` |
+| Techno & machines | `tunnel` (a panelled corridor lit only by its ring fixtures, a light running down it on every beat, a polished floor mirroring the ceiling), `warehouse` (concrete pillars, sodium lamps, strobes), `ridges` (Unknown Pleasures), `lattice`, `circuit` |
 | Trance & psy | `hyperspace`, `kaleido` (line-art KIFS), `galaxy`, `flow` |
 | Bass & breaks | `wobble` (the LFO's own shape), `chrome` (liquid metal), `slices` |
 | Urbain | `vinyl`, `halo`, `nightdrive`, `neon` |
@@ -1245,7 +1245,11 @@ at a time. `webapp/test/post.test.mjs` pins it.
   most worlds scored ~1.0 on it. A clock in seconds scores ~1.0 on all three. Feedback worlds are
   warmed for ten seconds before they are judged: they are their own history. The dev server runs
   with no watcher and no hot reload: editing a world during a sweep used to reload the bench page
-  under it, and every world after that "crashed" with `window.bench` undefined.
+  under it, and every world after that "crashed" with `window.bench` undefined. By default a world
+  runs on its OWN defaults (`fixed`), which is what the contracts are about; `--skin` pins it the
+  way the smart engine does, so it wears `--genre`'s skin — the only way to see a shape switch
+  (`tunnel` as ebm's helix, as peaktime's dashes) before a user does. `--pscale 2` renders the phone
+  layout at twice the size, to read detail.
 - **`webapp/test/viz.test.mjs` and `musical.test.mjs`** (node, in `npm test`) pin everything that can
   be decided without a GPU and that a GPU would only ever report as a black screen: the loader, the
   catalogue and the skins agree; every classifier family resolves by id AND by French label, and
