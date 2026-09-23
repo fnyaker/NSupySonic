@@ -11,9 +11,10 @@
 //   with its analytic gradient, so the edge is anti-aliased at the true pixel
 //   width and the surface has a normal.
 //   That normal is what makes it wax and not a flat shape: a highlight from
-//   the room, a rim where the surface turns away, and the lamp's glow coming
-//   THROUGH the thin edges (subsurface light), strongest low down near the
-//   bulb.
+//   the room, a rim where the surface turns away — and the wax is lit from
+//   INSIDE, by the bulb below, so its thin edges and undersides glow in its
+//   own colour and its thick cores go deep. And it is all seen through the
+//   lamp's glass, whose reflections run down the frame.
 //   THE CYCLE. Each blob rises and sinks on its own slow period, a whole
 //   number of bars, so the lamp keeps time without ever looking mechanical.
 //   Where two meet, the field merges them like wax does.
@@ -78,16 +79,33 @@ void main() {
   vec3 nrm = normalize(vec3(-g / gl * dome * 0.9, 1.0));
   vec3 L = normalize(vec3(-0.4, 0.6, 0.8));
   float diff = max(dot(nrm, L), 0.0);
-  float spec = pow(max(dot(reflect(-L, nrm), vec3(0.0, 0.0, 1.0)), 0.0), 30.0);
+  float spec = pow(max(dot(reflect(-L, nrm), vec3(0.0, 0.0, 1.0)), 0.0), 60.0);
   float rim = pow(1.0 - nrm.z, 2.0);
   // Thicker wax holds more of the lamp's light inside it.
   float thick = smoothstep(T, 1.2, f);
   vec3 waxC = mix(uPalMid.rgb, uPalHigh.rgb, thick);
   vec3 bulb = mix(vec3(1.0, 0.55, 0.25), uPalHigh.rgb, 0.5) * exp(-(p.y + 1.0) * 1.2) * heat;
-  vec3 wax = waxC * (0.18 + 0.35 * diff) + vec3(1.0) * spec * 0.35 + waxC * rim * 0.5 + bulb * (0.35 + 0.8 * (1.0 - thick)) * 0.5;
+  // WAX IS TRANSLUCENT: it is lit from INSIDE by the bulb below, so its thin
+  // edges and its undersides glow in its own colour and its thick cores go
+  // dark and deep. Lit from the front like a painted shape, it read as
+  // rubber.
+  float under = max(0.0, -nrm.y);
+  float through = pow(1.0 - thick, 1.5);
+  vec3 glowC = mix(waxC, vec3(1.0, 0.6, 0.3), 0.25) * (0.5 + 0.8 * heat);
+  vec3 wax = waxC * (0.08 + 0.22 * diff)
+           + glowC * (through * 0.55 + under * 0.45) * exp(-(p.y + 1.0) * 0.45)
+           + bulb * through * 0.35
+           + waxC * rim * 0.35
+           + vec3(1.0) * spec * 0.5;
   col = mix(col, wax, inside);
   // A glow in the liquid round the wax, where the lamp shines through it.
   col += waxC * exp(-max(-sd, 0.0) * 30.0) * (1.0 - inside) * 0.08 * heat;
+  // You are looking at all of it THROUGH the lamp's glass: two soft vertical
+  // reflections of the room run down it, the one cue that there is a vessel
+  // between you and the wax.
+  float gx = p.x / max(A, 1e-3);
+  col += vec3(1.0, 0.95, 0.9) * (exp(-pow((gx + 0.62) / 0.05, 2.0)) * 0.035 + exp(-pow((gx + 0.5) / 0.012, 2.0)) * 0.05
+       + exp(-pow((gx - 0.7) / 0.03, 2.0)) * 0.02) * smoothstep(-1.0, 0.2, p.y);
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
   col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
   emit(col * mix(1.0, uEnergy, 0.5));
