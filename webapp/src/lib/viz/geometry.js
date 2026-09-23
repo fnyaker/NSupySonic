@@ -78,6 +78,15 @@ export function createGeometry() {
     hy: 0,
     hw: 0,
     hh: 0,
+    // The artwork's OWN padded box around (hx, hy), before `hw`/`hh` are grown
+    // to keep the frame-centred polar primitives honest. The GL engine draws in
+    // p-space, not around the frame's centre, and needs the real thing: the
+    // mobile player's cover sits above the middle, and the grown box put every
+    // world's centre 7% of the frame below the cover it was framing.
+    ahw: 0,
+    ahh: 0,
+    // The top of the free band under the artwork's own box.
+    afloorY: 0,
     // THE BAND OF FRAME LEFT FREE UNDER THE ARTWORK, which is where anything
     // drawn as a horizon, a floor, a crowd or a mouth belongs. Several scenes
     // were each doing this arithmetic themselves and each getting it slightly
@@ -197,6 +206,8 @@ export function createGeometry() {
       out.hy = occl.y + occl.h / 2;
       out.hw = Math.min(occl.w / 2 + pad, w * HOLE_MAX);
       out.hh = Math.min(occl.h / 2 + pad, h * HOLE_MAX);
+      out.ahw = out.hw;
+      out.ahh = out.hh;
       out.hole = clamp01(Math.max(out.hw / out.rx, out.hh / out.ry));
       // `place` is polar around the FRAME's centre, so an artwork that is not
       // centred would leave the ring lopsided. It always is centred in both
@@ -210,9 +221,12 @@ export function createGeometry() {
       out.hy = out.cy;
       out.hw = 0;
       out.hh = 0;
+      out.ahw = 0;
+      out.ahh = 0;
       out.hole = 0;
     }
 
+    out.afloorY = out.hole > 0 ? Math.min(h - 8, out.hy + out.ahh) : h * 0.66;
     if (out.hole > 0) {
       out.floorY = Math.min(h - 8, out.cy + out.hh);
       out.floorH = Math.max(8, h - out.floorY);

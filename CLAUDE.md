@@ -74,9 +74,11 @@ export FLASK_APP="supysonic.web:create_application()"; flask run   # backend dev
 # Web UI (Svelte SPA)
 cd webapp && npm install && npm run build            # -> supysonic/webui/dist (gitignored)
 cd webapp && npm run dev                             # hot reload; proxies /api -> localhost:5000
-cd webapp && npm test                                # node --test: the analysis DSP, the animation scenes, the genre trainers, the cover loader.
+cd webapp && npm test                                # node --test: the analysis DSP, the animation catalogue/skins/drivers, the scope, the genre trainers, the cover loader.
                                                      # No test framework — but run the npm install above first: the modules under
                                                      # test reach svelte/store via stores.js, and a pretest guard says so in one line.
+cd webapp && node test/render/run.mjs --world piano --genre frenchcore --bpm 200   # render bench: contact sheet in test/render/out/
+cd webapp && node test/render/run.mjs --check        # every world, held to the picture contracts (headless Chromium, no GPU needed)
 
 # Deezer CLI
 supysonic-cli deezer login-test                      # check the ARL works
@@ -468,12 +470,15 @@ a WebAssembly trainer, and **the projector** is a screen most people never open,
 imports a scene on demand and `createScene` returns a PROMISE (a caller must cope with the scene
 arriving late and with the mode having changed again — `Visualizer.svelte` holds a token per build
 for exactly that). Two files exist only to keep the catalogue OFF the critical path:
-`lib/viz/modes.js` is the registry with no scene imports (the now-playing screens were dragging
-eighteen worlds in for two constants) and `lib/viz/worlds/catalogue.js` is each world's name and
-trail without the code that draws it, because `skins.js` only needs to know an id is real. Rollup
-hoists a module two chunks share into their common parent, so ONE static importer left in the main
-graph puts the whole tree back: `palette.js` therefore loads `skins.js` dynamically too. Measured,
-main bundle **656 kB → 450 kB** (223 → 155 kB gzipped), CSS **128 kB → 85 kB**.
+`lib/viz/modes.js` is the registry with no scene imports (the now-playing screens were dragging the
+whole scene tree in for two constants) and `lib/viz/worlds/catalogue.js` is each world's name and
+blurb without the shader that draws it, because `skins.js` and the settings gallery only need to
+know an id is real. Every world is its own chunk (one literal `import()` each in
+`worlds/index.js`), fetched the first time it is on screen. Rollup hoists a module two chunks share
+into their common parent, so ONE static importer left in the main graph puts the whole tree back:
+`palette.js` and the settings panel therefore load `skins.js` and the catalogue dynamically. Measured,
+main bundle **656 kB → 457 kB** (223 → 158 kB gzipped), CSS **128 kB → 85 kB**; the GL engine is a
+55 kB chunk and the largest world 25 kB (the microwave, 9 kB gzipped — fetched only when it is on screen).
 - `lib/appversion.js` is the other half: the bundle's own id (`__APP_BUILD__`, injected by
   `vite.config.js`, also written to `dist/version.json`) is compared with the server's
   (`/app/version.json`, never cached). Different → stage in the background → reload (automatically
@@ -953,9 +958,10 @@ Five archetypes are enough to blend between and nowhere near enough to tell hard
 frenchcore, so there is a THIRD output: **`look`, seven numbers** (`LOOK_KEYS`: motion, density,
 punch, smooth, warm, melodic, chaos) blended by the same family weights. It is deliberately not a
 name — a name cannot be interpolated — and every family starts from its archetype's look and
-overrides only what it actually differs on, so a new family costs one line. `smart.js` composes on
-it (each world reads it to tell its own subgenres apart — `chaos` widens the cracks, `motion` sets
-the travel, `melodic` decides whether the lead is drawn) and `palette.js` leans the chosen hue a third of the way toward red or cyan on
+overrides only what it actually differs on, so a new family costs one line. The GL engine carries it
+to every world (`uLookA` / `uLookB` in the Music block) — the hard worlds read it to tell neighbours
+apart (`chaos` widens `shatter`'s cracks, `melodic` decides how much of `forge`'s anthem ribbon is
+drawn) — and `palette.js` leans the chosen hue a third of the way toward red or cyan on
 `warm`, never replacing the source the user picked. A **served** verdict names a family, so
 `style.familyLook(id)` turns that name back into the seven numbers and `engine.merged` carries
 them: without it the look vector was dropped exactly when the server had measured the track, and a
@@ -967,14 +973,20 @@ through and change back at the drop. The classifier's adaptation rate is therefo
 `dynamics²`: at half level it only slows a little, at a twentieth it all but freezes and holds what
 it knows until there is something to form an opinion from.
 
-**Animations** (`webapp/src/lib/viz/`): a scene registry (`off`, `bars`, `pulse`, `scope`, `aurora`,
-`smart`),
-a palette whose SOURCE the user picks (cover art / the spectrum itself / fixed schemes), and quality
-tiers that `auto`-resolve from the device and **step down on their own** when a frame overruns its
-budget. `Visualizer.svelte` hosts the canvas: `scene.update()` runs on every analysis frame (~94 Hz,
-so a beat is never missed) and `scene.draw()` on rAF under the user's frame cap — the two rates are
-separate on purpose. Réglages → Animations configures all of it around a live preview and a readout
-of what the engine currently believes.
+**Animations** (`webapp/src/lib/viz/`): a mode registry (`off`, `bars`, `pulse`, `scope`, `aurora`,
+`smart` — `modes.js`), a palette whose SOURCE the user picks (cover art / the spectrum itself / fixed
+schemes), and quality tiers that `auto`-resolve from the device. Two kinds of scene come out of
+`lib/viz/index.js`, and the host has to know which: **`gl`** — every full-screen mode except the
+oscilloscope is the WebGL2 engine (`scenes/gl.js`) with a policy for which WORLD it shows (`pulse`,
+`aurora` and `bars` are one fixed world each — `pulse`, `aurora`, `spectrum` — and `smart` lets the
+genre choose among all 49) — and **`2d`**: the oscilloscope, which draws the samples on a canvas,
+and `scenes/bars.js`, the spectrum on a 2D canvas, which is what a device with no WebGL2 gets instead
+of any world (`createFallback`). `Visualizer.svelte` therefore owns TWO canvases and shows the one the
+scene's `kind` asks for: a canvas has one context type for its whole life. `scene.update()` runs on
+every analysis frame (~94 Hz, so a beat is never missed) and `scene.draw()` on rAF under the user's
+frame cap — the two rates are separate on purpose. Réglages → Animations configures all of it around
+a live preview (sticky, so it stays in view while the controls under it are moving it) and a readout
+of what the engine currently believes, down to the world it chose.
 
 **The oscilloscope** (`lib/viz/scenes/scope.js`, `scope` in the registry) is the one scene that draws the music rather than
 something *about* it, and that changes what "good" means: a scope is only worth looking at if it is
@@ -1061,241 +1073,220 @@ did and one on the scope costs up to 32 kB — a memcpy inside one browser proce
 not ask is sent nothing; a publisher that cannot answer leaves the projector's scope with no probe on
 it, drawing its graticule and a flat line, which is the truth rather than a broken picture.
 
-**A scene draws on the FRAME, never on `min(w, h)`** (`lib/viz/geometry.js`). Building everything
-around an inscribed circle produced the same fault twice: on a 16:9 beamer a third of the picture
-stayed black, and in the full-screen player the brightest part of every scene was behind the album
-cover. Both are answered by two primitives every scene (except `bars`) is written on:
+**THE ANIMATIONS ARE SHADERS, AND THAT WAS THE WHOLE FIX** (`lib/viz/gl/`, `lib/viz/scenes/gl.js`).
+They used to be 2D-canvas scenes — additive strokes over a translucent wash — and every one of them
+looked like what it was: hairlines on black, eight-bit trails you could count, a bloom bolted on
+after the fact on a second canvas. No amount of care inside the scenes could fix that, because the
+medium was the ceiling. Every full-screen animation except the oscilloscope is now a fragment
+shader, drawn by one WebGL2 engine in four files:
 
-- `place(angle, radial, aniso)` — polar coordinates for *this* frame. `radial` 0 is the inner
-  boundary (the artwork's rim, or the centre when there is none) and 1 is the frame's own edge along
-  that angle, so a ring of points at radial 1 traces the screen rather than a circle inscribed in
-  it. `aniso` below 1 blends back toward a circle through the corners, because a *shape* drawn at
-  full anisotropy stops reading as a shape and starts reading as a border round the picture.
-- `ringRx/ringRy(t)` — an expanding ring that starts at the artwork's rim and leaves through the
-  corners, leaning partway toward the frame's aspect (`RING_ANISO`): fully anisotropic is a squashed
-  oval, fully isotropic never touches the sides of a wide screen while it is still bright. A
-  receding corridor is the same primitive read backwards, which is what `industrial` uses: built
-  round the centre instead, its far end — where the girders are smallest and densest — landed
-  exactly on the album cover, 36% of the scene's ink.
-- `floorY/floorH` — the band of frame the artwork leaves FREE underneath it (the bottom third when
-  there is none), for anything drawn as a horizon, a floor, a crowd or a mouth. Three scenes were
-  each doing this arithmetic themselves and each getting it wrong in the same direction: they put
-  the motif's *centre* clear of the cover and then let it rise, open or bite back up into it.
+- `gl/renderer.js` — one context per CANVAS (not per scene: a mode change must not recompile the
+  shaders it already has), **HDR** render targets (RGBA16F; RGBA8 with the scene scaled by
+  `uHeadroom` where float targets are missing, so the bloom and the tone map still see values above
+  one), a program cache, and the four things a device WILL do to it: lose the context (prevented,
+  then every object rebuilt on restore and programs recompiled lazily from their source — a world
+  never knows), lack float targets, compile slowly (`KHR_parallel_shader_compile`, polled, so a first
+  switch to a world is never a frozen frame) and be too slow (`EXT_disjoint_timer_query_webgl2`: the
+  GPU's own time per frame, because timing the JavaScript that issues the calls measures nothing).
+- `gl/glsl.js` — the **Music block**: one std140 uniform block carrying the whole musical state, the
+  palette and the frame, uploaded ONCE per frame however many programs read it. Its layout is
+  declared once (`MUSIC_SLOTS`) and generates both the GLSL and the JS offsets, because a writer and
+  a reader that disagree by one vec4 do not fail — they silently feed every world the wrong numbers.
+  **There is no wall-clock time in it.** A world's clocks are beats, bars and phrases (`uClock`), so
+  "no constant that should be musical" is a property of the interface rather than a rule to police;
+  the one thing that needs seconds, the film grain, lives in the post pass. Also here: the library
+  chunks a world pulls in by name (`uses`: noise, fbm, sdf, voronoi, caustics, `crowd` — the person seen from behind that lasers and stage share — …, with dependencies),
+  and the assembly of a world's fragment and particle programs.
+- `gl/postfx.js` — what runs after a world has drawn: the **dissolve** between two worlds, the
+  **bloom** (the Jimenez/CoD 13-tap downsample with a Karis average on the first step and a tent on
+  the way up — the filter that does not shimmer when a bright line moves), the **AgX** tone map
+  (a hot neon rolls toward white THROUGH its own hue instead of clipping to a flat cyan blob — in
+  scenes built of emissive light that is the difference between lit and clipped), a radial
+  chromatic fringe that swells for an instant on an impact, and triangular dither plus grain (an
+  8-bit output cannot hold a smooth dark gradient). Deliberately **no vignette**: darkening the
+  edges would undo the rule that a picture fills a beamer.
+- `scenes/gl.js` — the musical reading turned into uniforms, and the POLICY: which world, dressed
+  how. `update` reads the music at analysis rate; `draw` extrapolates the clocks to the instant of
+  the frame and computes every envelope from event STAMPS at that instant, so motion is as smooth
+  at the projector's 45 Hz of analysis as at 94. A **dynamic resolution governor** steers on the
+  GPU time (or the frame interval when there is no timer) between the tier's floor and ceiling.
+  **Flashes are the engine's, not the worlds'**: a world calls `flash(power)`, and this file
+  decides — never more than three onsets a second whatever the music does (the WCAG general-flash
+  threshold, and on a projector in a room full of people the line between a style and a medical
+  risk), scaled by the user's setting (`vizFlash`: off / soft / full, one setting for both
+  screens), and none at all under `prefers-reduced-motion`. The one exception is **`unleashed`
+  ("Débridé")**, for people who are not photosensitive and want the real thing: it is a different
+  POLICY rather than a brighter "full" — the worlds only ask for a flash on a drop, once a minute,
+  so lifting the cap alone changes nothing — and the engine runs the strobe a lighting desk would
+  (`strobePower`: every main kick at the peak of the track, harder on a big kick, the snares of a
+  build accelerating into the drop, nothing in a breakdown), up to ten a second. It is only ever
+  set through `components/FlashWarning.svelte`, a warning with a box to tick (what it does, who it
+  endangers — including people who do not know it — what to do, and the projector's audience,
+  who accepted nothing); `vizFlashAck` records the acceptance and `stores.js#flashLevel` plays a
+  stored `unleashed` without one as `full`, so the warning is a condition, not a formality.
+  `prefers-reduced-motion` still wins over it. `musical.test.mjs` pins it: 27 flashes for the 26
+  main kicks of a 200 BPM drop, none in the breakdown.
 
-The artwork is **measured from the DOM**, never guessed: `Visualizer.svelte` takes an `occluder`
-element (the desktop cover box; the mobile carousel, from which `occluderShape="square"` takes the
-centred square the slide actually shows) and re-measures it on resize only. The projector and the
-settings preview pass none, and get the whole frame.
+**A world is one file** (`lib/viz/worlds/<id>.js`), fetched the first time it is on screen:
+`{ id, uses, feedback?, params, look, fragment, particles?, create() }`. `params` become `P_NAME`
+defines (sixteen at most, packed into four vec4s) that a skin may override; `look` is the world's
+grade (exposure, bloom, threshold, saturation), blended during a dissolve; `particles` is a
+STATELESS instanced sprite (`particle(id, …)` computes everything from its index and the music, so
+thousands cost nothing on the CPU); `create()` returns the DRIVER — the few lines of JavaScript that
+integrate what a shader cannot (a camera's travel, a stepped rotation, a runner's stride) into eight
+floats of `state` and a ring of eight `(birth, power, a, b)` events (`worlds/kit.js`). The rules,
+each of which a world broke once:
 
-**Two rules about compositing, both measured rather than eyeballed.** Everything is drawn additively
-over a translucent wash, so a scene's steady-state brightness is roughly `alpha / wash` — tripling
-what a scene covers without touching either is how `pulse` went from a glow in the middle to a white
-rectangle. And a canvas is eight bits per channel: a ring crossing the frame in a third of a second
-leaves one trail copy per frame, and a dozen quantisation steps on a dark background is a set of
-concentric circles you can count. So a ring travels at a **constant** speed (an ease-out bunches its
-trail exactly where there are most copies), is **wider than its own per-frame step** so the copies
-merge into one soft shell, and the wash has a **floor** so only three or four copies are ever alive.
+- **The driver gets seconds; it must spend beats.** `dt / m.beat`, `m.overBeats(n)`,
+  `m.ease(v, target, beats, dt)`. Events are stamped in beats and aged in the shader against
+  `uClock.x`. The two deliberate exceptions are perceptual, not musical: a flash's decay, and a
+  temporal average's time constant (aurora's denoise is 60 ms at any frame rate — a blend of 0.28
+  PER FRAME was a 60 ms average at 60 fps and a 25 ms one at 144).
+- **Feedback is a time constant, not a per-frame factor**, for the same reason. The feedback worlds
+  (`flow`, `ink`, `aurora`) get their dt from the driver.
+- **Anti-alias against the real footprint, in pixels.** `uFrame.w` is one pixel in p-space. A line's
+  width is its screen width at every depth, and where lines pack tighter than the pixels can hold
+  they fade into their average light instead of shimmering. The footprint is the WHOLE gradient:
+  `horizon`'s road lines run almost flat toward the horizon at the sides, and there it is the
+  vertical change in x that decides how many a pixel covers — reading one axis drew a band of
+  coloured moiré under the sun. `pixels` only draws its aperture grille where a virtual pixel is
+  big enough to carry one; a mask finer than the screen's own pixels is moiré, not texture.
+- **Draw on the frame, around the artwork.** p-space is y −1..1 and x −aspect..aspect; `uHole` is the
+  artwork's centre and half extents, **measured from the DOM** (`Visualizer.svelte`'s `occluder`,
+  through `lib/viz/geometry.js`), and `clearOfHole` dims what falls under it. It is the artwork's
+  OWN box (`hx/hy/ahw/ahh`), not the frame-centred one geometry.js grows for the scope's polar
+  primitives: the mobile cover sits above the middle, and the grown box centred every world 7% of
+  the frame below the cover it was framing. A world puts its motif in the band the artwork leaves
+  free (the pixel runner stands on a ground line under the cover; horizon's floor and storm's lake
+  start there and the synthwave sun rises from behind it; the spectrum frames it with a bank below
+  and a mirrored bank above) and fills a 16:9 beamer to all four edges. A world CENTRED on the
+  artwork (galaxy, kaleido) dims under it harder than the house third and lifts what is outside: the
+  core is hidden by definition, so the light goes to the arms that are seen. On a PHONE the cover
+  spans nearly the width, so "beside the artwork" is off the screen: a world whose subject would sit
+  behind it moves its camera instead (the night drive's horizon drops to the cover's bottom edge so
+  the car ahead is under it, the warehouse's hall vanishes in its top half, the lasers' stage and the
+  rock stage's deck stand under it), and a world that scatters things beside the cover scatters them
+  above and below it when there is no room at the sides (ink's drops, neon's slots). `run.mjs
+  --phone` for every world after touching one — two of these were only found by looking.
+- **A long clock wraps at a period its shader is exactly periodic in.** Uniforms are float32: the
+  wobble's LFO phase reached 3.4e4 in ten minutes at 250 BPM, which a few hours on is a visible
+  stutter. It now wraps at 200π (both its oscillators close there); the night drive at a multiple of
+  its lamp and dash spacing; the pixel runner's ground, skyline and stars each at their own.
+- **A spring is substepped against its own period.** The `slices` jump was a stiff spring integrated
+  in fixed 1/60 s steps; at 250 BPM its period is 84 ms, past where semi-implicit Euler is stable,
+  and the position ran to −Infinity in seven seconds — a black world for the rest of the night.
+- **Never name a variable after a GLSL built-in.** `float all = …` compiles, and the `all(…)` three
+  lines later does not; the world renders black. Tested.
+- **Nothing oscillates faster than a frame can show.** Rain's pane "shivered" on the kick at 80
+  radians a beat — faster than any refresh rate — which aliased into jitter; it is one thump now.
+  And nothing moves at a speed the thing it depicts never has: the record turns a revolution a
+  bar (32 rpm at 128 BPM, a real 33), not every two beats (a blur at 180).
 
-**`smart.js` picks the ANIMATION, not the weights.** It used to be one fixed set of layers whose
-alphas the classifier moved — a bloom for the voice, a shockwave for the kick, a wall for the
-guitars, four more keyed to the `look` vector. That is the right shape for blending *within* a style
-and the wrong shape for the question being asked: every genre came out of the same primitives at
-different strengths, so frenchcore and ambient were the same soft radial vocabulary at different
-brightness. The classifier's `dominant` family now chooses a **WORLD** — a complete, self-contained
-scene with its own motif, motion, background and trail (`lib/viz/worlds/`, one file each). Eighteen
-of them, drawn from what the genres themselves look like:
+**The catalogue: 49 worlds on eleven shelves** (`worlds/catalogue.js` — names and blurbs, no shader,
+so naming a world costs nothing; `worlds/index.js` — one LITERAL `import()` per world, so each is its
+own chunk: a session of techno never downloads the rawstyle forge).
 
-| world | motif | families |
-|---|---|---|
-| `tunnel` | a machine corridor rushing at the viewer, one ring laid down per beat | techno, hardtechno, industrial, electronic |
-| `shatter` | the frame in radiating shards, thrown out and rotated a notch on every kick | hardcore, frenchcore, uptempo, speedcore, krach, tribecore |
-| `hardbounce` | a core that squashes on the kick inside a radial bar ring, saw streaks on the lead | hardstyle, rawstyle, hardtekk, zaag, hardpingpong, german party, pieep |
-| `kaleido` | mirrored sectors turning against each other | psytrance |
-| `starfield` | stars streaming out, accelerating through a build, arcs on the chord changes | trance |
-| `breakgrid` | the picture sliced into strips that scroll and chop on the breaks | drum & bass, breakbeat, garage |
-| `wobble` | one band across the middle, LFO'd and chromatically split, tearing on the drop | dubstep |
-| `vinyl` | a turning record, boom in the middle, slash across it on the snare | hip-hop, rap, trap, phonk, reggaeton, dancehall |
-| `stagelights` | spotlights sweeping over a jagged silhouette, lit from the TOP | rock, metal, punk, hard rock, brutal |
-| `horizon` | the banded sun over a perspective floor grid | synthwave, lofi |
-| `bloom` | soft blooms from every emission point, confetti on the downbeat | pop, dance, house, disco, funk, soul, R&B, afro, amapiano, indie |
-| `smoke` | a brush stroke per note attack, drifting | jazz, blues, folk, country, reggae |
-| `nebula` | clouds, and no event in it anywhere | ambient, strings, drone, shoegaze |
-| `cathedral` | shafts of light down a nave, a rose window on the harmony | classical, orchestral, choral, opera, film score, gospel |
-| `carnival` | concentric rings of beads on patterns of different lengths, meeting every few bars | salsa, samba, afrobeat, reggae, reggaeton, amapiano, ska |
-| `pixels` | a coarse lit grid with sprites walking on it and rows tearing | chiptune, IDM, breakcore, hyperpop, glitch, grime |
-| `ocean` | swells re-drawn as a delay line, receding or bouncing | dub, trip-hop, downtempo, cloud rap, dub techno |
-| `neon` | tubes of bent glass over a wet street, VHS tracking across it | vaporwave, city pop, synthpop, italo disco |
+| shelf | worlds |
+|---|---|
+| Hard | `forge` (rawstyle's hammer — the pitched, overdriven kick rawpvc makes — and uptempo's: a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `piano` (frenchcore, the melodic side of hardcore: a keyboard of light with the tune rising above it as a piano roll READ FROM THE SPECTRUM — a key sounds when its band is a peak, the local maximum a semitone either side and clear of the bands two and a half out, so one note lights one key and a drum lights none — the chord's pitch classes as columns of light round the melody's register, the 200 BPM kick pounding the keyboard and sending pressure up the frame, a glissando on the drop), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong` (a neon rally: glass paddles that glide to meet the ball on the beat, one bounce on the far half), `soundsystem` (a speaker wall whose cones pump), `static` (the artwork's own signal torn apart: bands, pixel-sort streaks, chroma-error blocks), `microwave` (Deutscher Krach's buzzing kick as the oven it sounds like: the cavity seen through the door's perforated screen, the lamp surging on the kick, the standing wave's hot spots hopping on every main kick, arcs off the plate's gilt rim, a VFD timer counting the phrase down to "End"), `fireworks` (shells aimed at the NEXT beat, in a real show's colours turned to the palette, over a skyline and water that catch every burst) |
+| Techno & machines | `tunnel` (a panelled corridor lit only by its ring fixtures, a light running down it on every beat, a polished floor mirroring the ceiling), `warehouse` (concrete pillars, sodium lamps, moving heads sweeping the haze and pooling on a wet floor, strobes that are flashes), `ridges` (Unknown Pleasures), `lattice` (a cone-marched chrome space frame carrying a current), `circuit` |
+| Trance & psy | `hyperspace`, `kaleido` (line-art KIFS), `galaxy`, `flow` |
+| Bass & breaks | `wobble` (the LFO's own shape, with its wake and current crackling along it), `chrome` (liquid metal), `slices` |
+| Urbain | `vinyl`, `halo` (the spectrum as a breathing crown round the artwork, its echoes going out through smoke the 808 pushes aside), `nightdrive` (the wet motorway behind a car whose brake lights flare on the kick), `neon` (a wet street under ten real neon signs — a heart, a martini, a bolt, a moon, notes… — laid out on slots the artwork never hides) |
+| Pop & groove | `bokeh` (lens bokeh in a luminous room, with glitter the one thing in focus), `discoball`, `silk`, `artwork` (the cover's own colours), `plasma` |
+| Rock & metal | `stage` (the band backlit against an LED wall showing the artwork, beams on a lighting desk's cues, the crowd), `inferno`, `storm` (a cloud deck lit from below by the last light, over a lake that mirrors every strike) |
+| Calme | `nebula`, `aurora`, `ocean`, `cathedral` (a Gothic rose of pointed lancets and leaded glass, down a nave of fluted columns), `ink`, `rain` (every drop a lens refracting the city), `fireflies` (a meadow whose fireflies fall into step on the drop) |
+| Monde | `carnival` (polyrhythm as rings of beads, under festoons of bulbs chasing the beat), `tropics` |
+| Rétro | `horizon` (the banded sun over a true ground plane), `pixels` (a CRT raster, a runner on a real gait, a brick equaliser whose caps fall under gravity) |
+| Classiques | `pulse`, `spectrum` — also the fixed `pulse` and `bars` modes |
 
-The `look` vector is still read INSIDE each world, which is what keeps hardstyle from looking
-exactly like hardtekk: `chaos` widens the cracks in `shatter` and the tears in `breakgrid`,
-`motion` sets how fast the shards turn and the stars travel, `punch` how far a kick throws them,
-`melodic` whether the saw lead is drawn at all. The coarse answer — the thing you recognise across
-the room — is the world; the fine one is still a blend.
+**A world is machinery; a SKIN is what one genre does with it** (`lib/viz/skins.js`). 226 rows, one
+per genre, each naming its world, how its palette leans (`hue` / `sat` / `light`, applied by
+`palette.js#setSkin` on top of the source the user picked, never replacing it), its `speed` and
+`energy`, and a bag of world parameters. The bag carries two kinds of parameter and only one of them
+is worth the table's length: a SCALING one (`sparks`, `shards`, `count`) says how much of the motif
+there is; a SHAPE one changes what the motif IS — `kaleido`'s `mirror` 0 is a pinwheel (goa) and
+`web` 1 a web (darkpsy, forest), `wobble`'s `wave` is the LFO's shape (sine / square / saw: melodic
+dubstep, riddim, brostep), `lasers`' `raw` goes from euphoric sweeps to raw red fire, `slices`' `axis`
+turns bands into falling columns (jungle), `tunnel`'s `sides` / `twist` / `dash` make a hexagon, a
+helix or strobing rings (EBM, peaktime), `vinyl`'s `rpm` turns a 78 faster than a 33 (swing). The
+anchor rows (techno, house, ambient, pop, hardstyle, rock, electronic) override almost nothing: they
+ARE the default each world was written around. `skinFor(name, archetype)` normalises whatever it is
+handed (an id, a French label, a hand-typed tag with spaces, accents or hyphens) through `ALIASES`
+and falls back to the archetype's anchor, which is the same world `catalogue.worldFor` names. A
+**pinned** world (`vizWorld` / `vizScreenWorld`, one per screen) keeps the playing genre's colours,
+and its parameters only when that genre lives on the pinned world.
 
-**A world is machinery; a SKIN is what one genre does with it** (`lib/viz/skins.js`). Eighteen
-worlds cannot dress two hundred sub-genres on their own, and the layer engine's failure repeats one
-level down if they try: hardstyle and zaag both land on `hardbounce`, and without a skin they are
-the same picture in two colours. So the catalogue holds **227 rows**, one per genre, each naming its
-world, how its palette leans (`hue` / `sat` / `light`, applied by `palette.js#setSkin` on top of the
-source the user picked, never replacing it), its `speed` and `energy`, and a bag of world
-parameters. `skinFor(name, archetype)` normalises whatever it is handed — an id, a French label from
-the classifier, a hand-typed tag with spaces, accents or hyphens — through `ALIASES` and falls back
-to the archetype's anchor row when nothing matches, so an unknown name still gets a considered
-picture rather than the default one.
+**The studio's vocabulary is the same vocabulary** (`analysis.EXTRA_GENRES` + `known_genres()`). The
+live classifier honestly separates ~54 families, so a *tag* is where a sub-genre name comes from —
+and a label the studio offers that the animation cannot resolve is a track somebody tagged carefully
+and then watched get animated generically. The two lists are written in different languages; a test
+reads the Python one and requires every label to reach a row of its own, not the archetype floor.
 
-**The `p` bag carries two kinds of parameter, and only one of them is worth the table's length.**
-A *scaling* parameter (`shards`, `dots`, `beams`) says how MUCH of the motif there is; a catalogue
-of nothing but those is two hundred brightness settings. A *shape* parameter changes what the motif
-IS, and every world has a few — `wobble`'s `wave` picks a sine, a square or a saw LFO (melodic
-dubstep, riddim and brostep are that difference in the music, so they are that difference on
-screen); `breakgrid`'s `axis` turns the strips into falling columns; `hardbounce`'s `lead` draws the
-lead as a streak, a staircase or a triangle wave (zaag is Dutch for saw); `stagelights`'s `backlit`
-moves the rig behind the band so doom and black metal are silhouettes; `tunnel`'s `dir` −1 sends the
-corridor away from the viewer; `vinyl`'s `arm` puts a tonearm on the deck and `hats` a machine
-hi-hat over it; `kaleido`'s `mirror` 0 makes a pinwheel out of a kaleidoscope. Each world's header
-comment lists its own vocabulary, and a world states a default for every one of them, so a new
-sub-genre costs one line. The four anchor rows (techno, house, ambient, electronic) override almost
-nothing on purpose: they ARE the default each world was written around.
+**Nothing hard-switches.** style.js refuses to rename the dominant family until a challenger has led
+by a clear margin for a second and a half, and a change of world is a **dissolve**: the new world is
+fetched and compiled while the old one keeps playing, and only once it is READY does a noise-edged
+burn carry the new picture through the old over one bar (`DISSOLVE_FS`) — so a first visit to a world
+is never a black frame. A second change while the first is still dissolving drops the one that was
+leaving: three worlds on screen is not a crossfade, and it is three times the work.
 
-**The studio's vocabulary is the same vocabulary** (`analysis.EXTRA_GENRES` + `known_genres()`).
-The live classifier honestly separates ~54 families, so a *tag* is where a sub-genre name comes
-from — and a label the studio offers that the animation cannot resolve is a track somebody tagged
-carefully and then watched get animated generically. The two lists are written in different
-languages and a test reads the Python one and resolves every label through `skinId` (it caught a
-misspelled `popunk` and a missing `jerseyclub` the day it was written).
+**`lib/viz/geometry.js`** is what is left of the canvas-era geometry: it measures the occluder for
+`uHole`, and it is the primitives the oscilloscope is drawn on (`place(angle, radial)`, where radial 1
+is the frame's own edge rather than a circle inscribed in it, and the expanding `ringRx/ringRy`).
+**`place` returns ONE shared array**, reused on every call so a 94 Hz loop makes no garbage: a caller
+holding two results at once holds the same array twice, and the segment between them collapses to a
+point with no error anywhere. Read the first point's numbers out before asking for the second.
 
-**Nothing hard-switches**, which is the property the layer engine had and this must not lose. Two
-things protect it: style.js already refuses to rename the dominant family until a challenger has led
-by a clear margin for a second and a half, and a change is a **crossfade** — the outgoing world keeps
-being updated and drawn at a falling weight for 1.6 s while the incoming one rises, so a track
-drifting between two neighbouring families dissolves between two pictures instead of flickering.
-A second change while the first is still dissolving drops the one that was leaving: three worlds on
-screen is not a crossfade, it is a mess, and it is also three times the work.
+**`lib/viz/post.js` is the CANVAS scenes' post pass** (the scope's bloom and grain) — the GL engine
+has its own. What it learned still stands: the bloom is a second, small canvas over the first,
+blended by CSS (the obvious build, reading the scene canvas and upscaling on the CPU side, measured
+45–52 ms a frame against 0.26 ms for the scene); every `ctx.filter` runs on a small buffer, because
+a filter applies over the area drawn INTO; and it times its own first frames and steps down a level
+at a time. `webapp/test/post.test.mjs` pins it.
 
-The **world owns its trail wash** (`WORLDS[id].trail`, applied by the compositor), because how much
-of the previous frame to keep is a property of the motif and not of the engine — speedcore wants a
-strobe (0.55), ambient wants a minute-long exposure (0.12), and `horizon` wants a full repaint (1)
-because a sky is not a trail. That also sets each world's alpha budget: additive compositing settles
-at roughly `alpha / trail`, so nebula's clouds are drawn at a tenth of what a normal world would use.
-`webapp/test/viz.test.mjs` drives every scene against a recording 2D context and pins that each one
-reaches all four edges of a 16:9 frame, that under a centred cover less than a quarter of its drawing
-lands behind it, that every family in style.js has a skin, that thirteen named genres each land on
-their own world AND draw in measurably different places (an 8×8 ink histogram), that a change of
-genre is a dissolve rather than a cut, and that **eleven pairs sharing a world separate on the shape
-switch alone** — both sides painted with the SAME look vector and archetype, so the classifier is
-telling the two worlds an identical story and only the skin is left. The recorder tags every point with the compositing mode it was drawn
-under, which is what lets the oscilloscope's tests measure its TRACE (the only thing it draws
-additively) apart from the graticule it is drawn on — otherwise a scope that drew its face and
-nothing else would pass the frame-coverage tests. On that separation they pin the trace against
-real samples: that it deflects with the signal and goes flat ON the zero line in silence rather
-than blanking, that the right channel reads 1.26x the left's mean deflection on material panned
-that way (a scope fed one summed signal reads exactly 1.00), that the trigger holds a steady tone
-still, that the column ladder climbs with the tier and the sub-sample trigger is worth a factor of
-158 on its own, and that both orientations route around the cover. `vinyl` is deliberately absent
-from that list: its motif is one disc filling the frame, so a tonearm or a ring of hi-hat spokes
-cannot move the footprint an 8×8 histogram measures, and boom bap against trap is pinned on ink
-VOLUME instead. Fitting the spatial threshold to the pair it cannot judge would have cost the other
-eleven their teeth.
+**How the animations are tested — two places, because only one of them has a GPU.**
 
-**`geometry.place` returns ONE shared array**, reused on every call so a 94 Hz loop does not make a
-few thousand short-lived pairs a frame. A caller holding two results at once is therefore holding
-the same array twice, the segment between them collapses to a point, and the motif silently stops
-being there — no error, no warning, nothing in the log. It cost a dashed corridor, a tonearm, a
-hi-hat ring, a set of spokes and a web before anyone noticed. Read the first point's numbers out
-before asking for the second (`const p0 = place(...); const x0 = p0[0], y0 = p0[1];`), which is what
-the older scenes already do; the contract is pinned by a test.
+- **`webapp/test/render/run.mjs`, the render bench** (not part of `npm test`: it needs a browser).
+  It starts the Vite dev server, opens `test/render/bench.html` in headless Chromium (Playwright on
+  SwiftShader, so no GPU is needed), drives each world through a synthetic arrangement
+  (`music.mjs`: intro, builds, drops, a breakdown, at any BPM and genre) and writes a contact sheet
+  per world to `test/render/out/` (git-ignored) — the only honest way to review a shader is to look
+  at it. `--check` holds every world to the contracts: all four edges carry light in the drop; the
+  drop is neither black nor washed out and almost nothing clips; the drop and the breakdown are
+  measurably different pictures; on the phone layout under a centred cover, less than a quarter of
+  the light sits behind it; and the picture moves materially more over the same two seconds at 180
+  BPM than at 90 (`--tempo`). That last one is read three ways and the strongest counts — frame to
+  frame on 24×14 blocks (grain and dither cancel; a fast world saturates), over the whole window (a
+  calm world's slow drift only shows there) and pixel by pixel (a sea's small waves average out of
+  every block) — because a single pair of frames right on a kick measures the kick's envelope, and
+  most worlds scored ~1.0 on it. A clock in seconds scores ~1.0 on all three. Feedback worlds are
+  warmed for ten seconds before they are judged: they are their own history. The dev server runs
+  with no watcher and no hot reload: editing a world during a sweep used to reload the bench page
+  under it, and every world after that "crashed" with `window.bench` undefined. By default a world
+  runs on its OWN defaults (`fixed`), which is what the contracts are about; `--skin` pins it the
+  way the smart engine does, so it wears `--genre`'s skin — the only way to see a shape switch
+  (`tunnel` as ebm's helix, as peaktime's dashes) before a user does. `--pscale 2` renders the phone
+  layout at twice the size, to read detail.
+- **`webapp/test/viz.test.mjs` and `musical.test.mjs`** (node, in `npm test`) pin everything that can
+  be decided without a GPU and that a GPU would only ever report as a black screen: the loader, the
+  catalogue and the skins agree; every classifier family resolves by id AND by French label, and
+  every studio sub-genre to a row of its own; every skin names a real world with parameters that
+  world declares, and every world is some genre's picture; neighbours sharing a world (goa/darkpsy,
+  dubstep/brostep, gabber/speedcore…) differ on a SHAPE switch; every `P_` define and every uniform a
+  shader names is one the engine declares, and no variable shadows a GLSL built-in; the engine
+  exposes no seconds clock. Then every world's DRIVER is run at 90 and 180 BPM over the same wall
+  clock — measured 1.82x (flow) to 2.31x (forge) as far; a rate in seconds scores 1.00 — for ten
+  minutes at 60 and at 250 BPM with quarter-second hitches (no NaN, no state past 1e4), and must
+  stamp its events in beats near now. It found both faults above the day it was written: the
+  diverging spring and the unbounded clocks. The oscilloscope's own tests (the trace against real
+  samples) are unchanged and live there too.
 
-**Everything above is what a scene DRAWS; `lib/viz/post.js` is what makes it look lit.** The scenes
-were putting flat additive strokes straight on the output — hairlines on black, hard edges, visible
-banding — and none of that is any one scene's fault or fixable eighteen times over inside them. What
-separates a 1998 canvas demo from a modern visualizer is the pass that runs AFTER the drawing, on
-the whole frame: **bloom** (bright areas bleed, which is what makes a stroke read as light rather
-than as ink), a **chromatic fringe** on the wide halo, and **grain** — a dither first and a mood
-second, since an 8-bit canvas cannot hold a smooth dark gradient. Deliberately **no vignette**:
-darkening the edges is the other half of the stock recipe and it would undo the thing the geometry
-work exists for.
-
-- **The bloom is a SECOND, SMALL canvas over the first, blended by CSS** — not a composite onto the
-  output. The obvious build (render to an offscreen buffer, copy it out, add the bloom) measured
-  45–52 ms a frame against 0.26 ms for the scene itself. Bisected, none of it was the blur (0.21 ms
-  — it is a 260×150 buffer); it was **full-frame canvas traffic**: 27 ms to read the scene canvas
-  and 14 ms for the full-size upscale. So the scene still draws straight onto the visible canvas
-  exactly as it always did, the bloom is built at a fifth of the size, and the compositor does the
-  upscale and the blend on the GPU. One full-frame read a frame instead of three.
-- **Every `filter` runs on a small buffer; every full-size draw has `filter = "none"`.**
-  `ctx.filter` applies over the area drawn INTO, so a hue-rotate on the upscale is a full-frame
-  filter pass however small the source was — doing that three times a frame is where the first
-  113 ms went.
-- **The scene gives back exactly what the bloom adds** (`SCENE_GAIN`, applied by `withPostGain`).
-  Every world was calibrated to a frame mean of 0.05–0.20 with a bloom nowhere in the picture, and
-  switching one on does not redistribute that light, it ADDS to it: techno went from 0.113 to 0.292
-  with 4% of the frame clipped. So `preset.glow` comes down by the order the halo puts back and the
-  exposure stays where 227 skins were tuned to sit. The bright pass is deliberately a HIGH threshold
-  with **no saturation boost** — saturating a frame the palette has already coloured is what
-  collapsed every world to the same magenta.
-- **It measures itself**, because none of those numbers transfer. These are all canvas-to-canvas
-  blits: free on a GPU, hopeless on a software rasteriser, and nothing available in the page says
-  which one the user has. `run` times its own first frames and steps DOWN a level (ultra → high →
-  medium → off) rather than straight off, with a fast path for frames several times over budget so
-  a bad device loses five frames and not a second. That check has a useful property: timing canvas
-  calls normally measures only how long they took to QUEUE, so on an accelerated device it reads ~0
-  and never trips — it reads true only when something forces the pipeline to synchronise, which is
-  exactly the case where the pass is too expensive. A tier the user selects outranks whatever it
-  stepped itself down to, and a bail-out rebuilds the scene at full `glow` rather than leaving it
-  dimmed for a halo that is no longer coming.
-- `webapp/test/post.test.mjs` pins the exposure contract, that the pass never writes into the canvas
-  the scene washes over (that feedback would go to white in about a second), that the frame is read
-  exactly once, and the whole step-down ladder.
-
-**A genre may bring its OWN animation** (`lib/viz/genres/`, one file each). A world plus a skin is a
-shared motif with a genre's numbers poured into it: the right answer for the long tail and the wrong
-one for a genre somebody actually listens to, because no parameter turns a bouncing core into a
-sawtooth waveform. `smart.js` prefers a dedicated file whenever the resolved genre has one and falls
-back to the world for everything else, so the catalogue fills in a genre at a time without a flag
-day, and the crossfade does not care which kind it is dissolving between. Seventeen so far —
-frenchcore, tribecore, raggatek, gabber, speedcore, hardtekk, zaag, uptempo, hardstyle, rawstyle,
-pieep, hardtechno, krach, hardcore, industrial, hardpingpong, germanparty — plus fourteen musical
-neighbours that share a file (`SAME_AS`, kept explicit because "terrorcore is uptempo" is a
-judgement about the music and belongs somewhere a person can disagree with it).
-
-**Every one of them is held to the same three properties the shared worlds are**, which they were
-not before: `viz.test.mjs` now drives each dedicated animation through `smart` and pins that it
-reaches all four edges of a 16:9 frame and keeps three-quarters of its drawing off a centred cover,
-and `musical.test.mjs` pins that it moves materially more at 180 BPM than at 90 and draws a drop
-differently from a breakdown. `SCENES` in that suite is the mode registry — off / bars / pulse /
-aurora / smart — so what `smart` actually draws for most of this library was never being asked. It
-found four scenes putting a quarter to a third of their ink behind the artwork (gabber's crowd,
-rawstyle's mouth, industrial's hall, hardpingpong's rally), one timed in seconds (krach's tear was
-a shove, and a shove travels velocity × time, so at twice the tempo each one moved half as far
-twice as often), and two faults in the benches themselves: the recorder had no `strokeRect`, so
-`industrial` took the suite down rather than being measured, and it recorded a rectangle only by
-its CENTRE, which makes a scene built on centred bars invisible — `hardcore`'s wall of columns, the
-animation of which is their height, scored 0.00 movement at both tempos.
-
-**These genres are not one scene, and the first version of that directory said they were.** Tribe,
-hardtek and raggatek do come out of the European sound-system and teknival world. Everything else
-does not: gabber is Rotterdam and Thunderdome and a commercial industry from the start; uptempo is a
-festival and club genre with its own labels; zaag is a Dutch hardstyle KICK DESIGN out of the
-Q-dance lineage (the name is the sound, not a place); hardtekk is the German club scene; speedcore is
-a label-and-festival world; frenchcore began in the French free party scene and has been a festival
-genre for two decades. Filing them all under "free party" is inaccurate and dismissive of scenes that
-are large and organised. The animations are built from what each genre SOUNDS like — the kick, the
-swing, the tempo, the lead — which is the honest basis for a picture and the one that does not put
-words in a scene's mouth.
-
-**No constant that should be musical** (`lib/viz/musical.js`). The animations were full of numbers
-that knew nothing about the music — `spin += dt * 0.05`, `if (s.age > 3.4)` — and a scene written
-that way turns at one rate through a 90 BPM intro and a 200 BPM drop, holds a trail for 3.4 seconds
-whether that is half a bar or six, and has one character however the track moves under it. So
-nothing downstream expresses a duration in seconds or a rate in "per second": `m.overBeats(n)` is a
-lifetime, `m.perBeat(n)` / `m.sweep(turns)` are rates, `m.ease(v, target, beats, dt)` is a smoothing,
-and the shape of the moment comes off `m.drive` / `m.weight` / `m.air` / `m.tension` / `m.calm`.
-`webapp/test/musical.test.mjs` drives every dedicated animation at 90 and at 180 BPM over the same
-wall clock and fails any that does not move materially more at the second — a hard-coded rate scores
-~1.0 and is invisible in review, which is the only reason this line can be held. A second test drives
-a drop against a breakdown at one tempo and fails anything that draws them the same. Both caught real
-regressions the day they were written (a ring that reversed direction every phrase moved LESS the
-harder the track drove, scoring 0.27).
+**No constant that should be musical** (`lib/viz/musical.js`) is still the layer every driver reads:
+`m.overBeats(n)` is a lifetime, `m.perBeat(n)` a rate, `m.ease(v, target, beats, dt)` a smoothing,
+and the shape of the moment comes off `m.drive` / `m.weight` / `m.build` / `m.breakdown` /
+`m.dropped`, plus the stamps (`m.stamp.main`, `.snare`, `.drop`, …) a driver turns into events. The
+old canvas scenes had to be policed into it by a stopwatch test; the shaders cannot break it, and
+the drivers are held to it by the test above.
 
 **ANALYSIS AND RENDERING ARE DIFFERENT THINGS, and `lib/viz/bridge.js` is the line between them.**
 The sound is analysed ONCE, in the tab that has the audio — one beat tracker, one classifier — so
@@ -1318,7 +1309,7 @@ projector was missing about half of every track's beats, kicks and downbeats. Co
 be sampled; **events have to be latched**. `beat`, `downbeat`, `kickHit`, the style kick's `hit` and
 the peak `onset` are accumulated across the dropped frames and cleared once sent. `kickHit` was also
 simply absent from the payload, so every animation that fires on a kick never fired at all on the
-second screen — which is all of `lib/viz/genres/`. `webapp/test/bridge.test.mjs` pins both halves:
+second screen — which was every animation built on the kick. `webapp/test/bridge.test.mjs` pins both halves:
 no event lost to the throttle, and no event reported twice.
 
 **The projector window** (`routes/Viz.svelte`, `lib/viz/bridge.js`, `lib/viz/host.js`) is the same
@@ -1488,7 +1479,10 @@ every claim a test makes should be a MEASURED number written down next to the as
 `webapp/npm test` (node --test, no dependency to install) is the SPA's suite. Its audio half drives
 the **whole analysis chain** — real audio through a real FFT into `features.js` into `tempo.js` into
 `pattern.js` — on sixteen records, because every fault listed above passed a suite that drove one
-module at a time with material chosen to suit it.
+module at a time with material chosen to suit it. Its animation half (see **How the animations are
+tested**) pins what can be decided without a GPU — the catalogue, the skins, the shader contracts,
+the drivers' musical time — and leaves the pixels to the render bench (`test/render/run.mjs
+--check`), which is not part of `npm test` because it needs a browser. Run it after touching a world.
 
 `test/synth.mjs` is the instrument: it writes **samples**, not spectra, and analyses them with an
 iterative radix-2 FFT and a Hann window scaled exactly as `AnalyserNode.getFloatFrequencyData`

@@ -51,11 +51,31 @@ const SCOPE = {
   ultra: { buffer: 16384, search: 250, points: 4096, exact: true, fine: true, interp: true, divisions: 10, passes: 3 },
 };
 
+// THE GL WORLDS' KNOBS, per tier. What they trade is not the picture — every
+// tier draws the same world — but how finely it is resolved:
+//
+//   scale      the render resolution as a share of the canvas's backing store,
+//   min / max  and the range the dynamic-resolution governor may move it in
+//              (lib/viz/scenes/gl.js#govern). Soft, emissive worlds survive a
+//              low scale almost untouched — the bloom and the upscale are the
+//              same softness — which is why the phone tier can go so low.
+//   steps      the raymarch / octave budget a world multiplies its loops by.
+//   particles  the share of a world's sprites that are drawn.
+//   bloom      mip levels in the bloom chain: fewer is a shorter tail.
+//   ca, grain  the lens fringe and the film grain; off at the bottom, where a
+//              device is already struggling and the eye will not miss them.
+const GL = {
+  low: { scale: 0.55, min: 0.34, max: 0.75, steps: 0.5, particles: 0.35, bloom: 4, ca: 0, grain: 0 },
+  medium: { scale: 0.7, min: 0.4, max: 0.9, steps: 0.75, particles: 0.6, bloom: 5, ca: 0.7, grain: 0.02 },
+  high: { scale: 0.85, min: 0.45, max: 1, steps: 1, particles: 1, bloom: 6, ca: 1, grain: 0.028 },
+  ultra: { scale: 1, min: 0.5, max: 1, steps: 1.35, particles: 1.6, bloom: 7, ca: 1, grain: 0.034 },
+};
+
 const PRESETS = {
-  low: { dpr: 1, particles: 24, bars: 40, glow: 0.45, trail: 0.34, blur: 0, layers: 2, scope: SCOPE.low },
-  medium: { dpr: 1.5, particles: 64, bars: 56, glow: 0.7, trail: 0.24, blur: 0, layers: 3, scope: SCOPE.medium },
-  high: { dpr: 2, particles: 130, bars: 72, glow: 1, trail: 0.17, blur: 1, layers: 4, scope: SCOPE.high },
-  ultra: { dpr: 2, particles: 240, bars: 96, glow: 1.25, trail: 0.12, blur: 1, layers: 5, scope: SCOPE.ultra },
+  low: { tier: "low", dpr: 1, particles: 24, bars: 40, glow: 0.45, trail: 0.34, blur: 0, layers: 2, scope: SCOPE.low, gl: GL.low },
+  medium: { tier: "medium", dpr: 1.5, particles: 64, bars: 56, glow: 0.7, trail: 0.24, blur: 0, layers: 3, scope: SCOPE.medium, gl: GL.medium },
+  high: { tier: "high", dpr: 2, particles: 130, bars: 72, glow: 1, trail: 0.17, blur: 1, layers: 4, scope: SCOPE.high, gl: GL.high },
+  ultra: { tier: "ultra", dpr: 2, particles: 240, bars: 96, glow: 1.25, trail: 0.12, blur: 1, layers: 5, scope: SCOPE.ultra, gl: GL.ultra },
 };
 
 export function autoTier() {

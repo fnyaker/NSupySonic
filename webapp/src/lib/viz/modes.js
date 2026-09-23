@@ -4,10 +4,9 @@
 // The now-playing screens, the settings page and the projector all need to know
 // which modes exist and which one is in effect. Until this file existed they
 // got that from `./index.js`, which imports the scene factory, which imports
-// every scene, which imports eighteen worlds, eight dedicated genre animations
-// and a two-hundred-row skin catalogue — a third of a megabyte of source, on
-// the critical path, parsed at launch by every visitor including the ones who
-// never turn an animation on. Two constants are not worth that.
+// the render engine, the world registry and a two-hundred-row skin catalogue —
+// on the critical path, parsed at launch by every visitor including the ones
+// who never turn an animation on. Two constants are not worth that.
 //
 // Nothing here imports a scene, and nothing here may start doing so.
 
@@ -61,8 +60,8 @@ export const MODES = [
     id: "smart",
     label: "Moteur intelligent",
     hint:
-      "Une animation par genre : corridor pour la techno, éclats pour la frenchcore, " +
-      "kaléidoscope pour la psytrance, vinyle pour le rap, horizon pour la synthwave…",
+      "Un monde par genre : la forge pour la frenchcore, le kaléidoscope pour la " +
+      "psytrance, l'horizon pour la synthwave…",
     rhythm: true,
     fullBleed: true,
   },

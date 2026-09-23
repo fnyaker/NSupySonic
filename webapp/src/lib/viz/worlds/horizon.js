@@ -1,195 +1,162 @@
-// SYNTHWAVE / LOFI — the sun over the grid.
+// HORIZON — the sun going down over a grid that never ends.
 //
-// There is exactly one image for this music and everybody already knows it: a
-// banded sun sitting on a horizon with a perspective floor running away
-// underneath. So the world draws that, honestly, and hangs the music on it —
-// the grid scrolls at the tempo, the sun breathes on the bass, the bands across
-// it lift with the mids, and the sky carries the palette.
+// Synthwave, outrun, retrowave, lo-fi house: the one image the genre is made
+// of, done properly. A banded sun sinking into a violet sky, ranges of
+// mountains edged in neon, and a floor of light-lines running to the horizon
+// and rushing toward you, one line per beat.
 //
-// It is the one world that paints an OPAQUE background (`trail: 1` in the
-// registry): a sky is not a trail, and a horizon smeared over its own previous
-// frame is a smudge rather than a place.
+//   THE SUN is a disc graded from gold to the palette's pink, cut by
+//   horizontal slits that thicken toward its base and slide slowly down it —
+//   the signature — and it breathes with the bass.
+//   THE MOUNTAINS are two ranges, far and near, each a silhouette with a
+//   neon line tracing its ridge, the far one hazed by distance.
+//   THE GRID is a true ground plane: lines along the road and lines across
+//   it, both anti-aliased at their real pixel width at every depth and faded
+//   where they pack too tight to be lines. The cross lines ARE the beat: one
+//   passes under the camera on every beat, and each main kick lights them.
+//   The sun lies on the floor as a long reflection.
+//   THE DROP races the grid and sweeps a line of light across the sky.
+//
+// Parameters:
+//   grid    grid brightness    sun   sun size
+//   peaks   mountain height
 
-import { approach, clamp, envelope, hsl, lerp, rng } from "../util.js";
+import { onStamp } from "./kit.js";
 
-const TAU = Math.PI * 2;
-const STARS = 40;
+export default {
+  id: "horizon",
+  uses: ["noise"],
+  params: { grid: 1, sun: 1, peaks: 1 },
+  look: { exposure: 1.0, bloom: 1.35, threshold: 0.6, saturation: 1.3 },
 
-export function createHorizonWorld(preset, opts, skin = {}) {
-  const p = skin.p || {};
-  const SUN = p.sun ?? 1;
-  const BANDS = Math.max(0, Math.round(7 * (p.bands ?? 1)));
-  const GRID = p.grid ?? 1;
-  const SCAN = p.scan ?? 0.3;
-  // `peaks` puts a ridge along the horizon — a mountain line is the difference
-  // between outrun (driving toward something) and lofi (sitting still). It is
-  // fixed, not spectral: a horizon that danced would be a second visualizer.
-  // `reverse` sends the floor away from the viewer instead of toward them.
-  const PEAKS = clamp(p.peaks ?? 0, 0, 1);
-  const REVERSE = (p.reverse ?? 0) > 0.5 ? -1 : 1;
-  const SPEED = skin.speed ?? 1;
-  const ridge = new Float32Array(24);
-  const rand = rng(1984);
-  const star = new Float32Array(STARS * 3); // x, y, twinkle seed
-  for (let i = 0; i < STARS; i++) {
-    star[i * 3] = rand();
-    star[i * 3 + 1] = rand();
-    star[i * 3 + 2] = rand() * TAU;
+  fragment: `
+// The horizon: a little under the middle, or — with the artwork in front — just
+// under the cover, so the whole floor is in the band the cover leaves free.
+float horizonY() { return uHole.z > 0.0 ? clamp(min(-0.08, uHoleR.z - 0.02), -0.6, -0.08) : -0.08; }
+
+void main() {
+  vec2 p = fragP();
+  float amp = 0.6 + 0.4 * uCtl.x;
+  float A = uFrame.z;
+  float px = uFrame.w;
+  float hy = horizonY();
+  float travel = uS0.x;
+  float sweep = uS0.y;
+  vec3 pink = mix(vec3(1.0, 0.25, 0.6), uPalHigh.rgb, 0.35);
+  vec3 gold = mix(vec3(1.0, 0.78, 0.25), uPalHigh.rgb, 0.1);
+  vec3 violet = mix(vec3(0.25, 0.05, 0.45), uPalLow.rgb, 0.4);
+  vec3 col;
+
+  // --- the sky ---
+  float sy = clamp((p.y - hy) / (1.0 - hy), 0.0, 1.0);
+  col = mix(pink * 0.35, violet * 0.3, smoothstep(0.0, 0.5, sy));
+  col = mix(col, uPalBg.rgb * 0.3, smoothstep(0.4, 1.0, sy));
+  vec2 sg = floor(p * 120.0);
+  col += vec3(0.9) * step(0.995, hash12(sg)) * smoothstep(0.3, 0.8, sy) * (0.4 + 0.6 * uHit2.x) * 0.3;
+  // The drop's sweep: a line of light running up the sky.
+  col += pink * exp(-pow((sy - sweep) / 0.01, 2.0)) * step(0.001, sweep) * 0.6;
+
+  // --- the sun: slits sliding down it, breathing with the bass ---
+  // With the artwork in front, the sun rises from behind it: its upper half
+  // above the cover's top edge, the cover standing in front of the rest.
+  float R = 0.36 * P_SUN * (1.0 + 0.04 * uBandA.x);
+  vec2 sc = uHole.z > 0.0 ? vec2(uHole.x, min(uHole.y + uHole.w + 0.04, 0.98 - R)) : vec2(0.0, hy + 0.4);
+  float unhid = uHole.z > 0.0 ? smoothstep(0.0, 0.02, holeSd(p)) : 1.0;
+  vec2 sd = p - sc;
+  float r = length(sd);
+  if (sd.y > -R && p.y > hy) {
+    float v = (sd.y + R) / (2.0 * R);                   // 0 at the base, 1 at the top
+    // The slits: thick at the base, gone by the top, sliding downward.
+    float slit = fract(v * 9.0 + uClock.y * 0.25);
+    float gap = mix(0.45, 0.0, smoothstep(0.0, 0.6, v));
+    float cut = step(gap, slit);
+    vec3 sunC = mix(pink, gold, smoothstep(0.1, 0.9, v));
+    float disc = smoothstep(R + px, R - px, r) * cut * unhid;
+    col = mix(col, sunC * 1.5, disc);
   }
-  for (let i = 0; i < ridge.length; i++) ridge[i] = 0.25 + rand() * 0.75;
-  let scroll = 0;
-  let bass = 0;
-  let mid = 0;
-  let clock = 0;
-  let chaos = 0.2;
+  col += pink * exp(-max(r - R, 0.0) * 4.0) * 0.18 * (0.8 + 0.3 * uBandA.x) * step(hy, p.y) * unhid;
 
-  return {
-    update(frame, dt) {
-      clock += dt;
-      const f = frame.features;
-      const e = frame.energy;
-      const beat = frame.beat;
-      const look = frame.style?.look;
-      chaos = approach(chaos, look ? look.chaos : 0.2, 1.2, dt);
-      const total = e.sub + e.bass + e.lowMid + e.mid + e.high + e.air + 1e-12;
-      bass = envelope(bass, clamp(((e.sub + e.bass) / total) * 2.6, 0, 1), dt, 0.03, 0.26);
-      mid = envelope(mid, clamp(((e.lowMid + e.mid) / total) * 2.6, 0, 1), dt, 0.03, 0.22);
-      // The floor runs at one grid line per beat, so the drive is the tempo.
-      const period = beat.locked ? beat.period : 0.6;
-      scroll = ((scroll + (dt * SPEED * REVERSE) / period) % 1 + 1) % 1;
-      void f;
-    },
+  // --- the mountains: far, hazed; near, edged in neon ---
+  if (p.y > hy) {
+    float far = hy + (0.1 + 0.18 * (fbm(vec2(p.x * 1.8 + 10.0, 0.5), 5) * 0.5 + 0.5)) * P_PEAKS;
+    float nearH = hy + (0.04 + 0.22 * pow(fbm(vec2(p.x * 1.1 - 3.0, 1.5), 5) * 0.5 + 0.5, 1.6)) * P_PEAKS * smoothstep(0.1, 0.9, abs(p.x) / A + 0.2);
+    if (p.y < far) col = mix(col, violet * 0.25 + pink * 0.05, 0.85);
+    col += mix(pink, violet, 0.3) * exp(-pow((p.y - far) / (px * 1.5), 2.0)) * 0.25;
+    if (p.y < nearH) {
+      col = uPalBg.rgb * 0.15 + violet * 0.06;
+      // A faint wireframe down the slopes.
+      float ribs = exp(-pow(abs(fract(p.x * 12.0) - 0.5) / 0.04, 2.0)) * smoothstep(hy, nearH, p.y);
+      col += pink * ribs * 0.04;
+    }
+    col += pink * exp(-pow((p.y - nearH) / (px * 1.3), 2.0)) * (0.6 + 0.4 * uHit.y * amp);
+  }
 
-    draw(g, geom, pal, w) {
-      const W = geom.w;
-      const H = geom.h;
-      // With artwork in the way the horizon goes BELOW it, so the cover stands
-      // on the grid like an object on the plain, and the sun moves up into the
-      // sky above it. Leaving the horizon in the middle put the one motif this
-      // world exists for directly behind the album art.
-      const hz = geom.hole
-        ? clamp(geom.cy + geom.hh + H * 0.03, H * 0.45, H * 0.86)
-        : H * 0.52;
-
-      // --- the sky, opaque -------------------------------------------------
-      g.globalCompositeOperation = "source-over";
-      const sky = g.createLinearGradient(0, 0, 0, hz);
-      sky.addColorStop(0, hsl(pal.high + 20, pal.sat * 0.8, 0.1, w.fade));
-      sky.addColorStop(0.62, hsl(pal.mid, pal.sat * 0.85, 0.2, w.fade));
-      sky.addColorStop(1, hsl(pal.low, pal.sat, 0.34, w.fade));
-      g.fillStyle = sky;
-      g.fillRect(0, 0, W, hz);
-      const ground = g.createLinearGradient(0, hz, 0, H);
-      ground.addColorStop(0, hsl(pal.low + 10, pal.sat * 0.7, 0.12, w.fade));
-      ground.addColorStop(1, hsl(pal.low - 20, pal.sat * 0.5, 0.03, w.fade));
-      g.fillStyle = ground;
-      g.fillRect(0, hz, W, H - hz);
-
-      g.globalCompositeOperation = "lighter";
-
-      // --- stars -----------------------------------------------------------
-      for (let i = 0; i < STARS; i++) {
-        const j = i * 3;
-        const y = star[j + 1] * hz * 0.75;
-        const tw = 0.4 + 0.6 * Math.abs(Math.sin(clock * 0.9 + star[j + 2]));
-        g.fillStyle = hsl(pal.high, 0.2, 0.95, 0.35 * tw * w.energy);
-        g.fillRect(star[j] * W, y, 1.6, 1.6);
-      }
-
-      // --- the sun ---------------------------------------------------------
-      const sunR = Math.min(W, H) * (0.19 + bass * 0.04) * SUN * (geom.hole ? 0.55 : 1);
-      const sunY = geom.hole
-        ? clamp(geom.cy - geom.hh - sunR * 1.05, sunR * 0.7, hz - sunR * 0.28)
-        : hz - sunR * 0.28;
-      const sg = g.createRadialGradient(geom.cx, sunY, sunR * 0.1, geom.cx, sunY, sunR);
-      sg.addColorStop(0, hsl(pal.high, pal.sat, 0.72, 0.62 * w.energy * preset.glow));
-      sg.addColorStop(0.55, hsl(pal.mid, pal.sat, 0.6, 0.4 * w.energy * preset.glow));
-      sg.addColorStop(1, hsl(pal.low, pal.sat, 0.5, 0));
-      g.fillStyle = sg;
-      g.beginPath();
-      g.arc(geom.cx, sunY, sunR, 0, TAU);
-      g.fill();
-
-      // The bands across it, widening downward — what makes it a synthwave sun
-      // and not a circle. They are painted in the colour of whatever is BEHIND
-      // the sun at that height, not cut out of the canvas: `destination-out`
-      // punched through the sky as well and left bars of pure black hanging
-      // over the horizon.
-      g.globalCompositeOperation = "source-over";
-      const bands = BANDS;
-      for (let i = 0; i < bands; i++) {
-        const t = i / bands;
-        const y = sunY + sunR * (0.05 + t * 0.95);
-        const thick = Math.max(1, sunR * (0.03 + t * 0.09) * (1 - mid * 0.45));
-        const x = geom.cx - sunR * 1.05;
-        const bw = sunR * 2.1;
-        // Above the horizon it is sky, below it is ground; a band straddling
-        // the line gets both halves.
-        if (y < hz) {
-          g.fillStyle = hsl(pal.low, pal.sat, 0.32, 0.96 * w.fade);
-          g.fillRect(x, y, bw, Math.min(thick, hz - y));
-        }
-        if (y + thick > hz) {
-          const y2 = Math.max(y, hz);
-          g.fillStyle = hsl(pal.low + 10, pal.sat * 0.7, 0.11, 0.96 * w.fade);
-          g.fillRect(x, y2, bw, y + thick - y2);
-        }
-      }
-      // --- the ridge, opaque like the sky it stands against -----------------
-      if (PEAKS > 0.05) {
-        g.beginPath();
-        g.moveTo(0, hz);
-        for (let i = 0; i < ridge.length; i++) {
-          const x = (i / (ridge.length - 1)) * W;
-          g.lineTo(x, hz - ridge[i] * H * 0.09 * PEAKS);
-        }
-        g.lineTo(W, hz);
-        g.closePath();
-        g.fillStyle = hsl(pal.low + 6, pal.sat * 0.6, 0.06, 0.96 * w.fade);
-        g.fill();
-      }
-
-      g.globalCompositeOperation = "lighter";
-
-      // --- the floor grid --------------------------------------------------
-      const glow = (0.16 + mid * 0.3) * w.energy * preset.glow;
-      g.strokeStyle = hsl(pal.high, pal.sat, 0.68, glow);
-      g.lineWidth = Math.max(1, H * 0.0016);
-      g.beginPath();
-      // Verticals, converging on the vanishing point.
-      const VANISH = geom.cx;
-      const cols = Math.max(5, Math.round(15 * GRID));
-      for (let i = 0; i <= cols; i++) {
-        const t = i / cols - 0.5;
-        g.moveTo(VANISH + t * W * 0.12, hz);
-        g.lineTo(VANISH + t * W * 3.2, H);
-      }
-      g.stroke();
-      // Horizontals, spaced by perspective and scrolling toward the viewer. The
-      // squared step is what makes the floor recede instead of being a ladder.
-      const rows = Math.max(5, Math.round(13 * GRID));
-      for (let i = 0; i < rows; i++) {
-        const t = (i + scroll) / rows;
-        const y = hz + (H - hz) * t * t;
-        const a = glow * (0.25 + t * 1.1);
-        g.strokeStyle = hsl(pal.high, pal.sat, 0.7, Math.min(0.5, a));
-        g.lineWidth = Math.max(1, H * 0.0015 * (0.4 + t * 2));
-        g.beginPath();
-        g.moveTo(0, y);
-        g.lineTo(W, y);
-        g.stroke();
-      }
-
-      // --- the tape ---------------------------------------------------------
-      // Lofi is a worn medium, so it gets scan lines; synthwave, which is a
-      // clean one, does not. `chaos` is the axis that separates them.
-      const grain = Math.max(chaos, SCAN);
-      if (grain > 0.12 && preset.layers >= 3) {
-        g.fillStyle = hsl(pal.high, 0.1, 0.9, 0.025 * grain * w.energy);
-        for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1);
-      }
-      g.globalCompositeOperation = "source-over";
-      void lerp;
-    },
-  };
+  // --- the floor ---
+  if (p.y < hy) {
+    float z = 0.35 / max(hy - p.y, 1e-3);
+    float x = p.x * z;
+    // A line's footprint on screen is the whole gradient of its coordinate,
+    // not one axis of it: out at the sides the road lines run almost flat
+    // toward the horizon, and there it is the VERTICAL change in x that
+    // decides how many of them a pixel covers.
+    float dzdy = z * z / 0.35;
+    float pxX = px * length(vec2(z, p.x * dzdy));
+    float pxZ = px * dzdy;
+    // Lines along the road...
+    float lx = abs(fract(x * 2.2 + 0.5) - 0.5) / 2.2;
+    float along = exp(-pow(lx / (pxX * 1.1 + 0.0012 * z), 2.0)) * smoothstep(0.35, 0.1, pxX * 2.2);
+    // ...and across it, one passing under the camera per beat.
+    float wz = z + travel;
+    float lz = abs(fract(wz + 0.5) - 0.5);
+    float across = exp(-pow(lz / (pxZ * 1.1 + 0.003), 2.0)) * smoothstep(0.35, 0.1, pxZ);
+    // Where both have gone, the floor keeps their average light, so the grid
+    // melts into a glow at the horizon instead of ending at a seam.
+    float melt = (1.0 - smoothstep(0.35, 0.1, pxX * 2.2)) * 0.12 + (1.0 - smoothstep(0.35, 0.1, pxZ)) * 0.08;
+    float fade = exp(-z * 0.04);
+    float kick = 1.0 + 1.5 * uHit.y * amp * exp(-z * 0.2);
+    vec3 floorC = uPalBg.rgb * 0.08 + violet * 0.04 * fade;
+    floorC += pink * (along + across + melt) * fade * 0.55 * P_GRID * kick;
+    // The sun on the floor: a long, soft reflection.
+    floorC += mix(pink, gold, 0.4) * exp(-pow((p.x - sc.x) / (0.12 + 0.2 * (hy - p.y)), 2.0)) * exp(-(hy - p.y) * 2.5) * 0.25;
+    col = floorC;
+    // The haze where floor meets sky.
+    col += pink * exp(-(hy - p.y) * 30.0) * 0.2;
+  }
+  col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
+  col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
+  emit(col * mix(1.0, uEnergy, 0.5));
 }
+`,
+
+  create({ state, flash }) {
+    let travel = 0;
+    let speed = 1;
+    let sweep = 0;
+    let sweeping = false;
+    const drop = onStamp((m) => m.stamp.drop, () => {
+      sweep = 0.001;
+      sweeping = true;
+      flash(0.6);
+    });
+    return {
+      step(dt, m) {
+        drop(m);
+        // Cross lines are one unit apart; one per beat is a unit a beat,
+        // faster through a build and a drop.
+        const want = (0.8 + 0.3 * m.drive + 0.6 * m.build + (sweeping ? 0.8 : 0)) * (1 - 0.4 * m.breakdown);
+        speed = m.ease(speed, want, 1, dt);
+        travel += (dt / m.beat) * speed;
+        if (travel > 4096) travel -= 4096; // the cross lines are one unit apart
+        if (sweeping) {
+          sweep += dt / m.overBeats(2);
+          if (sweep > 1) {
+            sweep = 0;
+            sweeping = false;
+          }
+        }
+        state[0] = travel;
+        state[1] = sweep;
+      },
+    };
+  },
+};

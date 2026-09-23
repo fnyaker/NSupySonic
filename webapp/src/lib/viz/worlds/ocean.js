@@ -1,157 +1,162 @@
-// DUB / DUB TECHNO / TRIP-HOP / DOWNTEMPO / CLOUD RAP — depth and echo.
+// OCÉAN — the sea at night, under the moon.
 //
-// What this music does that nothing else in the set does is REPEAT ITSELF at a
-// decay: one hit, then the same hit quieter a beat later, then quieter again.
-// So the world is built on echoes — every event lays down a swell, and that
-// swell is re-drawn behind itself at a delay, smaller and dimmer, three or four
-// times. The picture is literally a dub delay.
+// Dub, downtempo, trip-hop, ambient with a pulse: the picture is the open
+// sea at night from a boat, the swell rolling under the camera and the moon
+// laying a road of light across it.
 //
-// Slow, wide, horizontal, and lit from below: the opposite of `shatter` in
-// every axis.
+//   THE SEA is a height field, raymarched: six wave trains in different
+//   directions, each one an exponentiated sine — sharp crests, broad troughs,
+//   the shape real wind waves have and plain sines do not. The march refines
+//   the hit, and the normal comes from the field itself, so every wave
+//   catches the light at its own angle.
+//   THE LIGHT is the sky reflected — by Fresnel, so the water is dark
+//   looking down and a mirror toward the horizon — plus the MOON GLADE: the
+//   moon's highlight broken by the waves into thousands of glints, the one
+//   thing that makes night water look like water. Crests show a little of
+//   the water's own colour where light passes through them.
+//   THE MUSIC. The bass is the swell (its height and how steep it stands);
+//   the drive is the wind (how fast the waves run and how chopped they are);
+//   the hats set the glints flickering; the drop brightens the moon glade and
+//   lifts the swell, settling back over four bars.
 //
-// skin.p — swells (how many events are kept), echo (how many repeats and how
-//          far apart), depth (how far back they recede)
+// Parameters:
+//   swell   wave height      wind   wave speed (x)
+//   moon    moonlight
 
-import { approach, clamp, envelope, hsl } from "../util.js";
+import { onStamp } from "./kit.js";
 
-const TAU = Math.PI * 2;
+export default {
+  id: "ocean",
+  uses: ["noise"],
+  params: { swell: 1, wind: 1, moon: 1, march: 56 },
+  look: { exposure: 1.0, bloom: 1.25, threshold: 0.7, saturation: 1.1 },
 
-// `pingpong` sends the delay's repeats alternately left and right instead of
-// straight back, which is the effect dub is actually built on — a tape echo
-// bouncing across the stereo field — and is a different picture rather than a
-// dimmer one. `rain` hangs the repeats' tails down over the water.
-export function createOceanWorld(preset, opts, skin = {}) {
-  const p = skin.p || {};
-  const MAX = Math.max(3, Math.round(6 * (p.swells ?? 1)));
-  const PINGPONG = clamp(p.pingpong ?? 0, 0, 1);
-  const RAIN = clamp(p.rain ?? 0, 0, 1);
-  const swell = [];
-  for (let i = 0; i < MAX; i++) swell.push({ age: -1, x: 0.5, power: 0, hue: 0 });
-  let next = 0;
-  let level = 0;
-  let sub = 0;
-  let drift = 0;
-  let lastAt = -1;
-  let clock = 0;
-
-  return {
-    update(frame, dt) {
-      clock += dt;
-      const f = frame.features;
-      const e = frame.energy;
-      const beat = frame.beat;
-      const total = e.sub + e.bass + e.lowMid + e.mid + e.high + e.air + 1e-12;
-      sub = envelope(sub, clamp(((e.sub + e.bass) / total) * 2.4, 0, 1), dt, 0.05, 0.5);
-      level = approach(level, f.level || 0, 0.5, dt);
-      drift += dt * 0.06;
-
-      const hit = (beat.beat && beat.locked) || (f.kick || 0) > 0.5;
-      if (hit && clock - lastAt > 0.2) {
-        lastAt = clock;
-        const s = swell[(next = (next + 1) % MAX)];
-        s.age = 0;
-        s.x = 0.25 + Math.sin(clock * 0.7) * 0.25 + 0.25;
-        s.power = 0.5 + (f.kick || 0) * 0.5;
-        s.hue = Math.sin(clock * 0.37) * 26;
-      }
-      for (const s of swell) {
-        if (s.age < 0) continue;
-        s.age += dt;
-        if (s.age > 6) s.age = -1;
-      }
-    },
-
-    draw(g, geom, pal, w) {
-      const W = geom.w;
-      const H = geom.h;
-      // A horizon low in the frame: this world is lit from below, which is what
-      // makes it read as depth rather than as a light show.
-      const base = geom.hole ? Math.min(H * 0.95, geom.cy + geom.hh + H * 0.06) : H * 0.78;
-      g.globalCompositeOperation = "lighter";
-
-      // The delay line. Each swell is drawn ECHOES times, each copy further
-      // back, smaller, dimmer and later — which is the effect the music is
-      // made of, drawn rather than described.
-      const echoes = Math.max(2, Math.round(4 * (p.echo ?? 1)));
-      const spacing = 0.42 / echoes;
-      const depth = p.depth ?? 1;
-      for (const s of swell) {
-        if (s.age < 0) continue;
-        for (let k = echoes - 1; k >= 0; k--) {
-          const t = (s.age - k * spacing * 3) / 3.2;
-          if (t < 0 || t > 1) continue;
-          const back = k / echoes;
-          const fade = Math.pow(0.55, k);
-          const alpha = Math.sin(Math.PI * t) * s.power * 0.024 * fade * w.energy * preset.glow;
-          if (alpha < 0.004) continue;
-          // Further back = higher up and narrower, as anything receding is.
-          const y = base - back * (base - H * 0.12) * depth;
-          const rx = W * (0.16 + t * 0.4) * (1 - back * 0.5);
-          const ry = H * (0.05 + t * 0.12) * (1 - back * 0.55);
-          // Straight back down the middle, or thrown side to side one repeat at
-          // a time. Same delay line, read as a room instead of as a corridor.
-          const x =
-            PINGPONG > 0.05
-              ? geom.cx + (k % 2 === 0 ? 1 : -1) * PINGPONG * W * 0.34 * back +
-                (s.x - 0.5) * W * (1 - back * 0.6) * (1 - PINGPONG * 0.6)
-              : geom.cx + (s.x - 0.5) * W * (1 - back * 0.6);
-          const hue = pal.low + s.hue + back * 24;
-          g.save();
-          g.translate(x, y);
-          g.scale(1, Math.max(0.04, ry / Math.max(1, rx)));
-          const gr = g.createRadialGradient(0, 0, 0, 0, 0, Math.max(1, rx));
-          gr.addColorStop(0, hsl(hue, pal.sat, 0.66, alpha));
-          gr.addColorStop(0.6, hsl(hue + 12, pal.sat * 0.9, 0.55, alpha * 0.4));
-          gr.addColorStop(1, hsl(hue + 20, pal.sat * 0.8, 0.45, 0));
-          g.fillStyle = gr;
-          g.beginPath();
-          g.arc(0, 0, Math.max(1, rx), 0, TAU);
-          g.fill();
-          g.restore();
-        }
-      }
-
-      // Rain: a tail hanging from each live repeat down onto the water. It is
-      // the one vertical thing in a world of horizontals, so a little goes a
-      // long way and only the genres built on a wet, dripping delay ask for it.
-      if (RAIN > 0.05) {
-        g.lineWidth = Math.max(1, H * 0.002);
-        g.beginPath();
-        for (const s of swell) {
-          if (s.age < 0) continue;
-          const t = s.age / 3.2;
-          if (t > 1) continue;
-          const x = geom.cx + (s.x - 0.5) * W;
-          const top = base - H * 0.1 * (1 - t);
-          g.moveTo(x, top);
-          g.lineTo(x, base);
-        }
-        g.strokeStyle = hsl(pal.mid, pal.sat * 0.7, 0.6, 0.05 * RAIN * w.energy * preset.glow);
-        g.stroke();
-      }
-
-      // The surface: a slow wide wave along the horizon, riding on the sub.
-      const steps = Math.max(24, Math.min(90, Math.floor(W / 14)));
-      g.strokeStyle = hsl(pal.mid, pal.sat * 0.8, 0.62, (0.02 + sub * 0.05) * w.energy * preset.glow);
-      g.lineWidth = Math.max(1.5, H * 0.004 * (0.5 + sub));
-      g.beginPath();
-      for (let i = 0; i <= steps; i++) {
-        const t = i / steps;
-        const y =
-          base +
-          Math.sin(t * 4.2 + drift * 2.4) * H * 0.02 * (0.4 + sub) +
-          Math.sin(t * 1.7 - drift * 1.3) * H * 0.03 * (0.3 + level);
-        i === 0 ? g.moveTo(t * W, y) : g.lineTo(t * W, y);
-      }
-      g.stroke();
-
-      // The deep: everything below the surface, glowing faintly.
-      const dg = g.createLinearGradient(0, base, 0, H);
-      dg.addColorStop(0, hsl(pal.low, pal.sat, 0.5, (0.015 + sub * 0.03) * w.energy * preset.glow));
-      dg.addColorStop(1, hsl(pal.low - 16, pal.sat * 0.7, 0.3, 0));
-      g.fillStyle = dg;
-      g.fillRect(0, base, W, H - base);
-      g.globalCompositeOperation = "source-over";
-    },
-  };
+  fragment: `
+float wave(vec2 x, float t, float swell, float chop) {
+  float h = 0.0;
+  float a = 0.28 * swell;
+  float k = 0.55;
+  float ang = 0.3;
+  for (int i = 0; i < 6; i++) {
+    vec2 d = vec2(cos(ang), sin(ang));
+    float ph = dot(d, x) * k + t * sqrt(k) * 1.6;
+    h += a * (exp(sin(ph) - 1.0) * 2.0 - 0.6);
+    // The next train: finer, turned, and warped by the one before it (which
+    // is what makes crests lean and interfere instead of tiling).
+    x += d * a * (exp(sin(ph) - 1.0)) * chop * 0.8;
+    a *= 0.5;
+    k *= 1.85;
+    ang += 2.1;
+  }
+  return h;
 }
+
+vec3 moonDir() { return normalize(vec3(-0.35, 0.28, 1.0)); }
+
+vec3 sky(vec3 rd, float glade) {
+  vec3 c = mix(uPalLow.rgb * 0.12 + uPalBg.rgb * 0.2, uPalBg.rgb * 0.3, smoothstep(0.0, 0.5, rd.y));
+  vec3 md = moonDir();
+  float m = max(dot(rd, md), 0.0);
+  vec3 moonC = mix(vec3(0.95, 0.95, 0.88), uPalHigh.rgb, 0.2);
+  c += moonC * smoothstep(0.99955, 0.9997, m) * 3.0 * P_MOON;
+  c += moonC * pow(m, 60.0) * 0.25 * P_MOON * (1.0 + glade);
+  c += moonC * pow(m, 6.0) * 0.04 * P_MOON;
+  return c;
+}
+
+void main() {
+  vec2 p = fragP();
+  float t = uS0.x;
+  float swell = (0.6 + 0.8 * uBandA.x + 0.35 * uS0.y) * P_SWELL;
+  float chop = 0.5 + 0.8 * uFlow.x;
+  float glade = uS0.y;
+  vec3 ro = vec3(0.0, 1.4, 0.0);
+  vec3 rd = normalize(vec3(p.x, p.y - 0.18, 1.6));
+  vec3 col;
+  if (rd.y > 0.02) {
+    col = sky(rd, glade);
+    // Stars above the haze.
+    vec2 sg = floor(rd.xy / rd.z * 140.0);
+    col += vec3(0.8) * step(0.993, hash12(sg)) * smoothstep(0.08, 0.3, rd.y) * 0.3;
+  } else {
+    // March the height field.
+    float tt = 0.0;
+    float hitT = -1.0;
+    int steps = int(clamp(P_MARCH * uQual.x, 28.0, 96.0));
+    float dtm = 0.35;
+    for (int i = 0; i < 96; i++) {
+      if (i >= steps) break;
+      vec3 pos = ro + rd * tt;
+      float d = pos.y - wave(pos.xz, t, swell, chop);
+      if (d < 0.0) {
+        // Refine between the last two samples.
+        float a = tt - dtm;
+        float b = tt;
+        for (int j = 0; j < 5; j++) {
+          float m = 0.5 * (a + b);
+          vec3 q = ro + rd * m;
+          if (q.y - wave(q.xz, t, swell, chop) < 0.0) b = m; else a = m;
+        }
+        hitT = 0.5 * (a + b);
+        break;
+      }
+      dtm = max(0.05, d * 0.6) * (1.0 + tt * 0.03);
+      tt += dtm;
+      if (tt > 80.0) break;
+    }
+    if (hitT < 0.0) hitT = (ro.y) / max(-rd.y, 1e-3);
+    vec3 pos = ro + rd * hitT;
+    // The normal from the field, with a step that grows with distance.
+    float e = 0.01 + hitT * 0.002;
+    float h0 = wave(pos.xz, t, swell, chop);
+    vec3 n = normalize(vec3(h0 - wave(pos.xz + vec2(e, 0.0), t, swell, chop), e, h0 - wave(pos.xz + vec2(0.0, e), t, swell, chop)));
+    // Far away, the waves are smaller than a pixel: flatten toward calm.
+    n = normalize(mix(n, vec3(0.0, 1.0, 0.0), smoothstep(20.0, 70.0, hitT)));
+    vec3 r = reflect(rd, n);
+    r.y = abs(r.y);
+    float fres = 0.02 + 0.98 * pow(1.0 - max(dot(n, -rd), 0.0), 5.0);
+    col = sky(r, glade) * fres;
+    // The body of the water: never quite black, a deep tone of the palette
+    // that the swell's faces pick up.
+    col += mix(uPalLow.rgb, uPalMid.rgb, 0.3) * (0.02 + 0.03 * max(n.z * -rd.z, 0.0));
+    // The moon glade: its highlight, broken into glints by the waves.
+    vec3 md = moonDir();
+    float spec = pow(max(dot(r, md), 0.0), 500.0);
+    float glint = spec * (1.0 + 2.0 * uHit2.x * step(0.6, hash12(floor(pos.xz * 8.0) + floor(uClock.x * 4.0))));
+    col += mix(vec3(1.0, 0.98, 0.9), uPalHigh.rgb, 0.2) * glint * 8.0 * P_MOON * (1.0 + glade);
+    // Light through the crests: a little of the water's own colour.
+    float crest = smoothstep(0.05, 0.35, h0);
+    col += mix(uPalMid.rgb, uPalLow.rgb, 0.5) * crest * 0.05 * max(dot(md, n), 0.0);
+    // Distance haze.
+    col = mix(col, sky(vec3(rd.x, 0.02, rd.z), glade) * 0.8, smoothstep(10.0, 80.0, hitT));
+  }
+  col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.15;
+  col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
+  emit(col * mix(1.0, uEnergy, 0.5));
+}
+`,
+
+  create({ state, params, flash }) {
+    let t = 0;
+    let glade = 0;
+    const drop = onStamp((m) => m.stamp.drop, () => {
+      glade = 1;
+      flash(0.4);
+    });
+    return {
+      step(dt, m) {
+        drop(m);
+        // The waves' own clock, in beats — pinned to 1 at 120 BPM, where the
+        // swell was tuned — scaled by the wind and the drive, integrated so a
+        // change of tempo never jumps. It used to follow only the square root
+        // of the tempo ("a sea twice as fast stops reading as water"), and a
+        // 140 BPM half-time track then rolled at barely the speed of a 90 BPM
+        // one: the sea is here to breathe with the track, not to be physics.
+        t += (dt / m.beat) * 0.5 * (0.55 + 0.35 * m.drive) * (params.wind || 1);
+        glade = Math.max(0, glade - dt / m.overBeats(16));
+        state[0] = t;
+        state[1] = glade;
+      },
+    };
+  },
+};

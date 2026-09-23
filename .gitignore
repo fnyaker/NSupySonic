@@ -95,3 +95,7 @@ supysonic/webui/dist/
 
 # partest: recorded per-test durations, used only to balance the next run
 .partest-timings.json
+
+# Render bench output (webapp/test/render/run.mjs): screenshots and a report,
+# regenerated on every run.
+/webapp/test/render/out/

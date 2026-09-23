@@ -1,162 +1,205 @@
-// PSYTRANCE — a kaleidoscope.
+// KALÉIDOSCOPE — a crystal of light, folded into a mandala.
 //
-// Psytrance is relentless, symmetrical and hypnotic, and the visual that has
-// always belonged to it is the mandala: a handful of sectors mirrored around
-// the middle, turning against each other, morphing with the sound. Nothing else
-// in the set is symmetrical, so it is unmistakable at a glance.
+// Psytrance is relentless, symmetrical and hypnotic, and the picture that has
+// always belonged to it is the mandala: a pattern mirrored around a centre,
+// turning, endlessly detailed. What makes one look DESIGNED rather than noisy
+// is line work on darkness, so this is drawn as line art — not as a coloured
+// fractal fill, which is what an inversion fold gives you and what reads as
+// television static at any distance.
 //
-// `mirror` 0 drops the reflected half, lags each sector behind the last AND
-// lets the arms climb outward as they lag, so the figure is a PINWHEEL rather
-// than a kaleidoscope — a serpentine line unwinding, which is what goa is made
-// of. Dropping the reflection alone only halved the strokes and left them at
-// the same radii: rotationally symmetric, so a viewer could not tell and nor
-// could a test. A spiral has to travel to read as one. `aniso` is how much of the frame's shape
-// the mandala takes: nearly none keeps it a true circle (arabic, psych rock),
-// more lets it spread across a beamer (hitech). `web` joins the sectors with
-// chords, which is forest and dark psy's tangle and nothing else's.
+//   THE CRYSTAL is a kaleidoscopic IFS: space is folded into mirrored sectors,
+//   then — seven times over — folded across both axes and the diagonal,
+//   rotated, scaled up and pushed out. At every step a straight segment is
+//   drawn in the folded space, so it appears at every scale the fold visits:
+//   a lattice of struts that branches into finer struts, each generation a
+//   step further along the palette and a little dimmer. The distance to each
+//   strut is carried back to the screen by the fold's accumulated scale, so a
+//   strut is a hairline in PIXELS at every depth — crisp on a phone, crisp on
+//   a 4K beamer, and never the aliased mush a coloured orbit trap turns into.
+//   THE DEPTH. A second crystal, larger, blurred and dim, turns the other way
+//   behind the first: the parallax is what makes it a space, not a pattern.
+//   JEWELS sit on the fold's vertices and glint with the hats.
 //
-// The mirroring is done in COORDINATES, not with a canvas transform: one
-// element is drawn at K rotations and at each of their reflections, which is a
-// few more strokes rather than a save/restore per sector and keeps every point
-// inside the frame's own polar mapping (so the mandala fills a wide screen
-// instead of being inscribed in a circle in the middle of it).
+// The music drives the FOLD, which is what makes it psychedelic rather than
+// merely decorative: the fold's angle drifts over the phrase and leans with
+// the bass, so the whole structure grows and re-forms; the mandala ratchets a
+// fraction of a sector on every bar like a hand turning a real kaleidoscope;
+// the kick pumps the zoom and lights the struts from the centre outward. A
+// build tightens and speeds it, a breakdown leaves the struts glowing dimly,
+// the drop throws a ring of light out through it.
+//
+// Shape switches (skins): `sectors` (how many mirrors), `mirror` 0 turns the
+// kaleidoscope into a pinwheel (goa), `web` draws the circle traps as well
+// (forest, dark psy: a web, not a crystal), `iter` is how deep the fold goes,
+// `twist` how far each bar turns it.
 
-import { approach, clamp, envelope, hsl, lerp } from "../util.js";
+import { eventRing, onStamp } from "./kit.js";
 
-const TAU = Math.PI * 2;
-const PETALS = 9; // elements inside one sector
+export default {
+  id: "kaleido",
+  uses: ["sdf"],
+  params: { sectors: 8, mirror: 1, twist: 1, web: 0, iter: 7, zoom: 1 },
+  look: { exposure: 1.0, bloom: 1.25, threshold: 0.7, saturation: 1.2 },
 
-export function createKaleidoWorld(preset, opts, skin = {}) {
-  const p = skin.p || {};
-  const SECTORS = p.sectors ?? 1;
-  const PETAL_K = p.petals ?? 1;
-  const BEADS = p.beads ?? 1;
-  const TWIST = p.twist ?? 1;
-  const MIRROR = (p.mirror ?? 1) > 0.5;
-  const ANISO = clamp(p.aniso ?? 0.3, 0, 1);
-  const WEB = clamp(p.web ?? 0, 0, 1);
-  const SPEED = skin.speed ?? 1;
-  const band = new Float32Array(PETALS);
-  let spin = 0;
-  let counter = 0; // the inner ring turns the other way
-  let kick = 0;
-  let density = 0.8;
-  let chaos = 0.3;
-
-  return {
-    update(frame, dt) {
-      const f = frame.features;
-      const beat = frame.beat;
-      const look = frame.style?.look;
-      density = approach(density, look ? look.density : 0.8, 1.2, dt);
-      chaos = approach(chaos, look ? look.chaos : 0.3, 1.2, dt);
-      kick = envelope(kick, clamp((f.kick || 0) * 1.15, 0, 1), dt, 0.006, 0.14);
-
-      const b = frame.bands;
-      const per = b.length / PETALS;
-      for (let i = 0; i < PETALS; i++) {
-        let m = 0;
-        const a = Math.floor(i * per);
-        const e = Math.floor((i + 1) * per);
-        for (let j = a; j < e && j < b.length; j++) if (b[j] > m) m = b[j];
-        band[i] = envelope(band[i], m, dt, 0.03, 0.22);
-      }
-      // Both rotations are locked to the bar, so the pattern lands on the music
-      // instead of drifting across it.
-      const barLen = beat.locked ? beat.period * beat.beatsPerBar : 2.4;
-      spin += ((dt * SPEED) / (barLen * 4)) * TAU;
-      counter -= ((dt * SPEED * TWIST) / (barLen * 2.6)) * TAU;
-    },
-
-    draw(g, geom, pal, w) {
-      g.globalCompositeOperation = "lighter";
-      // More sectors when the genre is dense; always even, so every element has
-      // a true mirror.
-      const K = 2 * Math.max(2, Math.round(lerp(3, 6, density) * SECTORS));
-      const step = TAU / K;
-      const lw = Math.max(1.2, geom.rMin * 0.008);
-
-      const shown = Math.max(3, Math.min(PETALS, Math.round(PETALS * PETAL_K)));
-      for (let p = 0; p < shown; p++) {
-        const v = band[p];
-        if (v < 0.03) continue;
-        const t = (p + 0.5) / shown;
-        // Where this element sits inside its sector, and how far out. The
-        // wobble is what makes the mandala breathe rather than spin rigidly.
-        const local = step * (0.18 + 0.64 * t) + Math.sin(spin * 2 + p) * step * 0.08 * chaos;
-        const rad = 0.06 + t * 0.86 + v * 0.14 + kick * 0.06;
-        const hue = pal.low + (pal.high - pal.low) * t;
-        const alpha = (0.04 + v * 0.16) * w.energy * preset.glow;
-        g.strokeStyle = hsl(hue, pal.sat, 0.68, alpha);
-        g.lineWidth = lw * (0.6 + v * 2);
-        g.lineCap = "round";
-        const phase = p % 2 === 0 ? spin : counter;
-
-        for (let k = 0; k < K; k++) {
-          // Without a mirror the sectors are free to lag, and a lag of a third
-          // of a sector per step is what turns a star into a vortex.
-          const lag = MIRROR ? 0 : k / K;
-          const base = phase + k * step + lag * step * (0.7 + t * 0.9);
-          // The element and its reflection inside the sector: that pair is what
-          // a kaleidoscope is.
-          for (const sign of MIRROR ? [1, -1] : [1]) {
-            const a0 = base + sign * local;
-            const a1 = base + sign * (local + step * 0.3);
-            // Nearly circular (see geometry.place): a mandala that takes the
-            // frame's shape stops being a mandala and becomes a patterned
-            // border, which is what it was doing.
-            // The arm climbs as it lags: sector by sector it reaches further
-            // out, which is the difference between a star and a spiral.
-            const rr = rad * (1 + lag * 0.5);
-            const q0 = geom.place(a0, rr, ANISO);
-            const x0 = q0[0];
-            const y0 = q0[1];
-            const q1 = geom.place(a1, rr * (0.82 + v * 0.2), ANISO);
-            g.beginPath();
-            g.moveTo(x0, y0);
-            g.lineTo(q1[0], q1[1]);
-            g.stroke();
-            // A bead at the outer end: the pattern needs points as well as
-            // lines or it reads as a wire diagram.
-            if (v * BEADS > 0.5) {
-              g.fillStyle = hsl(hue + 20, pal.sat, 0.8, alpha * 1.1);
-              g.beginPath();
-              g.arc(x0, y0, lw * (0.9 + v * 2.2), 0, TAU);
-              g.fill();
-            }
-          }
-        }
-      }
-
-      // The web: a chord from each sector to the one two along, at the radius
-      // the pattern currently reaches. It turns the mandala into a tangle,
-      // which is the whole look of forest and dark psy and would be wrong
-      // anywhere else on this world.
-      if (WEB > 0.05) {
-        const rad = 0.5 + kick * 0.2;
-        g.strokeStyle = hsl(pal.mid, pal.sat * 0.8, 0.6, 0.05 * WEB * w.energy * preset.glow);
-        g.lineWidth = lw * 0.8;
-        g.beginPath();
-        for (let k = 0; k < K; k++) {
-          const q0 = geom.place(spin + k * step, rad, ANISO);
-          const x0 = q0[0];
-          const y0 = q0[1];
-          const q1 = geom.place(spin + (k + 2) * step, rad, ANISO);
-          g.moveTo(x0, y0);
-          g.lineTo(q1[0], q1[1]);
-        }
-        g.stroke();
-      }
-
-      // The eye of the mandala, pumping on the kick.
-      const r0 = geom.hole ? Math.min(geom.hw, geom.hh) * 0.85 : 0;
-      const cr = r0 + geom.rMin * (0.1 + kick * 0.22);
-      const cg = g.createRadialGradient(geom.cx, geom.cy, r0, geom.cx, geom.cy, Math.max(r0 + 1, cr));
-      cg.addColorStop(0, hsl(pal.high, pal.sat, 0.82, (0.05 + kick * 0.18) * w.energy * preset.glow));
-      cg.addColorStop(1, hsl(pal.mid, pal.sat, 0.6, 0));
-      g.fillStyle = cg;
-      g.fillRect(0, 0, geom.w, geom.h);
-      g.globalCompositeOperation = "source-over";
-    },
-  };
+  fragment: `
+// Seven folds of the crystal. Returns the light of its struts at this point,
+// already coloured, in linear units. \`px\` is one screen pixel in z's units.
+vec3 crystal(vec2 z, float ang, vec2 off, float sc, int iter, float px, float hue, float lit, out float jewel) {
+  vec3 acc = vec3(0.0);
+  float s = 1.0;
+  jewel = 0.0;
+  for (int i = 0; i < 9; i++) {
+    if (i >= iter) break;
+    z = abs(z);
+    if (z.x < z.y) z = z.yx;
+    z *= rot(ang);
+    z = z * sc - off * (sc - 1.0);
+    s *= sc;
+    float fi = float(i);
+    // The strut, and how far it is from here in SCREEN units.
+    float d = sdSeg2(z, vec2(-0.6, 0.0), vec2(0.9, 0.0)) / s;
+    float w = pow(0.66, fi);
+    // A hairline core and a soft halo; each generation one step round the
+    // palette and a little dimmer, so the eye reads the structure first.
+    vec3 c = pal(fract(hue + fi * 0.13));
+    // A gaussian core, not the long glow tail: a thousand struts' tails would
+    // sum into a milky fill and the line work would drown in it.
+    float line = exp(-d * d / (px * px * 1.3)) + 0.035 * glow(d, px * 5.0);
+    // The kick travels OUT through the generations: the first folds light
+    // first, the finest last.
+    float wave = exp(-pow((fi / 7.0 - lit) * 3.5, 2.0));
+    acc += c * line * w * (0.35 + 1.3 * wave);
+    if (P_WEB > 0.02) {
+      float dc = abs(length(z) - 0.55) / s;
+      acc += c * glow(dc, px * 0.8) * w * P_WEB * 0.6;
+    }
+    jewel += glow(length(z - vec2(0.9, 0.0)) / s, px * 2.2) * w;
+  }
+  return acc;
 }
+
+void main() {
+  vec2 p = fragP() - uHole.xy;
+  float bars = uClock.y * uSpeed;
+  float amp = 0.6 + 0.4 * uCtl.x;
+  float rim = uHole.z > 0.0 ? min(uHole.z, uHole.w) : 0.0;
+  // The mandala leans toward the frame's shape (the ring metric every
+  // expanding thing here uses), so on a 16:9 beamer it reaches the sides
+  // instead of sitting in a circle in the middle of them.
+  vec2 lean = vec2(mix(1.0, uFrame.z, 0.3), 1.0);
+  float r = length(p / lean);
+  float corner = length(frameHalf() / lean);
+
+  // The ratchet: a fraction of a sector per bar, eased over its first beat, so
+  // the mandala CLICKS round with the music rather than drifting.
+  float n = max(2.0, floor(P_SECTORS + 0.5));
+  float sector = TAU / n;
+  float ratchet = floor(bars) + smoothstep(0.0, 0.3, fract(bars));
+  float turn = ratchet * sector * 0.5 * P_TWIST * (1.0 - 0.7 * uMood.x) + uS0.x;
+
+  // The fold's own geometry: drifting over the phrase, leaning with the bass.
+  float ang = 0.42 + 0.16 * sin(uClock.z * TAU * 0.5 + 0.7) + 0.05 * uBandA.y + uS0.y;
+  vec2 off = vec2(1.0, 0.36 + 0.08 * cos(uClock.z * TAU * 0.25) + 0.06 * uBandA.w);
+  float sc = 1.72 + 0.12 * uArc.y;
+  int iter = int(clamp(P_ITER * (0.75 + 0.25 * uQual.x), 4.0, 9.0));
+
+  // The zoom breathes over the phrase and pumps on the kick.
+  // Scaled so the frame's corner lands on the crystal's outer edge.
+  float zoom = (1.05 + 0.12 * sin(uClock.z * TAU)) / corner * (1.0 - 0.06 * uHit.y * amp) / max(P_ZOOM, 0.2);
+  float lit = uS0.z;
+  float hue = uS0.w;
+
+  // Mirror space: n sectors, mirrored (or a pinwheel without the mirror).
+  float a = atan(p.y / lean.y, p.x / lean.x) + turn;
+  float sa = mod(a, sector);
+  if (P_MIRROR > 0.5) sa = abs(sa - sector * 0.5);
+  else sa += r * 0.6;
+  vec2 q = vec2(cos(sa), sin(sa)) * max(r - rim * 0.8, 0.0);
+
+  vec3 col = uPalBg.rgb * 0.35;
+  // The depth: a larger crystal behind, turning the other way, soft and dim.
+  float aB = atan(p.y / lean.y, p.x / lean.x) - turn * 0.6;
+  float saB = mod(aB, sector);
+  saB = abs(saB - sector * 0.5);
+  vec2 qB = vec2(cos(saB), sin(saB)) * r;
+  float jB;
+  float zB = zoom * 0.6;
+  vec3 back = crystal(qB * zB, ang * 0.8 + 0.3, off * vec2(1.0, 1.2), sc, max(iter - 2, 3), uFrame.w * zB * 2.5, hue + 0.5, lit, jB);
+  col += back * 0.2 * (0.5 + 0.5 * uMood.y);
+
+  // The crystal.
+  float jewel;
+  vec3 front = crystal(q * zoom, ang, off, sc, iter, uFrame.w * zoom, hue, lit, jewel);
+  // A breakdown keeps the struts alive, breathing over two bars, rather than
+  // letting the whole thing go out.
+  float breath = 0.5 + 0.5 * sin(uClock.y * PI * 0.5);
+  float bright = (0.45 + 0.45 * uFlow.x + 0.35 * uHit.x) * (1.0 - 0.3 * uArc.z) + uArc.z * (0.35 + 0.45 * breath);
+  col += front * bright * 0.7;
+  // The jewels glint with the hats.
+  col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * jewel * (0.12 + 0.9 * uHit2.x * amp) * 0.5;
+
+  // The eye: a ring of light on the rim, pumping on the kick.
+  float eye = glow(r - rim - 0.02, 0.012 + 0.02 * uHit.y);
+  col += mix(uPalHigh.rgb, vec3(1.0), 0.3) * eye * (0.2 + 0.9 * uHit.y * amp);
+  // A soft glow from the centre that the whole thing radiates from.
+  col += uPalMid.rgb * exp(-max(r - rim, 0.0) * 3.0) * 0.06 * (0.4 + uMood.y);
+
+  // The drop throws a ring of light out through the crystal.
+  for (int i = 0; i < 8; i++) {
+    vec4 ev = uEv[i];
+    float age = uClock.x - ev.x;
+    if (ev.y <= 0.0 || age < 0.0 || age > 4.0) continue;
+    float rc = ringCoord(fragP());
+    float front2 = age / 4.0 * 1.1;
+    float band = exp(-pow((rc - front2) / 0.035, 2.0));
+    col += mix(uPalHigh.rgb, uPalAcc.rgb, ev.z) * band * ev.y * (1.0 - age / 4.0) * 0.8;
+    col += front * band * ev.y * 1.5;
+  }
+  col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.25;
+  // The mandala is centred on the artwork, so its brightest ring hugs the
+  // cover: dim what is under it properly, not by the house third.
+  col *= mix(0.15, 1.0, clearOfHole(fragP(), 0.08));
+  emit(col * mix(1.0, uEnergy, 0.5));
+}
+`,
+
+  create({ ev, state, flash }) {
+    const ring = eventRing(ev);
+    let spin = 0;
+    let lean = 0;
+    let lit = 1;
+    let hue = 0;
+    let n = 0;
+    const drop = onStamp((m) => m.stamp.drop, (s) => {
+      ring.push(s, 1, 1, 0);
+      flash(0.8);
+    });
+    const main = onStamp((m) => m.stamp.main, () => {
+      lit = 0;
+    });
+    const bar = onStamp((m) => m.stamp.bar, (s, m) => {
+      if (m.drive > 0.55 && m.breakdown < 0.3 && ++n % 4 === 0) ring.push(s, 0.35, 0, 0);
+    });
+    const chord = onStamp((m) => m.stamp.chord, () => {
+      hue += 0.08;
+    });
+    return {
+      step(dt, m) {
+        drop(m);
+        main(m);
+        bar(m);
+        chord(m);
+        // A slow continuous turn under the ratchet, faster through a build.
+        spin += m.perBeat(0.004 + 0.012 * m.build) * dt * Math.PI * 2;
+        // The fold leans with the melody, eased so it never jumps.
+        lean = m.ease(lean, 0.08 * m.melodic - 0.04, 4, dt);
+        // The kick's wave travels out through the generations over half a beat.
+        lit = Math.min(1.4, lit + dt / m.overBeats(0.5));
+        state[0] = spin;
+        state[1] = lean;
+        state[2] = lit;
+        state[3] = hue;
+      },
+    };
+  },
+};

@@ -1,196 +1,248 @@
-// TECHNO / HARDTECHNO / INDUSTRIAL — a machine corridor.
+// CORRIDOR — a machine tunnel, lit by its own rings.
 //
-// The motif is a perspective tunnel: a new frame-shaped ring is laid down on
-// every beat and rushes at the viewer, so the picture is literally built out of
-// the beat grid. Nothing in here is random, because nothing in the music is:
-// the rings are evenly spaced, the corridor edges are fixed, and the only thing
-// that moves off the grid is the brightness.
+// Techno is a machine running at a constant speed, and the picture that has
+// always belonged to it is the corridor: strict, symmetrical, receding. The
+// first version drew it as glowing lines on black — a wireframe, which is what
+// a corridor looks like in a 1998 screensaver. This one is ARCHITECTURE: every
+// pixel is a point on a wall at a real depth (the inverse of its distance from
+// the axis, in the corridor's own cross-section), the walls are panelled, and
+// the only light in the place comes from the fixtures in it.
 //
-// It fills any frame by construction — the rings ARE the frame's shape
-// (geometry.place at aniso 1) — and with artwork in the middle the corridor
-// simply runs around it.
+//   THE RINGS. A light fixture runs round the section every unit of depth. It
+//   lights the panels either side of it and falls off along the walls, so the
+//   corridor reads as lit surfaces with light pooling between dark stretches,
+//   not as lines. Every other ring burns brighter; a main kick fires them all.
+//   THE BEAT. A ring of light runs away down the corridor once per beat (once
+//   per bar in a breakdown), lighting the walls as it passes and making each
+//   fixture flare as it goes by — the tempo, travelling.
+//   THE FLOOR. Polished: it mirrors the ceiling's rings (a ring on the ceiling
+//   at depth 3z shows in the floor at depth z, exactly, for a flat floor and
+//   ceiling) and carries a streak of the far end's light.
+//   THE STRIPS. LED strips along every corner, segmented, washing the walls
+//   either side of them.
+//   THE AIR. Haze, which swallows the far end into one glow and throws faint
+//   shafts from it.
 //
-// The skin reshapes the corridor itself, which is how eleven machine genres get
-// eleven corridors: `sides` is its cross-section (a four-sided shaft for techno,
-// a twenty-four-sided bore for acid), `twist` turns each ring against the one
-// behind it so the shaft becomes a helix, `dir` -1 sends the rings AWAY from the
-// viewer instead of at them (minimal and dub techno recede, hardtechno charges),
-// `dash` breaks each ring into segments with gaps — a strobing machine rather
-// than a solid one — and `depth` is how many beats a ring takes to cross.
+// The camera advances at a rate set in beats, so the corridor IS the tempo; a
+// build accelerates the run and thickens the haze, a drop surges, a breakdown
+// slows to a crawl and dims the rings to embers.
+//
+// Shape switches (the skins): `sides` (a four-sided shaft shaped like the
+// frame, a triangle, a hexagon, a round bore at twenty-four), `twist` winds
+// the rings into a helix, `dir` -1 runs the camera backwards (minimal
+// recedes, hardtechno charges), `dash` breaks the rings into strobing
+// segments, `scan` lays a crawl of machine noise over it (industrial).
+//
+// With the artwork in front, the corridor runs behind it: the cover becomes
+// the far end everything recedes into.
 
-import { approach, clamp, envelope, hsl, lerp } from "../util.js";
+export default {
+  id: "tunnel",
+  uses: ["noise"],
+  params: { sides: 4, twist: 0, dir: 1, dash: 0, scan: 0.15, depth: 1, strips: 1 },
+  look: { exposure: 1.0, bloom: 1.2, threshold: 0.8, saturation: 1.12 },
 
-const TAU = Math.PI * 2;
-const MAX_RINGS = 14;
+  fragment: `
+const float K = 0.5;   // the section's apothem, in depth units
 
-export function createTunnelWorld(preset, opts, skin = {}) {
-  const p = skin.p || {};
-  // How many sides the corridor has. Four is a rectangular shaft (techno),
-  // twenty-four is a bore (acid), and the genre decides which.
-  const SIDES = Math.max(3, Math.round(p.sides ?? 4));
-  const SPOKES = Math.max(0, Math.round(p.spokes ?? 4));
-  const SCAN = p.scan ?? 0.15;
-  const GLOW = p.glow ?? 1;
-  const TWIST = p.twist ?? 0;
-  const DIR = (p.dir ?? 1) < 0 ? -1 : 1;
-  const DASH = clamp(p.dash ?? 0, 0, 0.9);
-  const DEPTH = Math.max(1.2, 3 * (p.depth ?? 1));
-  const SPEED = skin.speed ?? 1;
-  const SIDE_INK = Math.min(1, Math.max(0.5, 7 / SIDES));
-  const rings = [];
-  for (let i = 0; i < MAX_RINGS; i++) rings.push({ z: -1, power: 0 });
-  let next = 0;
-  let kick = 0;
-  let grit = 0;
-  let scan = 0;
-  let sinceRing = 0;
+// The corridor's cross-section at screen point p. Returns its distance metric
+// rp (the wall under p lies at depth K / rp) and fills in
+//   n   the wall's inward normal, in the section plane
+//   s   the position across the wall, in world units
+//   u   the angle round the axis, 0..1
+//   cd  the screen distance to the nearest corner, where two walls meet.
+float section(vec2 p, float N, out vec2 n, out float s, out float u, out float cd) {
+  u = atan(p.y, p.x) / TAU;
+  if (N > 3.5 && N < 4.5) {
+    // A rectangle with the frame's proportions and softened corners, so a
+    // 16:9 beamer looks down a wide corridor and a phone down a tall one.
+    vec2 h = vec2(clamp(uFrame.z, 0.6, 1.9), 1.0);
+    vec2 q = max(abs(p) / h, vec2(1e-5));
+    vec2 qk = pow(q, vec2(8.0));
+    float rp = pow(qk.x + qk.y, 0.125);
+    n = -normalize(sign(p) * qk / q / h + 1e-9);
+    s = (qk.x > qk.y ? p.y : p.x) * K / max(rp, 1e-4);
+    cd = abs(abs(p.x) * h.y - abs(p.y) * h.x) / length(h);
+    return rp;
+  }
+  // A regular polygon with a face at the bottom, so there is always a floor.
+  float seg = TAU / N;
+  float a = atan(p.y, p.x);
+  float off = mod(-0.5 * PI, seg);
+  float ac = off + floor((a - off) / seg + 0.5) * seg;
+  vec2 c = vec2(cos(ac), sin(ac));
+  n = -c;
+  float rp = dot(p, c);
+  s = dot(p, vec2(-c.y, c.x)) * K / max(rp, 1e-4);
+  cd = length(p) * sin(max(seg * 0.5 - abs(a - ac), 0.0));
+  return rp;
+}
 
-  function spawn(power) {
-    const r = rings[(next = (next + 1) % MAX_RINGS)];
-    // A corridor that recedes starts its rings at the viewer and sends them
-    // down it; one that charges starts them at the far end. Same track, same
-    // spacing, opposite reading — which is exactly the difference between
-    // minimal and hardtechno.
-    // A ring's radius is `0.06 + (1 - z²) · 1.02`, so z near 0 puts it PAST
-    // the frame's edge. A corridor charging at the viewer wants that (the ring
-    // leaves the picture at the end of its life), but one receding starts
-    // there — and at z = 0.02 it spent its whole bright phase outside the frame
-    // and only became visible once it was dim. 0.25 puts it on the edge.
-    r.z = DIR > 0 ? 1 : 0.25;
-    r.power = power;
+// How bright ring k burns: every other one brighter, all of them on the kick,
+// and the one the beat's light is passing flares.
+float ringLevel(float k, float cam, float dir, float zp, float pulseI, float kick, float calm) {
+  float zk = (k - cam * dir) * dir;
+  float base = mix(0.35, 1.0, step(0.5, fract(k * 0.5))) * mix(1.0, 0.22, calm);
+  // A ring right at the lens flaring would fill the frame's border with
+  // bloom on every beat; the pulse takes a metre to come into its own.
+  float flare = exp(-pow((zk - zp) * 1.4, 2.0)) * pulseI * 2.4 * smoothstep(0.35, 1.1, zk);
+  return base * (0.5 + 0.5 * uFlow.x) + flare + kick * 0.8;
+}
+
+// How much of a ring's light reaches a wall dd depth units away from it: a
+// hot pool right beside the fixture and a long, soft tail.
+float ringReach(float dd) {
+  return 0.75 / (1.0 + dd * dd * 70.0) + 0.25 / (1.0 + dd * dd * 5.0);
+}
+
+void main() {
+  vec2 p = fragP() - uHole.xy;
+  float px = uFrame.w;
+  float beats = uClock.x * uSpeed;
+  float amp = 0.6 + 0.4 * uCtl.x;
+  float N = max(3.0, floor(P_SIDES + 0.5));
+  vec2 n;
+  float s, u, cd;
+  float rp = max(section(p, N, n, s, u, cd), 1e-3);
+  float cam = uS0.x;
+  float dir = P_DIR < 0.0 ? -1.0 : 1.0;
+  float z = K / rp;                 // the wall's depth under this pixel
+  float wz = z + cam * dir;          // ...in the corridor's own coordinates
+  float calm = smoothstep(0.2, 0.8, uArc.z);
+  float kick = uHit.y * amp * (1.0 - 0.7 * calm);
+  float fog = exp(-z * (0.15 + 0.1 * uArc.y));
+
+  vec3 ringCol = mix(uPalMid.rgb, uPalHigh.rgb, 0.6);
+  vec3 stripCol = mix(mix(uPalHigh.rgb, uPalAcc.rgb, 0.25), vec3(1.0), 0.3);
+  vec3 hazeCol = mix(uPalMid.rgb, uPalHigh.rgb, 0.4);
+
+  // --- the beat's light, running away down the corridor ---
+  float ph = mix(uPhase.x, uPhase.y, calm);
+  float zp = 0.3 + ph * 7.0;
+  float pulseI = (0.55 + 1.0 * uFlow.x) * (1.0 - 0.55 * calm) * (1.0 - 0.45 * ph);
+
+  // --- which rings are near: \`twist\` winds them into a helix ---
+  // A whole number of rings per turn, or the helix could not close: it would
+  // break where the angle wraps, on the left of the frame.
+  float turns = abs(P_TWIST) > 0.05 ? sign(P_TWIST) * max(1.0, floor(abs(P_TWIST) * 2.5 + 0.5)) : 0.0;
+  float fwu = fwidth(u);
+  float rz = wz + turns * u;
+  float fwz = fwidth(wz) + abs(turns) * (fwu > 0.25 ? 0.0 : fwu);
+  float k0 = floor(rz);
+
+  // --- the light on the walls ---
+  vec3 light = vec3(0.0);
+  for (int j = -1; j <= 2; j++) {
+    float k = k0 + float(j);
+    light += ringCol * ringLevel(k, cam, dir, zp, pulseI, kick, calm) * ringReach(rz - k);
+  }
+  // The beat's light itself, a moving source.
+  light += mix(ringCol, vec3(1.0), 0.3) * pulseI * 1.4 * ringReach((z - zp) * 0.8);
+  // The strips wash the walls either side of the corners they run along.
+  float stripI = P_STRIPS * (0.3 + 0.7 * uFlow.x) * (1.0 - 0.5 * calm) / sqrt(max(N, 4.0) / 4.0);
+  light += stripCol * stripI * 0.35 * exp(-cd * z * 7.0);
+
+  // --- the panels: dark brushed metal, seams as grooves ---
+  vec2 tile = vec2(s / 0.2, wz / 0.5);
+  vec2 ti = floor(tile);
+  vec2 tf = abs(fract(tile) - 0.5);
+  vec2 fwt = fwidth(tile);
+  float seam = 1.0 - smoothstep(0.0, 0.02 + fwt.x, 0.5 - tf.x) * smoothstep(0.0, 0.02 + fwt.y, 0.5 - tf.y);
+  seam *= 1.0 - smoothstep(0.12, 0.35, max(fwt.x, fwt.y));
+  float var = hash12(mod(ti, 256.0) + 0.5);
+  vec3 albedo = mix(vec3(0.55, 0.58, 0.62), uPalLow.rgb, 0.3) * (0.07 + 0.05 * var);
+  vec3 col = albedo * light * (1.0 - 0.75 * seam);
+
+  // --- the fixtures themselves ---
+  // Each ring is a strip of real width; past what a pixel can hold it is drawn
+  // a pixel wide at the brightness its true width would give, never thicker.
+  float kn = floor(rz + 0.5);
+  float dd = abs(rz - kn);
+  float wR = max(0.007, fwz * 0.7);
+  float fixture = exp(-pow(dd / wR, 2.0)) * min(1.0, 0.007 / wR);
+  // \`dash\` breaks the rings into segments that swap every beat: a strobe
+  // made of the architecture. 0 is whole rings, 1 is every other segment out.
+  if (P_DASH > 0.02) {
+    float dash = step(0.5, fract(s * 2.5 + kn * 0.5 + floor(beats) * 0.5));
+    fixture *= mix(1.0, dash, clamp(P_DASH, 0.0, 1.0));
+  }
+  float lvN = ringLevel(kn, cam, dir, zp, pulseI, kick, calm);
+  col += mix(ringCol, vec3(1.0), 0.25) * fixture * lvN * 2.6;
+  // The travelling light has a body too: a thin bright band on the walls.
+  float wP = max(0.012, fwidth(z) * 0.7);
+  col += mix(ringCol, vec3(1.0), 0.4) * exp(-pow((z - zp) / wP, 2.0)) * min(1.0, 0.012 / wP) * pulseI * 3.0
+       * smoothstep(0.35, 1.1, zp);
+
+  // --- the corner strips: LED segments, one pixel minimum ---
+  if (P_STRIPS > 0.01) {
+    float halfW = 0.012 / z;
+    float wS = max(halfW, px * 0.6);
+    float fwS = fwidth(wz * 2.0);
+    float leds = mix(step(0.3, fract(wz * 2.0)), 0.7, smoothstep(0.25, 0.6, fwS));
+    float chase = 0.6 + 0.4 * pow(0.5 + 0.5 * sin((wz * 0.5 - beats) * TAU), 6.0);
+    col += stripCol * exp(-pow(cd / wS, 2.0)) * min(1.0, halfW / wS) * leds * chase * stripI * 2.2;
   }
 
-  return {
-    update(frame, dt) {
-      const beat = frame.beat;
-      const f = frame.features;
-      kick = envelope(kick, clamp((f.kick || 0) * 1.2, 0, 1), dt, 0.006, 0.14);
-      grit = approach(grit, Math.max(SCAN, frame.style?.look?.chaos ?? 0.2), 1.2, dt);
-      sinceRing += dt;
-      // One ring per beat while the grid holds; a steady fallback cadence when
-      // it does not, because a corridor that stops advancing looks broken.
-      const every = beat.locked ? beat.period : 0.5;
-      if ((beat.beat && beat.locked) || sinceRing > every * 1.6) {
-        spawn(beat.downbeat ? 1 : 0.6 + (f.kick || 0) * 0.4);
-        sinceRing = 0;
-      }
-      // Depth travel: a ring crosses the corridor in two beats, so there are
-      // always a couple in flight and the spacing reads as speed.
-      // Three beats to cross, so there are always three rings in flight: two
-      // is a pair of rectangles, three reads as a corridor.
-      const v = (dt * SPEED) / (every * DEPTH);
-      for (const r of rings) {
-        if (r.z < 0) continue;
-        r.z -= v * DIR;
-        if (r.z <= 0 || r.z >= 1) r.z = -1;
-      }
-      scan = (scan + dt * lerp(0.1, 0.5, grit)) % 1;
-    },
+  // --- the floor: polished, mirroring the ceiling ---
+  float isFloor = smoothstep(0.7, 0.95, n.y);
+  if (isFloor > 0.0) {
+    float refl = 0.0;
+    if (mod(N, 2.0) < 0.5) {
+      // A ring on the ceiling at depth 3z shows in the floor at depth z, and
+      // the gloss blurs it more the further the light has to travel.
+      float r3 = 3.0 * z + cam * dir;
+      float k3 = floor(r3 + 0.5);
+      float w3 = 0.04 + 0.06 * z + fwidth(r3) * 0.7;
+      refl += ringLevel(k3, cam, dir, zp, pulseI, kick, calm) * exp(-pow((r3 - k3) / w3, 2.0))
+            * min(1.0, 0.05 / w3) * exp(-3.0 * z * 0.15);
+      // ...and the beat's light, mirrored the same way.
+      refl += pulseI * exp(-pow((3.0 * z - zp) / (0.15 + 0.1 * z), 2.0)) * 0.8;
+    }
+    // A streak of the far end's glow, running down the middle of the floor.
+    float streak = exp(-abs(p.x) / (0.015 + 0.2 * abs(p.y))) * exp(-abs(p.y) * 2.0);
+    float portal = 0.35 + 0.5 * uMood.y + 0.9 * kick;
+    col += (ringCol * refl * 0.55 + mix(uPalHigh.rgb, vec3(1.0), 0.3) * streak * portal * 0.18) * isFloor;
+  }
 
-    draw(g, geom, pal, w) {
-      const cx = geom.cx;
-      const cy = geom.cy;
-      g.globalCompositeOperation = "lighter";
+  // --- the air ---
+  col = col * fog + hazeCol * (1.0 - fog) * 0.05 * (0.35 + uMood.y + kick);
+  // The far end: the glow the haze dissolves into, and faint shafts from it.
+  float farR = exp(-rp * 9.0);
+  float shafts = 0.5 + 0.25 * sin(u * TAU * 7.0 + beats * 0.13) + 0.25 * sin(u * TAU * 11.0 - beats * 0.09 + 1.7);
+  float portal = 0.3 + 0.5 * uMood.y + 0.9 * kick;
+  col += mix(uPalHigh.rgb, uPalMid.rgb, 0.5) * (farR + exp(-rp * 2.5) * shafts * shafts * 0.12)
+       * portal * clearOfHole(fragP(), 0.1);
 
-      // The corridor's own edges: four fixed lines from the middle out through
-      // the corners. Two of them and the rings stop being a tunnel and start
-      // being a stack of rectangles.
-      g.strokeStyle = hsl(pal.mid, pal.sat * 0.4, 0.55, 0.1 * w.energy);
-      g.lineWidth = Math.max(1, geom.rMin * 0.004);
-      g.beginPath();
-      for (let i = 0; i < SPOKES; i++) {
-        const a = Math.PI / 4 + (i * TAU) / Math.max(1, SPOKES);
-        const inner = geom.place(a, 0.02);
-        const x0 = inner[0];
-        const y0 = inner[1];
-        const outer = geom.place(a, 1);
-        g.moveTo(x0, y0);
-        g.lineTo(outer[0], outer[1]);
-      }
-      g.stroke();
-
-      // The rings. `1 - z²` puts them closer together far away and further
-      // apart as they arrive, which is what perspective does and what makes the
-      // corridor read as depth rather than as a target.
-      const steps = SIDES;
-      for (const r of rings) {
-        if (r.z < 0) continue;
-        const t = 1 - r.z * r.z;
-        // A ring charging at the viewer is faint far away and bright as it
-        // arrives, so its brightness and its size grow together. Receding, the
-        // two FALL together — and a ring that shrinks and dims at the same
-        // rate has vanished by the time it is halfway down the corridor, which
-        // is how minimal ended up rendering at a third of every other skin on
-        // this world. Going away, the near end stays lit.
-        const ramp = DIR > 0 ? 0.1 + 0.9 * t : 0.5 + 0.5 * t;
-        // A ring's ink scales with its PERIMETER, and its perimeter is set by
-        // how many sides it has: a four-sided shaft cuts straight chords well
-        // inside the frame, a twenty-four-sided bore hugs the frame's whole
-        // outline. At one alpha the bore is several times the light of the
-        // shaft for the same nominal brightness, which is how acid techno came
-        // out blown when techno did not.
-        const a = ramp * r.power * 0.5 * SIDE_INK * w.energy * preset.glow;
-        if (a < 0.004) continue;
-        const hue = pal.low + (pal.high - pal.low) * r.z;
-        g.strokeStyle = hsl(hue, pal.sat * 0.75, 0.62, a);
-        g.lineWidth = Math.max(1.5, geom.rMin * 0.03 * t * (0.5 + r.power));
-        // Each ring is twisted by its own depth, so successive rings no longer
-        // line up and the shaft reads as a screw instead of a stack.
-        const roll = Math.PI / 4 + TWIST * r.z * TAU * 0.25;
-        const rad = 0.06 + t * 1.02;
-        if (DASH > 0.02) {
-          // Drawn side by side with a gap, rather than as one closed outline:
-          // a machine that strobes is not the same machine as one that hums,
-          // and a dashed ring is the difference at a glance.
-          g.beginPath();
-          for (let i = 0; i < steps; i++) {
-            const a0 = roll + (i / steps) * TAU;
-            const a1 = roll + ((i + 1 - DASH) / steps) * TAU;
-            // `place` returns ONE shared array (see geometry.js): holding two
-            // of its results at once aliases them, the segment collapses to a
-            // point and the whole ring draws nothing. Read the first out before
-            // asking for the second.
-            const q0 = geom.place(a0, rad);
-            const x0 = q0[0];
-            const y0 = q0[1];
-            const q1 = geom.place(a1, rad);
-            g.moveTo(x0, y0);
-            g.lineTo(q1[0], q1[1]);
-          }
-          g.stroke();
-        } else {
-          g.beginPath();
-          for (let i = 0; i <= steps; i++) {
-            const q = geom.place(roll + (i / steps) * TAU, rad);
-            i === 0 ? g.moveTo(q[0], q[1]) : g.lineTo(q[0], q[1]);
-          }
-          g.closePath();
-          g.stroke();
-        }
-      }
-
-      // The kick lights the whole corridor from the far end.
-      if (kick > 0.01) {
-        const inner = geom.hole ? Math.min(geom.hw, geom.hh) * 0.8 : 0;
-        const gr = g.createRadialGradient(cx, cy, inner, cx, cy, Math.max(inner + 1, geom.rMax));
-        gr.addColorStop(0, hsl(pal.high, pal.sat * 0.8, 0.6, 0.5 * GLOW * kick * w.energy * preset.glow));
-        gr.addColorStop(0.45, hsl(pal.mid, pal.sat * 0.7, 0.5, 0.12 * kick * w.energy));
-        gr.addColorStop(1, hsl(pal.low, pal.sat * 0.6, 0.4, 0));
-        g.fillStyle = gr;
-        g.fillRect(0, 0, geom.w, geom.h);
-      }
-
-      // Industrial gets the machine's own noise: horizontal scan bars crawling
-      // down the picture, at a rate its `chaos` sets.
-      if (SCAN > 0.05 && grit > 0.25 && preset.layers >= 3) {
-        const bars = 5;
-        g.fillStyle = hsl(pal.mid, pal.sat * 0.3, 0.7, 0.05 * grit * w.energy);
-        for (let i = 0; i < bars; i++) {
-          const y = (((scan + i / bars) % 1) * (geom.h + 80) - 40) | 0;
-          g.fillRect(0, y, geom.w, Math.max(2, geom.h * 0.012));
-        }
-      }
-      g.globalCompositeOperation = "source-over";
-    },
-  };
+  // The machine's own noise, crawling down the picture.
+  if (P_SCAN > 0.05) {
+    float y = gl_FragCoord.y / uRes.y;
+    float scan = smoothstep(0.99, 1.0, fract(y * 5.0 - beats * 0.25)) * P_SCAN;
+    col += uPalMid.rgb * scan * 0.2 * (0.4 + uFlow.x);
+  }
+  col += uPalHigh.rgb * uHit2.w * 0.3;
+  emit(col * mix(1.0, uEnergy, 0.5));
 }
+`,
+
+  create({ state, params, flash }) {
+    // The run: depth units per beat, integrated so a change of speed changes
+    // the speed and never jumps the position. It wraps at 128, a period every
+    // pattern on the walls repeats in exactly (rings every 1 with every other
+    // one brighter, panels and LED segments every 0.5, panel shades hashed on
+    // their index modulo 256).
+    let cam = 0;
+    let drop = null;
+    return {
+      step(dt, m) {
+        const speed = (0.9 + 0.8 * m.drive + 1.2 * m.build) * (1 - 0.6 * m.breakdown) * (params.depth || 1);
+        cam = (cam + (dt / m.beat) * speed) % 128;
+        state[0] = cam;
+        if (drop === null) drop = m.stamp.drop;
+        if (m.stamp.drop !== drop) {
+          drop = m.stamp.drop;
+          flash(0.7);
+        }
+      },
+    };
+  },
+};
