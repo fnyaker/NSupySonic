@@ -51,6 +51,9 @@ const LOADERS = {
   nebula: () => import("./nebula.js"),
   ocean: () => import("./ocean.js"),
   cathedral: () => import("./cathedral.js"),
+  ink: () => import("./ink.js"),
+  rain: () => import("./rain.js"),
+  fireflies: () => import("./fireflies.js"),
 };
 
 const cache = new Map();
