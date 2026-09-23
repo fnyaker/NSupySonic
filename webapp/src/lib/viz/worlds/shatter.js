@@ -14,12 +14,16 @@
 // radii whose height steps from one crack to the next (so each ring is a chain
 // of straight chords, the polygon a real web makes).
 //
-// Then the optics, which are what make it glass rather than a drawing of it:
-// every shard REFRACTS the wall behind it, shifted along its own throw and
-// turned about its own centre, and the three colour channels shift by
-// different amounts — the dispersion that fringes real broken glass with
-// colour. The LED wall behind is a fine grid of points on purpose: nothing
-// shows a misalignment like a grid that no longer lines up.
+// Then the optics, which are what make it GLASS rather than a drawing of it.
+// The pane is dark tinted glass in front of a stage: a white-hot light at the
+// point of impact and a few coloured beams sweeping behind. Every shard
+// REFRACTS that stage, shifted along its own throw and turned about its own
+// centre (the three colour channels by slightly different amounts — the
+// dispersion that fringes real broken glass), and every shard REFLECTS a
+// travelling light at its own tilt, so the break reads as a mosaic of facets,
+// some catching the light and some black. The cracks are bevels a pixel or two
+// wide, lit on one side; and when a main kick throws the pieces apart the
+// gaps open onto the raw light behind, which is what makes the hit land.
 //
 // Every main kick throws the pieces; they heal back before the next. Every bar
 // the glass is struck somewhere new (on the artwork's centre when there is one,
@@ -29,7 +33,7 @@
 //   shards  how many cracks (gabber: few long slabs; speedcore: a crushed web)
 //   jag     how far the pieces are thrown and how wide the gaps open
 //   spin    how far a piece turns        flash  downbeat strobe strength
-//   burst   the light behind the glass   leds   LED grid density
+//   burst   the light behind the glass   leds   how many beams sweep behind it
 
 import { onStamp, hashN } from "./kit.js";
 
@@ -37,41 +41,38 @@ export default {
   id: "shatter",
   uses: ["noise"],
   params: { shards: 1, jag: 1, spin: 1, flash: 0.5, burst: 1, leds: 1 },
-  look: { exposure: 1.0, bloom: 0.9, threshold: 1.1, saturation: 1.15 },
+  look: { exposure: 1.0, bloom: 1.25, threshold: 0.75, saturation: 1.15 },
 
   fragment: `
-// The LED wall behind the glass: a grid of points running a slow pattern, a
-// soft blaze of colour, and rays out of the impact that flare on the blow.
 // Where the glass was struck: the artwork's centre in the player, the
 // driver's pick across the width otherwise.
 vec2 impact() {
   return uHole.z > 0.0 ? uHole.xy : vec2(uS0.x * uFrame.z * 0.6, uS0.y);
 }
 
-vec3 wall(vec2 q, float beats, float blow) {
+// The stage behind the glass: dark, a white-hot light at the point of impact,
+// and beams fanning up from below the frame, sweeping on the bar.
+vec3 behind(vec2 q, float beats, float blow) {
   vec2 O = impact();
-  float pitch = 0.034 / clamp(P_LEDS, 0.5, 2.0);
-  vec2 g = q / pitch;
-  vec2 id = floor(g);
-  vec2 f = fract(g) - 0.5;
-  vec2 c = id * pitch;
-  // The pattern: a wave out of the impact, a sweep across, a noise shimmer.
-  float wave = 0.5 + 0.5 * sin(length(c - O) * 9.0 - beats * TAU * 0.5);
-  float sweep = 0.5 + 0.5 * sin(c.x * 2.3 + c.y * 1.1 + uClock.y * TAU * 0.25);
-  float shimmer = hash12(id + floor(beats * 4.0));
-  float lvl = 0.25 + 0.75 * mix(wave, sweep, 0.5) * (0.7 + 0.3 * shimmer);
-  float dot2 = exp(-dot(f, f) * 22.0);
-  vec3 led = pal(fract(0.5 + 0.35 * (c.x / uFrame.z) + 0.15 * sin(beats * 0.25)));
-  vec3 col = led * dot2 * lvl * (0.3 + 0.7 * uFlow.x) * 0.5;
-  // A soft blaze of colour behind the grid.
-  vec2 w = q + vec2(fbm(q * 0.9 + beats * 0.03, 3), fbm(q * 0.9 - beats * 0.03 + 5.0, 3)) * 0.5;
-  col += mix(uPalLow.rgb, uPalMid.rgb, 0.5 + 0.5 * sin(w.x * 1.7)) * 0.07 * (0.6 + 0.4 * sin(w.y * 2.1 + 1.0));
-  // Rays out of the point of impact.
-  vec2 d = q - O;
-  float r = length(d);
-  float a = atan(d.y, d.x);
-  float rays = pow(clamp(fbm(vec2(a * 3.5, r * 0.8 - beats * 0.6), 3) + 0.55, 0.0, 1.0), 5.0);
-  col += mix(uPalHigh.rgb, vec3(1.0), 0.3) * rays * glow(r, 0.45) * (0.1 + 0.9 * blow) * P_BURST;
+  float r = length(q - O);
+  vec3 col = uPalBg.rgb * 0.06 + uPalLow.rgb * 0.015;
+  col += mix(uPalHigh.rgb, vec3(1.0), 0.6) * glow(r, 0.04) * (0.4 + 2.2 * blow) * P_BURST;
+  col += mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * glow(r, 0.3) * (0.03 + 0.12 * blow) * P_BURST;
+  float nB = floor(clamp(1.0 + 4.0 * P_LEDS, 0.0, 6.0) + 0.5);
+  for (int i = 0; i < 6; i++) {
+    if (float(i) >= nB) break;
+    float fi = float(i);
+    vec2 src = vec2((nB > 1.0 ? fi / (nB - 1.0) * 2.0 - 1.0 : 0.0) * uFrame.z * 0.85, -1.25);
+    float ang = 1.5708 + 0.55 * sin(uClock.y * PI * 0.5 + fi * 1.9);
+    vec2 dir = vec2(cos(ang), sin(ang));
+    vec2 v = q - src;
+    float along = dot(v, dir);
+    float across = abs(v.x * dir.y - v.y * dir.x);
+    float beam = exp(-pow(across / (0.015 + along * 0.07), 2.0)) * step(0.0, along) * exp(-along * 0.35);
+    col += pal(fract(fi * 0.27 + 0.1)) * beam * (0.1 + 0.25 * uFlow.x + 0.3 * blow);
+  }
+  // A haze the light hangs in.
+  col += mix(uPalLow.rgb, uPalMid.rgb, 0.5) * (fbm(q * 1.3 + vec2(beats * 0.04, 0.0), 3) * 0.5 + 0.5) * 0.035 * (1.0 + 2.0 * blow);
   return col;
 }
 
@@ -139,28 +140,45 @@ void main() {
   float throwBy = hit * (0.012 + 0.05 * rnd + 0.035 * min(w.z, 1.2)) * P_JAG;
   float turn = (rnd - 0.5) * hit * 0.3 * P_SPIN;
   vec2 q = rot(turn) * (p - sc) + sc - dir * throwBy;
-  vec2 disp = dir * (0.004 + throwBy * 0.25);
-  vec3 col;
-  col.r = wall(q + disp, beats, hit).r;
-  col.g = wall(q, beats, hit).g;
-  col.b = wall(q - disp, beats, hit).b;
-  // Each pane catches the light at its own tilt.
-  float tilt = dot(rot(rnd * 6.28) * vec2(1.0, 0.0), normalize(p - sc + 1e-4));
-  col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * pow(max(tilt, 0.0), 8.0) * 0.08 * (0.3 + hit);
-  // Gaps where the pieces have pulled apart, and the cracks themselves.
+  vec2 disp = dir * (0.002 + throwBy * 0.2);
+  // Refraction: the stage behind, through this shard, channel by channel.
+  vec3 through;
+  through.r = behind(q + disp, beats, hit).r;
+  through.g = behind(q, beats, hit).g;
+  through.b = behind(q - disp, beats, hit).b;
+  // The glass is tinted and absorbs; what it lets through is dimmer than what
+  // comes through a gap.
+  vec3 col = through * 0.4;
+  // Reflection: each shard sits at its own tilt, so a travelling light glints
+  // off some and leaves others black — the facets are what read as glass.
+  float r2 = hash11(rnd * 91.7 + 3.1);
+  vec3 n = normalize(vec3((rnd - 0.5) * 0.7, (r2 - 0.5) * 0.7, 1.0) + vec3(dir * hit * 0.25 * P_SPIN, 0.0));
+  float la = uClock.y * PI * 0.25;
+  vec3 L = normalize(vec3(cos(la) * 0.6, 0.45 + 0.2 * sin(la * 1.3), 1.0));
+  vec3 R = reflect(vec3(0.0, 0.0, -1.0), n);
+  float spec = pow(max(dot(R, L), 0.0), 34.0);
+  // Across the shard the reflection is a band, not a flat fill: a softbox.
+  float band = smoothstep(-0.25, 0.25, dot(p - sc, normalize(n.xy + 1e-4)) + (r2 - 0.5) * 0.2);
+  // The reflection carries the room's colour, running from the palette's mid
+  // tone into a white core where the light sits squarely on the facet.
+  vec3 sheen = mix(mix(uPalMid.rgb, uPalHigh.rgb, band), vec3(1.0), 0.25 + 0.5 * spec * band);
+  col += sheen * spec * (0.03 + 0.4 * band * band) * (0.6 + 0.8 * hit + 0.3 * uFlow.x);
+  // The cracks: a bevel a pixel or two wide, lit on the side facing the light;
+  // the gap opened by the throw shows the raw light behind the glass.
   float px = uFrame.w * 1.3;
-  float gap = 0.0006 + 0.012 * hit * P_JAG * (0.4 + 0.6 * min(w.z, 1.0));
+  float gap = 0.0006 + 0.014 * hit * P_JAG * (0.4 + 0.6 * min(w.z, 1.0));
   float e = w.x;
-  col *= smoothstep(gap, gap + px, e);
-  // A crack is a hairline: its width is counted in PIXELS, so it stays one
-  // bright line at any resolution instead of a glowing rope.
-  float crack = exp(-max(e - gap, 0.0) / (uFrame.w * 0.9));
-  vec3 hot = mix(uPalHigh.rgb, vec3(1.0), 0.65);
-  col += hot * crack * (0.05 + 0.6 * hit) * (0.45 + 0.55 * uFlow.x);
-  // The crushed point of impact.
-  float crush = glow(length(p - O), 0.035) * (0.2 + 1.2 * hit);
-  col += hot * crush * 0.5;
-  col += mix(uPalHigh.rgb, vec3(0.9), P_FLASH) * uHit2.w * 0.35;
+  float open = 1.0 - smoothstep(gap, gap + px, e);
+  col = mix(col, behind(p, beats, hit) * (0.9 + 0.8 * hit), open);
+  float lit = 0.35 + 0.65 * max(dot(n.xy, L.xy) * 1.5, 0.0);
+  float bevel = exp(-max(e - gap, 0.0) / (uFrame.w * 1.1)) * (1.0 - open);
+  vec3 hot = mix(uPalHigh.rgb, vec3(1.0), 0.6);
+  col += hot * bevel * lit * (0.18 + 0.7 * hit) * (0.5 + 0.5 * uFlow.x);
+  // The crushed point of impact: powder, catching everything.
+  vec2 dO = p - O;
+  float crush = glow(length(dO), 0.03) * (0.25 + 1.3 * hit);
+  col += hot * crush * 0.45;
+  col += mix(uPalHigh.rgb, vec3(0.9), P_FLASH) * uHit2.w * 0.15;
   col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
   emit(col * mix(1.0, uEnergy, 0.6));
 }
