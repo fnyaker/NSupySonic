@@ -4,6 +4,7 @@
 //   node test/render/run.mjs                     # every world, default track
 //   node test/render/run.mjs --world forge,tunnel --genre frenchcore --bpm 200
 //   node test/render/run.mjs --phone             # the phone player, cover in the middle
+//   node test/render/run.mjs --phone --pscale 2  # ... at twice the size, to read detail
 //   node test/render/run.mjs --check             # fail on the contracts below
 //   node test/render/run.mjs --tempo             # the 90-vs-180 BPM stopwatch
 //
@@ -74,10 +75,13 @@ async function worldList() {
   return block ? [...block[1].matchAll(/^\s*([a-z0-9]+):/gm)].map((m) => m[1]) : [];
 }
 
-const PHONE = { w: 270, h: 585 };
+// --pscale 2 renders the phone at twice the size, to look at detail; the
+// contracts are scale-free, so --check is unaffected either way.
+const PSCALE = Math.max(1, +arg("pscale", 1) || 1);
+const PHONE = { w: 270 * PSCALE, h: 585 * PSCALE };
 function phoneHole() {
   const side = Math.round(PHONE.w * 0.72);
-  return { x: Math.round((PHONE.w - side) / 2), y: Math.round((PHONE.h - side) / 2) - 40, w: side, h: side };
+  return { x: Math.round((PHONE.w - side) / 2), y: Math.round((PHONE.h - side) / 2) - 40 * PSCALE, w: side, h: side };
 }
 
 function fmt(v, d = 3) {
