@@ -75,8 +75,16 @@ void main() {
     // A gate comes from far away (small ring) and passes the camera (huge).
     float gz = mix(3.0, 0.05, age / 2.0);
     float R = 0.35 / gz;
-    float ring = exp(-pow((r - R) / (0.01 + R * 0.04), 2.0));
-    col += mix(uPalHigh.rgb, uPalAcc.rgb, ev.z) * ring * ev.y * P_GATES * (1.0 - age / 2.0) * 1.2;
+    // A gate is a band of light with depth, not a hoop: a hot core, a wide
+    // glow, and segments round it like the lights of a structure, turning as
+    // it comes. Its colour is the palette's light — the complement read as a
+    // green hoop pasted on the middle of every drop.
+    float wR = 0.012 + R * 0.05;
+    float dr = r - R;
+    float segs = 0.55 + 0.45 * step(0.3, fract(atan(p.y, p.x) / TAU * 16.0 + age * 0.5 + ev.z * 0.5));
+    float ring = exp(-dr * dr / (wR * wR)) * segs + glow(dr, wR * 4.0) * 0.25;
+    vec3 gc = mix(mix(uPalHigh.rgb, uPalMid.rgb, ev.z * 0.5), vec3(1.0), 0.35);
+    col += gc * ring * ev.y * P_GATES * (1.0 - age / 2.0) * smoothstep(0.0, 0.25, age) * 1.3;
   }
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.4;
   col *= mix(0.35, 1.0, clearOfHole(fragP(), 0.05));
