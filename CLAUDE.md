@@ -478,7 +478,7 @@ know an id is real. Every world is its own chunk (one literal `import()` each in
 into their common parent, so ONE static importer left in the main graph puts the whole tree back:
 `palette.js` and the settings panel therefore load `skins.js` and the catalogue dynamically. Measured,
 main bundle **656 kB → 457 kB** (223 → 158 kB gzipped), CSS **128 kB → 85 kB**; the GL engine is a
-54 kB chunk and the largest world 16 kB.
+55 kB chunk and the largest world 16 kB.
 - `lib/appversion.js` is the other half: the bundle's own id (`__APP_BUILD__`, injected by
   `vite.config.js`, also written to `dist/version.json`) is compared with the server's
   (`/app/version.json`, never cached). Different → stage in the background → reload (automatically

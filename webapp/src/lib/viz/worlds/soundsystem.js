@@ -30,7 +30,7 @@ import { onStamp } from "./kit.js";
 
 export default {
   id: "soundsystem",
-  uses: ["noise", "sdf"],
+  uses: ["noise", "crowd"],
   params: { cols: 7, rings: 1, shake: 1, uv: 1 },
   look: { exposure: 1.05, bloom: 1.1, threshold: 0.8, saturation: 1.1 },
 
@@ -84,32 +84,33 @@ vec3 cone(vec2 p, vec2 c, float R, float e, vec3 L1, vec3 L2, vec3 c1, vec3 c2, 
   return col;
 }
 
-// The crowd in front of the rig: heads and shoulders, lit from behind by the
-// wall, bobbing on the beat, hands in the air after the drop. Returns the
-// silhouette's coverage and writes its rim light.
+// The crowd in front of the rig — the same people as every crowd in the
+// catalogue (the shared \`crowd\` chunk): two rows seen from behind, lit from
+// behind by the wall, bobbing on the beat, hands going up through the build
+// and all at once on the drop. One field for the whole crowd, so the rim
+// light runs round its outline and never between two people standing
+// together. Returns the silhouette's coverage and writes its rim light.
 float crowd(vec2 p, out float rim) {
-  float W = 0.085;
-  float bob = envB(uSince.x, 0.3) * 0.012;
-  float hands = envB(uSince.w, 8.0) * step(uSince.w, 16.0) + uArc.y * 0.4;
-  // One field for the whole crowd, so the rim light runs round the crowd's
-  // outline and never between two people standing together.
+  float want = 0.05 + 0.3 * uFlow.x + 0.45 * uArc.y + 0.8 * envB(uSince.w, 8.0) * step(uSince.w, 16.0);
   float body = 1e3;
-  for (int i = -1; i <= 1; i++) {
-    float c = floor(p.x / W) + float(i);
-    vec3 h = hash31(c * 1.37 + 4.1);
-    float x0 = (c + 0.5 + (h.x - 0.5) * 0.5) * W;
-    float base = -1.0 + 0.12 + 0.07 * h.y - bob * (0.6 + 0.8 * h.z);
-    float head = length((p - vec2(x0, base + 0.05)) * vec2(1.0, 0.85)) - 0.028;
-    float sh = sdRound2(p - vec2(x0, base - 0.25), vec2(0.05, 0.25), 0.03);
-    float b = smin(head, sh, 0.02);
-    // An arm raised, for some of them, once the drop has landed.
-    if (h.z > 0.45 && hands > 0.05) {
-      float side = h.x > 0.5 ? 1.0 : -1.0;
-      vec2 a0 = vec2(x0 + side * 0.035, base - 0.02);
-      vec2 a1 = a0 + vec2(side * 0.025, 0.14 * min(hands, 1.0));
-      b = min(b, sdSeg2(p, a0, a1) - 0.008);
+  for (int row = 0; row < 2; row++) {
+    float fr = float(row);
+    float R0 = row == 0 ? 0.03 : 0.05;
+    float cw = row == 0 ? 0.08 : 0.14;
+    float yh = row == 0 ? -0.83 : -0.96;
+    float c0 = floor(p.x / cw + 0.5 * fr);
+    for (int j = -1; j <= 1; j++) {
+      float ci = c0 + float(j);
+      vec3 h = hash32(vec2(ci, fr * 13.0 + 2.0));
+      float R = R0 * (0.86 + 0.28 * fract(h.x * 13.7));
+      float x = (ci + 0.5 - 0.5 * fr + (h.x - 0.5) * 0.4) * cw;
+      float y = yh + (h.y - 0.5) * 1.1 * R + envB(uSince.x, 0.3) * 0.35 * R * (0.6 + 0.8 * h.z);
+      float rR = smoothstep(h.y, h.y + 0.25, want);
+      float rL = smoothstep(h.z, h.z + 0.25, want * (h.x > 0.45 ? 1.0 : 0.55));
+      vec2 q = (p - vec2(x, y)) / R;
+      if (abs(q.x) > 7.0 || q.y > 8.0) continue;
+      body = min(body, crowdPerson(q, rL, rR, 0.0) * R);
     }
-    body = min(body, b);
   }
   rim = exp(-pow(max(body, 0.0) / (uFrame.w * 1.5), 2.0)) * step(0.0, body);
   return smoothstep(uFrame.w, -uFrame.w, body);

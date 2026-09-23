@@ -18,8 +18,9 @@
 //   COLOUR BY ALTITUDE. The palette's own light at the hem, its cooler end
 //   higher up: the green-to-violet of oxygen and nitrogen, transposed into
 //   whatever colour the track brought.
-//   STILL WATER below the horizon, reflecting the same sky through slow
-//   ripples, and a mountain line for the reflection to sit under.
+//   STILL WATER below the horizon, reflecting the same sky and its stars
+//   through slow ripples, a mist lying on it that the curtains light from
+//   above, and a mountain line for the reflection to sit under.
 //
 // The music moves it gently, because this is the calm mode: the level
 // brightens it, the bass lifts the curtains, the hi-hats make the rays shimmer,
@@ -130,6 +131,18 @@ void main() {
     // With the horizon on the cover's top edge the visible water is deep, so the
     // reflection carries further.
     col += aurora(normalize(rr), bars, max(8, n / 2), jitter) * bright * 0.45 * P_WATER * exp(-depth * (uHole.z > 0.0 ? 1.3 : 3.0));
+    // The stars, mirrored and broken by the ripples.
+    vec2 sp = vec2(p.x + (rr.x - rd.x) * 1.5, 2.0 * hz - p.y) * 60.0 * P_STARS;
+    vec2 cell = floor(sp);
+    vec2 h = hash22(cell);
+    float d = length(fract(sp) - 0.5 - (h - 0.5) * 0.6);
+    col += vec3(0.85, 0.9, 1.0) * step(0.962, h.x) * glow(d, 0.05) * 0.35 * P_WATER * exp(-depth * 1.5);
+    // Mist lying on the water, lit from above by the curtains: the near water
+    // mirrors the empty zenith, and without this a phone — whose horizon sits
+    // on the cover's top edge — showed a black lower half.
+    float mist = fbm(vec2(p.x * 1.4 + bars * 0.08, depth * 5.0 - bars * 0.03), 4) * 0.5 + 0.5;
+    mist = smoothstep(0.35, 0.95, mist) * exp(-depth * 1.1);
+    col += mix(uPalMid.rgb, uPalHigh.rgb, 0.55) * mist * 0.1 * bright * P_WATER;
   }
   // The mountains: a ridge standing on the horizon, black against the sky.
   float ridge = hz + 0.035 + 0.06 * (fbm(vec2(p.x * 1.2, 3.0), 4) + 0.5);
