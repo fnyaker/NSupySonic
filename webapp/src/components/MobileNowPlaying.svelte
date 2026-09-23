@@ -48,6 +48,7 @@
   import EcoToggle from "./EcoToggle.svelte";
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
+  import PartyButton from "./PartyButton.svelte";
   import Icon from "./Icon.svelte";
   import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
@@ -813,6 +814,7 @@
         </button>
       {/if}
       <button class="sm" on:click={() => openShare($current)} aria-label="Partager"><Icon name="share" size={20} /></button>
+      <PartyButton size={20} />
       <span class="grow"></span>
       <EcoToggle />
       <QualityMenu />

@@ -17,6 +17,7 @@
     "vite": "^7.3.5"
   },
   "dependencies": {
+    "qrcode-generator": "^2.0.4",
     "svelte-dnd-action": "^0.9.70",
     "svelte-spa-router": "^5.1.0"
   }

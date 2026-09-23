@@ -16,9 +16,11 @@ instead of a 404 so the rest of the server keeps working.
 
 from __future__ import annotations
 
+import html
 import os.path
+import re
 
-from flask import Blueprint, abort, send_from_directory
+from flask import Blueprint, abort, make_response, send_from_directory
 
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
 
@@ -99,3 +101,48 @@ def serve(path: str = ""):
     )
     response.headers["Cache-Control"] = "no-cache"
     return response
+
+
+# The listen party's link: short enough to read out or put in a QR code, and a
+# real page rather than a bare redirect so messaging apps render a proper
+# preview ("Listen party — Alice") instead of the SPA's generic title. The page
+# itself only forwards into the app, with a meta refresh because the CSP (rightly)
+# refuses inline script.
+_PARTY_ID = re.compile(r"\A[A-Za-z0-9_-]{16,64}\Z")
+
+
+@spa.route("/party/<pid>")
+def party_link(pid: str):
+    if not _PARTY_ID.fullmatch(pid):
+        abort(404)
+    from .party import _get
+
+    party = _get(pid)
+    host = html.escape(party.owner_name) if party else ""
+    title = f"Listen party de {host}" if host else "Listen party"
+    desc = (
+        "Rejoins l'écoute : la même musique, au même instant, sur ton appareil."
+        if party
+        else "Cette listen party est terminée."
+    )
+    target = f"/app/#/party/{pid}"
+    page = (
+        "<!doctype html><html lang=fr><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>{title}</title>"
+        f"<meta property='og:title' content='{title}'>"
+        f"<meta property='og:description' content='{desc}'>"
+        "<meta property='og:type' content='music.radio_station'>"
+        "<meta name=theme-color content='#0f0d13'>"
+        f"<meta http-equiv=refresh content='0;url={target}'>"
+        "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;"
+        "background:#0f0d13;color:#f3f0f7;font:16px system-ui,sans-serif}"
+        "a{color:#a238ff}</style></head>"
+        f"<body><a href='{target}'>{title}</a></body></html>"
+    )
+    resp = make_response(page)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    # The page names the host; keep it out of search engines.
+    resp.headers["X-Robots-Tag"] = "noindex"
+    return resp

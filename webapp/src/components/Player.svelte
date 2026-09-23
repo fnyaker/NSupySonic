@@ -67,9 +67,11 @@
     saveEpisodeProgress,
     markEpisodeFinished,
   } from "../lib/podcastProgress.js";
+  import { bindPartySource, partyPoke } from "../lib/party/hostbridge.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import ImmersivePlayer from "./ImmersivePlayer.svelte";
+  import PartyButton from "./PartyButton.svelte";
 
   // Two managed audio elements so a quality change can be gapless: we preload
   // the new bitrate on the idle element at the exact current position, then
@@ -111,11 +113,24 @@
     el.addEventListener("durationchange", onPosJump);
     el.addEventListener("seeked", onPosJump);
     el.addEventListener("ratechange", onPosJump);
+    // A listen party republishes on these at once instead of at its next look.
+    el.addEventListener("seeked", partyPoke);
+    el.addEventListener("play", partyPoke);
+    el.addEventListener("pause", partyPoke);
     return el;
   }
   onMount(() => {
     els = [makeEl(), makeEl()];
     audio = els[0]; // assignment kicks the reactive load/transport blocks
+    // The listen party watches this player; it never drives it.
+    bindPartySource({
+      element: () => audio,
+      // The track the active element actually carries — null between a skip
+      // and the new source being attached, when it still plays the old one.
+      loaded: () => (loadingTrack ? null : curId),
+      xfading: () => (xfade && xfade.phase === "fading" ? xfade.fade : 0),
+      plan: partyPlan,
+    });
     startWatchdog();
     document.addEventListener("visibilitychange", onVisibility);
     // Last reliable moment before the tab is discarded: report the current
@@ -889,6 +904,9 @@
     // gate onTime so a late timeupdate from the old source can't write it back.
     loadingTrack = true;
     player.setProgress(resumeAt, track.duration || 0);
+    // A listen party announces the change now, not at its next look: guests
+    // stop the old track a quarter of a second sooner.
+    partyPoke();
 
     // A manual skip cuts hard by default. With the crossfade on, soften it:
     // a ramp short enough to be inaudible as a delay, long enough to kill the
@@ -1562,6 +1580,30 @@
     return null;
   }
 
+  // What this player will do at the end of the current track, for the listen
+  // party to announce ahead of time: the point it hands over (`at`, in this
+  // track), the next track and where it starts, and the crossfade length. It
+  // applies exactly the rules the handover itself does (maybeCrossfade,
+  // maybeTrimEnding, onEnded, loadTrack's trimmed start) — a prediction that
+  // disagrees with them would have every guest start the next track at the
+  // wrong moment.
+  function partyPlan() {
+    const cur = $current;
+    if (!cur || !audio) return null;
+    const s = get(player);
+    const end = audioEndsAt();
+    if (!end) return null;
+    if (s.repeat === "one") return { track: cur, at: end, start: 0, fade: 0 };
+    const next = peekNext(s);
+    if (!next) return null;
+    // No Web Audio, no crossfade (armCrossfade gives up): a plain cut then.
+    const graph = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+    const fade =
+      graph && get(crossfadeEnabled) && !cur.podcast && !next.podcast ? Math.min(fadeSeconds(), end) : 0;
+    const e = edgesFor(next);
+    return { track: next, at: Math.max(0, end - fade), start: e && e.start > 0.25 ? e.start : 0, fade };
+  }
+
   function maybeCrossfade() {
     if (xfade || !get(crossfadeEnabled)) return;
     if (switching || chasing || loadingTrack || recovering) return;
@@ -2224,6 +2266,7 @@
         </ul>
       {/if}
     </div>
+    <PartyButton size={17} />
     {#if $current}
       <button class="sm" on:click={() => openShare($current)} title="Partager" aria-label="Partager"><Icon name="share" size={17} /></button>
     {/if}

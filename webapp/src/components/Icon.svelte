@@ -262,6 +262,34 @@
   {:else if name === "pin"}
     <path d="M12 17v5" />
     <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+  {:else if name === "party"}
+    <!-- listen party: headphones with the waves of a shared signal -->
+    <path d="M3 17v-3a9 9 0 0 1 18 0v3" />
+    <rect x="2" y="15" width="5" height="7" rx="2" />
+    <rect x="17" y="15" width="5" height="7" rx="2" />
+    <path d="M9.5 9.5a3.5 3.5 0 0 1 5 0" />
+    <path d="M7.4 7.4a6.5 6.5 0 0 1 9.2 0" />
+  {:else if name === "users"}
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+  {:else if name === "copy"}
+    <rect x="8" y="8" width="14" height="14" rx="2" />
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  {:else if name === "link"}
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+  {:else if name === "minus"}
+    <path d="M5 12h14" />
+  {:else if name === "logOut"}
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    <path d="m16 17 5-5-5-5" />
+    <path d="M21 12H9" />
+  {:else if name === "timer"}
+    <line x1="10" y1="2" x2="14" y2="2" />
+    <line x1="12" y1="14" x2="15" y2="11" />
+    <circle cx="12" cy="14" r="8" />
   {/if}
 </svg>
 

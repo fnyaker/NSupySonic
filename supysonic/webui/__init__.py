@@ -3460,6 +3460,16 @@ def cover(cid):
     a reliable same-origin URL for the OS media-notification artwork and the
     offline cover cache, instead of depending on the client reaching the Deezer
     image CDN (flaky enough to regularly leave the notification artless)."""
+    return cover_response(cid)
+
+
+def cover_response(cid, *, vetted=False):
+    """The body of ``/cover/<cid>``, shared with the listen party.
+
+    ``vetted`` skips the per-user access check, for a caller that has already
+    established the right to this id some other way — the party serves art for
+    exactly the tracks its host chose to play, to guests who have no session.
+    """
     from ..deezer import archive
 
     if _valid_id(cid):
@@ -3471,7 +3481,7 @@ def cover(cid):
             track = None
         # A UUID that isn't a track is fine (album/artist/playlist/podcast art,
         # resolved below) — but a track we may not read must not leak its cover.
-        if track is not None and not _may_access_track(track):
+        if track is not None and not vetted and not _may_access_track(track):
             return jsonify({"error": "not found"}), 404
     if track is not None and os.path.isfile(track.path):
         return _serve_embedded_cover(track)
@@ -3643,3 +3653,4 @@ from . import edges  # noqa: E402,F401  isort:skip
 from . import analysis  # noqa: E402,F401  isort:skip
 from . import genre  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip
+from . import party  # noqa: E402,F401  isort:skip
