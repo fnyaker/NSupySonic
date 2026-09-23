@@ -1150,7 +1150,13 @@ each of which a world broke once:
   start there and the synthwave sun rises from behind it; the spectrum frames it with a bank below
   and a mirrored bank above) and fills a 16:9 beamer to all four edges. A world CENTRED on the
   artwork (galaxy, kaleido) dims under it harder than the house third and lifts what is outside: the
-  core is hidden by definition, so the light goes to the arms that are seen.
+  core is hidden by definition, so the light goes to the arms that are seen. On a PHONE the cover
+  spans nearly the width, so "beside the artwork" is off the screen: a world whose subject would sit
+  behind it moves its camera instead (the night drive's horizon drops to the cover's bottom edge so
+  the car ahead is under it, the warehouse's hall vanishes in its top half, the lasers' stage and the
+  rock stage's deck stand under it), and a world that scatters things beside the cover scatters them
+  above and below it when there is no room at the sides (ink's drops, neon's slots). `run.mjs
+  --phone` for every world after touching one — two of these were only found by looking.
 - **A long clock wraps at a period its shader is exactly periodic in.** Uniforms are float32: the
   wobble's LFO phase reached 3.4e4 in ten minutes at 250 BPM, which a few hours on is a visible
   stutter. It now wraps at 200π (both its oscillators close there); the night drive at a multiple of
