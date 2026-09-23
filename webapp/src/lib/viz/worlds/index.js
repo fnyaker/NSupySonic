@@ -54,6 +54,10 @@ const LOADERS = {
   ink: () => import("./ink.js"),
   rain: () => import("./rain.js"),
   fireflies: () => import("./fireflies.js"),
+  carnival: () => import("./carnival.js"),
+  tropics: () => import("./tropics.js"),
+  horizon: () => import("./horizon.js"),
+  pixels: () => import("./pixels.js"),
 };
 
 const cache = new Map();
