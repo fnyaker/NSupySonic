@@ -29,6 +29,11 @@ const LOADERS = {
   soundsystem: () => import("./soundsystem.js"),
   static: () => import("./static.js"),
   fireworks: () => import("./fireworks.js"),
+  ridges: () => import("./ridges.js"),
+  lattice: () => import("./lattice.js"),
+  circuit: () => import("./circuit.js"),
+  galaxy: () => import("./galaxy.js"),
+  flow: () => import("./flow.js"),
 };
 
 const cache = new Map();

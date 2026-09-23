@@ -184,7 +184,10 @@ async function run(opts) {
     motionGap = 1 / 30,
     cover = true,
   } = opts;
-  await loadWorld(world);
+  // A feedback world is its own history: judge it after it has had time to
+  // build one, the way it would have on screen.
+  const def = await loadWorld(world);
+  const warmS = def?.feedback ? Math.max(warm, 10) : warm;
   const canvas = document.createElement("canvas");
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
@@ -258,7 +261,7 @@ async function run(opts) {
   let cost = 0;
   let costN = 0;
   for (const [name, at] of times) {
-    advance(at, at - warm);
+    advance(at, at - warmS);
     // Timed through gl.finish(), so the cost is the frame's and not merely the
     // time it took to queue it.
     const t0 = performance.now();
