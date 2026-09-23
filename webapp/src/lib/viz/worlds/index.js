@@ -40,6 +40,11 @@ const LOADERS = {
   halo: () => import("./halo.js"),
   nightdrive: () => import("./nightdrive.js"),
   neon: () => import("./neon.js"),
+  bokeh: () => import("./bokeh.js"),
+  discoball: () => import("./discoball.js"),
+  silk: () => import("./silk.js"),
+  artwork: () => import("./artwork.js"),
+  plasma: () => import("./plasma.js"),
 };
 
 const cache = new Map();
