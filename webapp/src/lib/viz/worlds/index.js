@@ -45,6 +45,9 @@ const LOADERS = {
   silk: () => import("./silk.js"),
   artwork: () => import("./artwork.js"),
   plasma: () => import("./plasma.js"),
+  stage: () => import("./stage.js"),
+  inferno: () => import("./inferno.js"),
+  storm: () => import("./storm.js"),
 };
 
 const cache = new Map();
