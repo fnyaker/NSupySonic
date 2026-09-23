@@ -226,3 +226,50 @@ test("every event a driver schedules is stamped in beats, near now", () => {
       assert.ok(birth > now - 4 && birth < now + 2.5, `${id}: event born at ${birth.toFixed(1)} with the clock at ${now.toFixed(1)}`);
   }
 });
+
+test("the unleashed strobe plays the kicks of a drop, and leaves the breakdown dark", async () => {
+  // "Débridé" (Réglages → Animations, behind a photosensitivity warning) turns
+  // the engine into a strobe. The worlds only ask for a flash on a drop — once
+  // a minute — so what this mode adds is the ENGINE's own policy
+  // (scenes/gl.js#strobePower), run here the way the engine runs it: event
+  // stamps read at the render clock, then the ten-a-second cap. Material:
+  // frenchcore at 200 BPM through the arrangement above (build 8-16 s, drop at
+  // 16 s, breakdown 32-40 s), with the pattern layer's `dropped` held for
+  // eight seconds after each drop exactly as audio/pattern.js holds it.
+  const { strobePower, STROBE_MIN_INTERVAL, FLASH_MIN_INTERVAL } = await import("../src/lib/viz/scenes/gl.js");
+  const bpm = 200;
+  const dt = 1 / 60;
+  const m = createMusical();
+  let seen = { main: m.stamp.main, snare: m.stamp.snare, drop: m.stamp.drop };
+  let last = -1e9;
+  const onsets = [];
+  let kicks = 0;
+  for (let t = dt; t < 48; t += dt) {
+    const f = frameAt(t, { bpm, dt });
+    const since = t >= 40 ? t - 40 : t >= 16 ? t - 16 : 999;
+    f.pattern.dropped = Math.max(0, 1 - since / 8);
+    if (f.pattern.mainKick && t >= 16 && t < 24) kicks++;
+    m.update(f, dt);
+    const st = m.stamp;
+    const p = strobePower(m, st.main !== seen.main, st.snare !== seen.snare, st.drop !== seen.drop);
+    seen = { main: st.main, snare: st.snare, drop: st.drop };
+    if (p > 0 && t - last >= STROBE_MIN_INTERVAL) {
+      last = t;
+      onsets.push(t);
+    }
+  }
+  const within = (a, b) => onsets.filter((t) => t >= a && t < b).length;
+  let busiest = 0;
+  for (const t of onsets) busiest = Math.max(busiest, within(t, t + 1));
+  // Measured: 27 flashes over the eight seconds of the drop for its 26 main
+  // kicks (every one of them, plus the drop itself) — 3.4 a second, past the
+  // three a second every other level is held to, which is the whole point of
+  // the mode. None at all in the breakdown. At most five in any one second
+  // (the kicks plus the build's snares), well inside the ten-a-second cap.
+  assert.ok(within(16, 24) >= kicks, `${within(16, 24)} flashes for ${kicks} kicks in the drop`);
+  assert.ok(within(16, 24) / 8 > 1 / FLASH_MIN_INTERVAL, "no faster than the capped levels");
+  assert.equal(within(32.5, 40), 0, "the breakdown strobes");
+  assert.ok(busiest <= 1 / STROBE_MIN_INTERVAL, `${busiest} flashes in one second`);
+  // And nothing is asked of a moment with no event in it.
+  assert.equal(strobePower(m, false, false, false), 0);
+});

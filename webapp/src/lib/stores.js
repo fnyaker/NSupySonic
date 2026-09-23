@@ -154,11 +154,21 @@ export const vizScreenQuality = persisted("viz.screen.quality", "high");
 // screen, for the same reason the mode is.
 export const vizWorld = persisted("viz.world", "auto");
 export const vizScreenWorld = persisted("viz.screen.world", "auto");
-// Flashes and strobes: "off", "soft" or "full". Even "full" is held under the
-// WCAG general-flash threshold (three a second) by the engine itself — this
-// setting chooses how bright a flash is, never how often one may happen. A
-// projector in a room of people is exactly where that matters.
+// Flashes and strobes: "off", "soft", "full" or "unleashed". Up to "full" the
+// engine holds every level under the WCAG general-flash threshold (three a
+// second) — those choose how bright a flash is, never how often one may happen,
+// and a projector in a room of people is exactly where that matters.
+// "unleashed" lifts the cap and turns the engine into a strobe; the settings
+// only offer it behind a photosensitivity warning, and `vizFlashAck` is the
+// time that warning was accepted on this device.
 export const vizFlash = persisted("viz.flash", "soft");
+export const vizFlashAck = persisted("viz.flash.ack", 0);
+// What the renderers are actually handed. A stored "unleashed" without an
+// accepted warning — a value from another build, a hand-edited storage — is
+// played as "full": the warning is the condition, not a formality.
+export const flashLevel = derived([vizFlash, vizFlashAck], ([$f, $ack]) =>
+  $f === "unleashed" && !$ack ? "full" : $f
+);
 
 // The user's own saved presets. A preset captures the WHOLE audio setup —
 // EQ on/off + the ten band gains, the bass lift and the normalization level —

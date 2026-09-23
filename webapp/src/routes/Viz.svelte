@@ -20,7 +20,7 @@
     vizScopeOrientation,
     vizScopeColour,
     vizScreenWorld,
-    vizFlash,
+    flashLevel,
   } from "../lib/stores.js";
   import { createSubscriber } from "../lib/viz/bridge.js";
   import { MODES, levelFor, needsWave } from "../lib/viz/modes.js";
@@ -172,7 +172,7 @@
     scopeOrientation={$vizScopeOrientation}
     scopeColour={$vizScopeColour}
     world={$vizScreenWorld}
-    flash={$vizFlash}
+    flash={$flashLevel}
   />
 
   {#if !supported}

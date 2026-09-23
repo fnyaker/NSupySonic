@@ -28,6 +28,7 @@
     vizWorld,
     vizScreenWorld,
     vizFlash,
+    vizFlashAck,
     ecoMode,
     current,
     playing,
@@ -46,6 +47,7 @@
   import Icon from "./Icon.svelte";
   import EcoToggle from "./EcoToggle.svelte";
   import WorldPicker from "./WorldPicker.svelte";
+  import FlashWarning from "./FlashWarning.svelte";
 
   const FPS_CHOICES = [
     { v: 30, label: "30", hint: "Le plus économe" },
@@ -56,13 +58,32 @@
 
   const KICK_LABEL = { soft: "souple", hard: "dur", industrial: "industriel" };
 
-  // How bright a flash may be. How OFTEN one may happen is not a setting: the
-  // engine holds every level, "full" included, under three onsets a second.
+  // How bright a flash may be. How OFTEN one may happen is not a setting up to
+  // "full": the engine holds those under three onsets a second. "unleashed" is
+  // the exception — a strobe on the kicks, past that threshold — so it is only
+  // ever set through the warning below, and only once that has been accepted.
   const FLASH_CHOICES = [
     { v: "off", label: "Aucun", hint: "Rien ne clignote, jamais" },
     { v: "soft", label: "Doux", hint: "Une lueur sur les drops" },
     { v: "full", label: "Plein", hint: "Le vrai éclair de scène" },
+    { v: "unleashed", label: "Débridé", hint: "Un stroboscope sur les frappes — sous avertissement" },
   ];
+  let flashWarning = false;
+  let reducedMotion = false;
+
+  function pickFlash(v) {
+    if (v === "unleashed" && !$vizFlashAck) {
+      flashWarning = true;
+      return;
+    }
+    vizFlash.set(v);
+  }
+
+  function acceptFlash() {
+    vizFlashAck.set(Date.now());
+    vizFlash.set("unleashed");
+    flashWarning = false;
+  }
 
   // The oscilloscope's two knobs. Written out here rather than imported from
   // the scene: `lib/viz/scenes/scope.js` is code-split precisely so that a
@@ -119,6 +140,11 @@
   // genre table on every launch's critical path.
   let catalogue = null;
   onMount(async () => {
+    try {
+      reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch {
+      /* no matchMedia: nothing to report */
+    }
     try {
       const [worlds, skins] = await Promise.all([
         import("../lib/viz/worlds/catalogue.js"),
@@ -332,14 +358,21 @@
       <span class="block-hint muted">
         L'éclair qui accompagne un drop ou une grosse frappe. Même en « Plein », jamais
         plus de trois par seconde : au-delà, une lumière qui clignote devient un risque
-        pour les personnes photosensibles. Coupés d'office si l'appareil demande de
-        réduire les animations. Vaut aussi pour l'écran séparé.
+        pour les personnes photosensibles. « Débridé » lève cette limite et fait de
+        l'animation un stroboscope calé sur les frappes, après un avertissement à
+        accepter. Coupés d'office si l'appareil demande de réduire les animations. Vaut
+        aussi pour l'écran séparé.
       </span>
     </div>
     <div class="seg">
       {#each FLASH_CHOICES as f}
-        <button class="seg-btn" class:sel={$vizFlash === f.v} title={f.hint} on:click={() => vizFlash.set(f.v)}
-          >{f.label}</button
+        <button
+          class="seg-btn"
+          class:sel={$vizFlash === f.v}
+          class:hot={f.v === "unleashed"}
+          title={f.hint}
+          on:click={() => pickFlash(f.v)}
+          >{#if f.v === "unleashed"}<Icon name="zap" size={13} />{/if}{f.label}</button
         >
       {/each}
     </div>
@@ -572,6 +605,10 @@
   </div>
 </section>
 
+{#if flashWarning}
+  <FlashWarning reduced={reducedMotion} on:accept={acceptFlash} on:cancel={() => (flashWarning = false)} />
+{/if}
+
 <style>
   .card {
     background: var(--bg-card);
@@ -781,6 +818,18 @@
     background: var(--accent);
     border-color: var(--accent);
     color: #fff;
+  }
+  .seg-btn.hot {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .seg-btn.hot:not(.sel) :global(svg) {
+    color: #ffb547;
+  }
+  .seg-btn.hot.sel {
+    background: linear-gradient(135deg, #ff8a3d, #ff4d6d);
+    border-color: transparent;
   }
   .slider-row {
     display: flex;

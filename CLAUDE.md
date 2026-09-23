@@ -1114,7 +1114,18 @@ shader, drawn by one WebGL2 engine in four files:
   decides — never more than three onsets a second whatever the music does (the WCAG general-flash
   threshold, and on a projector in a room full of people the line between a style and a medical
   risk), scaled by the user's setting (`vizFlash`: off / soft / full, one setting for both
-  screens), and none at all under `prefers-reduced-motion`.
+  screens), and none at all under `prefers-reduced-motion`. The one exception is **`unleashed`
+  ("Débridé")**, for people who are not photosensitive and want the real thing: it is a different
+  POLICY rather than a brighter "full" — the worlds only ask for a flash on a drop, once a minute,
+  so lifting the cap alone changes nothing — and the engine runs the strobe a lighting desk would
+  (`strobePower`: every main kick at the peak of the track, harder on a big kick, the snares of a
+  build accelerating into the drop, nothing in a breakdown), up to ten a second. It is only ever
+  set through `components/FlashWarning.svelte`, a warning with a box to tick (what it does, who it
+  endangers — including people who do not know it — what to do, and the projector's audience,
+  who accepted nothing); `vizFlashAck` records the acceptance and `stores.js#flashLevel` plays a
+  stored `unleashed` without one as `full`, so the warning is a condition, not a formality.
+  `prefers-reduced-motion` still wins over it. `musical.test.mjs` pins it: 27 flashes for the 26
+  main kicks of a 200 BPM drop, none in the breakdown.
 
 **A world is one file** (`lib/viz/worlds/<id>.js`), fetched the first time it is on screen:
 `{ id, uses, feedback?, params, look, fragment, particles?, create() }`. `params` become `P_NAME`

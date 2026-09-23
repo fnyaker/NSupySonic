@@ -32,6 +32,17 @@
 // the WCAG general-flash threshold, and the line above which a strobe on a
 // projector in a room full of people is a medical risk rather than a style —
 // scaled by the user's setting, and none at all under prefers-reduced-motion.
+//
+// The one exception is "unleashed", which the settings only offer behind a
+// photosensitivity warning the user has to accept. It is a different POLICY,
+// not a brighter "full": the worlds only ask for a flash on a drop, which is
+// once a minute, so lifting the cap alone would change nothing. Here the
+// engine itself runs the strobe a lighting desk would — every main kick of a
+// drop, a harder one on a big kick, the snares of a build accelerating into
+// it — up to ten a second (past that, flashes with this decay merge into one
+// continuous light and stop reading as flashes at all). prefers-reduced-motion
+// still wins: an operating-system setting is the stronger signal, and it may
+// well be the person the warning is about who set it.
 
 import { createMusical } from "../musical.js";
 import {
@@ -49,11 +60,13 @@ import { approach, clamp } from "../util.js";
 
 // The WCAG 2.x general flash threshold: no more than three flashes in any one
 // second. Enforced as a minimum interval between flash ONSETS.
-const FLASH_MIN_INTERVAL = 1 / 3;
+export const FLASH_MIN_INTERVAL = 1 / 3;
+// ...and the unleashed strobe's: ten a second.
+export const STROBE_MIN_INTERVAL = 1 / 10;
 // A flash's own decay, in SECONDS on purpose — how long a flash stays on the
 // retina is physiology, not music.
 const FLASH_DECAY = 0.09;
-const FLASH_GAIN = { off: 0, soft: 0.4, full: 1 };
+const FLASH_GAIN = { off: 0, soft: 0.4, full: 1, unleashed: 1.25 };
 // The dissolve between two worlds: one bar, within reason.
 const DISSOLVE_MIN = 0.9;
 const DISSOLVE_MAX = 3.2;
@@ -202,9 +215,29 @@ export function createGLScene(opts = {}) {
   function requestFlash(power) {
     const g = o.reducedMotion ? 0 : FLASH_GAIN[o.flash] ?? FLASH_GAIN.soft;
     if (g <= 0 || !(power > 0)) return;
-    if (clockSeconds - lastFlashAt < FLASH_MIN_INTERVAL) return;
+    const gap = o.flash === "unleashed" ? STROBE_MIN_INTERVAL : FLASH_MIN_INTERVAL;
+    if (clockSeconds - lastFlashAt < gap) return;
     lastFlashAt = clockSeconds;
     flash = Math.max(flash, clamp(power, 0, 1) * g);
+  }
+
+  // The unleashed strobe (see the header). Read off the event STAMPS at the
+  // render clock, like a driver's, so an event that lived for one analysis
+  // frame between two pictures is still seen exactly once.
+  let seenMain = m.stamp.main;
+  let seenSnare = m.stamp.snare;
+  let seenDrop = m.stamp.drop;
+  function strobe() {
+    const st = m.stamp;
+    const main = st.main !== seenMain;
+    const snare = st.snare !== seenSnare;
+    const drop = st.drop !== seenDrop;
+    seenMain = st.main;
+    seenSnare = st.snare;
+    seenDrop = st.drop;
+    if (o.flash !== "unleashed" || o.reducedMotion) return;
+    const p = strobePower(m, main, snare, drop);
+    if (p > 0) requestFlash(p);
   }
 
   // --- stages ---------------------------------------------------------------------
@@ -636,6 +669,7 @@ export function createGLScene(opts = {}) {
     clocks.melody = melody;
     if (prev?.driver?.step) prev.driver.step(rdt, m, clocks);
     if (cur.driver?.step) cur.driver.step(rdt, m, clocks);
+    strobe();
 
     govern(t, rdt);
     pack(pal, geom || geomRef, ahead);
@@ -768,6 +802,24 @@ export function createGLScene(opts = {}) {
       return flash;
     },
   };
+}
+
+// The unleashed strobe's decision for one frame: how hard a flash the events
+// that just happened are worth, 0 for none. Pure, so it can be pinned without a
+// GPU; the rate cap is applied after it, by requestFlash.
+export function strobePower(m, main, snare, drop) {
+  if (drop) return 1;
+  // The peak of the track: just after a drop, or anywhere the music is driving
+  // hard — never in a breakdown, where a strobe on a lone kick is an
+  // interruption rather than an accent.
+  const peak = Math.max(m.dropped, clamp((m.drive - 0.5) / 0.3, 0, 1)) * (1 - m.breakdown);
+  if (main && peak > 0.15) {
+    const p = m.bigKick ? 0.95 : 0.4 + 0.35 * clamp(m.mainPower, 0, 1);
+    return p * (0.55 + 0.45 * peak);
+  }
+  // A build's snares speed up into the drop, and so does the strobe.
+  if (snare && m.build > 0.35) return 0.2 + 0.5 * m.build;
+  return 0;
 }
 
 // `#define P_SIDES uP0.x` and so on, in the order the world declared its

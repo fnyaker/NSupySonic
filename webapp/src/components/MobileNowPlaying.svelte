@@ -29,7 +29,7 @@
   import {
     vizMode,
     vizWorld,
-    vizFlash,
+    flashLevel,
     vizQuality,
     vizPalette,
     vizIntensity,
@@ -713,7 +713,7 @@
         scopeOrientation={$vizScopeOrientation}
         scopeColour={$vizScopeColour}
         world={$vizWorld}
-        flash={$vizFlash}
+        flash={$flashLevel}
         occluder={scroller}
         occluderShape="square"
       />
