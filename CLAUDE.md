@@ -1172,7 +1172,7 @@ own chunk: a session of techno never downloads the frenchcore forge).
 | shelf | worlds |
 |---|---|
 | Hard | `forge` (a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong`, `soundsystem` (a speaker wall whose cones pump), `static` (the signal torn apart), `fireworks` (shells aimed at the NEXT beat) |
-| Techno & machines | `tunnel` (a panelled corridor lit only by its ring fixtures, a light running down it on every beat, a polished floor mirroring the ceiling), `warehouse` (concrete pillars, sodium lamps, strobes), `ridges` (Unknown Pleasures), `lattice`, `circuit` |
+| Techno & machines | `tunnel` (a panelled corridor lit only by its ring fixtures, a light running down it on every beat, a polished floor mirroring the ceiling), `warehouse` (concrete pillars, sodium lamps, strobes), `ridges` (Unknown Pleasures), `lattice` (a cone-marched chrome space frame carrying a current), `circuit` |
 | Trance & psy | `hyperspace`, `kaleido` (line-art KIFS), `galaxy`, `flow` |
 | Bass & breaks | `wobble` (the LFO's own shape), `chrome` (liquid metal), `slices` |
 | Urbain | `vinyl`, `halo`, `nightdrive`, `neon` |
