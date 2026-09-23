@@ -8,9 +8,14 @@
 //   THE TEAR. The frame is cut into horizontal bands, re-drawn every
 //   sixteenth, and each band is thrown sideways by the kick and the snare;
 //   the harder the track drives, the finer the bands and the further they go.
+//   THE SORT. Some torn bands are pixel-sorted: the brightest of the picture
+//   behind each pixel along the band drags into a long clean streak — the
+//   signature of glitch art, and what makes the damage look made rather than
+//   random.
 //   THE BLOCKS. A main kick corrupts a scatter of macroblocks the way a
 //   damaged video stream does: a block shows a piece of the picture from
-//   elsewhere, or smears its top row down, or inverts, and holds for a beat.
+//   elsewhere, or smears its top row down, or decodes its channels in the
+//   wrong order, and holds for a beat.
 //   THE CHANNELS. The red, green and blue planes are separated by the kick —
 //   a picture that comes apart into its colours and snaps back.
 //   THE CARRIER. Under all of it the analogue layer: scanlines, a snow of
@@ -85,7 +90,9 @@ void main() {
   float corrupt = envB(uSince.y, 1.2) * step(uSince.y, 1.0);
   float bh = hash12(bid + uCount.z * 3.1);
   float mode = 0.0;
-  if (bh < (0.1 + 0.25 * drive) * corrupt * P_BLOCKS * 2.0) {
+  // A handful, not a carpet: a scatter reads as a stream breaking, a field
+  // of them as a picture that was never there.
+  if (bh < (0.05 + 0.1 * drive) * corrupt * P_BLOCKS * 2.0) {
     mode = 1.0 + floor(hash12(bid + 9.7 + uCount.z) * 3.0);
     if (mode < 1.5) {
       // A piece of the picture from elsewhere.
@@ -103,7 +110,29 @@ void main() {
   col.r = signal(q + vec2(sep, 0.0), lod).r;
   col.g = signal(q, lod).g;
   col.b = signal(q - vec2(sep, 0.0), lod).b;
-  if (mode > 2.5) col = vec3(luma(col)) - col * 0.6 + pal(0.8) * 0.3;
+  // A chroma error: the block's channels decoded in the wrong order, which
+  // is what a broken stream actually shows (an inverted block reads as mud).
+  if (mode > 2.5) col = col.brg * 1.2;
+  // --- the sort: in a torn band, bright pixels run into streaks ---
+  // Pixel sorting, the signature of glitch art: every pixel in the band takes
+  // the brightest of the picture behind it along the band's direction, so
+  // light drags into long, clean smears that end where the dark begins. The
+  // run length is the band's own, re-drawn with the tear, and grows with the
+  // kick.
+  float sortOn = torn * step(0.45, hash12(vec2(band, seed + 3.0))) * P_TEAR;
+  if (sortOn > 0.5) {
+    float runL = (0.04 + 0.3 * hash12(vec2(band, seed + 5.0))) * (0.5 + 0.8 * drive + 0.8 * kick);
+    float dirS = hash12(vec2(band, seed + 11.0)) < 0.5 ? -1.0 : 1.0;
+    vec3 best = col;
+    float bestL = luma(col);
+    for (int i = 1; i <= 7; i++) {
+      vec3 c = signal(q - vec2(dirS * runL * float(i) / 7.0, 0.0), lod + 1.0);
+      float l = luma(c);
+      // Only light sorts: the streak stops at the first dark it would cross.
+      if (l > bestL && l > 0.12) { best = c; bestL = l; }
+    }
+    col = mix(col, best, 0.85);
+  }
   // The picture is a backdrop: dimmed, and brighter where it is torn.
   col *= 0.32 + 0.25 * torn * (kick + snare) + 0.12 * step(0.5, mode);
 
