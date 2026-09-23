@@ -95,7 +95,7 @@ export const SKINS = {
   tribecore: { world: "soundsystem" },
   hardtek: { world: "soundsystem", hue: -10, p: { cols: 9, shake: 1.3 } },
   raggatek: { world: "soundsystem", hue: 55, sat: 1.15, p: { cols: 6, uv: 1.4 } },
-  krach: { world: "static", p: { tear: 1.3, blocks: 1.2 } },
+  krach: { world: "microwave" },
   noise: { world: "static", sat: 0.7, p: { snow: 1.6, tear: 0.8, blocks: 0.8 } },
   industrial: { world: "static", hue: -10, sat: 0.7, p: { blocks: 1.3, split: 0.6 } },
   industrialhardcore: { world: "static", hue: -20, p: { tear: 1.2, blocks: 1.4, snow: 1.1 } },

@@ -877,7 +877,7 @@ test("every world is somebody's genre, and the catalogue is far wider than the d
   const used = new Set(Object.values(SKINS).map((s) => s.world));
   const unused = Object.keys(WORLD_META).filter((w) => !used.has(w));
   assert.deepEqual(unused, [], `no genre resolves to: ${unused.join(", ")}`);
-  // Measured when the catalogue was written: 226 rows across 47 worlds, the
+  // Measured when the catalogue was written: 226 rows across 48 worlds, the
   // busiest world (slices, every break-driven genre) carrying 12.
   assert.ok(skinCount() >= 220, `only ${skinCount()} genres are dressed`);
   const per = {};

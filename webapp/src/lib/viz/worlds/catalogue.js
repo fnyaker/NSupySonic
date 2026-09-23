@@ -40,6 +40,7 @@ export const WORLD_META = {
   pingpong: { group: "hard", label: "Ping-pong", blurb: "Un échange au néon : deux raquettes de verre qui renvoient une balle de lumière sur chaque temps." },
   soundsystem: { group: "hard", label: "Sound system", blurb: "Un mur d'enceintes dont les membranes pompent sous chaque basse, la foule devant." },
   static: { group: "hard", label: "Parasites", blurb: "La pochette en signal qui se déchire : bandes décalées, pixels triés, blocs corrompus." },
+  microwave: { group: "hard", label: "Micro-ondes", blurb: "Un four vu à travers sa porte grillagée : la lampe qui grésille sur le kick, le plateau qui tourne, des arcs qui claquent sur le bord doré." },
   fireworks: { group: "hard", label: "Feu d'artifice", blurb: "Des bouquets aux couleurs d'un vrai spectacle, sur les temps forts, au-dessus de la ville et de l'eau." },
 
   // --- techno & machines -------------------------------------------------------

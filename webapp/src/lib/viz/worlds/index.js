@@ -28,6 +28,7 @@ const LOADERS = {
   pingpong: () => import("./pingpong.js"),
   soundsystem: () => import("./soundsystem.js"),
   static: () => import("./static.js"),
+  microwave: () => import("./microwave.js"),
   fireworks: () => import("./fireworks.js"),
   ridges: () => import("./ridges.js"),
   lattice: () => import("./lattice.js"),

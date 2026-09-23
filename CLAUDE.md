@@ -478,7 +478,7 @@ know an id is real. Every world is its own chunk (one literal `import()` each in
 into their common parent, so ONE static importer left in the main graph puts the whole tree back:
 `palette.js` and the settings panel therefore load `skins.js` and the catalogue dynamically. Measured,
 main bundle **656 kB → 457 kB** (223 → 158 kB gzipped), CSS **128 kB → 85 kB**; the GL engine is a
-55 kB chunk and the largest world 16 kB.
+55 kB chunk and the largest world 25 kB (the microwave, 9 kB gzipped — fetched only when it is on screen).
 - `lib/appversion.js` is the other half: the bundle's own id (`__APP_BUILD__`, injected by
   `vite.config.js`, also written to `dist/version.json`) is compared with the server's
   (`/app/version.json`, never cached). Different → stage in the background → reload (automatically
@@ -979,7 +979,7 @@ schemes), and quality tiers that `auto`-resolve from the device. Two kinds of sc
 `lib/viz/index.js`, and the host has to know which: **`gl`** — every full-screen mode except the
 oscilloscope is the WebGL2 engine (`scenes/gl.js`) with a policy for which WORLD it shows (`pulse`,
 `aurora` and `bars` are one fixed world each — `pulse`, `aurora`, `spectrum` — and `smart` lets the
-genre choose among all 47) — and **`2d`**: the oscilloscope, which draws the samples on a canvas,
+genre choose among all 48) — and **`2d`**: the oscilloscope, which draws the samples on a canvas,
 and `scenes/bars.js`, the spectrum on a 2D canvas, which is what a device with no WebGL2 gets instead
 of any world (`createFallback`). `Visualizer.svelte` therefore owns TWO canvases and shows the one the
 scene's `kind` asks for: a canvas has one context type for its whole life. `scene.update()` runs on
@@ -1182,13 +1182,13 @@ each of which a world broke once:
   And nothing moves at a speed the thing it depicts never has: the record turns a revolution a
   bar (32 rpm at 128 BPM, a real 33), not every two beats (a blur at 180).
 
-**The catalogue: 47 worlds on eleven shelves** (`worlds/catalogue.js` — names and blurbs, no shader,
+**The catalogue: 48 worlds on eleven shelves** (`worlds/catalogue.js` — names and blurbs, no shader,
 so naming a world costs nothing; `worlds/index.js` — one LITERAL `import()` per world, so each is its
 own chunk: a session of techno never downloads the frenchcore forge).
 
 | shelf | worlds |
 |---|---|
-| Hard | `forge` (a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong` (a neon rally: glass paddles that glide to meet the ball on the beat, one bounce on the far half), `soundsystem` (a speaker wall whose cones pump), `static` (the artwork's own signal torn apart: bands, pixel-sort streaks, chroma-error blocks), `fireworks` (shells aimed at the NEXT beat, in a real show's colours turned to the palette, over a skyline and water that catch every burst) |
+| Hard | `forge` (a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong` (a neon rally: glass paddles that glide to meet the ball on the beat, one bounce on the far half), `soundsystem` (a speaker wall whose cones pump), `static` (the artwork's own signal torn apart: bands, pixel-sort streaks, chroma-error blocks), `microwave` (Deutscher Krach's buzzing kick as the oven it sounds like: the cavity seen through the door's perforated screen, the lamp surging on the kick, the standing wave's hot spots hopping on every main kick, arcs off the plate's gilt rim, a VFD timer counting the phrase down to "End"), `fireworks` (shells aimed at the NEXT beat, in a real show's colours turned to the palette, over a skyline and water that catch every burst) |
 | Techno & machines | `tunnel` (a panelled corridor lit only by its ring fixtures, a light running down it on every beat, a polished floor mirroring the ceiling), `warehouse` (concrete pillars, sodium lamps, moving heads sweeping the haze and pooling on a wet floor, strobes that are flashes), `ridges` (Unknown Pleasures), `lattice` (a cone-marched chrome space frame carrying a current), `circuit` |
 | Trance & psy | `hyperspace`, `kaleido` (line-art KIFS), `galaxy`, `flow` |
 | Bass & breaks | `wobble` (the LFO's own shape, with its wake and current crackling along it), `chrome` (liquid metal), `slices` |
