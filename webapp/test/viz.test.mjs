@@ -877,7 +877,7 @@ test("every world is somebody's genre, and the catalogue is far wider than the d
   const used = new Set(Object.values(SKINS).map((s) => s.world));
   const unused = Object.keys(WORLD_META).filter((w) => !used.has(w));
   assert.deepEqual(unused, [], `no genre resolves to: ${unused.join(", ")}`);
-  // Measured when the catalogue was written: 226 rows across 48 worlds, the
+  // Measured when the catalogue was written: 226 rows across 49 worlds, the
   // busiest world (slices, every break-driven genre) carrying 12.
   assert.ok(skinCount() >= 220, `only ${skinCount()} genres are dressed`);
   const per = {};
@@ -910,6 +910,7 @@ test("neighbours sharing a world are told apart by a SHAPE switch, not a brightn
     kaleido: ["mirror", "web", "sectors", "iter"],
     wobble: ["wave"],
     lasers: ["raw"],
+    forge: ["anvils"],
     slices: ["axis", "angle"],
     shatter: ["shards"],
     tunnel: ["sides", "twist", "dash", "dir"],
@@ -918,7 +919,7 @@ test("neighbours sharing a world are told apart by a SHAPE switch, not a brightn
     carnival: ["rings"],
   };
   const pairs = [
-    ["goa", "darkpsy"], ["dubstep", "brostep"], ["brostep", "riddim"], ["hardstyle", "rawstyle"],
+    ["goa", "darkpsy"], ["dubstep", "brostep"], ["brostep", "riddim"], ["hardstyle", "euphorichardstyle"], ["rawstyle", "uptempo"],
     ["dnb", "jungle"], ["gabber", "speedcore"], ["techno", "ebm"], ["jumpstyle", "hardbass"],
     ["boombap", "swing"], ["salsa", "dembow"], ["psytrance", "hitech"],
   ];

@@ -32,6 +32,8 @@
 //               crawl)
 //   wobble      wave 0/1/2 (sine / square / saw — the LFO's own shape)
 //   lasers      raw 0..1 (euphoric sweeps to raw red fire)
+//   forge       anvils 1/3 (one great anvil for rawstyle, the blows walked
+//               across three for uptempo)
 //   slices      axis 1 (falling columns instead of bands), angle
 //   shatter     shards (few slabs to a crushed web), jag (how far they fly)
 //   ridges      mirror (peaks centred like the Joy Division sleeve, or bass
@@ -66,8 +68,8 @@ import { WORLD_META } from "./worlds/catalogue.js";
 export const SKINS = {
   // === hard: the kick is the event ===========================================
   hardcore: { world: "shatter" },
-  frenchcore: { world: "forge", p: { anthem: 1.3, sparks: 1.2, anvils: 3 } },
-  uptempo: { world: "forge", hue: -12, sat: 1.1, speed: 1.2, p: { heat: 1.5, anthem: 0.5, sparks: 1.6, smoke: 0.6 } },
+  frenchcore: { world: "piano" },
+  uptempo: { world: "forge", hue: -12, sat: 1.1, speed: 1.2, p: { heat: 1.5, anthem: 0.5, sparks: 1.6, smoke: 0.6, anvils: 3 } },
   gabber: { world: "shatter", hue: -8, p: { shards: 0.55, jag: 1.35, flash: 0.8, leds: 0.6 } },
   speedcore: { world: "shatter", hue: -20, speed: 1.4, p: { shards: 2.1, jag: 0.8, spin: 1.5, burst: 1.2 } },
   terrorcore: { world: "shatter", hue: -28, sat: 1.15, p: { shards: 1.6, jag: 1.5, burst: 0.6, leds: 0.4 } },
@@ -75,9 +77,9 @@ export const SKINS = {
   ukhardcore: { world: "fireworks", hue: 30, p: { shells: 1.3, size: 1.05 } },
   happyhardcore: { world: "fireworks", hue: 45, sat: 1.2, p: { shells: 1.5, size: 1.1, smoke: 0.7 } },
   hardstyle: { world: "lasers" },
-  rawstyle: { world: "lasers", hue: -20, sat: 1.1, p: { raw: 1, fire: 1.4, beams: 6 } },
+  rawstyle: { world: "forge", hue: -18, sat: 1.1, p: { heat: 1.35, anthem: 0.35, sparks: 1.4, smoke: 1.2, anvils: 1 } },
   euphorichardstyle: { world: "lasers", hue: 20, p: { raw: 0, beams: 9, fire: 0.6, sweep: 0.8 } },
-  rawphase: { world: "lasers", hue: -30, sat: 1.2, speed: 1.15, p: { raw: 1, fire: 1.6, beams: 5, sweep: 1.4 } },
+  rawphase: { world: "forge", hue: -28, sat: 1.2, speed: 1.15, p: { heat: 1.6, anthem: 0.2, sparks: 1.7, smoke: 0.9, anvils: 3 } },
   hardhouse: { world: "lasers", hue: 25, p: { raw: 0.5, fire: 0.5, beams: 6, emitters: 3 } },
   hardtrance: { world: "lasers", hue: 180, p: { raw: 0.15, fire: 0.3, beams: 9, sweep: 1.3 } },
   hardtekk: { world: "bounce" },
@@ -264,7 +266,7 @@ export const SKINS = {
   baroque: { world: "cathedral", hue: 25, p: { window: 1.2 } },
   gospel: { world: "cathedral", hue: 30, p: { shafts: 1.4, window: 1.2 } },
   filmscore: { world: "cathedral", hue: -20, p: { shafts: 1.3, dust: 1.3 } },
-  piano: { world: "ink", sat: 0.8, p: { ink: 0.8, curl: 0.7 } },
+  piano: { world: "piano", sat: 0.85, p: { haze: 0.8, sparkle: 0.6, gliss: 0 } },
   romantic: { world: "ink", hue: -15, p: { fade: 1.2 } },
   minimalism: { world: "ink", sat: 0.6, speed: 0.7, p: { ink: 0.6, curl: 0.5, fade: 1.5 } },
   triphop: { world: "ink", sat: 0.6, p: { ink: 1.2, curl: 1.3 } },

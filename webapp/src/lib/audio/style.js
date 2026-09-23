@@ -112,7 +112,9 @@ const LOOK_OVERRIDES = {
   rawstyle: { motion: 0.84, punch: 0.98, warm: 0.5, chaos: 0.5, melodic: 0.24 },
   hardtekk: { motion: 0.8, density: 0.66, punch: 0.86, warm: 0.5, melodic: 0.5, chaos: 0.28 },
   zaag: { motion: 0.86, density: 0.78, punch: 0.88, warm: 0.26, melodic: 0.34, chaos: 0.5 },
-  frenchcore: { motion: 0.94, density: 0.82, punch: 0.98, warm: 0.86, chaos: 0.55, melodic: 0.2 },
+  // The melodic side of hardcore: the kick is huge, but it is the lead the
+  // crowd sings, so it weighs more than on any other 200 BPM family.
+  frenchcore: { motion: 0.94, density: 0.82, punch: 0.98, warm: 0.86, chaos: 0.5, melodic: 0.55 },
   uptempo: { motion: 0.97, density: 0.88, punch: 1, warm: 0.78, chaos: 0.66, melodic: 0.14 },
   hardcore: { motion: 0.9, density: 0.8, punch: 0.95, warm: 0.74, chaos: 0.5 },
   tribecore: { motion: 0.88, density: 0.84, warm: 0.6, chaos: 0.6, melodic: 0.2 },

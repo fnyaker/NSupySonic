@@ -1,10 +1,12 @@
-// FORGE — the hammer and the anthem.
+// FORGE — the hammer and the anvil.
 //
-// Frenchcore is two things at once and a picture that shows only one of them
-// has got half of it: a straight 4/4 at 190-220 BPM built on one enormous
-// distorted kick, and — what sets it apart from every other hard genre — a
-// frankly euphoric melody over the top. So this world is a forge with a song
-// in it.
+// Rawstyle is hardstyle with the kick pushed forward until it IS the track: a
+// pitched, overdriven kick at 150-160 BPM whose tail screams and whose punch
+// lands like metal on metal — the sound rawpvc makes — with screeches where
+// other genres put a lead. So this world is a forge, and every kick is a
+// hammer on an anvil. Uptempo, the same kick at 200 BPM and over, is struck
+// here too, walked across three anvils. (Frenchcore, the melodic side of the
+// hard scene, has its own world: `piano`, which draws the tune.)
 //
 //   THE STRIKE. Every MAIN kick is a hammer on an anvil: a white-hot flash at
 //   the point of impact, a shock front running out along the floor, and a
@@ -20,12 +22,13 @@
 //   pool of light across and the shock front runs over. Sparks that reach the
 //   floor skitter along it instead of falling through it.
 //   THE ANTHEM. Ribbons of gold across the upper frame, drawn only as bright as
-//   the melody is present and following its pitch — a track with no lead
-//   leaves the sky dark, a supersaw hook fills it.
+//   the melody is present and following its pitch — a raw track's screeches
+//   leave the sky dark, the anthem a rawstyle drop finally lets through fills
+//   it.
 //   THE AIR. Smoke lit from below by the hot metal, and embers rising through
 //   it faster as a build tightens.
 //
-// Rolls throw small bursts from the same anvil (a frenchcore roll is five hits
+// Rolls throw small bursts from the same anvil (an uptempo roll is five hits
 // in a beat and must read as a spray, not five explosions); the drop throws
 // the biggest fountain of the track and a flash the engine rate-limits.
 //
