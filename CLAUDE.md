@@ -1142,10 +1142,15 @@ each of which a world broke once:
   big enough to carry one; a mask finer than the screen's own pixels is moiré, not texture.
 - **Draw on the frame, around the artwork.** p-space is y −1..1 and x −aspect..aspect; `uHole` is the
   artwork's centre and half extents, **measured from the DOM** (`Visualizer.svelte`'s `occluder`,
-  through `lib/viz/geometry.js`), and `clearOfHole` dims what falls under it. A world puts its motif
-  in the band the artwork leaves free (the pixel runner stands on a ground line computed from the
-  cover's bottom edge; aurora's horizon sits just under it) and fills a 16:9 beamer to all four
-  edges.
+  through `lib/viz/geometry.js`), and `clearOfHole` dims what falls under it. It is the artwork's
+  OWN box (`hx/hy/ahw/ahh`), not the frame-centred one geometry.js grows for the scope's polar
+  primitives: the mobile cover sits above the middle, and the grown box centred every world 7% of
+  the frame below the cover it was framing. A world puts its motif in the band the artwork leaves
+  free (the pixel runner stands on a ground line under the cover; horizon's floor and storm's lake
+  start there and the synthwave sun rises from behind it; the spectrum frames it with a bank below
+  and a mirrored bank above) and fills a 16:9 beamer to all four edges. A world CENTRED on the
+  artwork (galaxy, kaleido) dims under it harder than the house third and lifts what is outside: the
+  core is hidden by definition, so the light goes to the arms that are seen.
 - **A long clock wraps at a period its shader is exactly periodic in.** Uniforms are float32: the
   wobble's LFO phase reached 3.4e4 in ten minutes at 250 BPM, which a few hours on is a visible
   stutter. It now wraps at 200π (both its oscillators close there); the night drive at a multiple of
@@ -1155,6 +1160,10 @@ each of which a world broke once:
   and the position ran to −Infinity in seven seconds — a black world for the rest of the night.
 - **Never name a variable after a GLSL built-in.** `float all = …` compiles, and the `all(…)` three
   lines later does not; the world renders black. Tested.
+- **Nothing oscillates faster than a frame can show.** Rain's pane "shivered" on the kick at 80
+  radians a beat — faster than any refresh rate — which aliased into jitter; it is one thump now.
+  And nothing moves at a speed the thing it depicts never has: the record turns a revolution a
+  bar (32 rpm at 128 BPM, a real 33), not every two beats (a blur at 180).
 
 **The catalogue: 47 worlds on eleven shelves** (`worlds/catalogue.js` — names and blurbs, no shader,
 so naming a world costs nothing; `worlds/index.js` — one LITERAL `import()` per world, so each is its
@@ -1168,7 +1177,7 @@ own chunk: a session of techno never downloads the frenchcore forge).
 | Bass & breaks | `wobble` (the LFO's own shape), `chrome` (liquid metal), `slices` |
 | Urbain | `vinyl`, `halo`, `nightdrive`, `neon` |
 | Pop & groove | `bokeh`, `discoball`, `silk`, `artwork` (the cover's own colours), `plasma` |
-| Rock & metal | `stage`, `inferno`, `storm` |
+| Rock & metal | `stage`, `inferno`, `storm` (a cloud deck lit from below by the last light, over a lake that mirrors every strike) |
 | Calme | `nebula`, `aurora`, `ocean`, `cathedral`, `ink`, `rain` (every drop a lens refracting the city), `fireflies` (a meadow whose fireflies fall into step on the drop) |
 | Monde | `carnival` (polyrhythm as rings of beads), `tropics` |
 | Rétro | `horizon` (the banded sun over a true ground plane), `pixels` (a CRT raster, a runner on a real gait, a brick equaliser whose caps fall under gravity) |
@@ -1234,7 +1243,9 @@ at a time. `webapp/test/post.test.mjs` pins it.
   calm world's slow drift only shows there) and pixel by pixel (a sea's small waves average out of
   every block) — because a single pair of frames right on a kick measures the kick's envelope, and
   most worlds scored ~1.0 on it. A clock in seconds scores ~1.0 on all three. Feedback worlds are
-  warmed for ten seconds before they are judged: they are their own history.
+  warmed for ten seconds before they are judged: they are their own history. The dev server runs
+  with no watcher and no hot reload: editing a world during a sweep used to reload the bench page
+  under it, and every world after that "crashed" with `window.bench` undefined.
 - **`webapp/test/viz.test.mjs` and `musical.test.mjs`** (node, in `npm test`) pin everything that can
   be decided without a GPU and that a GPU would only ever report as a black screen: the loader, the
   catalogue and the skins agree; every classifier family resolves by id AND by French label, and

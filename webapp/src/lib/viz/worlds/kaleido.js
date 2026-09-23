@@ -156,7 +156,9 @@ void main() {
     col += front * band * ev.y * 1.5;
   }
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.25;
-  col *= mix(0.35, 1.0, clearOfHole(fragP(), 0.05));
+  // The mandala is centred on the artwork, so its brightest ring hugs the
+  // cover: dim what is under it properly, not by the house third.
+  col *= mix(0.15, 1.0, clearOfHole(fragP(), 0.08));
   emit(col * mix(1.0, uEnergy, 0.5));
 }
 `,

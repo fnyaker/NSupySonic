@@ -49,7 +49,11 @@ vec3 city(vec2 p) {
         float d = length(q - at) / R;
         float disc = smoothstep(1.0, 0.7, d) * (0.6 + 0.4 * smoothstep(0.4, 0.9, d));
         vec3 lc = h.x > 0.5 ? mix(vec3(1.0, 0.7, 0.35), uPalHigh.rgb, 0.3) : mix(uPalMid.rgb, uPalAcc.rgb, h.y);
-        c += lc * disc * (0.06 + 0.08 * h.z) * P_CITY * (1.0 - 0.3 * fl) * smoothstep(1.0, 0.2, p.y);
+        // Each light breathes with its own slice of the spectrum: the city is
+        // listening too, and a signal changing at the tempo is what the eye
+        // reads as music through a blurred window.
+        float lvl = texture(uSpec, vec2(0.08 + 0.8 * fract(h.y * 3.7 + h.x), 0.25)).r;
+        c += lc * disc * (0.08 + 0.1 * h.z) * (0.45 + 1.1 * lvl) * P_CITY * (1.0 - 0.3 * fl) * smoothstep(1.0, 0.2, p.y);
       }
     }
   }
@@ -61,14 +65,16 @@ void main() {
   float amp = 0.6 + 0.4 * uCtl.x;
   float px = uFrame.w;
   // The kick shivers the pane.
-  vec2 shiver = vec2(sin(uClock.x * 80.0), cos(uClock.x * 70.0)) * 0.002 * envB(uSince.y, 0.25) * amp;
+  // One thump, not a buzz: an oscillation fast enough to read as a shiver is
+  // faster than any frame rate can show, and aliased into jitter.
+  vec2 shiver = vec2(0.0006, -0.0025) * envB(uSince.y, 0.25) * amp;
   vec2 q = p + shiver;
   // Seen through the pane, the city is a little fogged; the drops (which
   // are clear) show it sharper and brighter than the glass around them.
   vec3 col = city(p) * 0.75 + mix(uPalLow.rgb, uPalMid.rgb, 0.4) * 0.012;
 
   // --- the drops sitting on the glass ---
-  float cs = 0.1;
+  float cs = 0.13;
   vec2 g = q / cs;
   vec2 cell = floor(g);
   for (int j = -1; j <= 1; j++) {
@@ -77,12 +83,17 @@ void main() {
       vec3 h = hash32(id);
       // Drops come and go: each cell's drop lands on its own beat, stays a
       // while, and is renewed — the hats landing more of them.
+      // Each drop lives a few bars and is renewed; it LANDS — a quick swell
+      // from a bead to its full size — rather than blinking in, so a busy
+      // track is a pane filling up, not a flicker.
       float life = 6.0 + 10.0 * h.z;
-      float born = floor((uClock.x + h.x * life) / life);
+      float cyc = (uClock.x + h.x * life) / life;
+      float born = floor(cyc);
+      float ageB = fract(cyc) * life;
       vec3 h2 = hash32(id + born * 7.3);
-      if (h2.z > 0.45 * P_DROPS + 0.2 * uHit2.x) continue;
+      if (h2.z > 0.36 * P_DROPS) continue;
       vec2 at = (id + 0.5 + (h2.xy - 0.5) * 0.95) * cs;
-      float R = cs * (0.18 + 0.3 * h2.x);
+      float R = cs * (0.18 + 0.3 * h2.x) * (0.55 + 0.45 * smoothstep(0.0, 0.35, ageB));
       vec2 d = (q - at) / R;
       float r = length(d);
       if (r > 1.0) continue;
@@ -103,15 +114,17 @@ void main() {
   }
 
   // --- the runners ---
-  float colW = 0.16;
+  float colW = 0.12;
   float ci = floor(q.x / colW);
   vec3 hc = hash32(vec2(ci, 3.0));
-  if (hc.z < 0.5 * P_RUNNERS) {
-    float speed = (0.15 + 0.25 * hc.x) * (1.0 - 0.6 * uArc.z) + uS0.x;
-    float cyc = uClock.x * speed * 0.25 + hc.y * 7.0;
+  if (hc.z < 0.6 * P_RUNNERS) {
+    // A runner crosses the pane in a couple of bars: slow enough to follow,
+    // fast enough to be seen going. It used to take thirty to sixty beats.
+    float speed = (0.3 + 0.5 * hc.x) * (1.0 - 0.6 * uArc.z) + uS0.x;
+    float cyc = uClock.x * speed / 2.6 + hc.y * 7.0;
     float y = 1.2 - fract(cyc) * 2.6;
     float x = (ci + 0.5) * colW + sin(y * 9.0 + hc.x * 6.0) * 0.012 + (hc.y - 0.5) * 0.05;
-    vec2 d = (q - vec2(x, y)) / vec2(0.013, 0.018);
+    vec2 d = (q - vec2(x, y)) / vec2(0.019, 0.027);
     float r = length(d);
     if (r < 1.0) {
       vec3 inside = city(vec2(x, y) - d * 0.06) * 1.5 + vec3(1.0) * smoothstep(0.4, 0.0, length(d - vec2(-0.3, 0.4))) * 0.3;
@@ -120,8 +133,8 @@ void main() {
     // The trail: beads left behind it, and a clearer streak of glass.
     if (q.y > y && q.y < y + 0.6) {
       float trailX = abs(q.x - (x + sin(q.y * 9.0 + hc.x * 6.0) * 0.012 - sin(y * 9.0 + hc.x * 6.0) * 0.012));
-      float streak = smoothstep(0.008, 0.0, trailX) * exp(-(q.y - y) * 3.0);
-      col += city(q) * streak * 0.4;
+      float streak = smoothstep(0.011, 0.0, trailX) * exp(-(q.y - y) * 2.5);
+      col += city(q - vec2(0.0, 0.03)) * streak * 0.7 + mix(uPalHigh.rgb, vec3(1.0), 0.5) * streak * 0.01;
       float bead = step(0.7, hash12(vec2(ci, floor(q.y * 40.0)))) * smoothstep(0.006, 0.002, length(vec2(trailX, fract(q.y * 40.0) / 40.0 - 0.0125)));
       col += vec3(0.8) * bead * 0.3 * exp(-(q.y - y) * 2.0);
     }

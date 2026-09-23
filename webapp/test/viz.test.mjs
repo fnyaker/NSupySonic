@@ -402,6 +402,29 @@ test("with artwork in the way, radial 0 is its rim", () => {
   assert.ok(out.hw < 200 && out.hh < 200, "the artwork was allowed to cover everything");
 });
 
+test("the GL engine is told where the artwork really is, not where a centred one would be", () => {
+  // The mobile player's cover sits ABOVE the middle of the canvas (the
+  // controls are under it). The canvas-era geometry grows its box around the
+  // frame's centre so its polar primitives stay honest, and the GL engine
+  // used to be handed that grown box: every world centred its motif 7% of
+  // the frame below the cover it was framing and dimmed the wrong region.
+  const { set, out } = createGeometry();
+  const w = 390;
+  const h = 844;
+  const occl = { x: 40, y: 250, w: 310, h: 310 }; // centre y 405, frame centre 422
+  set(w, h, occl);
+  assert.equal(out.hx, 195);
+  assert.equal(out.hy, 405);
+  // The artwork's own padded box: its half-size plus the pad, and no more.
+  assert.ok(out.ahw >= 155 && out.ahw < 155 + 0.08 * w, `ahw ${out.ahw}`);
+  assert.ok(out.ahh >= 155 && out.ahh < 155 + 0.08 * w, `ahh ${out.ahh}`);
+  // The grown one still contains it, for the scope's primitives.
+  assert.ok(out.hh >= out.ahh + Math.abs(out.hy - out.cy) - 1e-9, "the grown box lost the artwork");
+  // And the free band under the artwork starts under the ARTWORK.
+  assert.ok(Math.abs(out.afloorY - (out.hy + out.ahh)) < 1e-9);
+  assert.ok(out.afloorY < out.floorY, "the true floor should sit above the grown one");
+});
+
 test("the canvas scenes survive every tier, aspect and artwork, at any frame", () => {
   // The cheap insurance: a scene that throws takes the whole render loop with
   // it, and a projector nobody is looking at is exactly where that happens.

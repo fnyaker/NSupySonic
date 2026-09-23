@@ -118,7 +118,10 @@ void main() {
     col += uPalHigh.rgb * exp(-pow((dd - age * 0.02) / 0.006, 2.0)) * k * 0.4 * ev.y;
   }
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
-  col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
+  // With the artwork in front the core is hidden by definition, so the light
+  // goes where it is seen: well under the cover, a little over it outside —
+  // the spiral reads as turning around the artwork.
+  col *= uHole.z > 0.0 ? mix(0.12, 1.2, clearOfHole(p, 0.12)) : 1.0;
   emit(col * mix(1.0, uEnergy, 0.5));
 }
 `,
@@ -165,7 +168,7 @@ void particle(int id, out vec2 pos, out vec2 axis, out float width, out vec4 col
   axis = vec2(0.0015 + 0.003 * bright, 0.0);
   width = axis.x;
   // Under the artwork a star is drawn for nobody: dim it like the gas.
-  col = vec4(c * bright * tw * (1.0 + 1.5 * wave) * 1.3 * mix(0.2, 1.0, clearOfHole(pos, 0.05)), 1.0);
+  col = vec4(c * bright * tw * (1.0 + 1.5 * wave) * 1.3 * (uHole.z > 0.0 ? mix(0.1, 1.2, clearOfHole(pos, 0.1)) : 1.0), 1.0);
 }
 `,
     fragment: `

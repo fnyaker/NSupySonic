@@ -35,6 +35,7 @@ void main() {
   vec3 col = uPalBg.rgb * 0.45;
   col += mix(uPalLow.rgb, uPalMid.rgb, 0.4) * exp(-dot(p * vec2(0.6, 1.2), p * vec2(0.6, 1.2))) * 0.05 * (0.6 + 0.4 * uFlow.x);
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
+  col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
   emit(col * mix(1.0, uEnergy, 0.5));
 }
 `,
@@ -74,7 +75,8 @@ void particle(int id, out vec2 pos, out vec2 axis, out float width, out vec4 col
   float bright = 0.04 + 0.6 * pow(hash11(j * 5.3), 4.0);
   float b = (bright * (0.5 + lvl) + 0.8 * flare + 0.3 * envB(uSince.w, 2.0) * step(uSince.w, 8.0)) * (layer < 0.5 ? 0.35 : 1.0);
   vec3 c = pal(f);
-  col = vec4(c * b * (0.6 + 0.4 * uFlow.x), 1.0);
+  // A light behind the artwork is a light nobody sees.
+  col = vec4(c * b * (0.6 + 0.4 * uFlow.x) * mix(0.2, 1.0, clearOfHole(at, R * 0.6)), 1.0);
   kind = layer + h2.y * 0.9; // layer, and a turn of the aperture
 }
 `,

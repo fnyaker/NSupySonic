@@ -69,6 +69,9 @@ void main() {
   col = max(col + (col - avg) * 0.07, vec3(0.0));
   float tau = (14.0 + 10.0 * uArc.z) * P_FADE;
   col *= exp(-dtB / tau);
+  // Ink that drifts behind the artwork dissolves there within a beat: nobody
+  // can see it, and the tank it came from should not drain into a hole.
+  col *= exp(-dtB * 5.0 * (1.0 - clearOfHole(p, 0.08)));
   // The drops themselves: ink poured in over their first half beat.
   for (int i = 0; i < 8; i++) {
     vec4 ev = uEv[i];
@@ -84,8 +87,9 @@ void main() {
   // The water itself, lit faintly from the surface above. A FLOOR rather than
   // an addition: this image feeds back, and a constant added every frame
   // would build up into fog.
-  vec3 water = mix(uPalLow.rgb * 0.01, mix(uPalLow.rgb, uPalMid.rgb, 0.3) * 0.045, smoothstep(-1.0, 1.0, p.y));
-  col = max(col, water);
+  // It brightens with the track: a breakdown is a dim tank, a drop a lit one.
+  vec3 water = mix(uPalLow.rgb * 0.012, mix(uPalLow.rgb, uPalMid.rgb, 0.3) * 0.07, smoothstep(-1.0, 1.0, p.y)) * (0.75 + 0.5 * uMood.y);
+  col = max(col, water * mix(0.35, 1.0, clearOfHole(p, 0.05)));
   emit(col);
 }
 `,
@@ -119,9 +123,11 @@ void main() {
       else if (m.melodic < 0.3) n++;
     });
     const dropS = onStamp((m) => m.stamp.drop, (s) => {
-      drop(s, 1);
-      drop(s + 0.1, 1);
-      drop(s + 0.2, 1);
+      // The drop pours: four drops, fuller than any note's.
+      drop(s, 1.5);
+      drop(s + 0.1, 1.5);
+      drop(s + 0.2, 1.4);
+      drop(s + 0.3, 1.3);
       flash(0.4);
     });
     return {

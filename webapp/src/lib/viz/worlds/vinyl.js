@@ -23,7 +23,7 @@
 //
 // Parameters:
 //   gloss   sheen strength    arm   the tonearm (0 hides it)
-//   rpm     revolutions per beat (x 0.5)
+//   rpm     revolutions per bar (1 = 32 rpm at 128 BPM, a record's real speed)
 
 import { onStamp } from "./kit.js";
 
@@ -135,6 +135,16 @@ void main() {
       float ring = exp(-pow((r - label * 0.72) / 0.004, 2.0));
       vec2 lp = vec2(cos(thR), sin(thR)) * r;
       lab += uPalHigh.rgb * ring * 0.3 + uPalAcc.rgb * smoothstep(0.03, 0.02, length(lp - vec2(label * 0.45, 0.0))) * 0.3;
+      // With nothing in front of the record (the projector, the preview) the
+      // label IS the artwork, turning with the platter — in the player the
+      // real cover sits over this very spot.
+      if (uCoverOK > 0.5 && uHole.z <= 0.0) {
+        vec2 luv = vec2(lp.x, -lp.y) / (2.0 * label) + 0.5;
+        vec3 art = textureLod(uCover, luv, 1.0).rgb;
+        lab = art * art * 0.85;
+        lab *= 1.0 - 0.35 * smoothstep(label * 0.9, label, r);
+        lab += vec3(1.0) * pow(max(dot(normalize(d + 1e-4), L2), 0.0), 12.0) * 0.06 * smoothstep(0.0, label, r);
+      }
       lab = mix(lab, vec3(0.6), smoothstep(0.012, 0.009, r));
       col = lab;
     }
@@ -188,9 +198,10 @@ void main() {
     return {
       step(dt, m) {
         drop(m);
-        // One revolution every two beats, integrated so tempo changes never
-        // jump the record.
-        spin += (dt / m.beat) * Math.PI * (params.rpm || 1);
+        // One revolution a bar — 32 rpm at 128 BPM, which is what a record
+        // actually does — integrated so a tempo change never jumps it. It
+        // used to turn every two beats: 64 rpm, a blur at 180 BPM.
+        spin += (dt / m.beat) * (Math.PI / 2) * (params.rpm || 1);
         // The scratch: back over a quarter beat, forward over the next,
         // on top of the steady turn.
         let off = 0;

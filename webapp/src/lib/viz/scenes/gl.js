@@ -474,9 +474,18 @@ export function createGLScene(opts = {}) {
     const h = cssH || 1;
     put("uFrame", w * dpr, h * dpr, w / h, 2 / (h * dpr * scale));
     const hh = h / 2;
-    if (geom && geom.hole > 0 && geom.hw > 0) {
-      put("uHole", (geom.cx - w / 2) / hh, -(geom.cy - h / 2) / hh, geom.hw / hh, geom.hh / hh);
-      put("uHoleR", (Math.min(geom.hw, geom.hh) / hh) * 0.08, geom.hole, -(geom.floorY - h / 2) / hh, 0);
+    // The artwork's OWN box (ahw/ahh around hx/hy), not the frame-centred one
+    // geometry.js grows for the canvas scenes' polar primitives: the mobile
+    // cover sits above the middle, and the grown box centred every world 7% of
+    // the frame below it.
+    const ahw = geom?.ahw ?? geom?.hw ?? 0;
+    const ahh = geom?.ahh ?? geom?.hh ?? 0;
+    if (geom && geom.hole > 0 && ahw > 0) {
+      const hx = geom.hx ?? geom.cx;
+      const hy = geom.hy ?? geom.cy;
+      const fy = geom.afloorY ?? geom.floorY;
+      put("uHole", (hx - w / 2) / hh, -(hy - h / 2) / hh, ahw / hh, ahh / hh);
+      put("uHoleR", (Math.min(ahw, ahh) / hh) * 0.08, geom.hole, -(fy - h / 2) / hh, 0);
     } else {
       put("uHole", 0, 0, 0, 0);
       put("uHoleR", 0, 0, -1 / 3, 0);

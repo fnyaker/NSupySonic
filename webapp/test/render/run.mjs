@@ -104,7 +104,10 @@ async function main() {
     root: webapp,
     configFile: false,
     logLevel: "error",
-    server: { port: 0, host: "127.0.0.1" },
+    // No hot reload and no watcher: editing a world while a sweep runs used
+    // to reload the bench page under it, and every world after that
+    // "crashed" with window.bench undefined.
+    server: { port: 0, host: "127.0.0.1", hmr: false, watch: null },
     // Only the viz modules are served; scanning the Svelte app for dependencies
     // (with no Svelte plugin loaded) is slow and prints nothing but errors.
     optimizeDeps: { noDiscovery: true, entries: [] },
