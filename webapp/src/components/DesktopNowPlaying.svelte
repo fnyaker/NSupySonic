@@ -40,6 +40,8 @@
   $: glowSrc = $bg.length ? $bg[$bg.length - 1].src : "";
   import {
     vizMode,
+    vizWorld,
+    vizFlash,
     vizQuality,
     vizPalette,
     vizIntensity,
@@ -161,6 +163,8 @@
         paused={!$playing}
         scopeOrientation={$vizScopeOrientation}
         scopeColour={$vizScopeColour}
+        world={$vizWorld}
+        flash={$vizFlash}
         occluder={coverBox}
       />
     </div>

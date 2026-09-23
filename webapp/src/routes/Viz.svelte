@@ -19,6 +19,8 @@
     vizIntensity,
     vizScopeOrientation,
     vizScopeColour,
+    vizScreenWorld,
+    vizFlash,
   } from "../lib/stores.js";
   import { createSubscriber } from "../lib/viz/bridge.js";
   import { MODES, levelFor, needsWave } from "../lib/viz/modes.js";
@@ -148,8 +150,11 @@
     external
     paused={!playing}
     coverRgb={meta.rgb}
+    coverUrl={meta.cover}
     scopeOrientation={$vizScopeOrientation}
     scopeColour={$vizScopeColour}
+    world={$vizScreenWorld}
+    flash={$vizFlash}
   />
 
   {#if !supported}

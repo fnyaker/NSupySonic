@@ -28,6 +28,8 @@
   import { api } from "../lib/api.js";
   import {
     vizMode,
+    vizWorld,
+    vizFlash,
     vizQuality,
     vizPalette,
     vizIntensity,
@@ -710,6 +712,8 @@
         paused={!$playing}
         scopeOrientation={$vizScopeOrientation}
         scopeColour={$vizScopeColour}
+        world={$vizWorld}
+        flash={$vizFlash}
         occluder={scroller}
         occluderShape="square"
       />

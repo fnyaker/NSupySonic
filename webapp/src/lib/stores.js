@@ -113,7 +113,7 @@ export const trimThresholdDb = persisted("fade.trimDb", -45);
 export const ecoMode = persisted("viz.eco", false);
 
 // The scene drawn in the full-screen player: "off" (the plain, original player),
-// "bars", "pulse", "aurora" or "smart" (the style-aware engine).
+// "bars", "pulse", "scope", "aurora" or "smart" (the style-aware engine).
 export const vizMode = persisted("viz.mode", "bars");
 // Rendering effort: "auto" reads the device, the rest are explicit.
 export const vizQuality = persisted("viz.quality", "auto");
@@ -149,6 +149,16 @@ export const vizScopeColour = persisted("viz.scope.colour", "duo");
 // screen wants a different answer from a phone.
 export const vizScreenMode = persisted("viz.screen.mode", "smart");
 export const vizScreenQuality = persisted("viz.screen.quality", "high");
+// The smart engine's world: "auto" lets the genre choose (lib/viz/skins.js),
+// anything else pins one world from the catalogue whatever is playing. One per
+// screen, for the same reason the mode is.
+export const vizWorld = persisted("viz.world", "auto");
+export const vizScreenWorld = persisted("viz.screen.world", "auto");
+// Flashes and strobes: "off", "soft" or "full". Even "full" is held under the
+// WCAG general-flash threshold (three a second) by the engine itself — this
+// setting chooses how bright a flash is, never how often one may happen. A
+// projector in a room of people is exactly where that matters.
+export const vizFlash = persisted("viz.flash", "soft");
 
 // The user's own saved presets. A preset captures the WHOLE audio setup —
 // EQ on/off + the ten band gains, the bass lift and the normalization level —

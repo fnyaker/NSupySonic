@@ -3,50 +3,45 @@
 //
 // THE SCENES ARE LOADED ON DEMAND. `createScene` is async and imports the scene
 // module when a scene is actually asked for, which is the first moment anything
-// in here is needed. Before that split the whole animation tree — four scenes,
-// eighteen worlds, eight dedicated genre animations and a 227-row skin
-// catalogue, about a third of a megabyte of source — sat in the main bundle
-// because the now-playing screens import `effectiveMode` from this file. Every
-// launch of the app parsed all of it, including the launches with animations
-// switched off entirely.
+// in here is needed. The now-playing screens import `effectiveMode` from this
+// file's registry half (`./modes.js`) and must not pay for the engine to do it.
 //
-// The registry itself is in `./modes.js`, which imports nothing. Anything that
-// only needs to know which modes exist should import THAT, not this.
+// Two kinds of scene come out of here:
+//
+//   "gl"  every full-screen mode except the oscilloscope: the WebGL2 engine
+//         (lib/viz/scenes/gl.js) with a policy for which world it shows —
+//         pulse, aurora and bars are one fixed world each (`pulse`,
+//         `aurora`, `spectrum`), smart lets the genre choose among all of them.
+//   "2d"  the oscilloscope, which draws the samples themselves on a canvas, and
+//         the spectrum bars' canvas twin, which is what a device with no WebGL2
+//         gets instead of any GL scene (`createFallback`).
+//
+// The host (components/Visualizer.svelte) reads `scene.kind` and hands the
+// scene the right surface: a canvas cannot switch context type once it has one.
 
 export { MODES, MODE_BY_ID, effectiveMode, levelFor, needsWave } from "./modes.js";
 
-// One promise per mode, so a scene module is fetched once however many views
-// ask for it and a switch back to a mode already used is synchronous-ish.
+// The world each fixed mode shows. Smart has none: the music decides.
+const FIXED = { bars: "spectrum", pulse: "pulse", aurora: "aurora" };
+
+// One promise per module, so a scene module is fetched once however many views
+// ask for it.
 const loading = new Map();
 
-function load(mode) {
-  let p = loading.get(mode);
+function load(key, importer) {
+  let p = loading.get(key);
   if (p) return p;
-  switch (mode) {
-    case "bars":
-      p = import("./scenes/bars.js").then((m) => m.createBarsScene);
-      break;
-    case "pulse":
-      p = import("./scenes/pulse.js").then((m) => m.createPulseScene);
-      break;
-    case "scope":
-      p = import("./scenes/scope.js").then((m) => m.createScopeScene);
-      break;
-    case "aurora":
-      p = import("./scenes/aurora.js").then((m) => m.createAuroraScene);
-      break;
-    case "smart":
-      p = import("./scenes/smart.js").then((m) => m.createSmartScene);
-      break;
-    default:
-      return null;
-  }
+  p = importer();
   // A failed fetch must not be remembered as a failure for ever — offline, or
   // mid-deploy, the next attempt should be allowed to work.
-  p.catch(() => loading.delete(mode));
-  loading.set(mode, p);
+  p.catch(() => loading.delete(key));
+  loading.set(key, p);
   return p;
 }
+
+const glModule = () => load("gl", () => import("./scenes/gl.js"));
+const scopeModule = () => load("scope", () => import("./scenes/scope.js"));
+const barsModule = () => load("bars", () => import("./scenes/bars.js"));
 
 /**
  * Build a scene. Returns a PROMISE of one, or null for a mode with no scene.
@@ -55,13 +50,24 @@ function load(mode) {
  * mode having changed again in the meantime — see components/Visualizer.svelte,
  * which discards a scene whose mode is no longer the one on screen.
  */
-export function createScene(mode, opts) {
-  const p = load(mode);
-  return p ? p.then((make) => make(opts)) : null;
+export function createScene(mode, opts = {}) {
+  if (mode === "scope") return scopeModule().then((m) => m.createScopeScene(opts));
+  if (mode === "smart" || FIXED[mode])
+    return glModule().then((m) => m.createGLScene({ ...opts, fixed: FIXED[mode] || null }));
+  return null;
+}
+
+/**
+ * What a device with no WebGL2 draws instead of any GL scene: the spectrum on a
+ * 2D canvas. Honest rather than impressive — it is the fallback, and a picture
+ * that works is better than a black one.
+ */
+export function createFallback(opts = {}) {
+  return barsModule().then((m) => m.createBarsScene(opts));
 }
 
 /** Start fetching a scene without building it. Fire-and-forget. */
 export function preloadScene(mode) {
-  const p = load(mode);
+  const p = mode === "scope" ? scopeModule() : mode === "smart" || FIXED[mode] ? glModule() : null;
   if (p) p.catch(() => {});
 }
