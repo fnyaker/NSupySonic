@@ -194,6 +194,9 @@ void main() {
         const want = 9 * (0.75 + 0.25 * m.drive + 0.5 * m.build + 0.6 * surge) * (1 - 0.35 * m.breakdown);
         speed = m.ease(speed, want, 2, dt);
         travel += (dt / m.beat) * speed;
+        // Lamps repeat every SPACING and dashes every quarter of it: wrap at a
+        // multiple of both so a float32 uniform never loses the road's grain.
+        if (travel > 9 * 512) travel -= 9 * 512;
         state[0] = travel;
         state[1] = speed;
       },

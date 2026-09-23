@@ -168,7 +168,7 @@ void main() {
   vec3 col = mix(horizonC, midC, smoothstep(0.0, 0.45, tb));
   col = mix(col, topC, smoothstep(0.4, 1.0, tb));
   // Stars, a little parallax, twinkling with the hats.
-  vec2 sc = c + vec2(floor(cam * 0.04), 0.0);
+  vec2 sc = c + vec2(uS1.w, 0.0);
   float sh = hash12(sc + 17.0);
   if (t > 0.3 && sh > 0.986) {
     float tw = 0.35 + 0.65 * step(0.5, hash12(sc + 3.0)) * uHit2.x + 0.3 * step(0.994, sh);
@@ -204,7 +204,7 @@ void main() {
   if (rd.y <= 0.0 && ring > 0.0) col = mix(col, ringC, 0.95);
 
   // --- the skyline ---
-  float sx = c.x + floor(cam * 0.22);
+  float sx = c.x + uS1.z;
   float bi = floor(sx / 7.0);
   float bx = sx - bi * 7.0;
   vec3 bh3 = hash31(bi * 3.1 + 1.0);
@@ -457,7 +457,14 @@ void main() {
             if (flipping) flip = -2 * Math.PI * Math.min(1, Math.max(0, (u - 0.15) / 0.7));
           }
         }
-        state[0] = cam;
+        // The ground repeats every tile (8) and every coin segment (64), so it
+        // gets the scroll wrapped at a multiple of both; the skyline and the
+        // stars scroll at their own parallax and get their own, already
+        // floored and wrapped at a multiple of a building's width. Float32
+        // uniforms, and a runner that may run all night.
+        state[0] = cam % 4096;
+        state[6] = Math.floor(cam * 0.22) % (7 * 1024);
+        state[7] = Math.floor(cam * 0.04) % 4096;
         state[1] = ph;
         state[2] = y;
         state[3] = flip;

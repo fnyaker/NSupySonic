@@ -2,87 +2,49 @@
 //
 // This is the test that holds the line the whole `lib/viz/musical.js` layer
 // exists for. A constant that should have been musical is invisible in review —
-// `spin += dt * 0.05` looks exactly like `spin += dt * m.perBar(1)` in a diff —
-// and it is obvious to a stopwatch: the first one turns at the same rate through
-// a 90 BPM intro and a 180 BPM drop, and the second one turns twice as fast.
+// `t += dt * 0.5` looks exactly like `t += dt / m.beat * 0.5` in a diff — and it
+// is obvious to a stopwatch: the first one runs at the same rate through a 90
+// BPM intro and a 180 BPM drop, and the second one runs twice as fast.
 //
-// So every dedicated animation is driven twice over identical wall-clock time,
-// once at 90 BPM and once at 180, and the picture has to MOVE about twice as
-// much in the second. Nothing else in either suite would catch a regression
-// here, because a scene with a hard-coded rate renders perfectly well — it is
-// just not listening.
+// The worlds' SHADERS cannot make that mistake: the engine gives them no
+// seconds clock at all (pinned in viz.test.mjs), only beats, bars and phrases.
+// What can make it is a world's DRIVER — the few lines of JavaScript that
+// integrate a camera's travel, a stepped rotation, a runner's stride — because
+// the driver is handed the render dt in seconds. So every driver is run twice
+// over identical wall-clock time, at 90 BPM and at 180, and whatever it
+// integrates has to move about twice as far in the second.
 //
-// The second half asks the other question: does it respond to the moment, not
-// only to the grid? Same tempo, a loud dense passage against a quiet one, and
-// the picture has to differ. An animation that ignores `m.drive` draws a
-// breakdown exactly like a drop.
+// The pixels themselves are asked the same question by the render bench
+// (`node test/render/run.mjs --tempo`), which needs a browser.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createGeometry } from "../src/lib/viz/geometry.js";
-// Loaded directly: the app code-splits the scenes (lib/viz/index.js), and
-// these checks are about what a scene draws rather than how it is fetched.
-import { createSmartScene } from "../src/lib/viz/scenes/smart.js";
-import { tierPreset } from "../src/lib/viz/quality.js";
-import { createPalette } from "../src/lib/viz/palette.js";
 import { createMusical } from "../src/lib/viz/musical.js";
 import { LOOK_KEYS } from "../src/lib/audio/style.js";
-import { dedicatedIds, genreSceneFor } from "../src/lib/viz/genres/index.js";
+import { worldIds, loadWorld } from "../src/lib/viz/worlds/index.js";
 
-const W = 1280;
-const H = 720;
-
-// A context that records where ink was put, so "how much did the picture move"
-// can be answered by comparing two frames.
-function recorder() {
-  const ink = [];
-  const noop = () => {};
-  const grad = { addColorStop: noop };
-  const ctx = new Proxy(
-    {
-      ink,
-      globalAlpha: 1,
-      globalCompositeOperation: "source-over",
-      filter: "none",
-      lineWidth: 1,
-      lineCap: "butt",
-      lineJoin: "miter",
-      strokeStyle: "",
-      fillStyle: "",
-      moveTo: (x, y) => ink.push(x, y),
-      lineTo: (x, y) => ink.push(x, y),
-      arc: (x, y) => ink.push(x, y),
-      rect: (x, y) => ink.push(x, y),
-      // A RECTANGLE IS NOT ITS CENTRE. Recording only the middle makes every
-      // scene built on centred bars invisible to this test: `hardcore` draws a
-      // wall of columns whose height is the animation, and each column's centre
-      // sits at exactly H/2 for ever, so the picture scored 0.00 movement at
-      // both tempos and the ratio came out 0/0. The two mid-edges move when the
-      // bar grows, which is what the eye is actually seeing.
-      fillRect: (x, y, w, h) =>
-        ink.push(x + w / 2, y + h / 2, x + w / 2, y, x + w / 2, y + h),
-      strokeRect: (x, y, w, h) =>
-        ink.push(x + w / 2, y + h / 2, x + w / 2, y, x + w / 2, y + h),
-      quadraticCurveTo: (cx, cy, x, y) => ink.push(x, y),
-      createLinearGradient: () => grad,
-      createRadialGradient: () => grad,
-      createPattern: () => null,
-    },
-    {
-      get: (t, k) => (k in t ? t[k] : noop),
-      set: (t, k, v) => ((t[k] = v), true),
-    }
-  );
-  return ctx;
-}
-
-/** One synthetic frame of a track at `bpm`, `t` seconds in. */
-function frameAt(t, { bpm, loud = 1, genre = "frenchcore", arche = { hard: 0.9 } }) {
+/**
+ * One synthetic frame of a track at `bpm`, `t` seconds in, with an
+ * arrangement: a build from 8 s, the drop at 16 s, a breakdown from 32 s to
+ * 40 s and a second drop at 40 s — the shape the drivers react to — plus a
+ * snare on beats 2 and 4 and a melody that moves.
+ */
+function frameAt(t, { bpm, dt = 1 / 60, steady = false }) {
   const period = 60 / bpm;
   const ph = (t % period) / period;
   const idx = Math.floor(t / period);
-  const kick = Math.max(0, 1 - ph * 7) * loud;
+  const hit = ph < dt / period;
+  // `steady` is the same groove with no arrangement: a drop lands at a time
+  // in SECONDS here, so everything a drop sets off would count the same at
+  // both tempos and drag a tempo comparison toward 1.
+  const section = steady ? 0 : t % 48;
+  const breakdown = section >= 32 && section < 40 ? 1 : 0;
+  const build = section >= 8 && section < 16 ? (section - 8) / 8 : 0;
+  const drop = (section >= 16 && section - dt < 16) || (section >= 40 && section - dt < 40);
+  const loud = breakdown ? 0.2 : 1;
+  const kick = breakdown ? 0 : Math.max(0, 1 - ph * 7);
+  const snare = !breakdown && hit && idx % 2 === 1;
   const bands = new Float32Array(120);
   for (let i = 0; i < 120; i++) {
     const f = i / 120;
@@ -92,7 +54,7 @@ function frameAt(t, { bpm, loud = 1, genre = "frenchcore", arche = { hard: 0.9 }
   for (const k of LOOK_KEYS) look[k] = 0.6;
   return {
     t,
-    dt: 1 / 60,
+    dt,
     bands,
     bandsDb: bands,
     energy: {
@@ -101,95 +63,90 @@ function frameAt(t, { bpm, loud = 1, genre = "frenchcore", arche = { hard: 0.9 }
     },
     features: {
       level: 0.7 * loud, levelDb: -12, peak: 0.9, crest: 3, dynamics: loud,
-      flux: 0.02 * loud, lowFlux: 0.03 * loud, midFlux: 0.02 * loud, highFlux: 0.012 * loud,
-      kick, kickHit: ph < 1 / 60 / period, centroid: 1500, centroidN: 0.45,
-      flatness: 0.35, rolloff: 4000, rolloffN: 0.4, percussivity: 0.7 * loud,
-      vocalMod: 0.2, tonal: 0.4, melody: 0.5, melodyPitch: 0.5,
-      melodyFlux: 0.03 * loud, chordChange: 0.1, silent: false,
+      flux: 0.02 * loud, lowFlux: 0.03 * loud, midFlux: snare ? 0.4 : 0.01 * loud,
+      highFlux: hit ? 0.1 : 0.01, kick, kickHit: hit && !breakdown, centroid: 1500,
+      centroidN: 0.45, flatness: 0.35, rolloff: 4000, rolloffN: 0.4,
+      percussivity: 0.7 * loud, vocalMod: 0.2, tonal: 0.4, melody: 0.5,
+      melodyPitch: 0.5 + 0.3 * Math.sin(t * 1.3), melodyFlux: idx % 2 === 0 && hit ? 0.3 : 0.01,
+      chordChange: idx % 8 === 0 && hit ? 0.6 : 0.05, silent: false,
     },
     beat: {
-      bpm, confidence: 0.9, phase: ph, beat: ph < 1 / 60 / period, beatIndex: idx,
-      barPos: idx % 4, beatsPerBar: 4, downbeat: ph < 1 / 60 / period && idx % 4 === 0,
-      onset: ph < 1 / 60 / period ? 0.8 : 0, kickPulse: kick,
-      sinceBeat: t % period, period, locked: true,
+      bpm, confidence: 0.9, phase: ph, beat: hit, beatIndex: idx, barPos: idx % 4,
+      beatsPerBar: 4, downbeat: hit && idx % 4 === 0, onset: hit ? 0.8 : 0,
+      kickPulse: kick, sinceBeat: t % period, period, locked: true,
+    },
+    pattern: {
+      mainKick: hit && !breakdown, mainPower: 0.9, bigKick: hit && idx % 16 === 0,
+      rollKick: false, roll: 0, rollDiv: 0, drop, dropped: 0, sinceDrop: 999,
+      build, breakdown, energy: loud,
     },
     style: {
-      archetypes: { sustain: 0, voice: 0, groove: 0, hard: 0, rock: 0, ...arche },
-      look, dominant: genre, dominantLabel: genre,
-      archetype: Object.keys(arche)[0], confidence: 0.9,
-      kick: { type: "hard", strength: 0.9, decay: 0.12, hit: false },
+      archetypes: { sustain: 0, voice: 0, groove: 0, hard: 0.9, rock: 0 },
+      look, dominant: "techno", dominantLabel: "techno", archetype: "hard", confidence: 0.9,
+      kick: { type: "hard", strength: 0.9, decay: 0.12, hit },
     },
   };
 }
 
-/** How far the drawing moved between the last two frames of a run. */
-function travel({ bpm, seconds, loud = 1, genre, arche }) {
-  const geometry = createGeometry();
-  geometry.set(W, H, null);
-  const scene = createSmartScene({
-    preset: tierPreset("high"), layout: "full", intensity: 0.8,
-  });
-  const pal = createPalette("neon");
-  const dt = 1 / 60;
-  const n = Math.round(seconds / dt);
-  // Measured over a WINDOW, not over the last two frames. A picture whose
-  // event happened to fall between the two sampled frames scores zero and a
-  // picture that is between events scores zero too — raggatek, whose stacks sit
-  // still between skanks, read 0.00 at both tempos and the ratio came out 0/0.
-  // Summing the change over the last stretch asks the question that was meant:
-  // how much does this animation move, per second, at this tempo.
-  const WINDOW = 90; // frames
-  let prev = null;
-  let moved = 0;
-  let ink = 0;
-  for (let i = 0; i < n; i++) {
-    const f = frameAt(i * dt, { bpm, loud, genre, arche });
-    f.style.kick.hit = f.beat.beat;
-    pal.update(f, dt);
-    scene.update(f, dt, geometry.out);
-    if (i >= n - WINDOW) {
-      const g = recorder();
-      scene.draw(g, W, H, pal.out, geometry.out);
-      if (prev) moved += histDistance(prev, g.ink);
-      prev = g.ink;
-      ink += g.ink.length;
-    }
-  }
-  return { moved, ink: Math.round(ink / WINDOW) };
-}
+const WORLDS = [];
+for (const id of worldIds()) WORLDS.push([id, await loadWorld(id)]);
 
 /**
- * How much the picture changed between two frames, as the L1 distance between
- * 8x8 histograms of where the ink fell.
- *
- * Comparing the two point lists index by index looks simpler and is wrong: a
- * scene skips an element whose alpha rounded to nothing, the arrays shift by
- * one, and every later point is compared against its neighbour. Measured, that
- * made a ring rotating twice as fast score LOWER than the same ring at half the
- * speed. A histogram does not care what order the points arrived in.
+ * Run one world's driver the way scenes/gl.js does — the musical layer fed at
+ * the analysis rate, the driver stepped with the render dt — and report how far
+ * its state travelled over the second half of the run, what it asked of the
+ * flash and what it put in the event pool.
  */
-function histDistance(a, b) {
-  const ha = hist(a);
-  const hb = hist(b);
-  let d = 0;
-  for (let i = 0; i < ha.length; i++) d += Math.abs(ha[i] - hb[i]);
-  return d;
-}
-
-function hist(pts) {
-  const h = new Float64Array(64);
-  let n = 0;
-  for (let i = 0; i + 1 < pts.length; i += 2) {
-    const x = pts[i];
-    const y = pts[i + 1];
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    const cx = Math.max(0, Math.min(7, Math.floor((x / W) * 8)));
-    const cy = Math.max(0, Math.min(7, Math.floor((y / H) * 8)));
-    h[cy * 8 + cx]++;
-    n++;
+function drive(def, { bpm, seconds, dt = 1 / 60, hitchEvery = 0, steady = false }) {
+  const state = new Float32Array(8);
+  const ev = new Float32Array(32);
+  const flashes = [];
+  const driver = def.create({
+    params: { ...(def.params || {}) },
+    preset: {},
+    skin: {},
+    opts: {},
+    flash: (p) => flashes.push(p),
+    state,
+    ev,
+  });
+  const m = createMusical();
+  const clocks = {
+    beats: 0, bars: 0, phrases: 0, dt, aspect: 16 / 9, spec: new Float32Array(128),
+    pitch: 0.5, melody: 0.5, hole: [0, 0, 0, 0],
+  };
+  const prev = new Float32Array(8);
+  const before = new Float32Array(32);
+  const births = [];
+  let moved = 0;
+  let peak = 0;
+  let bad = null;
+  const n = Math.round(seconds / dt);
+  let t = 0;
+  for (let i = 0; i < n; i++) {
+    // A hitch — a tab brought back to the front, a GC pause — is a render dt
+    // of a quarter of a second, the most the engine ever hands a driver.
+    const step = hitchEvery && i % hitchEvery === hitchEvery - 1 ? 0.25 : dt;
+    t += step;
+    m.update(frameAt(t, { bpm, dt: step, steady }), step);
+    clocks.beats = (t * bpm) / 60;
+    clocks.bars = clocks.beats / 4;
+    clocks.phrases = clocks.bars / 8;
+    clocks.dt = step;
+    clocks.pitch = 0.5 + 0.3 * Math.sin(t);
+    before.set(ev);
+    driver.step?.(step, m, clocks);
+    // Only the slots this step wrote: the ring keeps its older events.
+    for (let k = 0; k < 32; k += 4)
+      if (ev[k] !== before[k] || ev[k + 1] !== before[k + 1]) births.push([ev[k], clocks.beats]);
+    for (let k = 0; k < 8; k++) {
+      if (!Number.isFinite(state[k])) bad ??= `state[${k}] = ${state[k]} at ${t.toFixed(1)} s`;
+      peak = Math.max(peak, Math.abs(state[k]));
+    }
+    if (i > n / 2) for (let k = 0; k < 8; k++) moved += Math.abs(state[k] - prev[k]);
+    prev.set(state);
   }
-  if (n) for (let i = 0; i < 64; i++) h[i] /= n;
-  return h;
+  return { moved, peak, bad, flashes, births };
 }
 
 test("the musical layer re-times everything when the tempo changes", () => {
@@ -210,52 +167,61 @@ test("the musical layer re-times everything when the tempo changes", () => {
   assert.ok(Math.abs(m.bar - m.beat * 4) < 1e-6);
 });
 
-test("every dedicated animation moves with the tempo", () => {
-  // The stopwatch. Same wall clock, twice the tempo: the picture has to move
-  // materially more. A hard-coded rate scores ~1.0 here and fails.
-  const ids = [...new Set(dedicatedIds())];
-  const slack = [];
-  for (const id of ids) {
-    const arche = { hard: 0.9 };
-    const slow = travel({ bpm: 90, seconds: 6, genre: id, arche });
-    const fast = travel({ bpm: 180, seconds: 6, genre: id, arche });
-    assert.ok(fast.ink > 20, `${id} drew almost nothing`);
-    const ratio = fast.moved / Math.max(1e-6, slow.moved);
-    slack.push(`${id} ${ratio.toFixed(2)}`);
-    assert.ok(
-      ratio > 1.25,
-      `${id} moves the same at 90 and 180 BPM (ratio ${ratio.toFixed(2)}) — ` +
-        `something in it is timed in seconds. Full set: ${slack.join(", ")}`
-    );
+test("every world's driver keeps musical time", () => {
+  // Measured when the catalogue was written, over 16 s of each tempo: every
+  // driver that integrates anything moves 1.85x-2.07x as far at 180 BPM as at
+  // 90 — shatter and bounce sit lowest, because a spring's overshoot is a
+  // property of the spring — except `ocean`, whose waves run at the SQUARE
+  // ROOT of the tempo on purpose (1.41x): a sea twice as fast stops reading as
+  // water. A rate written in seconds scores 1.00. Drivers that integrate
+  // nothing (their shader does all the moving on the beat clock) move under
+  // half a unit and are not asked.
+  const ratios = [];
+  for (const [id, def] of WORLDS) {
+    if (!def.create) continue;
+    const slow = drive(def, { bpm: 90, seconds: 16, steady: true });
+    const fast = drive(def, { bpm: 180, seconds: 16, steady: true });
+    if (slow.moved < 0.5) continue;
+    const r = fast.moved / slow.moved;
+    ratios.push(`${id} ${r.toFixed(2)}`);
+    assert.ok(r > 1.3, `${id}: moved ${r.toFixed(2)}x as far at twice the tempo — a clock in seconds?`);
+  }
+  assert.ok(ratios.length >= 20, `only ${ratios.length} drivers integrate anything: ${ratios.join(", ")}`);
+});
+
+test("every driver survives any tempo, hitches and ten minutes of music", () => {
+  // The projector at a party: nobody watching, the tab backgrounded and
+  // brought back, a track at 60 and the next at 250. A NaN in a driver's state
+  // is a uniform the GPU turns into a black world for the rest of the night,
+  // and a state that grows without bound loses a float32 uniform's precision
+  // — a phase of 1e6 moves in steps of 0.06, which is a visible stutter.
+  // Measured: before the long clocks were wrapped, the wobble's LFO phase
+  // reached 3.4e4 in ten minutes at 250 BPM, the night drive's road 2.3e4 and
+  // the pixel runner's scroll 2.9e4 — a few hours on, a float32 step there is
+  // a twentieth of a unit. Every long clock now wraps at a period its shader
+  // is exactly periodic in; the largest state left is the vinyl's turn at
+  // 8.4e3 (a float32 step of 0.001 of a turn).
+  for (const [id, def] of WORLDS) {
+    if (!def.create) continue;
+    for (const bpm of [60, 250]) {
+      const r = drive(def, { bpm, seconds: 600, dt: 1 / 30, hitchEvery: 97 });
+      assert.equal(r.bad, null, `${id} @ ${bpm}: ${r.bad}`);
+      assert.ok(r.peak < 1e4, `${id} @ ${bpm}: state reached ${r.peak.toExponential(1)}`);
+      for (const p of r.flashes) assert.ok(p >= 0 && p <= 1, `${id}: flash(${p})`);
+    }
   }
 });
 
-test("every dedicated animation answers the moment, not only the grid", () => {
-  // Same tempo, a drop against a breakdown. An animation that reads only the
-  // beat grid draws them identically, which is the other half of "adapts to
-  // the music" and is not caught by the tempo test at all.
-  for (const id of [...new Set(dedicatedIds())]) {
-    const arche = { hard: 0.9 };
-    const loud = travel({ bpm: 150, seconds: 5, loud: 1, genre: id, arche });
-    const quiet = travel({ bpm: 150, seconds: 5, loud: 0.12, genre: id, arche });
-    const diff = Math.abs(loud.ink - quiet.ink) / Math.max(1, loud.ink);
-    const moved = Math.abs(loud.moved - quiet.moved) / Math.max(1e-6, loud.moved);
-    assert.ok(
-      diff > 0.02 || moved > 0.05,
-      `${id} draws a breakdown exactly like a drop (ink ${loud.ink}/${quiet.ink})`
-    );
-  }
-});
-
-test("a dedicated animation declares what it is and how much trail it wants", () => {
-  for (const id of [...new Set(dedicatedIds())]) {
-    const mod = genreSceneFor(id);
-    assert.ok(mod, `${id} has no module`);
-    assert.ok(mod.meta && mod.meta.label, `${id} has no label`);
-    assert.ok(
-      mod.meta.trail > 0.05 && mod.meta.trail <= 1,
-      `${id} trail ${mod.meta.trail} is outside the usable range`
-    );
-    assert.equal(typeof mod.create, "function", `${id} exports no create()`);
+test("every event a driver schedules is stamped in beats, near now", () => {
+  // Events live in the uEv pool as (birth in beats, ...), and the shader ages
+  // them against uClock.x. A birth stamped in seconds, or at a stale beat,
+  // plays its animation at the wrong moment or never — and renders perfectly
+  // well, so nothing but this would notice. Fireworks aim a shell at the NEXT
+  // beat, which is the furthest ahead anything schedules.
+  for (const [id, def] of WORLDS) {
+    if (!def.create) continue;
+    const r = drive(def, { bpm: 140, seconds: 48 });
+    for (const [birth, now] of r.births)
+      assert.ok(birth > now - 4 && birth < now + 2.5, `${id}: event born at ${birth.toFixed(1)} with the clock at ${now.toFixed(1)}`);
   }
 });

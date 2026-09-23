@@ -764,7 +764,7 @@ export function createGLScene(opts = {}) {
 // `#define P_SIDES uP0.x` and so on, in the order the world declared its
 // parameters, so the GLSL reads its knobs by name and the packing lives in one
 // place.
-function paramDefines(names) {
+export function paramDefines(names) {
   const comp = ["x", "y", "z", "w"];
   let s = "";
   names.slice(0, 16).forEach((n, i) => {

@@ -25,6 +25,9 @@
     vizScopeColour,
     vizScreenMode,
     vizScreenQuality,
+    vizWorld,
+    vizScreenWorld,
+    vizFlash,
     ecoMode,
     current,
     playing,
@@ -42,6 +45,7 @@
   import Visualizer from "./Visualizer.svelte";
   import Icon from "./Icon.svelte";
   import EcoToggle from "./EcoToggle.svelte";
+  import WorldPicker from "./WorldPicker.svelte";
 
   const FPS_CHOICES = [
     { v: 30, label: "30", hint: "Le plus économe" },
@@ -51,6 +55,14 @@
   ];
 
   const KICK_LABEL = { soft: "souple", hard: "dur", industrial: "industriel" };
+
+  // How bright a flash may be. How OFTEN one may happen is not a setting: the
+  // engine holds every level, "full" included, under three onsets a second.
+  const FLASH_CHOICES = [
+    { v: "off", label: "Aucun", hint: "Rien ne clignote, jamais" },
+    { v: "soft", label: "Doux", hint: "Une lueur sur les drops" },
+    { v: "full", label: "Plein", hint: "Le vrai éclair de scène" },
+  ];
 
   // The oscilloscope's two knobs. Written out here rather than imported from
   // the scene: `lib/viz/scenes/scope.js` is code-split precisely so that a
@@ -100,16 +112,11 @@
 
   $: styleName =
     FAMILY_LIST.find((f) => f.id === $readout.style)?.label || $readout.styleLabel || "—";
-  // What the engine actually resolved: the genre's own skin, then the world
-  // that skin dresses. Two sub-genres sharing a world is normal and is
-  // exactly what this readout is for — it names the row that was matched.
-  // The animation catalogue — eighteen worlds and 227 skin rows, about 180 kB
-  // of source — is loaded ON DEMAND, purely to name the world the engine
-  // resolved. Importing it statically made this settings panel a static
-  // dependency of the catalogue, which put the whole thing back in the main
-  // bundle even though the scenes themselves are code-split: Rollup hoists a
-  // module two chunks share into their common parent, and that parent is the
-  // entry. One readout line is not worth a third of a megabyte at launch.
+  // The world catalogue and the skins are loaded ON DEMAND. Importing them
+  // statically made this panel a static importer of modules the (code-split)
+  // scene also imports, and Rollup hoists a module two chunks share into their
+  // common parent — the entry. The gallery below is not worth putting the
+  // genre table on every launch's critical path.
   let catalogue = null;
   onMount(async () => {
     try {
@@ -117,14 +124,31 @@
         import("../lib/viz/worlds/catalogue.js"),
         import("../lib/viz/skins.js"),
       ]);
-      catalogue = { WORLDS: worlds.WORLD_META, SKINS: skins.SKINS, skinId: skins.skinId };
+      catalogue = { GROUPS: worlds.GROUPS, WORLDS: worlds.WORLD_META, skinFor: skins.skinFor };
     } catch {
-      /* offline mid-deploy: the readout says "—", everything else still works */
+      /* offline mid-deploy: the gallery stays hidden, everything else works */
     }
   });
-  $: worldName = catalogue
-    ? catalogue.WORLDS[(catalogue.SKINS[catalogue.skinId($readout.style, $readout.archetype)] || {}).world]?.label || "—"
-    : "—";
+  // What "auto" draws for the genre the engine settled on: the genre's own
+  // skin, then the world that skin dresses. Two sub-genres sharing a world is
+  // normal and is exactly what this line is for.
+  $: resolvedWorld =
+    catalogue && ($readout.style || $readout.archetype)
+      ? catalogue.skinFor($readout.style, $readout.archetype).world
+      : "";
+  function worldLabel(id) {
+    return (catalogue && catalogue.WORLDS[id]?.label) || "—";
+  }
+  $: worldName =
+    mode !== "smart"
+      ? "—"
+      : $vizWorld !== "auto" && catalogue?.WORLDS[$vizWorld]
+        ? `${worldLabel($vizWorld)} · épinglé`
+        : resolvedWorld
+          ? worldLabel(resolvedWorld)
+          : "—";
+  $: screenWorldName =
+    $vizScreenWorld !== "auto" && catalogue?.WORLDS[$vizScreenWorld] ? worldLabel($vizScreenWorld) : "Auto";
 </script>
 
 <section class="card">
@@ -146,6 +170,8 @@
         paused={!previewLive}
         scopeOrientation={$vizScopeOrientation}
         scopeColour={$vizScopeColour}
+        world={$vizWorld}
+        flash={$vizFlash}
       />
       {#if !previewLive}
         <span class="ph">Lancez un titre pour voir l'aperçu</span>
@@ -205,6 +231,26 @@
       </p>
     {/if}
   </div>
+
+  {#if mode === "smart" && catalogue}
+    <div class="block">
+      <div class="block-head">
+        <span class="block-title">Monde</span>
+        <span class="block-hint muted">
+          Chaque genre a son monde et ses couleurs. Épinglez-en un pour le garder quel
+          que soit le morceau : il prend quand même la teinte du genre qui passe.
+        </span>
+      </div>
+      <WorldPicker
+        value={$vizWorld}
+        groups={catalogue.GROUPS}
+        meta={catalogue.WORLDS}
+        resolved={$vizBeatDetect ? resolvedWorld : ""}
+        genre={$readout.style ? styleName : ""}
+        on:pick={(e) => vizWorld.set(e.detail)}
+      />
+    </div>
+  {/if}
 
   <!-- The scope's own settings, shown when it is the scene somewhere — here or
        on the separate screen. They sit directly under the picker that reveals
@@ -277,6 +323,25 @@
         aria-label="Intensité"
       />
       <span class="val">{Math.round($vizIntensity * 100)}%</span>
+    </div>
+  </div>
+
+  <div class="block">
+    <div class="block-head">
+      <span class="block-title"><Icon name="zap" size={15} /> Flashs</span>
+      <span class="block-hint muted">
+        L'éclair qui accompagne un drop ou une grosse frappe. Même en « Plein », jamais
+        plus de trois par seconde : au-delà, une lumière qui clignote devient un risque
+        pour les personnes photosensibles. Coupés d'office si l'appareil demande de
+        réduire les animations. Vaut aussi pour l'écran séparé.
+      </span>
+    </div>
+    <div class="seg">
+      {#each FLASH_CHOICES as f}
+        <button class="seg-btn" class:sel={$vizFlash === f.v} title={f.hint} on:click={() => vizFlash.set(f.v)}
+          >{f.label}</button
+        >
+      {/each}
     </div>
   </div>
 
@@ -364,13 +429,13 @@
       <span class="ro-v">{KICK_LABEL[$readout.kick] || "—"}</span>
       <span class="bar"></span>
     </div>
-    <!-- Which of the thirteen animations the style above has chosen. Without
-         it the smart engine's whole point — that the picture is different per
+    <!-- Which world the style above has chosen (or the one pinned). Without it
+         the smart engine's whole point — that the picture is different per
          genre — is something you have to notice rather than something the
          settings tell you. -->
     <div class="ro">
-      <span class="ro-k">Animation</span>
-      <span class="ro-v">{mode === "smart" && $readout.style ? worldName : "—"}</span>
+      <span class="ro-k">Monde</span>
+      <span class="ro-v">{worldName}</span>
       <span class="bar"></span>
     </div>
   </div>
@@ -484,6 +549,26 @@
         >
       {/each}
     </div>
+    {#if $vizScreenMode === "smart" && catalogue}
+      <!-- Folded: the player's own gallery above is the one people browse;
+           this is the same choice for the other screen, one tap away. -->
+      <details class="screen-world">
+        <summary>
+          <span>Monde de cet écran</span>
+          <span class="sw-val">{screenWorldName}</span>
+        </summary>
+        <div class="screen-world-body">
+          <WorldPicker
+            value={$vizScreenWorld}
+            groups={catalogue.GROUPS}
+            meta={catalogue.WORLDS}
+            resolved={$vizBeatDetect ? resolvedWorld : ""}
+            genre={$readout.style ? styleName : ""}
+            on:pick={(e) => vizScreenWorld.set(e.detail)}
+          />
+        </div>
+      </details>
+    {/if}
   </div>
 </section>
 
@@ -507,8 +592,14 @@
   .muted {
     color: var(--text-dim);
   }
+  /* The preview follows the reader down the card: every control in it
+     changes what the preview shows, and a world picked at the bottom of the
+     gallery is worth nothing if the picture it changed has scrolled away. */
   .preview {
-    position: relative;
+    position: sticky;
+    top: 8px;
+    z-index: 2;
+    box-shadow: 0 10px 28px -14px rgba(0, 0, 0, 0.7);
     width: 100%;
     aspect-ratio: 16 / 9;
     max-height: 260px;
@@ -519,7 +610,14 @@
     display: grid;
     place-items: center;
   }
-  .preview.idle {
+  @media (max-width: 640px) {
+    .preview {
+      max-height: 190px;
+    }
+  }
+  /* Dim the picture, never the box: the box is sticky and slides over the
+     controls, so it has to stay opaque. */
+  .preview.idle :global(canvas) {
     opacity: 0.85;
   }
   .preview.none {
@@ -552,7 +650,52 @@
     margin-bottom: 10px;
   }
   .block-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     font-weight: 600;
+  }
+  .screen-world {
+    margin-top: 12px;
+    border: 1px solid var(--bg-hover);
+    border-radius: 12px;
+    background: var(--bg);
+  }
+  .screen-world summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 44px;
+    padding: 0 14px;
+    font-weight: 600;
+    cursor: pointer;
+    list-style: none;
+  }
+  .screen-world summary::-webkit-details-marker {
+    display: none;
+  }
+  .screen-world summary::after {
+    content: "";
+    width: 7px;
+    height: 7px;
+    margin-left: 4px;
+    border-right: 2px solid var(--text-dim);
+    border-bottom: 2px solid var(--text-dim);
+    transform: translateY(-2px) rotate(45deg);
+    transition: transform 0.16s ease;
+  }
+  .screen-world[open] summary::after {
+    transform: translateY(2px) rotate(-135deg);
+  }
+  .sw-val {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.86rem;
+  }
+  .screen-world-body {
+    padding: 4px 14px 14px;
   }
   .block-hint {
     font-size: 0.78rem;

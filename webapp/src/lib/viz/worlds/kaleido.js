@@ -94,8 +94,8 @@ void main() {
   // the mandala CLICKS round with the music rather than drifting.
   float n = max(2.0, floor(P_SECTORS + 0.5));
   float sector = TAU / n;
-  float step = floor(bars) + smoothstep(0.0, 0.3, fract(bars));
-  float turn = step * sector * 0.5 * P_TWIST * (1.0 - 0.7 * uMood.x) + uS0.x;
+  float ratchet = floor(bars) + smoothstep(0.0, 0.3, fract(bars));
+  float turn = ratchet * sector * 0.5 * P_TWIST * (1.0 - 0.7 * uMood.x) + uS0.x;
 
   // The fold's own geometry: drifting over the phrase, leaning with the bass.
   float ang = 0.42 + 0.16 * sin(uClock.z * TAU * 0.5 + 0.7) + 0.05 * uBandA.y + uS0.y;

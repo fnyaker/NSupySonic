@@ -118,6 +118,10 @@ void main() {
         const push = Math.min(0.999, m.weight * 0.9 + m.drive * 0.5);
         const rate = RATES[Math.floor(push * RATES.length)] * (params.rate || 1);
         ph += (dt / m.beat) * rate * Math.PI * 2 * 0.5;
+        // Wrapped at a period both oscillators close on (osc(ph) and
+        // osc(ph * 0.33) — 0.33 · 200π is 66π), so the uniform keeps its
+        // precision through a whole night instead of stuttering hours in.
+        if (ph > 200 * Math.PI) ph -= 200 * Math.PI;
         depth = m.ease(depth, Math.min(1, m.weight * 1.2 + 0.2 * m.drive), 0.5, dt);
         state[0] = ph;
         state[1] = depth;

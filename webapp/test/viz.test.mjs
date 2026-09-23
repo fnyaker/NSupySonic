@@ -1,19 +1,22 @@
-// Offline checks for the animation scenes (lib/viz/*).
+// Offline checks for the animation layer (lib/viz/*).
 //
-// The scenes only ever touch a CanvasRenderingContext2D, which is a recordable
-// interface — so they can be driven from Node against a stub that writes down
-// where they drew, and then asked the two questions that actually matter and
-// that nothing else can answer without a person looking at a screen:
+// Two kinds of scene come out of lib/viz, and they are checked in two places.
 //
-//   1. DOES IT FILL THE FRAME? Every scene used to be built on `min(w, h)`,
-//      which on a 16:9 projector is a circle inscribed in the middle and a
-//      third of the picture left black.
-//   2. DOES IT KEEP OFF THE ARTWORK? In the full-screen player the cover sits
-//      in the middle, and the scenes put their brightest material exactly
-//      there — behind it.
+// THE CANVAS SCENES — the oscilloscope and the spectrum bars' no-WebGL twin —
+// only ever touch a CanvasRenderingContext2D, which is a recordable interface:
+// they are driven here against a stub that writes down where they drew, and
+// asked whether they fill the frame, keep off the artwork and (the scope)
+// actually draw the SAMPLES.
 //
-// Plus the third one, for the smart engine: does a different genre actually
-// produce a different picture, or only a differently-tinted one?
+// THE WORLDS are fragment shaders. Node has no GPU, so what they draw is asked
+// of real pixels by the render bench (test/render/run.mjs --check), which
+// renders every one in headless Chromium. What this file pins about them is
+// everything that can be decided WITHOUT a GPU and that a GPU would only report
+// as a black screen: the catalogue, the loader and the skins agree with each
+// other; every genre either vocabulary can name resolves to a world that
+// exists, with parameters that world actually reads; every P_ define and every
+// uniform a shader mentions is one the engine declares; and no shader can ask
+// for wall-clock time, because the engine does not give it any.
 
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -23,10 +26,11 @@ import { createGeometry } from "../src/lib/viz/geometry.js";
 import { createScene, MODES, effectiveMode, levelFor } from "../src/lib/viz/index.js";
 import { tierPreset, TIERS } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
-import { LOOK_KEYS, FAMILY_LIST } from "../src/lib/audio/style.js";
-import { WORLDS } from "../src/lib/viz/worlds/index.js";
-import { hasGenreScene, dedicatedIds } from "../src/lib/viz/genres/index.js";
-import { SKINS, skinId, skinFor, skinCount } from "../src/lib/viz/skins.js";
+import { FAMILY_LIST } from "../src/lib/audio/style.js";
+import { WORLD_META, GROUPS, worldFor } from "../src/lib/viz/worlds/catalogue.js";
+import { worldIds, loadWorld, hasWorld } from "../src/lib/viz/worlds/index.js";
+import { SKINS, ALIASES, skinId, skinFor, skinCount } from "../src/lib/viz/skins.js";
+import { worldFragment, particleVertex, particleFragment, WORLD_UNIFORMS } from "../src/lib/viz/gl/glsl.js";
 
 // --- a canvas that remembers where it was drawn on --------------------------
 //
@@ -286,33 +290,14 @@ function makeFrame(t, opts = {}) {
   };
 }
 
-function styleOf(arche, look, dominant = "techno") {
-  const a = { sustain: 0, voice: 0, groove: 0, hard: 0, rock: 0, ...arche };
-  const l = {};
-  for (const k of LOOK_KEYS) l[k] = look[k] ?? 0.5;
-  return {
-    archetypes: a,
-    look: l,
-    dominant,
-    dominantLabel: dominant,
-    archetype: "groove",
-    confidence: 0.8,
-    kick: { type: "hard", strength: 0.8, decay: 0.12, hit: true },
-  };
-}
 
-
-// The scene modules are CODE-SPLIT in the app (lib/viz/index.js loads them on
-// demand so a launch with animations off does not parse a third of a megabyte
-// of them), which makes `createScene` a promise. These checks are about what
-// the scenes DRAW, not about how they are fetched, so they load once here and
-// stay synchronous. The loader's own contract is pinned separately, below.
+// The canvas scenes are CODE-SPLIT in the app (lib/viz/index.js loads them on
+// demand), which makes `createScene` a promise. These checks are about what
+// they DRAW, so they load once here and stay synchronous; the loader's own
+// contract is pinned separately, below.
 const SCENE_FACTORY = {
   bars: (await import("../src/lib/viz/scenes/bars.js")).createBarsScene,
-  pulse: (await import("../src/lib/viz/scenes/pulse.js")).createPulseScene,
-  aurora: (await import("../src/lib/viz/scenes/aurora.js")).createAuroraScene,
   scope: (await import("../src/lib/viz/scenes/scope.js")).createScopeScene,
-  smart: (await import("../src/lib/viz/scenes/smart.js")).createSmartScene,
 };
 const makeScene = (mode, opts) => (SCENE_FACTORY[mode] ? SCENE_FACTORY[mode](opts) : null);
 
@@ -343,11 +328,8 @@ function paint(
   return { ink: g.ink, scene, geom: geometry.out };
 }
 
-const SCENES = MODES.filter((m) => m.id !== "off" && m.id !== "bars").map((m) => m.id);
 
 // Where a scene spent its ink, as an 8×8 histogram normalised to sum to 1.
-// Two animations that genuinely differ put their material in different places;
-// two that are the same primitives at different brightness do not.
 function signature(ink, w, h) {
   const n = 8;
   const cell = new Float64Array(n * n);
@@ -420,356 +402,10 @@ test("with artwork in the way, radial 0 is its rim", () => {
   assert.ok(out.hw < 200 && out.hh < 200, "the artwork was allowed to cover everything");
 });
 
-test("every scene fills a 16:9 frame instead of a circle in the middle of it", () => {
-  const w = 1920;
-  const h = 1080;
-  for (const mode of SCENES) {
-    const { ink } = paint(mode, { w, h, style: styleOf({ hard: 0.6, groove: 0.4 }, { motion: 0.8 }) });
-    assert.ok(ink.length > 50, `${mode}: drew almost nothing (${ink.length} points)`);
-    const { minX, maxX, minY, maxY } = extent(ink);
-    assert.ok(minX < w * 0.15, `${mode}: nothing drawn on the left (min x ${minX.toFixed(0)})`);
-    assert.ok(maxX > w * 0.85, `${mode}: nothing drawn on the right (max x ${maxX.toFixed(0)})`);
-    assert.ok(minY < h * 0.2, `${mode}: nothing drawn at the top (min y ${minY.toFixed(0)})`);
-    assert.ok(maxY > h * 0.8, `${mode}: nothing drawn at the bottom (max y ${maxY.toFixed(0)})`);
-  }
-});
-
-test("every scene keeps its material off the artwork", () => {
-  // A phone in the full-screen player: the cover is a square across most of
-  // the width, dead centre. Anything drawn inside it is drawn for nobody.
-  const w = 420;
-  const h = 900;
-  const side = w * 0.72;
-  const occl = { x: (w - side) / 2, y: (h - side) / 2, w: side, h: side };
-  for (const mode of SCENES) {
-    const { ink, geom } = paint(mode, {
-      w, h, occl,
-      style: styleOf({ hard: 0.5, groove: 0.5 }, { motion: 0.8, chaos: 0.5, melodic: 0.6 }),
-    });
-    const inside = ink.filter(
-      (p) => Math.abs(p[0] - geom.cx) < geom.hw && Math.abs(p[1] - geom.cy) < geom.hh
-    ).length;
-    assert.ok(
-      inside / ink.length < 0.25,
-      `${mode}: ${((inside / ink.length) * 100) | 0}% of the drawing is behind the cover`
-    );
-  }
-});
-
-test("every dedicated animation fills the frame and stays off the artwork", () => {
-  // The two properties the whole geometry layer exists for, asked of the
-  // scenes that were NOT being asked. `SCENES` above is the mode registry —
-  // off / bars / pulse / aurora / smart — so a dedicated genre animation, which
-  // is what `smart` actually draws for most of this library, was never checked
-  // for either. On a 16:9 beamer a scene built round an inscribed circle leaves
-  // a third of the picture black; in the full-screen player its brightest part
-  // sits behind the album cover.
-  const look = { motion: 0.8, density: 0.7, punch: 0.8, smooth: 0.4, warm: 0.5, melodic: 0.6, chaos: 0.5 };
-  const arche = { hard: 0.8, groove: 0.2 };
-  for (const id of [...new Set(dedicatedIds())]) {
-    const wide = paint("smart", { w: 1920, h: 1080, style: styleOf(arche, look, id) });
-    assert.ok(wide.ink.length > 50, `${id}: drew almost nothing (${wide.ink.length} points)`);
-    const { minX, maxX, minY, maxY } = extent(wide.ink);
-    assert.ok(minX < 1920 * 0.15, `${id}: nothing drawn on the left (min x ${minX.toFixed(0)})`);
-    assert.ok(maxX > 1920 * 0.85, `${id}: nothing drawn on the right (max x ${maxX.toFixed(0)})`);
-    assert.ok(minY < 1080 * 0.2, `${id}: nothing drawn at the top (min y ${minY.toFixed(0)})`);
-    assert.ok(maxY > 1080 * 0.8, `${id}: nothing drawn at the bottom (max y ${maxY.toFixed(0)})`);
-
-    const w = 420;
-    const h = 900;
-    const side = w * 0.72;
-    const occl = { x: (w - side) / 2, y: (h - side) / 2, w: side, h: side };
-    const phone = paint("smart", { w, h, occl, style: styleOf(arche, look, id) });
-    const geom = phone.geom;
-    const inside = phone.ink.filter(
-      (pt) => Math.abs(pt[0] - geom.cx) < geom.hw && Math.abs(pt[1] - geom.cy) < geom.hh
-    ).length;
-    assert.ok(
-      inside / phone.ink.length < 0.25,
-      `${id}: ${((inside / phone.ink.length) * 100) | 0}% of the drawing is behind the cover`
-    );
-  }
-});
-
-test("every genre gets its own animation, not the same one re-weighted", () => {
-  // THE complaint this design answers: the old engine drew one visual
-  // vocabulary at per-genre strengths, so frenchcore and ambient were the same
-  // picture at different brightness. A family now maps either to its OWN
-  // animation (`lib/viz/genres/`, where the id is the genre itself) or, for the
-  // long tail, to a world it shares — and neither kind is a variation on the
-  // others. The expected value below is whichever applies.
-  const cases = {
-    frenchcore: ["frenchcore", { motion: 0.96, density: 0.85, punch: 0.98, smooth: 0.12, warm: 0.82, melodic: 0.15, chaos: 0.7 }, { hard: 0.9 }],
-    techno: ["tunnel", { motion: 0.66, density: 0.62, smooth: 0.38, warm: 0.28, melodic: 0.28, chaos: 0.2 }, { groove: 0.85 }],
-    psytrance: ["kaleido", { motion: 0.9, density: 0.86, smooth: 0.3, warm: 0.22, melodic: 0.4, chaos: 0.32 }, { hard: 0.6, groove: 0.4 }],
-    rap: ["vinyl", { motion: 0.46, punch: 0.7, warm: 0.62, melodic: 0.35, smooth: 0.6 }, { groove: 0.6, voice: 0.4 }],
-    metal: ["stagelights", { motion: 0.78, density: 0.72, punch: 0.84, warm: 0.62, chaos: 0.5, smooth: 0.22 }, { rock: 0.9 }],
-    synthwave: ["horizon", { motion: 0.44, density: 0.5, smooth: 0.8, warm: 0.88, melodic: 0.78 }, { groove: 0.5, voice: 0.5 }],
-    ambient: ["nebula", { motion: 0.06, density: 0.16, punch: 0.04, smooth: 0.93, warm: 0.38, melodic: 0.9, chaos: 0.04 }, { sustain: 0.95 }],
-    dnb: ["breakgrid", { motion: 0.88, density: 0.8, punch: 0.72, warm: 0.36, chaos: 0.34, smooth: 0.26 }, { hard: 0.5, groove: 0.5 }],
-    dubstep: ["wobble", { motion: 0.7, density: 0.7, punch: 0.88, warm: 0.34, chaos: 0.55, smooth: 0.2 }, { hard: 0.8 }],
-    jazz: ["smoke", { motion: 0.4, density: 0.46, warm: 0.7, chaos: 0.2, smooth: 0.66, melodic: 0.85 }, { voice: 0.6, sustain: 0.4 }],
-    house: ["bloom", { motion: 0.5, density: 0.55, warm: 0.6, smooth: 0.58, melodic: 0.55 }, { groove: 0.7, voice: 0.3 }],
-    zaag: ["zaag", { motion: 0.86, density: 0.78, punch: 0.88, warm: 0.26, melodic: 0.34, chaos: 0.5 }, { hard: 0.88 }],
-    hardstyle: ["hardstyle", { motion: 0.78, punch: 0.95, warm: 0.62, melodic: 0.45, chaos: 0.3 }, { hard: 0.9 }],
-    hardbass: ["hardbounce", { motion: 0.8, punch: 0.95, warm: 0.6, melodic: 0.3, chaos: 0.35 }, { hard: 0.88 }],
-    trance: ["starfield", { motion: 0.62, density: 0.7, warm: 0.3, smooth: 0.72, melodic: 0.84 }, { groove: 0.5, sustain: 0.5 }],
-  };
-  const sigs = {};
-  for (const [family, [expected, look, arche]] of Object.entries(cases)) {
-    const r = paint("smart", {
-      w: 1600, h: 900, seconds: 9,
-      style: styleOf(arche, look, family),
-    });
-    assert.equal(r.scene.world, expected, `${family} did not land on its own animation`);
-    assert.equal(
-      r.scene.kind,
-      hasGenreScene(family) ? "genre" : "world",
-      `${family} should be drawn by its ${hasGenreScene(family) ? "own file" : "world"}`
-    );
-    assert.equal(r.scene.skin, family, `${family} was dressed as ${r.scene.skin}`);
-    assert.ok(r.ink.length > 40, `${family}: ${expected} drew almost nothing`);
-    sigs[family] = signature(r.ink, 1600, 900);
-  }
-  // ...and the pictures themselves differ, not only the label on them. These
-  // are the pairs a listener would call obviously unrelated.
-  const pairs = [
-    ["frenchcore", "ambient"],
-    ["zaag", "house"],
-    ["techno", "rap"],
-    ["synthwave", "dubstep"],
-    ["psytrance", "metal"],
-    ["jazz", "dnb"],
-    ["hardstyle", "trance"],
-  ];
-  for (const [a, b] of pairs) {
-    const d = sigDistance(sigs[a], sigs[b]);
-    assert.ok(d > 0.3, `${a} and ${b} draw in the same places (distance ${d.toFixed(2)})`);
-  }
-});
-
-test("every family the classifier can name has its own skin", () => {
-  // A family added to style.js and forgotten here would silently fall back,
-  // which is exactly the kind of gap nobody notices until a genre looks wrong.
-  for (const f of FAMILY_LIST) {
-    const id = skinId(f.id);
-    assert.ok(id, `family "${f.id}" has no skin`);
-    assert.ok(WORLDS[SKINS[id].world], `family "${f.id}" points at an unknown world`);
-    // ...and its LABEL resolves to the same PICTURE, because that is what a
-    // hand-applied tag from the genre studio actually carries. The id and the
-    // label may be two names for one sound ("garage" / "UK garage"), so what
-    // has to match is the world, not the row.
-    const byLabel = skinId(f.label);
-    assert.ok(byLabel, `the label of "${f.id}" ("${f.label}") resolves to nothing`);
-    assert.equal(
-      SKINS[byLabel].world,
-      SKINS[id].world,
-      `"${f.label}" and "${f.id}" land in different worlds`
-    );
-  }
-});
-
-test("the catalogue is far wider than the detector, and every row is usable", () => {
-  // The point of the skin table: the live classifier can only name what six
-  // descriptors separate, but a tag or a trained model can name a sub-genre,
-  // and that sub-genre should not fall back to its parent's picture.
-  assert.ok(skinCount() > 150, `only ${skinCount()} genres are dressed`);
-  for (const [id, sk] of Object.entries(SKINS)) {
-    assert.ok(WORLDS[sk.world], `${id}: unknown world ${sk.world}`);
-    for (const k of ["hue", "sat", "light", "speed", "energy"]) {
-      if (sk[k] === undefined) continue;
-      assert.ok(Number.isFinite(sk[k]), `${id}: ${k} is not a number`);
-    }
-    if (sk.sat !== undefined) assert.ok(sk.sat > 0 && sk.sat <= 2, `${id}: sat ${sk.sat}`);
-    if (sk.speed !== undefined) assert.ok(sk.speed > 0 && sk.speed <= 3, `${id}: speed ${sk.speed}`);
-    // Most parameters are multipliers around 1; a few are counts (the number of
-    // sides on a corridor) and a few are SIGNED, because the thing they set is
-    // a direction — a corridor whose rings recede, a grid that scrolls the
-    // other way. All of them are bounded: a typo of 400 would allocate an array
-    // that size.
-    for (const v of Object.values(sk.p || {}))
-      assert.ok(Number.isFinite(v) && v >= -64 && v <= 64, `${id}: odd parameter ${v}`);
-  }
-  // Every world is actually reached by something — a world nothing selects is
-  // dead code that still has to be maintained.
-  const used = new Set(Object.values(SKINS).map((x) => x.world));
-  for (const w of Object.keys(WORLDS))
-    assert.ok(used.has(w), `no genre uses the "${w}" world`);
-});
-
-test("a name arrives however it likes and still finds its skin", () => {
-  assert.equal(skinId("Drum & Bass"), "dnb");
-  assert.equal(skinId("drum and bass"), "dnb");
-  assert.equal(skinId("Psytrance"), "psytrance");
-  assert.equal(skinId("PSY"), "psytrance");
-  assert.equal(skinId("Cordes / classique"), "strings");
-  assert.equal(skinId("Hard pingpong"), "hardpingpong");
-  assert.equal(skinId("musique classique"), "classical");
-  assert.equal(skinId("8-bit"), "eightbit");
-  // Unknown names still dress the scene rather than leaving it blank.
-  assert.equal(skinId("a genre nobody has named", "hard"), "hardstyle");
-  assert.ok(WORLDS[skinFor("total nonsense").world]);
-});
-
-test("two genres sharing a world still draw differently", () => {
-  // The second half of the answer. Thirteen worlds cannot cover two hundred
-  // genres on their own; what separates gabber from speedcore is the skin —
-  // seven big slabs and a strobe against twenty splinters — and if that came
-  // out identical the catalogue would be decoration.
-  const pairs = [
-    // Both still on `hardbounce`: hardstyle and rawstyle have their own files
-    // now, which is the catalogue working as intended — this line is about the
-    // long tail that does not, and hardbass against jumpstyle is exactly that.
-    [["hardbass", { chaos: 0.35, motion: 0.8, punch: 0.95 }, { hard: 0.9 }],
-     ["jumpstyle", { chaos: 0.25, motion: 0.82, punch: 0.9 }, { hard: 0.85 }]],
-    [["techno", { chaos: 0.2, motion: 0.66 }, { groove: 0.85 }],
-     ["acidtechno", { chaos: 0.35, motion: 0.8 }, { groove: 0.8 }]],
-    [["liquiddnb", { chaos: 0.2, motion: 0.85 }, { groove: 0.6, hard: 0.4 }],
-     ["drumfunk", { chaos: 0.5, motion: 0.95 }, { hard: 0.6, groove: 0.4 }]],
-    [["classical", { melodic: 0.95, smooth: 0.9 }, { sustain: 0.95 }],
-     ["gospel", { melodic: 0.9, smooth: 0.8, warm: 0.8 }, { voice: 0.6, sustain: 0.4 }]],
-  ];
-  for (const [[a, la, aa], [b, lb, ab]] of pairs) {
-    const ra = paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(aa, la, a) });
-    const rb = paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(ab, lb, b) });
-    assert.equal(ra.scene.world, rb.scene.world, `${a}/${b} should share a world`);
-    assert.notEqual(ra.scene.skin, rb.scene.skin);
-    const d = sigDistance(signature(ra.ink, 1600, 900), signature(rb.ink, 1600, 900));
-    assert.ok(d > 0.08, `${a} and ${b} came out identical (distance ${d.toFixed(3)})`);
-  }
-});
-
-test("place() hands back one shared array, and the scenes know it", () => {
-  // Pinning the contract rather than the consequence. `place` reuses a single
-  // pair to keep a 94 Hz loop out of the garbage collector, so two results held
-  // at once are the same array — and a scene that forgets draws a zero-length
-  // segment, which throws nothing, logs nothing and simply is not there. It
-  // cost a dashed corridor, a tonearm, a hi-hat ring, a set of spokes and a web
-  // before anyone noticed, so the sharp edge is written down here.
-  const geometry = createGeometry();
-  geometry.set(1600, 900, null);
-  const g = geometry.out;
-  const a = g.place(0, 1);
-  const first = [a[0], a[1]];
-  const b = g.place(Math.PI, 1);
-  assert.equal(a, b, "place no longer shares its buffer — update the scenes' comments");
-  assert.notDeepEqual(first, [b[0], b[1]], "two different angles gave the same point");
-});
-
-test("every genre the studio offers is a genre the animation can dress", () => {
-  // The two halves of the vocabulary are written in different languages and
-  // have to agree: `analysis.known_genres()` is what the genre studio offers an
-  // admin to tag with, and this table is what the animation does with the tag
-  // that comes back. A label the studio offers and the engine cannot resolve is
-  // a track that gets tagged carefully and then animated generically, which is
-  // the exact failure this whole catalogue exists to fix — and nothing else in
-  // either suite would catch it, because neither side is wrong on its own.
-  const py = readFileSync(
-    new URL("../../supysonic/deezer/analysis.py", import.meta.url),
-    "utf8"
-  );
-  const block = py.match(/EXTRA_GENRES = \[([\s\S]*?)\n\]/);
-  assert.ok(block, "EXTRA_GENRES is no longer where this test looks for it");
-  const rows = [...block[1].matchAll(/\("([^"]+)",\s*"([a-z]+)"\)/g)];
-  assert.ok(rows.length > 100, `only ${rows.length} extra genres parsed`);
-  const orphans = [];
-  for (const [, label] of rows) if (!skinId(label)) orphans.push(label);
-  assert.deepEqual(orphans, [], `no skin for: ${orphans.join(", ")}`);
-
-  // And the other direction, at the level that matters: the archetypes the
-  // studio files them under are the ones the fallback knows.
-  const arches = new Set(rows.map((r) => r[2]));
-  for (const a of arches)
-    assert.ok(skinId("a name nothing will ever match", a), `no fallback for archetype ${a}`);
-});
-
-test("a shape switch, not a multiplier, is what separates neighbours", () => {
-  // The stronger version of the test above, and the one that pins the thing
-  // that was missing: both sides are painted with the SAME look vector and the
-  // same archetype, so the classifier is telling the two worlds exactly the
-  // same story and the only difference left is the skin's shape switch. A
-  // catalogue that only scaled things would fail every line of this.
-  const pairs = [
-    ["dubstep", "riddim"],        // a sine LFO against a square gate
-    ["garage", "breakbeat"],      // columns against strips
-    ["hardhouse", "hardbass"],    // a streak lead against a triangle wave
-
-    ["punk", "doom"],             // lit from the front, or from behind
-    ["ambient", "drone"],         // clouds against curtains
-    ["downtempo", "dub"],         // a delay receding against one bouncing
-    ["piano", "choral"],          // parallel shafts against a vault
-    ["psytrance", "goa"],         // a kaleidoscope against a pinwheel
-    ["idm", "chiptune"],          // a smooth grid against a two-level one
-    ["techno", "minimal"],        // a corridor rushing at you, or away
-    ["reggae", "samba"],          // a groove that never resolves, and one that does
-  ];
-  const look = { motion: 0.6, density: 0.6, punch: 0.6, smooth: 0.5, warm: 0.5, melodic: 0.5, chaos: 0.4 };
-  const arche = { groove: 0.6, hard: 0.4 };
-  for (const [a, b] of pairs) {
-    const ra = paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(arche, look, a) });
-    const rb = paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(arche, look, b) });
-    assert.equal(ra.scene.world, rb.scene.world, `${a}/${b} should share a world`);
-    const d = sigDistance(signature(ra.ink, 1600, 900), signature(rb.ink, 1600, 900));
-    // The closest pair measures 0.22 and most are several times that, so the
-    // bar is set where a real regression (a switch that stopped being read)
-    // would land rather than where today's numbers happen to sit.
-    assert.ok(d > 0.15, `${a} and ${b} draw in the same places (distance ${d.toFixed(3)})`);
-  }
-
-  // `vinyl` is deliberately not in that list, and the reason is worth writing
-  // down. Its motif is ONE disc filling the frame, so everything it draws —
-  // the tonearm, the hi-hat spokes, a warped groove — lands inside the same
-  // footprint and an 8x8 histogram of where the ink fell cannot see any of it.
-  // How MUCH ink there is can: boom bap is played off a deck (a tonearm, no
-  // machine hats) and trap is programmed (sixteen spokes, no deck), so the two
-  // put down measurably different amounts of it. Fitting the spatial threshold
-  // to this pair instead would have cost the eleven pairs above their teeth.
-  const ink = (g) =>
-    paint("smart", { w: 1600, h: 900, seconds: 8, style: styleOf(arche, look, g) }).ink.length;
-  const bap = ink("boombap");
-  const trp = ink("trap");
-  assert.ok(
-    Math.abs(bap - trp) / Math.max(bap, trp) > 0.05,
-    `boom bap and trap lay down the same ink (${bap} vs ${trp})`
-  );
-});
-
-test("a change of genre is a dissolve, never a cut", () => {
-  // The property the old layer engine had and this one must not lose: the
-  // outgoing world keeps being drawn while the incoming one rises.
-  const preset = tierPreset("high");
-  const geometry = createGeometry();
-  geometry.set(1280, 720, null);
-  const scene = makeScene("smart", { preset, layout: "full", intensity: 0.8 });
-  const pal = createPalette("neon");
-  const g = recorder(1280, 720);
-  const dt = 1 / 60;
-  const run = (style, seconds) => {
-    for (let i = 0; i < Math.round(seconds / dt); i++) {
-      const f = makeFrame(i * dt, { style });
-      pal.update(f, dt);
-      scene.update(f, dt, geometry.out);
-      scene.draw(g, 1280, 720, pal.out, geometry.out);
-    }
-  };
-  run(styleOf({ sustain: 0.95 }, { motion: 0.06, smooth: 0.93 }, "ambient"), 3);
-  assert.equal(scene.world, "nebula");
-  assert.equal(scene.leaving, null);
-  // One tenth of a second of the new genre: the old world must still be there.
-  // ...and the incoming one is a DEDICATED animation, which is the case worth
-  // pinning: the crossfade must not care which kind it is dissolving between.
-  const hard = styleOf({ hard: 0.9 }, { motion: 0.96, chaos: 0.7 }, "frenchcore");
-  run(hard, 0.2);
-  assert.equal(scene.world, "frenchcore");
-  assert.equal(scene.kind, "genre");
-  assert.equal(scene.leaving, "nebula", "the outgoing world was cut instead of faded");
-  run(hard, 4);
-  assert.equal(scene.leaving, null, "the dissolve never finished");
-});
-
-test("every scene survives every tier, aspect and artwork, at any frame", () => {
+test("the canvas scenes survive every tier, aspect and artwork, at any frame", () => {
   // The cheap insurance: a scene that throws takes the whole render loop with
   // it, and a projector nobody is looking at is exactly where that happens.
+  // The bars are what a device with no WebGL2 gets instead of every world.
   const shapes = [
     [1920, 1080, null],
     [390, 844, { x: 20, y: 300, w: 350, h: 350 }],
@@ -777,11 +413,11 @@ test("every scene survives every tier, aspect and artwork, at any frame", () => 
     [800, 800, { x: 100, y: 100, w: 600, h: 600 }],
     [200, 120, null],
   ];
-  for (const mode of ["bars", ...SCENES]) {
+  for (const mode of ["bars", "scope"]) {
     for (const tier of TIERS) {
       for (const [w, h, occl] of shapes) {
         assert.doesNotThrow(
-          () => paint(mode, { w, h, occl, tier, seconds: 1, style: styleOf({ groove: 1 }, {}) }),
+          () => paint(mode, { w, h, occl, tier, seconds: 1 }),
           `${mode} @ ${tier} ${w}x${h}${occl ? " with artwork" : ""}`
         );
       }
@@ -789,22 +425,31 @@ test("every scene survives every tier, aspect and artwork, at any frame", () => 
   }
 });
 
-test("a scene with no style yet still draws, and still fills the frame", () => {
-  // The first seconds of a track, and every track on a device where the smart
-  // level has not been reached: `frame.style` is null and every layer has to
-  // fall back to something sane rather than to nothing.
-  for (const mode of SCENES) {
-    const { ink } = paint(mode, { w: 1600, h: 900, style: null, seconds: 4 });
-    assert.ok(ink.length > 30, `${mode}: drew nothing without a style verdict`);
-    const { maxX } = extent(ink);
-    assert.ok(maxX > 1600 * 0.8, `${mode}: stayed in the middle without a style verdict`);
-  }
+test("the scope fills a 16:9 frame and keeps off the artwork", () => {
+  const w = 1920;
+  const h = 1080;
+  const { ink } = paint("scope", { w, h });
+  assert.ok(ink.length > 50, `drew almost nothing (${ink.length} points)`);
+  const { minX, maxX, minY, maxY } = extent(ink);
+  assert.ok(minX < w * 0.15 && maxX > w * 0.85, `left/right ${minX.toFixed(0)}..${maxX.toFixed(0)}`);
+  assert.ok(minY < h * 0.2 && maxY > h * 0.8, `top/bottom ${minY.toFixed(0)}..${maxY.toFixed(0)}`);
+  // A phone in the full-screen player: the cover is a square across most of
+  // the width, dead centre. Anything drawn inside it is drawn for nobody.
+  const pw = 420;
+  const ph = 900;
+  const side = pw * 0.72;
+  const occl = { x: (pw - side) / 2, y: (ph - side) / 2, w: side, h: side };
+  const r = paint("scope", { w: pw, h: ph, occl });
+  const inside = r.ink.filter(
+    (p) => Math.abs(p[0] - r.geom.cx) < r.geom.hw && Math.abs(p[1] - r.geom.cy) < r.geom.hh
+  ).length;
+  assert.ok(inside / r.ink.length < 0.25, `${((inside / r.ink.length) * 100) | 0}% is behind the cover`);
 });
 
 // --- the oscilloscope -------------------------------------------------------
 //
-// The two tests above ask every scene whether it fills the frame and keeps off
-// the artwork, and the scope answers both. Neither of them would notice if it
+// The two tests above ask the scope whether it fills the frame and keeps off
+// the artwork, and it answers both. Neither of them would notice if it
 // drew its graticule and nothing else — which is why what follows drives the
 // SAMPLES through it and measures the trace on its own. The recorder tags each
 // point with the compositing mode it was drawn under, and the scope's trace is
@@ -1005,6 +650,7 @@ test("the scope's orientation moves the lanes, and both keep off the artwork", (
     );
   }
 });
+// --- the registry and the loader ---------------------------------------------
 
 test("the mode registry stays consistent with what the scenes can do", () => {
   for (const m of MODES) {
@@ -1020,14 +666,14 @@ test("the mode registry stays consistent with what the scenes can do", () => {
   assert.equal(effectiveMode("bars", false, false), "bars");
 });
 
-test("the scene loader hands back the same scenes, on demand", async () => {
+test("the scene loader hands back the right KIND of scene, on demand", async () => {
   // The app never imports a scene statically: `createScene` fetches the module
-  // the first time a mode is asked for. What must hold is that every mode in
-  // the registry can still be built, that the promise resolves to a real scene,
-  // and that "off" stays the one mode with nothing behind it — a launch with
-  // animations off must not fetch anything at all.
+  // the first time a mode is asked for. The host reads `kind` to decide which
+  // context to give the canvas — a canvas cannot switch from 2D to WebGL once
+  // it has one — so the kind is part of the contract, not a detail.
+  const opts = { preset: tierPreset("high"), layout: "full", intensity: 0.8 };
   for (const m of MODES) {
-    const p = createScene(m.id, { preset: tierPreset("high"), layout: "full", intensity: 0.8 });
+    const p = createScene(m.id, opts);
     if (m.id === "off") {
       assert.equal(p, null, "the off mode must not load a scene");
       continue;
@@ -1036,24 +682,229 @@ test("the scene loader hands back the same scenes, on demand", async () => {
     const scene = await p;
     assert.equal(typeof scene?.update, "function", `${m.id} has no update()`);
     assert.equal(typeof scene?.draw, "function", `${m.id} has no draw()`);
+    // The canvas scenes predate the engine and carry no `kind`: the host reads
+    // anything that is not "gl" as a 2D scene.
+    assert.equal(scene.kind === "gl" ? "gl" : "2d", m.id === "scope" ? "2d" : "gl", `${m.id} is the wrong kind of scene`);
   }
-  // Asked for twice, the module is fetched once: the second call resolves to a
-  // NEW scene built from the SAME factory, not to a second download.
-  const opts = { preset: tierPreset("high"), layout: "full", intensity: 0.8 };
   const [a, b] = await Promise.all([createScene("smart", opts), createScene("smart", opts)]);
   assert.ok(a && b && a !== b, "each call must build its own scene");
 });
 
-test("every world in the registry is in the catalogue, and the reverse", async () => {
-  // The registry (worlds/index.js, which pulls in all eighteen scene modules)
-  // and the catalogue (worlds/catalogue.js, which is just names and trails) are
-  // separate files so that naming a world costs nothing. They have to agree.
-  const { WORLDS } = await import("../src/lib/viz/worlds/index.js");
-  const { WORLD_META } = await import("../src/lib/viz/worlds/catalogue.js");
-  assert.deepEqual(Object.keys(WORLDS).sort(), Object.keys(WORLD_META).sort());
-  for (const [id, w] of Object.entries(WORLDS)) {
-    assert.equal(w.label, WORLD_META[id].label, `${id}: the labels differ`);
-    assert.equal(w.trail, WORLD_META[id].trail, `${id}: the trails differ`);
-    assert.equal(typeof w.make, "function", `${id} has no factory`);
+test("every world in the loader is in the catalogue, and the reverse", async () => {
+  // The loader (worlds/index.js: one literal import() per world, so each is its
+  // own chunk) and the catalogue (worlds/catalogue.js: names and blurbs, no
+  // shader) are separate files so that naming a world costs nothing. They have
+  // to agree, or a gallery offers a world that cannot load.
+  assert.deepEqual([...worldIds()].sort(), Object.keys(WORLD_META).sort());
+  const groups = new Set(GROUPS.map((g) => g.id));
+  const used = new Set();
+  for (const id of worldIds()) {
+    const meta = WORLD_META[id];
+    assert.ok(groups.has(meta.group), `${id}: unknown shelf "${meta.group}"`);
+    used.add(meta.group);
+    assert.ok(meta.label && meta.blurb, `${id}: no label or blurb`);
+    const def = await loadWorld(id);
+    assert.equal(def?.id, id, `${id}: the module calls itself "${def?.id}"`);
+  }
+  for (const g of GROUPS) assert.ok(used.has(g.id), `shelf "${g.id}" is empty`);
+  assert.ok(!hasWorld("no-such-world"));
+  // The floor under the skins names real worlds too.
+  for (const a of ["sustain", "voice", "groove", "hard", "rock", "?"]) assert.ok(WORLD_META[worldFor(a)], a);
+});
+
+// --- the shaders, as far as they can be checked without a GPU ------------------
+//
+// A shader that does not compile is a black screen and a line in the console of
+// a browser nobody is looking at — a projector at a party. The render bench
+// compiles every world for real; these are the mistakes it has actually caught,
+// turned into checks that run in a second on every `npm test`.
+
+const WORLDS = [];
+for (const id of worldIds()) WORLDS.push([id, await loadWorld(id)]);
+const { paramDefines } = await import("../src/lib/viz/scenes/gl.js");
+
+// GLSL ES 3.00's reserved words and the built-in functions a world calls.
+// Declaring a local with one of these names is legal right up to the first
+// call it shadows — `float all = …` compiled, and then `all(lessThan(…))` a few
+// lines down did not, and the world rendered black.
+const RESERVED = new Set(
+  (
+    "attribute const uniform varying layout centroid flat smooth break continue do for while switch " +
+    "case default if else in out inout float int uint void bool true false invariant discard return " +
+    "struct precision highp mediump lowp coherent volatile restrict readonly writeonly resource " +
+    "atomic_uint noperspective patch sample subroutine common partition active asm class union enum " +
+    "typedef template this goto inline noinline public static extern external interface long short " +
+    "double half fixed unsigned superp input output filter sizeof cast namespace using " +
+    "all any not min max step mix length distance dot cross normalize reflect refract sign floor ceil " +
+    "round trunc fract mod modf clamp smoothstep abs sin cos tan asin acos atan pow exp exp2 log log2 " +
+    "sqrt inversesqrt texture textureLod texelFetch equal notEqual lessThan greaterThan lessThanEqual " +
+    "greaterThanEqual radians degrees transpose inverse determinant outerProduct matrixCompMult " +
+    "faceforward isnan isinf fwidth dFdx dFdy"
+  ).split(/\s+/)
+);
+
+function glslBodies(def) {
+  const out = [["fragment", def.fragment]];
+  if (def.particles) {
+    out.push(["particle vertex", def.particles.vertex]);
+    out.push(["particle fragment", def.particles.fragment]);
+  }
+  return out;
+}
+
+test("every world's shader asks only for what the engine declares", () => {
+  const declared = new Set(WORLD_UNIFORMS.match(/\bu[A-Z]\w*/g));
+  for (const [id, def] of WORLDS) {
+    const names = Object.keys(def.params || {});
+    assert.ok(names.length <= 16, `${id}: ${names.length} params, the engine packs 16`);
+    for (const [k, v] of Object.entries(def.params || {}))
+      assert.ok(Number.isFinite(v), `${id}: param ${k} is not a number`);
+    const defines = paramDefines(names);
+    for (const [where, body] of glslBodies(def)) {
+      assert.equal(typeof body, "string", `${id}: no ${where}`);
+      // Every P_ a world mentions is one of its own parameters: an undefined
+      // define is a compile error, and a skin can only ever set a param that
+      // exists.
+      for (const p of new Set(body.match(/\bP_[A-Z0-9_]+\b/g) || []))
+        assert.ok(defines.includes(`#define ${p} `), `${id} (${where}): ${p} is not one of its params`);
+      for (const u of new Set(body.match(/\bu[A-Z]\w*/g) || []))
+        assert.ok(declared.has(u), `${id} (${where}): uniform ${u} does not exist`);
+      for (const [open, close] of [["{", "}"], ["(", ")"]]) {
+        const a = body.split(open).length;
+        const b = body.split(close).length;
+        assert.equal(a, b, `${id} (${where}): unbalanced ${open}${close}`);
+      }
+      for (const m of body.matchAll(/\b(?:float|int|uint|bool|vec[234]|ivec[234]|mat[234])\s+([A-Za-z_]\w*)\s*[=;,)[]/g))
+        assert.ok(!RESERVED.has(m[1]), `${id} (${where}): a variable called "${m[1]}" shadows GLSL`);
+    }
+    // And the whole thing assembles: every chunk it uses exists.
+    assert.doesNotThrow(() => worldFragment(def.fragment, def.uses || [], defines), `${id}: fragment`);
+    if (def.particles) {
+      assert.match(def.particles.vertex, /void particle\(int id, out vec2 pos, out vec2 axis, out float width, out vec4 col, out float kind\)/, `${id}: particle() signature`);
+      assert.match(def.particles.fragment, /vec4 sprite\(vec2 \w+, vec4 \w+, float \w+\)/, `${id}: sprite() signature`);
+      assert.doesNotThrow(() => particleVertex(def.particles.vertex, def.particles.uses || [], defines));
+      assert.doesNotThrow(() => particleFragment(def.particles.fragment, def.particles.uses || [], defines));
+    }
+  }
+});
+
+test("a world cannot see wall-clock time, because the engine gives it none", () => {
+  // Every clock a shader has is counted in beats, bars and phrases (uClock),
+  // so a rate written in a shader is a rate per beat by construction and the
+  // picture plays the track at any tempo. That only holds while there is no
+  // seconds uniform to reach for; this is the line.
+  const declared = WORLD_UNIFORMS.match(/\bu[A-Z]\w*/g);
+  for (const u of declared) assert.doesNotMatch(u, /time|sec|second/i, `${u} looks like wall-clock time`);
+  for (const [id, def] of WORLDS)
+    for (const [where, body] of glslBodies(def))
+      assert.doesNotMatch(body, /\biTime\b|\buTime\b|\bu_time\b/, `${id} (${where}) reaches for a seconds clock`);
+});
+
+// --- the skins -----------------------------------------------------------------
+
+const EXTRA = (() => {
+  const py = readFileSync(new URL("../../supysonic/deezer/analysis.py", import.meta.url), "utf8");
+  const block = py.match(/EXTRA_GENRES = \[([\s\S]*?)\n\]/);
+  assert.ok(block, "EXTRA_GENRES is no longer where this test looks for it");
+  return [...block[1].matchAll(/\("([^"]+)",\s*"([a-z]+)"\)/g)].map((m) => [m[1], m[2]]);
+})();
+
+test("every family the classifier can name has its own skin, by id and by label", () => {
+  for (const f of FAMILY_LIST) {
+    assert.equal(skinId(f.id), f.id, `family "${f.id}" has no row of its own`);
+    // The classifier's French label is what a served verdict or the readout
+    // hands over, and it must land on the same row.
+    assert.equal(skinId(f.label), f.id, `label "${f.label}" resolves to "${skinId(f.label)}"`);
+  }
+});
+
+test("every genre the studio offers is a genre the animation can dress", () => {
+  // The two halves of the vocabulary are written in different languages and
+  // have to agree: `analysis.known_genres()` is what the genre studio offers an
+  // admin to tag with, and this table is what the animation does with the tag
+  // that comes back. A label that only reaches the archetype fallback is a
+  // track tagged carefully and then animated generically.
+  assert.ok(EXTRA.length > 100, `only ${EXTRA.length} extra genres parsed`);
+  const orphans = EXTRA.filter(([label]) => !SKINS[skinId(label)] || !skinId(label)).map(([l]) => l);
+  assert.deepEqual(orphans, [], `no skin for: ${orphans.join(", ")}`);
+  const arches = new Set(EXTRA.map((r) => r[1]));
+  for (const a of arches) assert.ok(skinId("a name nothing will ever match", a), `no fallback for ${a}`);
+});
+
+test("every skin names a real world, with parameters that world reads", () => {
+  const params = Object.fromEntries(WORLDS.map(([id, def]) => [id, def.params || {}]));
+  for (const [id, s] of Object.entries(SKINS)) {
+    assert.ok(WORLD_META[s.world], `${id}: unknown world "${s.world}"`);
+    for (const [k, v] of Object.entries(s.p || {})) {
+      // A key the world does not declare is silently ignored by the engine,
+      // which is exactly how a skin ends up looking like its anchor row.
+      assert.ok(k in params[s.world], `${id}: "${s.world}" has no parameter "${k}"`);
+      assert.ok(Number.isFinite(v), `${id}: ${k} is not a number`);
+    }
+    for (const k of ["hue", "sat", "light", "speed", "energy"])
+      if (k in s) assert.ok(Number.isFinite(s[k]), `${id}: ${k} is not a number`);
+    for (const k of ["sat", "light", "speed", "energy"]) if (k in s) assert.ok(s[k] > 0, `${id}: ${k} <= 0`);
+  }
+  for (const [from, to] of Object.entries(ALIASES)) assert.ok(SKINS[to], `alias ${from} -> missing ${to}`);
+});
+
+test("every world is somebody's genre, and the catalogue is far wider than the detector", () => {
+  // A world no genre resolves to is one "auto" never shows: forty-seven
+  // worlds were written so that the genres would stop sharing five.
+  const used = new Set(Object.values(SKINS).map((s) => s.world));
+  const unused = Object.keys(WORLD_META).filter((w) => !used.has(w));
+  assert.deepEqual(unused, [], `no genre resolves to: ${unused.join(", ")}`);
+  // Measured when the catalogue was written: 226 rows across 47 worlds, the
+  // busiest world (slices, every break-driven genre) carrying 12.
+  assert.ok(skinCount() >= 220, `only ${skinCount()} genres are dressed`);
+  const per = {};
+  for (const s of Object.values(SKINS)) per[s.world] = (per[s.world] || 0) + 1;
+  assert.ok(Math.max(...Object.values(per)) <= 14, `one world carries ${Math.max(...Object.values(per))} genres`);
+});
+
+test("a name arrives however it likes and still finds its skin", () => {
+  assert.equal(skinId("Drum & Bass"), "dnb");
+  assert.equal(skinId("drum and bass"), "dnb");
+  assert.equal(skinId("PSY"), "psytrance");
+  assert.equal(skinId("Cordes / classique"), "strings");
+  assert.equal(skinId("Hard Ping-Pong"), "hardpingpong");
+  assert.equal(skinId("Deutscher Krach"), "krach");
+  assert.equal(skinId("Électronique"), "electronic");
+  assert.equal(skinId("musique classique"), "classical");
+  assert.equal(skinId("8-bit"), "eightbit");
+  assert.equal(skinId("UK garage"), "garage");
+  // Unknown names still dress the scene rather than leaving it blank, and the
+  // floor agrees with the catalogue's own archetype fallback.
+  for (const a of ["sustain", "voice", "groove", "hard", "rock"])
+    assert.equal(skinFor("a genre nobody has named", a).world, worldFor(a), a);
+  assert.ok(WORLD_META[skinFor("total nonsense").world]);
+});
+
+test("neighbours sharing a world are told apart by a SHAPE switch, not a brightness", () => {
+  // The pairs the catalogue exists for: same world, and at least one parameter
+  // that changes what the motif IS rather than how much of it there is.
+  const SHAPE = {
+    kaleido: ["mirror", "web", "sectors", "iter"],
+    wobble: ["wave"],
+    lasers: ["raw"],
+    slices: ["axis", "angle"],
+    shatter: ["shards"],
+    tunnel: ["sides", "twist", "dash", "dir"],
+    bounce: ["twins"],
+    vinyl: ["rpm", "arm"],
+    carnival: ["rings"],
+  };
+  const pairs = [
+    ["goa", "darkpsy"], ["dubstep", "brostep"], ["brostep", "riddim"], ["hardstyle", "rawstyle"],
+    ["dnb", "jungle"], ["gabber", "speedcore"], ["techno", "ebm"], ["jumpstyle", "hardbass"],
+    ["boombap", "swing"], ["salsa", "dembow"], ["psytrance", "hitech"],
+  ];
+  for (const [a, b] of pairs) {
+    const sa = SKINS[a];
+    const sb = SKINS[b];
+    assert.equal(sa.world, sb.world, `${a}/${b} no longer share a world`);
+    const keys = SHAPE[sa.world];
+    const differ = keys.some((k) => (sa.p?.[k] ?? "default") !== (sb.p?.[k] ?? "default"));
+    assert.ok(differ, `${a} and ${b} differ on no shape switch of ${sa.world} (${keys.join(", ")})`);
   }
 });

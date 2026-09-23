@@ -152,9 +152,14 @@ void main() {
         const w = (2 * Math.PI) / m.overBeats(0.35);
         const k = w * w;
         const c = 2 * 0.55 * w;
+        // Integrated in substeps a fraction of the spring's own period: at
+        // 250 BPM the period is 84 ms, and a fixed 1/60 s step (w·h = 1.25)
+        // is past where semi-implicit Euler stays stable — the jump
+        // position ran off to infinity within seven seconds.
         const span = Math.min(dt, 0.25);
-        const h = Math.min(span, 1 / 60);
-        for (let t = 0; t < span; t += h) {
+        const n = Math.min(64, Math.max(1, Math.ceil((span * w) / 0.3)));
+        const h = span / n;
+        for (let i = 0; i < n; i++) {
           const a = k * (target - shown) - c * vel;
           vel += a * h;
           shown += vel * h;

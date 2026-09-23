@@ -141,6 +141,7 @@ void main() {
         const want = (0.8 + 0.3 * m.drive + 0.6 * m.build + (sweeping ? 0.8 : 0)) * (1 - 0.4 * m.breakdown);
         speed = m.ease(speed, want, 1, dt);
         travel += (dt / m.beat) * speed;
+        if (travel > 4096) travel -= 4096; // the cross lines are one unit apart
         if (sweeping) {
           sweep += dt / m.overBeats(2);
           if (sweep > 1) {

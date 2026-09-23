@@ -1,338 +1,318 @@
 // One visual identity per GENRE, not per world.
 //
-// The worlds (`lib/viz/worlds/`) are the machinery — a corridor, a field of
-// shards, a turning record. A SKIN is what one genre does with that machinery:
-// which world it uses, how its palette leans, and a handful of parameters the
-// world reads (how many shards, how wide the cracks, how many sectors in the
-// mandala, whether the sun is banded or bare). Two genres can share a world and
-// still be told apart across a room, which is the whole point: gabber and
-// speedcore are both `shatter`, and one is a slow seven-piece strobe while the
-// other is a twenty-piece blur.
+// The worlds (`lib/viz/worlds/`) are the machinery — a corridor, a sheet of
+// glass, a turning record, a meadow of fireflies. A SKIN is what one genre
+// does with that machinery: which world it uses, how its palette leans, and a
+// handful of parameters the world reads. Two genres can share a world and still
+// be told apart across a room, which is the whole point: gabber and speedcore
+// are both `shatter`, and one breaks into a few long slabs while the other is
+// crushed into a web.
 //
-// EVERY FIELD IS OPTIONAL. A world states its own defaults and a skin overrides
-// only what that genre actually differs on, so a new sub-genre costs one line
-// and the table stays readable.
+// EVERY FIELD IS OPTIONAL. A world states its own default for every parameter
+// and a skin overrides only what that genre actually differs on, so a new
+// sub-genre costs one line and the table stays readable.
 //
-//   world   which world renders it
-//   hue     degrees to lean the palette by — the genre's own colour temperament
+//   world   which world renders it (an id from worlds/catalogue.js)
+//   hue     degrees to lean the palette by — the genre's colour temperament
 //   sat     saturation multiplier          light  lightness multiplier
-//   speed   how fast the world's motion runs
+//   speed   how fast the world's own motion runs (its clock, not the tempo)
 //   energy  overall brightness multiplier
-//   p       the world's own parameters (see each world file for its vocabulary)
+//   p       the world's own parameters (each world file lists its vocabulary)
 //
-// `p` carries two KINDS of parameter, and the difference is the whole reason
-// this table is worth its length. A scaling one (`shards`, `dots`, `beams`)
-// says how MUCH of the motif there is; those alone make two genres on one world
-// the same picture at two brightnesses. A shape one changes what the motif IS,
-// and every world has a few:
+// `p` carries two KINDS of parameter, and the difference is the reason this
+// table is worth its length. A SCALING one (`sparks`, `shards`, `count`) says
+// how much of the motif there is; a table of nothing but those is two hundred
+// brightness settings. A SHAPE one changes what the motif IS, and those are
+// what separate neighbours sharing a world:
 //
-//   tunnel       twist (a helix), dir -1 (the rings recede), dash (a strobing
-//                ring), depth (beats to cross), sides
-//   shatter      even (clean slabs), edge (a splintered rim), drift (the disc
-//                rolls), flash (white strobe against a coloured one)
-//   hardbounce   lead 0/1/2 (streak / staircase / saw), spike (a stabbing core)
-//   breakgrid    axis (columns instead of strips), stutter (the ratchet),
-//                tear (a chopped strip reverses)
-//   bloom        petal (lobes — a flower, not a ring), ray (mirror-ball
-//                spokes), float (confetti may RISE)
-//   vinyl        arm (the tonearm), warp (a bent record), label
-//   stagelights  teeth (the silhouette's profile), haze, backlit (the rig moves
-//                behind the band)
-//   kaleido      mirror 0 (a pinwheel, not a kaleidoscope), aniso, web
-//   starfield    spiral (a vortex), dot (a still sky)
-//   wobble       wave 0/1/2 (sine / square / saw — the LFO's own shape)
-//   horizon      peaks (a ridge), reverse (the floor recedes)
-//   smoke        ink (a dry, plucked brush), stave
-//   nebula       veil (curtains, not clouds), fall
-//   cathedral    fan (a vault), dust
-//   carnival     bar (clave blocks), meet (the polyrhythm coincides), skip
-//   pixels       steps (the grid's bit depth), scroll
-//   ocean        pingpong (the delay bounces), rain
-//   neon         bend (an L of tube — lettering), wet
+//   kaleido     mirror 0 (a pinwheel — goa), web 1 (a web, not a crystal —
+//               darkpsy, forest), sectors, iter (how deep the fold goes)
+//   tunnel      sides (a shaft, a hexagon, a bore), twist (a helix), dir -1
+//               (the corridor recedes), dash (strobing rings), scan (machine
+//               crawl)
+//   wobble      wave 0/1/2 (sine / square / saw — the LFO's own shape)
+//   lasers      raw 0..1 (euphoric sweeps to raw red fire)
+//   slices      axis 1 (falling columns instead of bands), angle
+//   shatter     shards (few slabs to a crushed web), jag (how far they fly)
+//   ridges      mirror (peaks centred like the Joy Division sleeve, or bass
+//               on the left)
+//   galaxy      arms 2/4, tilt (face-on to edge-on)
+//   bounce      twins (the off-beat pair), spikes (the crown)
+//   vinyl       arm (the tonearm), rpm (a 78 turns faster than a 33)
+//   stairs      steps per turn, rise
+//   carnival    rings (how many patterns turn against each other)
+//   pixels      steps (colour depth), glitch, coins
 //
-// A world states its own default for every one of them, so a row overrides only
-// what that genre actually differs on and the four anchor rows (techno, house,
-// ambient, electronic) deliberately override almost nothing: they ARE the
-// default each world was written around.
+// The anchor rows (techno, house, ambient, pop, hardstyle, rock, electronic)
+// deliberately override almost nothing: they ARE the default each world was
+// written around.
 //
 // THE VOCABULARY IS DELIBERATELY WIDER THAN THE DETECTOR. The live classifier
 // (`audio/style.js`) and the server's (`deezer/analysis.py`) name ~54 families,
 // because that is what six audio descriptors can honestly separate. A name can
 // also arrive from the genre studio — a hand-applied tag, or a trained model's
 // prediction — and those are not limited to what a heuristic can guess. So this
-// table covers the sub-genres too, and `skinFor` normalises whatever it is
-// handed (an id, a French label, a spelling with spaces or hyphens) before
-// looking it up.
+// table covers the ~170 sub-genres the studio offers too (`EXTRA_GENRES`), and
+// `skinFor` normalises whatever it is handed (an id, a French label, a spelling
+// with spaces, accents or hyphens) before looking it up. A test reads both
+// vocabularies and fails on any name that does not resolve.
 
 // The catalogue, NOT the registry: this file only needs to know that a world
-// id is real, and importing the registry would drag all eighteen scene modules
-// in behind it (see worlds/catalogue.js).
+// id is real, and importing the registry would drag every world's shader in
+// behind it (see worlds/catalogue.js).
 import { WORLD_META } from "./worlds/catalogue.js";
 
 // --- the catalogue ----------------------------------------------------------
 export const SKINS = {
-  // === machine techno ======================================================
-  // Cold, strict, rectangular. The corridor is the motif; what changes between
-  // them is its shape, its speed and how much machine noise rides on it.
-  techno: { world: "tunnel", hue: -30, sat: 0.8, p: { sides: 4, scan: 0.15 } },
-  minimal: { world: "tunnel", hue: -40, sat: 0.7, light: 0.95, speed: 0.75, p: { sides: 4, spokes: 2, scan: 0.05, glow: 0.9, dir: -1, depth: 1.4, dash: 0.3 } },
-  detroit: { world: "tunnel", hue: -18, sat: 0.9, speed: 0.85, p: { sides: 6, scan: 0.1, twist: 0.15, depth: 1.2 } },
-  acidtechno: { world: "tunnel", hue: 62, sat: 1.05, p: { sides: 24, scan: 0.35, glow: 1, speed: 1.2, twist: 1.1 } },
-  hardtechno: { world: "tunnel", hue: -12, sat: 0.95, speed: 1.35, p: { sides: 4, scan: 0.4, glow: 1.35, depth: 0.7 } },
-  schranz: { world: "tunnel", hue: -6, sat: 0.7, light: 1.1, speed: 1.55, p: { sides: 4, scan: 0.65, glow: 1.4, dash: 0.5, depth: 0.8 } },
-  industrialtechno: { world: "tunnel", hue: -55, sat: 0.35, light: 1.1, speed: 1.2, p: { sides: 4, scan: 0.8, glow: 1.1, dash: 0.35, twist: 0.2 } },
-  industrial: { world: "tunnel", hue: -60, sat: 0.3, light: 1.15, p: { sides: 4, scan: 0.9, glow: 1, dash: 0.25, depth: 1.1 } },
-  ebm: { world: "tunnel", hue: -70, sat: 0.45, speed: 1.1, p: { sides: 6, scan: 0.6, dash: 0.4, depth: 1.2 } },
-  peaktime: { world: "tunnel", hue: -20, sat: 0.95, speed: 1.15, p: { sides: 8, scan: 0.25, glow: 1.2, depth: 0.85 } },
-  electronic: { world: "tunnel", hue: 0, p: { sides: 8, scan: 0.12 } },
-  idm: { world: "pixels", hue: -35, sat: 0.7, p: { cell: 0.7, glitch: 0.55, sprites: 0.3, steps: 0, scroll: 0.2 } },
-  glitch: { world: "pixels", hue: -25, sat: 0.8, p: { cell: 0.55, glitch: 0.9, sprites: 0.25, steps: 3, scroll: 0.6 } },
-  experimental: { world: "pixels", hue: -45, sat: 0.5, p: { cell: 1.2, glitch: 0.7, scroll: -0.3 } },
-  noise: { world: "pixels", hue: 0, sat: 0.25, light: 1.1, p: { cell: 0.4, glitch: 1, steps: 2, scroll: 1.4 } },
+  // === hard: the kick is the event ===========================================
+  hardcore: { world: "shatter" },
+  frenchcore: { world: "forge", p: { anthem: 1.3, sparks: 1.2, anvils: 3 } },
+  uptempo: { world: "forge", hue: -12, sat: 1.1, speed: 1.2, p: { heat: 1.5, anthem: 0.5, sparks: 1.6, smoke: 0.6 } },
+  gabber: { world: "shatter", hue: -8, p: { shards: 0.55, jag: 1.35, flash: 0.8, leds: 0.6 } },
+  speedcore: { world: "shatter", hue: -20, speed: 1.4, p: { shards: 2.1, jag: 0.8, spin: 1.5, burst: 1.2 } },
+  terrorcore: { world: "shatter", hue: -28, sat: 1.15, p: { shards: 1.6, jag: 1.5, burst: 0.6, leds: 0.4 } },
+  crossbreed: { world: "shatter", hue: 150, sat: 0.8, p: { shards: 1.3, jag: 1.1, leds: 0.4 } },
+  ukhardcore: { world: "fireworks", hue: 30, p: { shells: 1.3, size: 1.05 } },
+  happyhardcore: { world: "fireworks", hue: 45, sat: 1.2, p: { shells: 1.5, size: 1.1, smoke: 0.7 } },
+  hardstyle: { world: "lasers" },
+  rawstyle: { world: "lasers", hue: -20, sat: 1.1, p: { raw: 1, fire: 1.4, beams: 6 } },
+  euphorichardstyle: { world: "lasers", hue: 20, p: { raw: 0, beams: 9, fire: 0.6, sweep: 0.8 } },
+  rawphase: { world: "lasers", hue: -30, sat: 1.2, speed: 1.15, p: { raw: 1, fire: 1.6, beams: 5, sweep: 1.4 } },
+  hardhouse: { world: "lasers", hue: 25, p: { raw: 0.5, fire: 0.5, beams: 6, emitters: 3 } },
+  hardtrance: { world: "lasers", hue: 180, p: { raw: 0.15, fire: 0.3, beams: 9, sweep: 1.3 } },
+  hardtekk: { world: "bounce" },
+  germanparty: { world: "bounce", hue: 30, sat: 1.15, p: { height: 1.2, gloss: 1.2 } },
+  jumpstyle: { world: "bounce", hue: -15, p: { height: 1.4, squash: 0.7, twins: 0 } },
+  hardbass: { world: "bounce", hue: 200, sat: 0.9, p: { squash: 1.4, twins: 1, spikes: 1.3 } },
+  bouncy: { world: "bounce", hue: 15, p: { height: 1.3, twins: 1 } },
+  tekk: { world: "bounce", hue: -10, p: { spikes: 1.2 } },
+  makina: { world: "bounce", hue: 60, p: { height: 1.1, spikes: 1.2, twins: 0 } },
+  zaag: { world: "saw" },
+  pieep: { world: "stairs", hue: 35, p: { steps: 16, trail: 0.7 } },
+  acidtechno: { world: "stairs", hue: 70, sat: 1.1, p: { steps: 12, rise: 0.16, trail: 1.4 } },
+  acidcore: { world: "stairs", hue: 60, speed: 1.3, p: { steps: 20, rise: 0.1, trail: 0.6 } },
+  hardpingpong: { world: "pingpong" },
+  tribecore: { world: "soundsystem" },
+  hardtek: { world: "soundsystem", hue: -10, p: { cols: 9, shake: 1.3 } },
+  raggatek: { world: "soundsystem", hue: 55, sat: 1.15, p: { cols: 6, uv: 1.4 } },
+  krach: { world: "static", p: { tear: 1.3, blocks: 1.2 } },
+  noise: { world: "static", sat: 0.7, p: { snow: 1.6, tear: 0.8, blocks: 0.8 } },
+  industrial: { world: "static", hue: -10, sat: 0.7, p: { blocks: 1.3, split: 0.6 } },
+  industrialhardcore: { world: "static", hue: -20, p: { tear: 1.2, blocks: 1.4, snow: 1.1 } },
+  extratone: { world: "static", speed: 1.5, p: { tear: 1.6, snow: 1.5, split: 1.4 } },
+  darkstep: { world: "static", sat: 0.6, p: { tear: 0.9, blocks: 1 } },
+  bigroom: { world: "fireworks", p: { shells: 1.4, size: 1.3, smoke: 1.2 } },
+  doomcore: { world: "warehouse", sat: 0.7, speed: 0.7, p: { strobe: 0.4, fog: 1.6, lamps: 0.6 } },
 
-  // === house & disco =======================================================
-  // Warm, round, generous. `bloom` for all of it; the differences are how much
-  // confetti, how bright, how vocal.
-  house: { world: "bloom", hue: 12, p: { blooms: 1, confetti: 0.8 } },
-  deephouse: { world: "bloom", hue: -14, sat: 0.85, light: 0.95, speed: 0.85, p: { blooms: 0.75, confetti: 0.3, voice: 1.1, float: 0.5 } },
-  techhouse: { world: "bloom", hue: -20, sat: 0.8, p: { blooms: 0.9, confetti: 0.4, float: 1.1 } },
-  proghouse: { world: "starfield", hue: -8, sat: 0.9, speed: 0.85, p: { arcs: 1.2, stars: 0.9, dot: 0.6 } },
-  melodichouse: { world: "starfield", hue: 8, p: { arcs: 1.4, stars: 0.85, speed: 0.9, spiral: 0.25 } },
-  bigroom: { world: "bloom", hue: 20, sat: 1.1, light: 1.05, p: { blooms: 1.4, confetti: 1.5, petal: 6, ray: 0.8 } },
-  electrohouse: { world: "bloom", hue: 28, sat: 1.15, p: { blooms: 1.2, confetti: 1.1, petal: 4 } },
-  frenchhouse: { world: "vinyl", hue: 26, sat: 1.05, p: { grooves: 1.1, bass: 0.8, slash: 0.7, arm: 0.9, label: 1.1, hats: 0.3 } },
-  ghettohouse: { world: "bloom", hue: 32, sat: 1.1, speed: 1.2, p: { confetti: 1.3, float: 1.3 } },
-  afrohouse: { world: "carnival", hue: 26, sat: 1.05, p: { rings: 1.1, dots: 1.2, meet: 0.9, bar: 0.3 } },
-  amapiano: { world: "carnival", hue: 34, sat: 1, speed: 0.8, p: { rings: 0.85, dots: 1.4, sway: 1.3, skip: 2, meet: 0.7 } },
-  gqom: { world: "carnival", hue: -10, sat: 0.9, speed: 1.1, p: { rings: 1.2, dots: 0.9, bar: 0.8, meet: 0.5 } },
-  disco: { world: "bloom", hue: 30, sat: 1.15, light: 1.05, p: { blooms: 1.2, confetti: 1.6, voice: 1.1, petal: 8, ray: 1.4 } },
-  italodisco: { world: "neon", hue: 36, sat: 1.15, p: { signs: 1.2, vhs: 0.3, bend: 0.5 } },
-  nudisco: { world: "bloom", hue: 24, sat: 1.05, p: { blooms: 1.1, confetti: 1.2, petal: 6, ray: 0.8 } },
-  funk: { world: "vinyl", hue: 34, sat: 1.1, p: { bass: 1.3, slash: 1.2, grooves: 0.9, arm: 0.6, label: 0.9, hats: 0.2 } },
-  boogie: { world: "vinyl", hue: 30, sat: 1.05, speed: 0.9, p: { bass: 1.2, slash: 1, arm: 0.7, hats: 0.2 } },
-  eurodance: { world: "bloom", hue: 40, sat: 1.2, light: 1.05, speed: 1.15, p: { confetti: 1.8, blooms: 1.2, petal: 5, float: 1.2 } },
-  hardhouse: { world: "hardbounce", hue: 30, sat: 1.05, speed: 1.15, p: { bars: 0.9, saw: 0.6, lead: 0 } },
-  hardbass: { world: "hardbounce", hue: 18, sat: 1.1, speed: 1.3, p: { bars: 1.1, squash: 1.2, saw: 0.8, lead: 2, spike: 0.4 } },
-  jumpstyle: { world: "hardbounce", hue: 24, sat: 1.05, speed: 1.25, p: { squash: 1.35, bars: 0.8, saw: 0.5, lead: 1 } },
+  // === techno & machines =====================================================
+  techno: { world: "tunnel" },
+  peaktime: { world: "tunnel", hue: -10, p: { dash: 1, depth: 0.8 } },
+  ebm: { world: "tunnel", hue: -25, sat: 0.9, p: { sides: 3, twist: 0.4, scan: 0.4 } },
+  hardtechno: { world: "warehouse", p: { strobe: 1.2 } },
+  schranz: { world: "warehouse", hue: -10, speed: 1.2, p: { strobe: 1.6, fog: 1.3 } },
+  industrialtechno: { world: "warehouse", sat: 0.8, p: { warm: 0.3 } },
+  gqom: { world: "warehouse", hue: 20, p: { warm: 1.3, strobe: 0.6, fog: 1.2 } },
+  minimal: { world: "ridges", sat: 0.8, p: { lines: 0.8, height: 0.8 } },
+  postpunk: { world: "ridges", sat: 0.15, p: { lines: 1, height: 1.2, mirror: 1 } },
+  darkwave: { world: "ridges", hue: -40, sat: 0.5, p: { height: 1.1 } },
+  coldwave: { world: "ridges", hue: 180, sat: 0.5, p: { height: 0.9, mirror: 0 } },
+  electronic: { world: "lattice" },
+  detroit: { world: "lattice", hue: 160, p: { rod: 0.8, pulses: 1.3, bank: 0.6 } },
+  idm: { world: "circuit", hue: 120, p: { packets: 1.4, chips: 1.2 } },
+  dubtechno: { world: "ocean", sat: 0.6, p: { swell: 1, wind: 0.7, moon: 0.7 } },
 
-  // === garage & breaks =====================================================
-  garage: { world: "breakgrid", hue: 10, sat: 0.95, p: { rows: 0.9, chop: 0.8, axis: 1, stutter: 0.3 } },
-  ukgarage: { world: "breakgrid", hue: 14, sat: 1, p: { rows: 0.9, chop: 0.9, snare: 1.2, axis: 1, stutter: 0.5 } },
-  twostep: { world: "breakgrid", hue: 6, sat: 0.95, speed: 0.9, p: { rows: 0.8, chop: 1, axis: 1, stutter: 0.6 } },
-  speedgarage: { world: "breakgrid", hue: 0, speed: 1.15, p: { chop: 1.1, axis: 1, stutter: 0.4 } },
-  bassline: { world: "wobble", hue: 8, p: { rate: 0.85, split: 0.8, wave: 1 } },
-  breakbeat: { world: "breakgrid", hue: -6, p: { rows: 1.1, chop: 1.1, stutter: 0.2 } },
-  bigbeat: { world: "breakgrid", hue: 16, sat: 1.05, p: { rows: 0.85, chop: 1.2, snare: 1.3, tear: 0.5 } },
-  nubreaks: { world: "breakgrid", hue: -12, p: { chop: 1.2, speed: 1.1, stutter: 0.4 } },
-  jersey: { world: "pixels", hue: 30, sat: 1.1, speed: 1.2, p: { cell: 0.8, glitch: 0.6, sprites: 0.9, steps: 2, scroll: 1.1 } },
-  moombahton: { world: "carnival", hue: 20, sat: 1.05, speed: 0.9, p: { dots: 1.1, skip: 2, meet: 0.6 } },
-  glitchhop: { world: "pixels", hue: -8, sat: 0.9, p: { cell: 0.9, glitch: 0.8, steps: 3, scroll: 0.5 } },
+  // === trance & psy ==========================================================
+  trance: { world: "hyperspace" },
+  uplifting: { world: "hyperspace", hue: 15, p: { gates: 1.3, nebula: 1.2 } },
+  vocaltrance: { world: "hyperspace", hue: 30, p: { nebula: 1.4, gates: 0.7 } },
+  progtrance: { world: "galaxy", p: { arms: 2, tilt: 0.6 } },
+  psytrance: { world: "kaleido" },
+  goa: { world: "kaleido", hue: 40, sat: 1.15, p: { mirror: 0, sectors: 6 } },
+  fullon: { world: "kaleido", hue: 20, p: { sectors: 10, twist: 1.3 } },
+  darkpsy: { world: "kaleido", hue: -40, sat: 0.7, light: 0.8, p: { web: 1, sectors: 7 } },
+  hitech: { world: "kaleido", speed: 1.4, p: { sectors: 12, twist: 2, iter: 8 } },
+  forest: { world: "kaleido", hue: 90, sat: 0.85, p: { web: 1, sectors: 6 } },
+  psydub: { world: "flow", hue: 60, p: { speed: 0.7, scale: 1.3 } },
 
-  // === drum & bass =========================================================
-  dnb: { world: "breakgrid", hue: -16, sat: 0.95, speed: 1.2, p: { rows: 1.2, chop: 1.1, snare: 1.1, stutter: 0.35 } },
-  liquiddnb: { world: "breakgrid", hue: -4, sat: 0.9, light: 1.05, speed: 1.05, p: { rows: 1, chop: 0.55, snare: 0.8, stutter: 0.1 } },
-  neurofunk: { world: "breakgrid", hue: -50, sat: 0.6, light: 1.05, speed: 1.3, p: { rows: 1.3, chop: 1.5, snare: 1.2, tear: 0.9, stutter: 0.7 } },
-  jumpup: { world: "breakgrid", hue: 22, sat: 1.15, speed: 1.25, p: { chop: 1.3, snare: 1.4, stutter: 0.8 } },
-  jungle: { world: "breakgrid", hue: 30, sat: 1, speed: 1.35, p: { rows: 1.4, chop: 1.6, stutter: 1, tear: 0.6 } },
-  darkstep: { world: "breakgrid", hue: -62, sat: 0.5, speed: 1.3, p: { rows: 1.3, chop: 1.3, tear: 0.7, stutter: 0.5 } },
-  drumfunk: { world: "breakgrid", hue: -20, sat: 0.85, speed: 1.4, p: { rows: 1.5, chop: 1.7, stutter: 1, tear: 0.8 } },
+  // === house, dance, disco ===================================================
+  house: { world: "pulse" },
+  deephouse: { world: "pulse", hue: 20, speed: 0.8, p: { caustic: 1.2, spin: 0.7 } },
+  techhouse: { world: "pulse", hue: -15, p: { caustic: 1.3, spin: 1.3, ripple: 1.2 } },
+  proghouse: { world: "galaxy", hue: 20, p: { arms: 4, tilt: 0.3 } },
+  melodichouse: { world: "aurora", hue: 25, p: { rays: 1.1, water: 1.2 } },
+  electrohouse: { world: "spectrum", hue: -20 },
+  bigbeat: { world: "spectrum", hue: 30, p: { width: 0.72, curve: 1.3 } },
+  frenchhouse: { world: "discoball", hue: 15, p: { spots: 1.2, turn: 1.2, beams: 1.3 } },
+  ghettohouse: { world: "slices", hue: -15, p: { angle: 45, bands: 12, jump: 1.4 } },
+  dance: { world: "discoball", hue: 200, p: { beams: 1.2, turn: 1.3 } },
+  disco: { world: "discoball" },
+  nudisco: { world: "discoball", hue: 30, p: { spots: 1, beams: 0.7 } },
+  boogie: { world: "discoball", hue: 25, p: { spots: 0.9, turn: 0.8 } },
+  eurodance: { world: "discoball", hue: 200, sat: 1.15, p: { spots: 1.4, turn: 1.4 } },
+  schlager: { world: "discoball", hue: 40, p: { spots: 1.2 } },
+  funk: { world: "plasma", hue: 20, p: { blobs: 8, heat: 1.1 } },
 
-  // === dubstep & bass ======================================================
-  dubstep: { world: "wobble", hue: -30, sat: 0.9, p: { rate: 1, split: 1, band: 1, wave: 0 } },
-  brostep: { world: "wobble", hue: -14, sat: 1.05, p: { rate: 1.25, split: 1.5, tear: 1.3, wave: 2 } },
-  riddim: { world: "wobble", hue: -40, sat: 0.7, p: { rate: 1.5, split: 1.2, band: 0.8, tear: 1.2, wave: 1 } },
-  melodicdubstep: { world: "starfield", hue: -18, sat: 0.95, p: { arcs: 1.3, spiral: 0.2, dot: 0.3 } },
-  futurebass: { world: "bloom", hue: -4, sat: 1.15, light: 1.05, p: { blooms: 1.3, confetti: 1.2, voice: 1.2, petal: 6, ray: 0.5, float: 0.4 } },
-  trapedm: { world: "wobble", hue: -22, sat: 0.95, speed: 0.85, p: { rate: 0.7, split: 1.1, wave: 1 } },
-  hardtrap: { world: "wobble", hue: -8, sat: 1, speed: 1.1, p: { rate: 0.9, tear: 1.2, wave: 2 } },
+  // === bass & breaks =========================================================
+  dnb: { world: "slices" },
+  jungle: { world: "slices", hue: 90, p: { axis: 1, bands: 11, jump: 1.3 } },
+  breakbeat: { world: "slices", hue: 30, p: { angle: 12, bands: 7 } },
+  nubreaks: { world: "slices", hue: -20, p: { angle: 24, bands: 8 } },
+  drumfunk: { world: "slices", hue: 40, p: { axis: 1, bands: 7 } },
+  jumpup: { world: "slices", hue: 60, speed: 1.2, p: { jump: 1.6, bands: 10 } },
+  garage: { world: "slices", hue: -15, p: { angle: -15, bands: 8, jump: 0.8 } },
+  twostep: { world: "slices", hue: 10, p: { angle: 30, bands: 6 } },
+  speedgarage: { world: "slices", hue: -30, p: { angle: 18, bands: 10, jump: 1.2 } },
+  jerseyclub: { world: "slices", hue: 50, speed: 1.2, p: { angle: 60, bands: 10, jump: 1.5 } },
+  grime: { world: "slices", sat: 0.6, p: { angle: 0, bands: 12, jump: 1.2 } },
+  liquiddnb: { world: "flow", hue: 170, p: { speed: 1.2, scale: 0.8, fade: 1.2 } },
+  neurofunk: { world: "circuit", hue: 170, speed: 1.2, p: { packets: 1.6, lanes: 1.2, tilt: 1.2 } },
+  dubstep: { world: "wobble" },
+  brostep: { world: "wobble", hue: -20, p: { wave: 2, split: 1.3, tear: 1.3 } },
+  riddim: { world: "wobble", hue: 40, p: { wave: 1, rate: 1.2 } },
+  melodicdubstep: { world: "wobble", hue: 30, p: { wave: 0, rate: 0.7, split: 0.6, tear: 0.6 } },
+  bassline: { world: "wobble", hue: -40, p: { wave: 1, rate: 1.4, grid: 0.6 } },
+  trapedm: { world: "chrome", hue: -10, p: { blobs: 4, spikes: 1.2 } },
+  hardtrap: { world: "chrome", hue: -25, p: { spikes: 1.6, blobs: 3 } },
+  futurebass: { world: "bokeh", hue: 30, sat: 1.2, p: { count: 1.4, blades: 6 } },
 
-  // === trance & psy ========================================================
-  trance: { world: "starfield", hue: -22, sat: 0.95, p: { stars: 1, arcs: 1, spiral: 0.15 } },
-  upliftingtrance: { world: "starfield", hue: -18, sat: 1.05, light: 1.05, p: { stars: 1.2, arcs: 1.5, spiral: 0.5 } },
-  progtrance: { world: "starfield", hue: -28, sat: 0.9, speed: 0.85, p: { stars: 0.9, arcs: 0.9, dot: 0.5 } },
-  vocaltrance: { world: "starfield", hue: -10, sat: 1, p: { arcs: 1.4, stars: 0.95, spiral: 0.3, dot: 0.2 } },
-  hardtrance: { world: "starfield", hue: -6, sat: 1.05, speed: 1.3, p: { stars: 1.3, arcs: 1.1, spiral: 0.35 } },
-  goa: { world: "kaleido", hue: 48, sat: 1.05, p: { sectors: 0.8, petals: 1.1, twist: 1.2, mirror: 0, aniso: 0.2 } },
-  psytrance: { world: "kaleido", hue: -46, sat: 1, p: { sectors: 1, petals: 1, aniso: 0.3 } },
-  fullon: { world: "kaleido", hue: 52, sat: 1.15, speed: 1.15, p: { sectors: 1.1, petals: 1.3, beads: 1.3, aniso: 0.35 } },
-  darkpsy: { world: "kaleido", hue: -80, sat: 0.6, speed: 1.4, p: { sectors: 1.3, petals: 1.4, twist: 1.6, web: 0.9, aniso: 0.25 } },
-  hitech: { world: "kaleido", hue: 96, sat: 0.9, speed: 1.7, p: { sectors: 1.4, petals: 1.5, twist: 1.8, web: 0.6, aniso: 0.55 } },
-  forest: { world: "kaleido", hue: 110, sat: 0.75, light: 0.95, speed: 1.25, p: { sectors: 1.2, petals: 1.2, web: 1, aniso: 0.15 } },
-  psydub: { world: "ocean", hue: 80, sat: 0.7, p: { echo: 1.3, depth: 1.2, pingpong: 0.8, rain: 0.5 } },
+  // === urban =================================================================
+  hiphop: { world: "vinyl" },
+  boombap: { world: "vinyl", hue: 20, sat: 0.85, p: { arm: 1, gloss: 0.8 } },
+  rap: { world: "halo" },
+  trap: { world: "halo", hue: -20, p: { echoes: 1.3, reach: 1.2 } },
+  drill: { world: "halo", hue: 200, sat: 0.8, p: { echoes: 0.8, reach: 1.4 } },
+  ukdrill: { world: "halo", hue: 210, sat: 0.6, p: { echoes: 0.8, reach: 1.4, dust: 0.6 } },
+  cloudrap: { world: "ocean", hue: 280, p: { swell: 0.8, wind: 0.6, moon: 1.3 } },
+  emorap: { world: "rain", hue: 220, sat: 0.6, p: { drops: 1.3, runners: 1.4 } },
+  lofihiphop: { world: "rain", hue: 20, p: { runners: 1.2 } },
+  phonk: { world: "nightdrive", hue: -30, p: { lamps: 0.8, rain: 1.2, traffic: 1.2 } },
+  gfunk: { world: "nightdrive", hue: 30, p: { rain: 0, lamps: 1.2, traffic: 0.8 } },
+  outrun: { world: "nightdrive", hue: -60, sat: 1.2, p: { rain: 0, city: 1.2 } },
 
-  // === hard (the shattering half) ==========================================
-  hardcore: { world: "shatter", hue: 4, sat: 1, p: { shards: 1, jag: 0.9, spin: 1, edge: 0.3, flash: 0.6 } },
-  frenchcore: { world: "shatter", hue: 8, sat: 1.05, speed: 1.15, p: { shards: 1.1, jag: 1.1, spin: 1.2, core: 1.1, edge: 0.5, flash: 0.2, drift: 0.2 } },
-  uptempo: { world: "shatter", hue: 14, sat: 1.05, speed: 1.35, p: { shards: 1.3, jag: 1.3, spin: 1.4, strobe: 1.2, edge: 0.7, flash: 0.4 } },
-  gabber: { world: "shatter", hue: -2, sat: 0.45, light: 1.2, speed: 1.1, p: { shards: 0.6, jag: 0.4, spin: 1.6, strobe: 1.5, core: 0.8, even: 0.85, edge: 0, flash: 1 } },
-  ukhardcore: { world: "shatter", hue: 34, sat: 1.15, light: 1.05, p: { shards: 0.9, jag: 0.7, strobe: 1.2, even: 0.5, flash: 0.9 } },
-  happyhardcore: { world: "bloom", hue: 44, sat: 1.2, light: 1.1, speed: 1.4, p: { confetti: 2, blooms: 1.4, petal: 6, ray: 1, float: 1.1 } },
-  terrorcore: { world: "shatter", hue: -8, sat: 0.6, light: 1.15, speed: 1.6, p: { shards: 1.5, jag: 1.6, spin: 1.8, strobe: 1.6, edge: 1, flash: 0.9, drift: 0.3 } },
-  speedcore: { world: "shatter", hue: 0, sat: 0.5, light: 1.2, speed: 1.9, p: { shards: 1.8, jag: 1.8, spin: 2, strobe: 1.8, edge: 1, flash: 1 } },
-  extratone: { world: "shatter", hue: 0, sat: 0.2, light: 1.3, speed: 2.4, p: { shards: 2, jag: 2, spin: 2.4, strobe: 2, edge: 1, flash: 1, drift: 0.6 } },
-  krach: { world: "shatter", hue: -16, sat: 0.55, light: 1.1, speed: 1.7, p: { shards: 1.6, jag: 1.9, spin: 1.9, strobe: 1.5, edge: 0.95, flash: 0.8, drift: 0.2 } },
-  tribecore: { world: "shatter", hue: 24, sat: 1.05, speed: 1.2, p: { shards: 1.2, jag: 1.2, spin: 0.7, drift: 0.8, edge: 0.4, flash: 0.3 } },
-  hardtek: { world: "shatter", hue: 30, sat: 1, speed: 1.1, p: { shards: 0.9, jag: 0.8, spin: 0.8, drift: 0.7, edge: 0.35, flash: 0.35 } },
-  acidcore: { world: "shatter", hue: 66, sat: 1.15, speed: 1.3, p: { shards: 1.2, jag: 1.1, spin: 1.5, drift: 0.5, edge: 0.6, flash: 0.5 } },
-  raggatek: { world: "shatter", hue: 88, sat: 1.05, speed: 1.15, p: { shards: 1, jag: 0.9, spin: 0.9, drift: 0.9, edge: 0.3, flash: 0.25 } },
-  industrialhardcore: { world: "shatter", hue: -60, sat: 0.35, light: 1.15, speed: 1.4, p: { shards: 1.3, jag: 1.5, strobe: 1.3, edge: 0.8, flash: 1, even: 0.3 } },
-  crossbreed: { world: "breakgrid", hue: -56, sat: 0.55, speed: 1.5, p: { rows: 1.4, chop: 1.8, tear: 1, stutter: 0.8 } },
-  doomcore: { world: "shatter", hue: -44, sat: 0.5, light: 0.9, speed: 0.55, p: { shards: 0.7, jag: 1.2, spin: 0.4, even: 0.6, edge: 0.5, flash: 0.5 } },
-  breakcore: { world: "pixels", hue: 20, sat: 1.1, speed: 1.6, p: { cell: 0.5, glitch: 1.3, sprites: 1.2, steps: 4, scroll: 2 } },
-  lolicore: { world: "pixels", hue: 40, sat: 1.25, light: 1.1, speed: 1.9, p: { cell: 0.4, glitch: 1.5, sprites: 1.5, steps: 3, scroll: 2.6 } },
-  makina: { world: "hardbounce", hue: 46, sat: 1.15, speed: 1.3, p: { bars: 1.1, saw: 1.2, lead: 1, spike: 0.2 } },
+  // === pop, voice, soul ======================================================
+  pop: { world: "bokeh" },
+  vocalPop: { world: "bokeh", hue: 10, p: { blades: 0 } },
+  kpop: { world: "bokeh", hue: -20, sat: 1.25, p: { count: 1.3, blades: 5 } },
+  jpop: { world: "bokeh", hue: 20, sat: 1.15, p: { count: 1.2, blades: 7 } },
+  smoothjazz: { world: "bokeh", hue: 25, sat: 0.85, speed: 0.7, p: { count: 0.7, blades: 0, drift: 0.6 } },
+  rnb: { world: "silk", p: { ribbons: 3 } },
+  soul: { world: "silk", hue: 20, p: { ribbons: 4, width: 1.2 } },
+  neosoul: { world: "silk", hue: 30, p: { ribbons: 3, twist: 0.7 } },
+  kizomba: { world: "silk", hue: -10, p: { ribbons: 2, width: 1.3, twist: 0.6 } },
+  dreampop: { world: "silk", sat: 0.8, p: { ribbons: 5, width: 1.4, twist: 0.5 } },
+  tango: { world: "silk", hue: -20, sat: 1.1, p: { ribbons: 2, width: 0.8, twist: 1.4 } },
+  motown: { world: "vinyl", hue: 25, p: { arm: 1, gloss: 1.2 } },
+  chanson: { world: "artwork", p: { blobs: 4, swirl: 0.7 } },
+  indie: { world: "artwork", p: { blobs: 5 } },
+  synthpop: { world: "neon" },
+  vaporwave: { world: "neon", hue: -60, sat: 0.9, speed: 0.7, p: { signs: 6, rain: 0.4 } },
+  citypop: { world: "neon", hue: -30, p: { signs: 10, rain: 0.3, wet: 0.8 } },
+  italodisco: { world: "neon", hue: 20, p: { signs: 9, rain: 0.5 } },
+  futurefunk: { world: "neon", hue: -45, sat: 1.2, p: { signs: 12, rain: 0, wet: 0.6 } },
+  hyperpop: { world: "pixels", hue: -60, sat: 1.3, p: { glitch: 1.4, steps: 12 } },
+  latinpop: { world: "tropics", hue: 15, p: { glitter: 1.3 } },
 
-  // === hard (the bouncing half) ============================================
-  hardstyle: { world: "hardbounce", hue: 12, sat: 1.05, p: { bars: 1, squash: 1, saw: 0.9, lead: 0, spike: 0.15 } },
-  euphorichardstyle: { world: "hardbounce", hue: 24, sat: 1.1, light: 1.05, p: { bars: 0.9, saw: 1.3, ring: 1.1, lead: 0 } },
-  rawstyle: { world: "hardbounce", hue: -10, sat: 0.8, light: 1.05, speed: 1.15, p: { bars: 1.2, squash: 1.3, saw: 0.7, spike: 0.8 } },
-  rawphase: { world: "hardbounce", hue: -26, sat: 0.6, speed: 1.2, p: { bars: 1.3, squash: 1.4, saw: 0.5, spike: 1 } },
-  hardtekk: { world: "hardbounce", hue: 6, sat: 1, speed: 1.1, p: { bars: 1, saw: 1.2, lead: 0, spike: 0.2 } },
-  tekk: { world: "hardbounce", hue: 0, sat: 0.95, speed: 1.05, p: { saw: 1.1, lead: 0 } },
-  zaag: { world: "hardbounce", hue: -34, sat: 1.05, speed: 1.2, p: { bars: 1.1, saw: 1.6, squash: 0.9, lead: 2 } },
-  hardpingpong: { world: "hardbounce", hue: 18, sat: 1, speed: 1.25, p: { bars: 1.2, saw: 1.1, squash: 1.1, lead: 1 } },
-  germanparty: { world: "hardbounce", hue: 38, sat: 1.15, light: 1.05, p: { bars: 0.85, saw: 1.3, ring: 1.15, lead: 1 } },
-  pieep: { world: "hardbounce", hue: -18, sat: 1.1, speed: 1.35, p: { bars: 1.3, saw: 1.5, lead: 1, spike: 0.1 } },
-  bouncy: { world: "hardbounce", hue: 42, sat: 1.1, speed: 1.2, p: { squash: 1.4, saw: 1, lead: 1 } },
+  // === rock & metal ==========================================================
+  rock: { world: "stage" },
+  hardrock: { world: "stage", hue: -10, p: { beams: 10, wall: 1.2 } },
+  garagerock: { world: "stage", hue: 20, sat: 0.85, p: { beams: 6, smoke: 0.8 } },
+  poppunk: { world: "stage", hue: 10, sat: 1.15, p: { beams: 8, wall: 1.3 } },
+  numetal: { world: "stage", hue: -15, sat: 0.8, p: { beams: 8, wall: 1.4 } },
+  powermetal: { world: "stage", hue: 30, p: { beams: 12, wall: 1.4 } },
+  symphonicmetal: { world: "stage", hue: 200, p: { beams: 12, smoke: 1.3, wall: 0.8 } },
+  bigband: { world: "stage", hue: 30, sat: 0.9, p: { beams: 6, wall: 0.5 } },
+  blues: { world: "stage", hue: 210, sat: 0.8, p: { beams: 4, smoke: 1.3, wall: 0.3 } },
+  metal: { world: "inferno" },
+  brutal: { world: "inferno", sat: 0.8, p: { height: 1.3, embers: 1.3, tint: 0.3 } },
+  heavymetal: { world: "inferno", p: { tint: 0.6 } },
+  deathmetal: { world: "inferno", light: 0.85, p: { height: 1.2, tint: 0.2 } },
+  deathcore: { world: "inferno", p: { height: 1.3, embers: 1.4, tint: 0.3 } },
+  sludge: { world: "inferno", sat: 0.8, speed: 0.6, p: { height: 0.8, embers: 0.6 } },
+  flamenco: { world: "inferno", hue: 10, p: { height: 0.9, embers: 1.2, tint: 0.8 } },
+  punk: { world: "storm", p: { bolts: 1.2 } },
+  hardcorepunk: { world: "storm", p: { bolts: 1.4, rain: 1.2 } },
+  thrash: { world: "storm", hue: -15, p: { bolts: 1.5, rain: 1.3 } },
+  blackmetal: { world: "storm", sat: 0.3, light: 0.9, p: { bolts: 1.1, rain: 0.6 } },
+  doom: { world: "storm", sat: 0.7, speed: 0.6, p: { bolts: 0.5, rain: 1.2 } },
+  metalcore: { world: "storm", hue: 20, p: { bolts: 1.3 } },
+  djent: { world: "storm", hue: 170, sat: 0.8, p: { bolts: 1.2, hills: 0.6 } },
+  grunge: { world: "storm", sat: 0.6, p: { bolts: 0.6, rain: 1.4 } },
+  psychrock: { world: "plasma", hue: 60, sat: 1.2, p: { blobs: 10, speed: 1.3, heat: 1.2 } },
+  progrock: { world: "galaxy", hue: -20, p: { arms: 2, tilt: 0.8, dust: 1.3 } },
+  emo: { world: "rain", sat: 0.7, p: { drops: 1.2, runners: 1.2 } },
+  gothic: { world: "cathedral", sat: 0.6, light: 0.8, p: { shafts: 0.7, window: 1.3 } },
+  witchhouse: { world: "nebula", hue: -60, sat: 0.6, p: { glow: 0.7, dust: 1.2 } },
 
-  // === urban ===============================================================
-  hiphop: { world: "vinyl", hue: 18, sat: 0.95, p: { grooves: 1, bass: 1, slash: 1, arm: 0.8, hats: 0.3 } },
-  boombap: { world: "vinyl", hue: 22, sat: 0.9, light: 0.95, speed: 0.85, p: { grooves: 1.2, bass: 0.9, slash: 1.2, arm: 1, label: 1.15 } },
-  rap: { world: "vinyl", hue: 14, sat: 1, p: { bass: 1.1, arm: 0.6, hats: 0.5 } },
-  trap: { world: "vinyl", hue: -28, sat: 0.85, speed: 0.8, p: { grooves: 0.8, bass: 1.5, slash: 0.8, arm: 0, label: 0.7, hats: 1.2 } },
-  drill: { world: "vinyl", hue: -48, sat: 0.6, light: 0.95, speed: 0.8, p: { grooves: 0.7, bass: 1.6, slash: 0.9, arm: 0, label: 0.6, hats: 1.3 } },
-  ukdrill: { world: "vinyl", hue: -54, sat: 0.55, speed: 0.8, p: { grooves: 0.7, bass: 1.6, arm: 0, label: 0.6, hats: 1.3 } },
-  phonk: { world: "vinyl", hue: -66, sat: 0.7, light: 1.05, p: { grooves: 1.3, bass: 1.4, slash: 1.3, warp: 1.2, arm: 0.5, hats: 1 } },
-  cloudrap: { world: "ocean", hue: -12, sat: 0.8, p: { swells: 0.8, echo: 1.3, pingpong: 0.5, rain: 0.7 } },
-  emorap: { world: "ocean", hue: -34, sat: 0.75, p: { swells: 0.9, echo: 1.1, rain: 0.8, pingpong: 0.2 } },
-  gfunk: { world: "vinyl", hue: 30, sat: 1.05, speed: 0.85, p: { slash: 1.1, bass: 1.1, arm: 0.7, warp: 0.3, hats: 0.4 } },
-  lofihiphop: { world: "horizon", hue: 26, sat: 0.8, light: 0.95, speed: 0.6, p: { sun: 0.8, grid: 0.7, scan: 1.4, peaks: 0.5 } },
-  grime: { world: "pixels", hue: -20, sat: 0.9, speed: 1.15, p: { cell: 0.7, glitch: 0.7, sprites: 0.8, steps: 2, scroll: 0.9 } },
-  reggaeton: { world: "carnival", hue: 14, sat: 1.05, p: { rings: 1, dots: 1.1, bar: 0.6, meet: 0.4, hats: 0.5 } },
-  dembow: { world: "carnival", hue: 18, sat: 1.1, speed: 1.1, p: { dots: 1.3, bar: 0.7, meet: 0.5, skip: 2 } },
-  dancehall: { world: "carnival", hue: 40, sat: 1.1, p: { rings: 1.1, dots: 1.2, sway: 1.2, bar: 0.5, meet: 0.6 } },
-  afrobeats: { world: "carnival", hue: 30, sat: 1.1, p: { rings: 1.2, dots: 1.3, meet: 1, bar: 0.2 } },
-  afroswing: { world: "carnival", hue: 26, sat: 1.05, p: { dots: 1.1, meet: 0.7 } },
+  // === calm ==================================================================
+  ambient: { world: "nebula" },
+  drone: { world: "nebula", speed: 0.7, p: { glow: 0.8, dust: 1.3, stars: 0.4 } },
+  darkambient: { world: "nebula", sat: 0.7, light: 0.8, p: { glow: 0.6, dust: 1.4 } },
+  newage: { world: "aurora" },
+  shoegaze: { world: "aurora", sat: 0.85, p: { rays: 0.6, spread: 1.4, height: 1.2 } },
+  soundtrack: { world: "aurora", hue: -15, p: { height: 1.2, rays: 1.2 } },
+  celtic: { world: "aurora", hue: 100, p: { stars: 1.2 } },
+  downtempo: { world: "ocean" },
+  chillout: { world: "tropics", speed: 0.8, p: { sway: 0.6, glitter: 1.2 } },
+  dub: { world: "ocean", hue: 60, p: { swell: 1.3, wind: 0.8 } },
+  lofi: { world: "rain" },
+  chillhop: { world: "rain", hue: 20, p: { drops: 0.8, city: 1.2 } },
+  strings: { world: "cathedral" },
+  classical: { world: "cathedral" },
+  orchestral: { world: "cathedral", hue: -10, p: { shafts: 1.2 } },
+  opera: { world: "cathedral", hue: 10, p: { window: 1.3, shafts: 1.1 } },
+  choral: { world: "cathedral", hue: 20, p: { shafts: 1.3, dust: 1.2 } },
+  baroque: { world: "cathedral", hue: 25, p: { window: 1.2 } },
+  gospel: { world: "cathedral", hue: 30, p: { shafts: 1.4, window: 1.2 } },
+  filmscore: { world: "cathedral", hue: -20, p: { shafts: 1.3, dust: 1.3 } },
+  piano: { world: "ink", sat: 0.8, p: { ink: 0.8, curl: 0.7 } },
+  romantic: { world: "ink", hue: -15, p: { fade: 1.2 } },
+  minimalism: { world: "ink", sat: 0.6, speed: 0.7, p: { ink: 0.6, curl: 0.5, fade: 1.5 } },
+  triphop: { world: "ink", sat: 0.6, p: { ink: 1.2, curl: 1.3 } },
+  experimental: { world: "ink", hue: 90, p: { ink: 1.3, curl: 1.6 } },
 
-  // === rock & metal ========================================================
-  rock: { world: "stagelights", hue: 12, p: { beams: 1, wall: 1, teeth: 1, haze: 0.3 } },
-  hardrock: { world: "stagelights", hue: 8, sat: 1.05, p: { beams: 1.1, wall: 1.1, strobe: 0.8, teeth: 1.1, haze: 0.5 } },
-  garagerock: { world: "stagelights", hue: 20, sat: 0.95, p: { beams: 0.8, wall: 1.1, teeth: 1.2, haze: 0.15 } },
-  psychrock: { world: "kaleido", hue: 56, sat: 1, speed: 0.7, p: { sectors: 0.7, petals: 0.9, twist: 0.6, aniso: 0.12, web: 0.2 } },
-  progrock: { world: "stagelights", hue: -10, sat: 0.9, speed: 0.85, p: { beams: 1.3, swing: 0.7, teeth: 0.5, haze: 0.7 } },
-  punk: { world: "stagelights", hue: 4, sat: 1, light: 1.05, speed: 1.35, p: { beams: 0.7, strobe: 1.4, swing: 1.5, teeth: 1.5, haze: 0 } },
-  hardcorepunk: { world: "stagelights", hue: 0, sat: 0.8, light: 1.1, speed: 1.5, p: { beams: 0.6, strobe: 1.6, swing: 1.6, teeth: 1.7, haze: 0 } },
-  postpunk: { world: "stagelights", hue: -40, sat: 0.6, speed: 0.9, p: { beams: 1.2, strobe: 0.4, teeth: 0.8, haze: 0.9, backlit: 1 } },
-  poppunk: { world: "stagelights", hue: 22, sat: 1.1, speed: 1.2, p: { beams: 0.9, strobe: 1, teeth: 1.3, haze: 0.2 } },
-  skapunk: { world: "carnival", hue: 44, sat: 1.1, speed: 1.2, p: { dots: 1.3, sway: 1.4, bar: 0.9, meet: 0.6, skip: 2 } },
-  ska: { world: "carnival", hue: 48, sat: 1.05, p: { dots: 1.2, sway: 1.3, bar: 1, meet: 0.5 } },
-  grunge: { world: "stagelights", hue: -16, sat: 0.7, speed: 0.9, p: { beams: 0.8, wall: 1.2, teeth: 1.1, haze: 0.8 } },
-  emo: { world: "stagelights", hue: -30, sat: 0.8, p: { beams: 0.9, teeth: 0.9, haze: 0.6 } },
-  shoegaze: { world: "nebula", hue: -18, sat: 0.85, p: { clouds: 1.3, band: 1.2, veil: 0.7 } },
-  indie: { world: "bloom", hue: 6, sat: 0.9, speed: 0.9, p: { blooms: 0.9, confetti: 0.6, float: 0.8 } },
-  metal: { world: "stagelights", hue: -6, sat: 0.9, light: 1.05, speed: 1.1, p: { beams: 1.2, wall: 1.3, strobe: 1.1, teeth: 1.4, haze: 0.7 } },
-  heavymetal: { world: "stagelights", hue: 6, sat: 1, p: { beams: 1.2, wall: 1.2, teeth: 1.3, haze: 0.6 } },
-  thrash: { world: "stagelights", hue: -4, sat: 0.85, light: 1.05, speed: 1.4, p: { wall: 1.4, strobe: 1.3, swing: 1.4, teeth: 1.9, haze: 0.4 } },
-  deathmetal: { world: "stagelights", hue: -22, sat: 0.55, light: 1.05, speed: 1.35, p: { wall: 1.5, strobe: 1.2, teeth: 2, haze: 0.9, backlit: 1 } },
-  blackmetal: { world: "stagelights", hue: -90, sat: 0.2, light: 1.15, speed: 1.3, p: { beams: 1.4, wall: 1.4, strobe: 1.4, teeth: 2, haze: 1.4, backlit: 1 } },
-  doom: { world: "stagelights", hue: -40, sat: 0.6, light: 0.9, speed: 0.5, p: { beams: 1.3, wall: 1.3, strobe: 0.3, teeth: 0.6, haze: 1.5, backlit: 1 } },
-  sludge: { world: "stagelights", hue: -34, sat: 0.55, speed: 0.6, p: { wall: 1.4, teeth: 0.8, haze: 1.3, backlit: 1 } },
-  metalcore: { world: "stagelights", hue: -12, sat: 0.9, speed: 1.25, p: { wall: 1.4, strobe: 1.3, teeth: 1.6, haze: 0.5 } },
-  deathcore: { world: "stagelights", hue: -26, sat: 0.6, speed: 1.3, p: { wall: 1.5, strobe: 1.4, teeth: 1.9, haze: 0.8, backlit: 1 } },
-  djent: { world: "pixels", hue: -46, sat: 0.6, p: { cell: 1, glitch: 0.5, sprites: 0.4, steps: 2, scroll: 0.3 } },
-  numetal: { world: "stagelights", hue: -18, sat: 0.8, speed: 1.15, p: { wall: 1.3, teeth: 1.2, haze: 0.5 } },
-  powermetal: { world: "stagelights", hue: 30, sat: 1.1, light: 1.05, p: { beams: 1.4, strobe: 1, teeth: 0.7, haze: 0.6 } },
-  symphonicmetal: { world: "cathedral", hue: -16, sat: 1, p: { shafts: 1.2, rose: 1.2, swell: 1.2, fan: 0.7, dust: 1 } },
-  brutal: { world: "stagelights", hue: -20, sat: 0.5, light: 1.1, speed: 1.45, p: { wall: 1.6, strobe: 1.5, teeth: 2, haze: 1, backlit: 1 } },
+  // === acoustic, folk, jazz ==================================================
+  jazz: { world: "vinyl", hue: 20, sat: 0.8, p: { arm: 1, rpm: 0.8 } },
+  bebop: { world: "vinyl", sat: 0.7, p: { arm: 1, rpm: 0.8 } },
+  swing: { world: "vinyl", hue: 25, sat: 0.75, p: { arm: 1, rpm: 1.5 } },
+  jazzfusion: { world: "flow", hue: 30, p: { speed: 0.9, ink: 1.2 } },
+  folk: { world: "fireflies" },
+  country: { world: "fireflies", hue: 25, p: { flies: 0.8 } },
+  bluegrass: { world: "fireflies", hue: 15, p: { flies: 1.2, wind: 1.2 } },
+  deltablues: { world: "fireflies", hue: 20, speed: 0.8, p: { flies: 0.7, wind: 0.6 } },
+  singersongwriter: { world: "fireflies", p: { flies: 0.9, sync: 0.6 } },
 
-  // === pop & vocal =========================================================
-  pop: { world: "bloom", hue: 16, sat: 1.05, p: { blooms: 1, confetti: 1, voice: 1.1, petal: 5, ray: 0.3 } },
-  vocalPop: { world: "bloom", hue: 10, sat: 1, speed: 0.9, p: { voice: 1.4, confetti: 0.7, float: 0.6 } },
-  synthpop: { world: "neon", hue: 20, sat: 1.1, p: { signs: 1, vhs: 0.4, bend: 0.6, wet: 0.3 } },
-  dreampop: { world: "nebula", hue: -8, sat: 0.9, light: 1.05, p: { clouds: 1.2, motes: 1.2, veil: 0.4, fall: 1 } },
-  hyperpop: { world: "pixels", hue: 46, sat: 1.3, light: 1.1, speed: 1.5, p: { cell: 0.45, glitch: 1.1, sprites: 1.4, steps: 3, scroll: 1.8 } },
-  kpop: { world: "bloom", hue: 34, sat: 1.2, light: 1.05, speed: 1.15, p: { confetti: 1.7, blooms: 1.2, voice: 1.2, petal: 8, ray: 1.1 } },
-  jpop: { world: "bloom", hue: 40, sat: 1.15, speed: 1.1, p: { confetti: 1.5, voice: 1.2, petal: 6, ray: 0.6 } },
-  citypop: { world: "neon", hue: 30, sat: 1.05, speed: 0.85, p: { signs: 1.2, vhs: 0.7, bend: 0.8, wet: 0.15 } },
-  vaporwave: { world: "neon", hue: -6, sat: 1.1, light: 1.05, speed: 0.55, p: { signs: 1.1, vhs: 1.5, flicker: 1.3, bend: 0.35, wet: 1 } },
-  futurefunk: { world: "neon", hue: 26, sat: 1.15, speed: 1.1, p: { signs: 1.3, vhs: 0.9, bend: 0.7, wet: 0.6 } },
-  latinpop: { world: "carnival", hue: 22, sat: 1.1, p: { dots: 1.2, rings: 1, meet: 0.7, bar: 0.3 } },
-  chanson: { world: "smoke", hue: 16, sat: 0.9, speed: 0.8, p: { strokes: 0.9, curve: 1.2, stave: 0.8 } },
-  schlager: { world: "bloom", hue: 38, sat: 1.15, p: { confetti: 1.6, voice: 1.2, petal: 6, ray: 0.7 } },
-  rnb: { world: "bloom", hue: 4, sat: 0.95, speed: 0.8, p: { voice: 1.5, confetti: 0.4, blooms: 0.9, float: 0.3 } },
-  neosoul: { world: "smoke", hue: 20, sat: 0.95, speed: 0.75, p: { strokes: 1.1, drift: 1.2, stave: 0.4 } },
-  soul: { world: "bloom", hue: 26, sat: 1.05, speed: 0.85, p: { voice: 1.4, confetti: 0.6, petal: 4, ray: 0.5, float: 0.5 } },
-  motown: { world: "vinyl", hue: 28, sat: 1.05, speed: 0.9, p: { grooves: 1.2, slash: 1.1, arm: 1, label: 1.2 } },
-  gospel: { world: "cathedral", hue: 32, sat: 1.05, light: 1.05, p: { shafts: 1.3, swell: 1.3, fan: 0.9, dust: 1.2 } },
+  // === world =================================================================
+  salsa: { world: "carnival", p: { rings: 5 } },
+  samba: { world: "carnival", hue: 30, p: { rings: 6, confetti: 1.4 } },
+  cumbia: { world: "carnival", hue: 15, p: { rings: 4, size: 1.1 } },
+  afrobeat: { world: "carnival", hue: 30, p: { rings: 5 } },
+  afrohouse: { world: "carnival", hue: 20, p: { rings: 5, confetti: 0.8 } },
+  amapiano: { world: "carnival", hue: 35, p: { rings: 4, confetti: 0.6, size: 1.2 } },
+  dembow: { world: "carnival", hue: -10, p: { rings: 3, size: 1.3 } },
+  ska: { world: "carnival", sat: 0.4, p: { rings: 4 } },
+  skapunk: { world: "carnival", sat: 0.5, p: { rings: 5 } },
+  bollywood: { world: "carnival", hue: 40, sat: 1.2, p: { rings: 6, confetti: 1.5 } },
+  arabic: { world: "kaleido", hue: 30, p: { sectors: 12, twist: 0.5 } },
+  reggae: { world: "tropics", p: { sway: 0.8 } },
+  reggaeton: { world: "tropics", hue: -10, p: { glitter: 1.3, sway: 1.2 } },
+  dancehall: { world: "soundsystem", hue: 30, p: { cols: 5, rings: 1.2, uv: 0.6 } },
+  rocksteady: { world: "tropics", hue: 20, p: { sway: 0.7 } },
+  afrobeats: { world: "tropics", hue: 15, p: { glitter: 1.1 } },
+  afroswing: { world: "tropics", hue: 5, p: { sway: 1.1 } },
+  bossanova: { world: "tropics", hue: 10, speed: 0.8, p: { sway: 0.6, glitter: 0.8 } },
+  highlife: { world: "tropics", hue: 25, p: { sway: 1.2 } },
+  moombahton: { world: "tropics", hue: -15, p: { glitter: 1.2, sway: 1.3 } },
 
-  // === chill & downtempo ===================================================
-  lofi: { world: "horizon", hue: 22, sat: 0.8, light: 0.95, speed: 0.6, p: { sun: 0.85, grid: 0.75, scan: 1.3, peaks: 0.6 } },
-  chillhop: { world: "horizon", hue: 18, sat: 0.85, speed: 0.7, p: { scan: 1.1, grid: 0.8, peaks: 0.4 } },
-  downtempo: { world: "ocean", hue: -14, sat: 0.85, speed: 0.7, p: { swells: 1, echo: 1.1, rain: 0.4 } },
-  triphop: { world: "ocean", hue: -30, sat: 0.75, speed: 0.75, p: { swells: 1.1, echo: 1.2, depth: 1.2, pingpong: 0.4, rain: 0.9 } },
-  chillout: { world: "ocean", hue: -6, sat: 0.85, speed: 0.65, p: { swells: 0.9, echo: 1, rain: 0.2 } },
-  dub: { world: "ocean", hue: 76, sat: 0.9, speed: 0.7, p: { echo: 1.6, depth: 1.3, pingpong: 1, rain: 1 } },
-  dubtechno: { world: "ocean", hue: -44, sat: 0.55, speed: 0.75, p: { echo: 1.5, depth: 1.4, swells: 0.9, pingpong: 0.9, rain: 0.3 } },
-  synthwave: { world: "horizon", hue: 4, sat: 1.1, p: { sun: 1, bands: 1, grid: 1, peaks: 0.8 } },
-  retrowave: { world: "horizon", hue: 8, sat: 1.1, p: { sun: 1.05, grid: 1, peaks: 0.7 } },
-  outrun: { world: "horizon", hue: -4, sat: 1.15, speed: 1.3, p: { grid: 1.3, sun: 0.95, peaks: 1 } },
-  darksynth: { world: "horizon", hue: -34, sat: 0.9, light: 0.95, speed: 1.15, p: { sun: 0.9, grid: 1.1, scan: 0.8, peaks: 0.9, reverse: 1 } },
-  darkwave: { world: "nebula", hue: -60, sat: 0.55, p: { clouds: 1.1, motes: 0.8, veil: 0.8, fall: 1 } },
-  coldwave: { world: "nebula", hue: -72, sat: 0.45, p: { clouds: 1, band: 0.8, veil: 0.9, fall: 1 } },
-  gothic: { world: "cathedral", hue: -58, sat: 0.6, light: 0.9, p: { shafts: 1.2, rose: 1.3, fan: 0.5, dust: 0.8 } },
-  witchhouse: { world: "pixels", hue: -66, sat: 0.6, speed: 0.7, p: { cell: 1.1, glitch: 0.9, steps: 2, scroll: -0.4 } },
-
-  // === still ===============================================================
-  ambient: { world: "nebula", hue: -10, sat: 0.9, speed: 0.8, p: { clouds: 1, motes: 1 } },
-  darkambient: { world: "nebula", hue: -76, sat: 0.45, light: 0.9, speed: 0.6, p: { clouds: 1.2, motes: 0.6, band: 0.7, veil: 0.6, fall: 1 } },
-  drone: { world: "nebula", hue: -50, sat: 0.5, speed: 0.4, p: { clouds: 1.3, motes: 0.4, band: 1.3, veil: 1, fall: 1 } },
-  newage: { world: "nebula", hue: 34, sat: 0.8, light: 1.05, speed: 0.7, p: { motes: 1.3, band: 1.2, veil: 0.2 } },
-  minimalism: { world: "cathedral", hue: -4, sat: 0.7, speed: 0.6, p: { shafts: 0.8, rose: 0.7, swell: 0.8, fan: 0.2, dust: 0.4 } },
-
-  // === played ==============================================================
-  jazz: { world: "smoke", hue: 20, sat: 1, p: { strokes: 1, curve: 1, stave: 0.5 } },
-  bebop: { world: "smoke", hue: 24, sat: 1.05, speed: 1.3, p: { strokes: 1.4, curve: 1.2, ink: 0.2, stave: 0.9 } },
-  swing: { world: "smoke", hue: 28, sat: 1.05, speed: 1.1, p: { strokes: 1.2, drift: 1.2, ink: 0.15, stave: 0.6 } },
-  bigband: { world: "stagelights", hue: 32, sat: 1.05, p: { beams: 1.3, wall: 0.8, strobe: 0.4, teeth: 0.2, haze: 0.5 } },
-  smoothjazz: { world: "smoke", hue: 16, sat: 0.9, speed: 0.75, p: { strokes: 0.8, drift: 1.3, stave: 0.3 } },
-  jazzfusion: { world: "smoke", hue: 10, sat: 1, speed: 1.15, p: { strokes: 1.3, ink: 0.3, stave: 0.6 } },
-  blues: { world: "smoke", hue: -22, sat: 0.9, speed: 0.8, p: { strokes: 0.9, curve: 1.3, ink: 0.35, stave: 0.4 } },
-  deltablues: { world: "smoke", hue: -14, sat: 0.85, speed: 0.7, p: { strokes: 0.8, curve: 1.4, ink: 0.8, stave: 0.2 } },
-  country: { world: "smoke", hue: 32, sat: 0.95, p: { strokes: 1, drift: 0.9, ink: 0.7, stave: 0.3 } },
-  bluegrass: { world: "smoke", hue: 36, sat: 1, speed: 1.25, p: { strokes: 1.4, ink: 1, stave: 0.4 } },
-  folk: { world: "smoke", hue: 26, sat: 0.9, speed: 0.85, p: { strokes: 0.9, ink: 0.6 } },
-  singersongwriter: { world: "smoke", hue: 18, sat: 0.85, speed: 0.75, p: { strokes: 0.8, drift: 1.1, ink: 0.4, stave: 0.3 } },
-  celtic: { world: "smoke", hue: 96, sat: 0.9, p: { strokes: 1.1, curve: 1.2, ink: 0.5, stave: 0.2 } },
-  flamenco: { world: "carnival", hue: 6, sat: 1.1, speed: 1.15, p: { dots: 1.3, sway: 1.2, bar: 1, meet: 0.9 } },
-  tango: { world: "carnival", hue: -4, sat: 1, speed: 0.9, p: { rings: 1.1, sway: 1.4, bar: 0.8, meet: 0.4 } },
-  salsa: { world: "carnival", hue: 22, sat: 1.15, speed: 1.2, p: { rings: 1.2, dots: 1.4, sway: 1.3, bar: 0.6, meet: 1.2 } },
-  cumbia: { world: "carnival", hue: 34, sat: 1.1, p: { dots: 1.2, sway: 1.2, bar: 0.5, meet: 0.7 } },
-  samba: { world: "carnival", hue: 40, sat: 1.15, speed: 1.3, p: { dots: 1.5, rings: 1.2, meet: 1.4, bar: 0.3, skip: 2 } },
-  bossanova: { world: "smoke", hue: 44, sat: 0.9, speed: 0.8, p: { strokes: 0.9, drift: 1.2, ink: 0.3, stave: 0.5 } },
-  reggae: { world: "carnival", hue: 84, sat: 1, speed: 0.85, p: { rings: 0.9, sway: 1.4, bar: 0.9, meet: 0 } },
-  rocksteady: { world: "carnival", hue: 78, sat: 0.95, speed: 0.8, p: { sway: 1.5, bar: 0.9, meet: 0 } },
-  afrobeat: { world: "carnival", hue: 36, sat: 1.05, p: { rings: 1.3, dots: 1.3, meet: 1.3, bar: 0.2 } },
-  highlife: { world: "carnival", hue: 42, sat: 1.05, p: { dots: 1.2, meet: 0.8 } },
-  kizomba: { world: "carnival", hue: 16, sat: 0.95, speed: 0.8, p: { sway: 1.5, dots: 0.9, meet: 0, bar: 0.4 } },
-  bollywood: { world: "carnival", hue: 50, sat: 1.2, speed: 1.1, p: { rings: 1.3, dots: 1.4, meet: 1, bar: 0.5 } },
-  arabic: { world: "kaleido", hue: 38, sat: 1.05, speed: 0.75, p: { sectors: 1.2, petals: 1.1, twist: 0.6, aniso: 0.08, web: 0.3 } },
-
-  // === classical ===========================================================
-  classical: { world: "cathedral", hue: 0, sat: 0.85, p: { shafts: 1, rose: 1, swell: 1, fan: 0.5, dust: 0.6 } },
-  strings: { world: "cathedral", hue: -6, sat: 0.85, p: { shafts: 1.1, swell: 1.1, rose: 0.8, fan: 0.4, dust: 0.8 } },
-  orchestral: { world: "cathedral", hue: 4, sat: 0.95, p: { shafts: 1.3, swell: 1.3, fan: 0.8, dust: 0.9 } },
-  opera: { world: "cathedral", hue: 12, sat: 1, p: { shafts: 1.2, swell: 1.4, rose: 1.1, fan: 0.7, dust: 1 } },
-  choral: { world: "cathedral", hue: 8, sat: 0.9, light: 1.05, p: { shafts: 1.4, swell: 1.2, fan: 1, dust: 1.2 } },
-  baroque: { world: "cathedral", hue: 30, sat: 0.9, p: { rose: 1.4, shafts: 0.9, fan: 0.3, dust: 0.5 } },
-  romantic: { world: "cathedral", hue: -12, sat: 0.95, p: { swell: 1.3, shafts: 1.1, fan: 0.6, dust: 0.9 } },
-  piano: { world: "cathedral", hue: -2, sat: 0.7, speed: 0.8, p: { shafts: 0.8, rose: 0.6, swell: 0.9, fan: 0, dust: 0.3 } },
-  filmscore: { world: "cathedral", hue: -20, sat: 0.9, p: { shafts: 1.3, swell: 1.4, rose: 0.9, fan: 0.85, dust: 1.1 } },
-  soundtrack: { world: "cathedral", hue: -16, sat: 0.9, p: { shafts: 1.2, swell: 1.3, fan: 0.8, dust: 1 } },
-
-  // === other ===============================================================
-  chiptune: { world: "pixels", energy: 0.82, hue: 100, sat: 1.2, p: { cell: 1.3, glitch: 0.3, sprites: 1.4, steps: 2, scroll: 1 } },
-  eightbit: { world: "pixels", energy: 0.82, hue: 108, sat: 1.25, p: { cell: 1.5, glitch: 0.25, sprites: 1.5, steps: 2, scroll: 0.8 } },
-  dance: { world: "bloom", hue: 22, sat: 1.1, p: { confetti: 1.3, blooms: 1.1, petal: 5, ray: 0.5 } },
+  // === retro =================================================================
+  synthwave: { world: "horizon" },
+  retrowave: { world: "horizon", hue: 10, p: { sun: 1.1 } },
+  darksynth: { world: "horizon", hue: -40, p: { sun: 0.8, peaks: 1.4, grid: 1.2 } },
+  chiptune: { world: "pixels" },
+  eightbit: { world: "pixels", hue: 20, p: { cell: 1.3, steps: 5 } },
+  glitch: { world: "pixels", hue: 150, p: { glitch: 1.8, steps: 6 } },
+  glitchhop: { world: "pixels", hue: 40, p: { glitch: 1.3, coins: 0.5 } },
+  breakcore: { world: "pixels", hue: -30, speed: 1.3, p: { glitch: 2, scroll: 1.4, coins: 0 } },
+  lolicore: { world: "pixels", hue: -50, sat: 1.2, p: { glitch: 1.6, coins: 1.2 } },
 };
 
 // --- aliases ----------------------------------------------------------------
@@ -341,122 +321,76 @@ export const SKINS = {
 // (lowercased, accents and punctuation removed), so only genuinely different
 // WORDS need a line here.
 export const ALIASES = {
-  // ids that differ from the normalised label
-  "cordesclassique": "strings",
-  "popchanson": "vocalPop",
-  "rbsoul": "rnb",
-  "hiphoprap": "hiphop",
-  "electronique": "electronic",
-  "jazzacoustique": "jazz",
-  // spellings and synonyms
-  "drumandbass": "dnb",
-  "drumnbass": "dnb",
-  "drumbass": "dnb",
-  "dandb": "dnb",
-  "liquid": "liquiddnb",
-  "neuro": "neurofunk",
-  "psy": "psytrance",
-  "psychedelictrance": "psytrance",
-  "goatrance": "goa",
-  "fullonpsytrance": "fullon",
-  "hitechpsy": "hitech",
-  "forestpsy": "forest",
-  "tekno": "hardtek",
-  "tribe": "tribecore",
-  "frenchtek": "hardtek",
-  "mainstreamhardcore": "hardcore",
-  "millennium": "hardcore",
-  "earlyhardcore": "gabber",
-  "rotterdam": "gabber",
-  "happycore": "happyhardcore",
-  "uktempo": "uptempo",
-  "terror": "terrorcore",
-  "splittercore": "extratone",
-  "flashcore": "extratone",
-  "hardtechnoindustrial": "industrialtechno",
-  "rawhardstyle": "rawstyle",
-  "euphoric": "euphorichardstyle",
-  "xtraraw": "rawphase",
-  "hardtechnoschranz": "schranz",
-  "acidhouse": "acidtechno",
-  "acid": "acidtechno",
-  "progressivehouse": "proghouse",
-  "progressivetrance": "progtrance",
-  "upliftingtrance": "upliftingtrance",
-  "uplifting": "upliftingtrance",
-  "melodictechno": "melodichouse",
-  "organichouse": "deephouse",
-  "frenchtouch": "frenchhouse",
-  "ukg": "ukgarage",
-  "2step": "twostep",
-  "deuxstep": "twostep",
-  "future": "futurebass",
-  "wave": "darkwave",
-  "phonkdrift": "phonk",
-  "driftphonk": "phonk",
-  "memphisrap": "phonk",
-  "lofihiphopbeats": "lofihiphop",
-  "lofibeats": "lofihiphop",
-  "jazzrap": "boombap",
-  "boombapsoul": "boombap",
-  "hiphopusa": "hiphop",
-  "afrobeatsnaija": "afrobeats",
-  "amapianoyanos": "amapiano",
-  "reggaetonlatino": "reggaeton",
-  "latin": "latinpop",
-  "musiquelatine": "latinpop",
-  "metalcorehardcore": "metalcore",
-  "deathmetalbrutal": "deathmetal",
-  "blackmetalatmospheric": "blackmetal",
-  "doommetal": "doom",
-  "stonerrock": "sludge",
-  "nu": "numetal",
-  "numetalrap": "numetal",
-  "hardrockmetal": "hardrock",
-  "punkrock": "punk",
-  "jerseyclub": "jersey",
-  "popunk": "poppunk",
-  "postrock": "shoegaze",
-  "dreamwave": "dreampop",
-  "citypopjapan": "citypop",
-  "vapor": "vaporwave",
-  "vaporwavemall": "vaporwave",
-  "synthwaveretro": "synthwave",
-  "musiqueclassique": "classical",
-  "classique": "classical",
-  "orchestre": "orchestral",
-  "bandeoriginale": "filmscore",
-  "bo": "filmscore",
-  "musiquedefilm": "filmscore",
-  "chorale": "choral",
-  "chant": "choral",
-  "8bit": "eightbit",
-  "huitbit": "eightbit",
-  "videogame": "chiptune",
-  "jeuvideo": "chiptune",
-  "ambiant": "ambient",
-  "nebuleuse": "ambient",
-  "worldmusic": "afrobeat",
-  "musiquedumonde": "afrobeat",
-  "variete": "vocalPop",
-  "varietefrancaise": "chanson",
-  "frenchvariety": "chanson",
-  "edm": "bigroom",
-  "mainstage": "bigroom",
-  "clubdance": "dance",
   // the classifier's own French labels, where they are not simply the id
-  "danceedm": "dance",
-  "discofunk": "disco",
-  "deutscherkrach": "krach",
-  "indus": "industrial",
-  "deathbrutal": "brutal",
-  "hardtekkzaag": "zaag",
-  "germanhardtekk": "germanparty",
-  "partytekk": "germanparty",
-  "hardpingpongtekk": "hardpingpong",
+  cordesclassique: "strings",
+  jazzacoustique: "jazz",
+  popchanson: "vocalPop",
+  rbsoul: "rnb",
+  danceedm: "dance",
+  discofunk: "disco",
+  deutscherkrach: "krach",
+  tribe: "tribecore",
+  indus: "industrial",
+  deathbrutal: "brutal",
+  ukgarage: "garage",
+  drumbass: "dnb",
+  electronique: "electronic",
+  // spellings people actually type
+  drumandbass: "dnb",
+  drumnbass: "dnb",
+  randb: "rnb",
+  edm: "bigroom",
+  mainstage: "bigroom",
+  clubdance: "dance",
+  variete: "vocalPop",
+  varietefrancaise: "chanson",
+  frenchvariety: "chanson",
+  chansonfrancaise: "chanson",
+  musiquedumonde: "afrobeat",
+  worldmusic: "afrobeat",
+  hardtekkzaag: "zaag",
+  germanhardtekk: "germanparty",
+  partytekk: "germanparty",
+  hardpingpongtekk: "hardpingpong",
+  frenchtek: "hardtek",
+  tekno: "hardtek",
+  freeparty: "tribecore",
+  teknival: "tribecore",
+  terror: "terrorcore",
+  neuro: "neurofunk",
+  liquid: "liquiddnb",
+  liquidfunk: "liquiddnb",
+  ukg: "garage",
+  "2step": "twostep",
+  goatrance: "goa",
+  psy: "psytrance",
+  darkpsytrance: "darkpsy",
+  upliftingtrance: "uplifting",
+  progressivetrance: "progtrance",
+  progressivehouse: "proghouse",
+  progressiverock: "progrock",
+  psychedelicrock: "psychrock",
+  classique: "classical",
+  musiqueclassique: "classical",
+  bandeoriginale: "filmscore",
+  musiquedefilm: "filmscore",
+  ost: "soundtrack",
+  hiphopfr: "hiphop",
+  rapfr: "rap",
+  chill: "chillout",
+  balearic: "chillout",
+  latin: "latinpop",
+  afro: "afrohouse",
+  electro: "electrohouse",
+  "8bit": "eightbit",
+  bitpop: "chiptune",
+  vgm: "chiptune",
+  retro: "synthwave",
+  newwave: "synthpop",
 };
 
 // When nothing in the catalogue matches, the archetype still says something.
+// Kept in step with worlds/catalogue.js#worldFor.
 const ARCHETYPE_SKIN = {
   sustain: "ambient",
   voice: "pop",
@@ -466,7 +400,7 @@ const ARCHETYPE_SKIN = {
 };
 
 // Accents out, punctuation out, lowercase. "Hard Ping-Pong" and "hardpingpong"
-// are the same genre, and so are "Cordes / classique" and its id.
+// are the same genre, and so are "Cordes / classique" and its alias.
 function normalise(name) {
   return String(name || "")
     .normalize("NFD")
@@ -478,7 +412,7 @@ function normalise(name) {
 const BY_KEY = new Map();
 for (const id of Object.keys(SKINS)) BY_KEY.set(normalise(id), id);
 for (const [from, to] of Object.entries(ALIASES)) {
-  if (SKINS[to]) BY_KEY.set(normalise(from), to);
+  if (SKINS[to] && !BY_KEY.has(normalise(from))) BY_KEY.set(normalise(from), to);
 }
 
 /** The catalogue id for whatever name was handed over, or "" when unknown. */
@@ -488,7 +422,8 @@ export function skinId(name, archetype = "") {
   return ARCHETYPE_SKIN[archetype] || "";
 }
 
-const EMPTY = { world: "bloom", p: {} };
+// The floor under everything: an unknown name with no archetype.
+const EMPTY = { world: "bokeh", p: {} };
 
 /** The skin itself, always usable: an unknown name still returns something. */
 export function skinFor(name, archetype = "") {
@@ -496,7 +431,7 @@ export function skinFor(name, archetype = "") {
   const s = (id && SKINS[id]) || EMPTY;
   // A skin naming a world that does not exist would render nothing at all,
   // which is a much worse failure than rendering the wrong one.
-  return WORLD_META[s.world] ? s : { ...s, world: "bloom" };
+  return WORLD_META[s.world] ? s : { ...s, world: EMPTY.world };
 }
 
 /** How many genres the animation engine can dress differently. */
