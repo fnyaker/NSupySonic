@@ -19,6 +19,11 @@ const LOADERS = {
   shatter: () => import("./shatter.js"),
   bounce: () => import("./bounce.js"),
   saw: () => import("./saw.js"),
+  tunnel: () => import("./tunnel.js"),
+  warehouse: () => import("./warehouse.js"),
+  hyperspace: () => import("./hyperspace.js"),
+  kaleido: () => import("./kaleido.js"),
+  wobble: () => import("./wobble.js"),
 };
 
 const cache = new Map();
