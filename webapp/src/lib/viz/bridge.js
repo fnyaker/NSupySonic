@@ -302,7 +302,7 @@ export function createPublisher({ onViewers, channel } = {}) {
         b: [b.bpm, b.confidence, b.phase, hadBeat ? 1 : 0, b.beatIndex, b.barPos,
             b.beatsPerBar, hadDown ? 1 : 0, peakOnset, b.kickPulse, b.period,
             b.locked ? 1 : 0],
-        // The MUSICAL layer (lib/audio/pattern.js). Its four events are latched
+        // The MUSICAL layer (rhythm/src/pattern.rs). Its four events are latched
         // above; the rest are continuous and can be sampled.
         p: frame.pattern
           ? [hadMain ? 1 : 0, frame.pattern.mainPower, hadBig ? 1 : 0, hadRollKick ? 1 : 0,
@@ -376,7 +376,7 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2, ini
     beatsPerBar: 4, downbeat: false, onset: 0, kickPulse: 0, period: 0.5, locked: false,
   };
   const kick = { type: "soft", strength: 0, decay: 0.1, hit: false };
-  // The musical layer, rebuilt in the shape lib/audio/pattern.js publishes.
+  // The musical layer, rebuilt in the shape lib/audio/engine.js publishes.
   const pattern = {
     mainKick: false, mainPower: 0, bigKick: false, rollKick: false,
     roll: 0, rollDiv: 0, rollNotes: 0,

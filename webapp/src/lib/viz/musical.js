@@ -22,7 +22,7 @@
 // ...and the SHAPE of the moment, each 0..1 and each smoothed over a musically
 // sensible span rather than an arbitrary one:
 //
-//   m.mainKick  the frame a MAIN kick lands — not a roll note (pattern.js)
+//   m.mainKick  the frame a MAIN kick lands — not a roll note (rhythm/src/pattern.rs)
 //   m.bigKick   ...and one that is big for this track
 //   m.roll      0..1, how much of a roll is going on; m.rollDiv, its subdivision
 //   m.drop      the frame the arrangement comes back; m.dropped decays from it
@@ -124,7 +124,7 @@ export function createMusical() {
     // How many, so far — for per-event variety that is stable for the life of
     // the event (a world hashes the count).
     count: { kick: 0, main: 0, snare: 0, drop: 0, bar: 0, beat: 0 },
-    // --- the MUSICAL reading (lib/audio/pattern.js) --------------------------
+    // --- the MUSICAL reading (webapp/rhythm/src/pattern.rs) -------------------
     mainKick: false,
     mainPower: 0,
     bigKick: false,
@@ -256,7 +256,7 @@ export function createMusical() {
       m.hit = !!f.kickHit;
       // The musical layer is optional: the engine only runs it at rhythm level
       // and above. Without it every accepted kick is treated as a main one,
-      // which is what a scene written before pattern.js already assumed.
+      // which is what a scene written before the pattern layer already assumed.
       const pat = frame.pattern;
       m.mainKick = pat ? !!pat.mainKick : m.hit;
       m.mainPower = pat?.mainPower ?? (m.hit ? m.kick : m.mainPower);
@@ -353,7 +353,7 @@ export function createMusical() {
       if (m.onBar) barsSinceKick = m.kick > 0.25 ? 0 : barsSinceKick + 1;
       const thinning = clamp(barsSinceKick / 3, 0, 1);
       const rising = clamp((level - 0.25) * 1.6, 0, 1) * clamp(air * 1.4, 0, 1);
-      // pattern.js has its own, better-informed reading of a build; take
+      // the pattern layer has its own, better-informed reading of a build; take
       // whichever is stronger so neither can hide the other.
       tension = m.ease(tension, Math.max(thinning * rising, m.build), 2, dt);
       m.tension = tension;

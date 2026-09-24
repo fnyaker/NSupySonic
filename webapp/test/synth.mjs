@@ -4,7 +4,7 @@
 // WHY THIS REPLACED THE PREVIOUS GENERATOR. That one drew spectra by hand: it
 // placed a bin per harmonic at a level I had chosen (`-8.5 * log10(h)`, a
 // number with no source but me), summed them, and handed the result to
-// features.js. Everything about it was a theory of what a kick looks like, and
+// the feature extractor. Everything about it was a theory of what a kick looks like, and
 // a detector tuned against it is tuned against my theory. Worse, it could not
 // contain the things that actually break detectors, because those things are
 // not in a list of harmonics:
@@ -326,7 +326,7 @@ function renderReverseBass(buf, ducks, { f = 70, gain = 0.5, riseMs = 130 } = {}
  * detections per kick either way, because the detector was reading the
  * CENTROID of an empty region rather than anything the hat put there. That is
  * the point of fixing the instrument first: it turned a mystery into a stated
- * fault in features.js, which is where the fix belongs.
+ * fault in the feature extractor, which is where the fix belongs.
  */
 function renderHat(buf, at, { lenMs = 35, gain = 0.12, poles = 4 } = {}) {
   const start = Math.round(at * SR);

@@ -235,7 +235,7 @@ test("the unleashed strobe plays the kicks of a drop, and leaves the breakdown d
   // stamps read at the render clock, then the ten-a-second cap. Material:
   // frenchcore at 200 BPM through the arrangement above (build 8-16 s, drop at
   // 16 s, breakdown 32-40 s), with the pattern layer's `dropped` held for
-  // eight seconds after each drop exactly as audio/pattern.js holds it.
+  // eight seconds after each drop exactly as rhythm/src/pattern.rs holds it.
   const { strobePower, STROBE_MIN_INTERVAL, FLASH_MIN_INTERVAL } = await import("../src/lib/viz/scenes/gl.js");
   const bpm = 200;
   const dt = 1 / 60;

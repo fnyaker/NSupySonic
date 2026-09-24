@@ -15,7 +15,7 @@
 // second build, and the drop again. `moments` names the instants worth
 // photographing.
 //
-// The scales follow what the real extractor produces (features.js): bands in
+// The scales follow what the real analyser produces (rhythm/src/features.rs): bands in
 // 0..1 of the display range, energies as linear power, fluxes as the small
 // per-bin averages they are, `kick` as a 0..1 envelope. Deterministic: the same
 // arguments always give the same track.

@@ -634,7 +634,15 @@ impl Analyzer {
             s[style::F_TONAL] = f.tonal;
             s[style::F_CHORD] = f.chord_change;
             s[style::F_DYN] = f.dynamics;
-            self.style.kick_frame(kick.map(|(kt, _)| kt), e[0] + e[1], e[4] + e[5], f.flatness, t);
+            let seen = kick.map(|(kt, strength)| style::KickSeen {
+                t: kt,
+                strength,
+                f0: kick_detail[0],
+                f1: kick_detail[1],
+                path: kick_detail[2],
+                click: kick_detail[3],
+            });
+            self.style.kick_frame(seen, e[0] + e[1], f.flatness, t);
             self.style.process(b.locked, b.confidence, f.dynamics, t, dt as f32);
             // A genre recognised LIVE may only confirm the octave the grid is
             // on, never move it: the classifier's own tempo term reads the
@@ -755,8 +763,17 @@ impl Analyzer {
         o[at!("kickHard")] = ks.hard;
         o[at!("kickIndus")] = ks.indus;
         o[at!("genre")..at!("genre") + genre::N].copy_from_slice(&self.genre.out);
-        let _ = kick_detail;
-        o[at!("debug")..at!("debug") + 8].copy_from_slice(&snap.debug);
+        // The accepted kick's evidence when this frame carries one (onset,
+        // f0, f1, path, click dB, level against the track's kicks, score),
+        // else the last candidate the detector weighed.
+        if let Some((kt, _)) = kick {
+            let d = at!("debug");
+            o[d] = kt as f32;
+            o[d + 1..d + 7].copy_from_slice(&kick_detail);
+            o[d + 7] = 1.0;
+        } else {
+            o[at!("debug")..at!("debug") + 8].copy_from_slice(&snap.debug);
+        }
         let dg = at!("diag");
         o[dg] = self.tempo.out.confidence;
         o[dg + 1] = if self.tempo.out.locked { 1.0 } else { 0.0 };

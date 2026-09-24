@@ -186,9 +186,15 @@ export function score(rec, truth) {
 
 // --- running an engine ------------------------------------------------------------
 async function engineFor(name) {
-  if (name === "js") return (await import("./engine-js.mjs")).default;
+  if (name === "js") return null; // the recorded baseline, see baseline-js.json
   return (await import("./engine-wasm.mjs")).default;
 }
+
+// The JavaScript chain this analyser replaced (features.js, tempo.js,
+// pattern.js and the live classifier, driven the way engine.js drove them) is
+// gone from the tree; what it scored on these records, in every scenario, is
+// kept in baseline-js.json and printed by `--engine js` for comparison.
+const BASELINE = JSON.parse(readFileSync(join(here, "baseline-js.json"), "utf8"));
 
 function scenarioOpts(sc, truth) {
   const genre = truth.genre;
@@ -213,11 +219,23 @@ async function main() {
       );
       const agg = {};
       for (const def of songs) {
-        const { pcm, truth } = loadSong(def);
-        const t0 = Date.now();
-        const rec = await engine.run(pcm, SR, scenarioOpts(sc, truth));
-        const ms = Date.now() - t0;
-        const s = score(rec, truth);
+        let s;
+        let rec;
+        let ms = 0;
+        let truth;
+        if (engine) {
+          const song = loadSong(def);
+          truth = song.truth;
+          const t0 = Date.now();
+          rec = await engine.run(song.pcm, SR, scenarioOpts(sc, truth));
+          ms = Date.now() - t0;
+          s = score(rec, truth);
+        } else {
+          s = BASELINE.find((b) => b.id === def.id && b.scenario === sc);
+          if (!s) continue;
+          truth = { seconds: 1 };
+          rec = { lockedShare: s.lockedShare, confMean: s.confNoBeat, beats: [], kicks: [] };
+        }
         results.push({ engine: engineName, scenario: sc, id: def.id, genre: truth.genre, ...s, ms });
         if (def.noBeat) {
           console.log(

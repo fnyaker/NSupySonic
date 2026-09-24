@@ -61,16 +61,43 @@ struct Family {
 }
 
 // --- the kick's SHAPE ---------------------------------------------------------
-// soft / hard / industrial from attack, decay, click and grit, blended per hit.
+// soft / hard / industrial, blended per kick, from what the kick detector
+// (kick.rs) measured on the kick itself — never from the mix around it.
+//
+// The old reading compared the bottom of the spectrum with the top at the
+// kick (a "click" ratio) and its thresholds sat three orders of magnitude
+// above anything that ratio ever reached, so on every record of the eval the
+// three weights stayed at a third each and every rule written on them (the
+// uptempo family multiplies by the industrial weight) was running blind.
+// Measured instead, per accepted kick, on the eval's 26 records:
+//
+//   where the pitch starts   160-200 Hz for rawstyle, frenchcore, uptempo,
+//                            krach, gabber and speedcore; 50-100 Hz for
+//                            techno, house, trap, pop, rock and metal.
+//                            Hardstyle's fast sweep reads 105 Hz on its first
+//                            full cycle, but falls by a factor of 1.9 — the
+//                            DROP is the other half of "pitched".
+//   how noisy the body is    spectral flatness over the three frames after
+//                            the onset: 0.55-0.61 for uptempo, zaag and krach
+//                            against 0.44-0.48 for rawstyle, frenchcore and
+//                            gabber — the distortion that makes a kick
+//                            "industrial" rather than merely hard.
+//
+// Neither number means anything for a soft kick (a hi-hat over it moves the
+// flatness), which is why grit only splits the HARD share.
 pub struct KickShape {
     capturing: bool,
     t0: f64,
     peak_low: f32,
     peak_at: f64,
-    peak_high: f32,
+    decay_at: f64,
+    // The kick being measured: its pitch and how reliable that is, and the
+    // flatness of the frames after it.
+    f0: f32,
+    f1: f32,
+    trust: f32,
     flat_sum: f32,
     flat_n: f32,
-    decay_at: f64,
     pub soft: f32,
     pub hard: f32,
     pub indus: f32,
@@ -83,6 +110,24 @@ pub struct KickShape {
     pub hit: bool,
 }
 
+/// What the detector said about one kick (lib.rs `Hit::detail`).
+#[derive(Clone, Copy, Default)]
+pub struct KickSeen {
+    pub t: f64,
+    pub strength: f32,
+    pub f0: f32,
+    pub f1: f32,
+    /// 1 = found by its pitch sweep, 2 = by the jump in the bottom octave.
+    pub path: f32,
+    /// The beater's crack, dB over what preceded it.
+    pub click: f32,
+}
+
+#[inline]
+fn ramp(x: f32, lo: f32, hi: f32) -> f32 {
+    ((x - lo) / (hi - lo)).clamp(0.0, 1.0)
+}
+
 impl KickShape {
     fn new() -> KickShape {
         KickShape {
@@ -90,10 +135,12 @@ impl KickShape {
             t0: 0.0,
             peak_low: 0.0,
             peak_at: 0.0,
-            peak_high: 0.0,
+            decay_at: 0.0,
+            f0: 0.0,
+            f1: 0.0,
+            trust: 0.0,
             flat_sum: 0.0,
             flat_n: 0.0,
-            decay_at: 0.0,
             soft: 1.0 / 3.0,
             hard: 1.0 / 3.0,
             indus: 1.0 / 3.0,
@@ -111,36 +158,40 @@ impl KickShape {
         *self = KickShape::new();
     }
 
-    /// One output frame. `kick_at` is the onset of a confirmed kick in this
-    /// frame, if any.
-    fn process(&mut self, kick_at: Option<f64>, low_lin: f32, high_lin: f32, flatness: f32, now: f64) {
+    /// One output frame: `kick` is the kick this frame carries, if any.
+    fn process(&mut self, kick: Option<KickSeen>, low_lin: f32, flatness: f32, now: f64) {
         self.hit = false;
-        if let Some(t) = kick_at {
+        if let Some(k) = kick {
             if self.capturing {
                 self.finish(now);
             }
             self.capturing = true;
-            self.t0 = t;
+            self.t0 = k.t;
             self.peak_low = low_lin;
             self.peak_at = now;
-            self.peak_high = high_lin;
-            self.flat_sum = flatness;
-            self.flat_n = 1.0;
             self.decay_at = 0.0;
+            self.f0 = k.f0;
+            self.f1 = k.f1;
+            // A pitch read cycle by cycle over a sweep is a measurement; one
+            // read after a jump in level is an estimate.
+            self.trust = if k.path == 1.0 { 1.0 } else { 0.5 };
+            self.flat_sum = 0.0;
+            self.flat_n = 0.0;
+            self.click = (k.click / 40.0).clamp(0.0, 1.0);
+            self.strength = k.strength.clamp(0.0, 1.0);
         } else if self.capturing {
             if low_lin > self.peak_low {
                 self.peak_low = low_lin;
                 self.peak_at = now;
             }
-            if high_lin > self.peak_high {
-                self.peak_high = high_lin;
+            if self.flat_n < 3.0 {
+                self.flat_sum += flatness;
+                self.flat_n += 1.0;
             }
-            self.flat_sum += flatness;
-            self.flat_n += 1.0;
             if self.decay_at == 0.0 && low_lin < self.peak_low * 0.25 && now - self.peak_at > 0.01 {
                 self.decay_at = now;
             }
-            if now - self.t0 > 0.42 || (self.decay_at > 0.0 && now - self.decay_at > 0.02) {
+            if now - self.t0 > 0.42 || (self.decay_at > 0.0 && now - self.decay_at > 0.02 && self.flat_n >= 3.0) {
                 self.finish(now);
             }
         }
@@ -156,26 +207,25 @@ impl KickShape {
 
     fn finish(&mut self, now: f64) {
         self.capturing = false;
-        let attack = ((self.peak_at - self.t0) as f32).max(0.004);
-        let end = if self.decay_at > 0.0 { self.decay_at } else { now };
-        let decay = (end - self.peak_at) as f32;
-        let click = if self.peak_low > 1e-9 { self.peak_high / self.peak_low } else { 0.0 };
-        let grit = if self.flat_n > 0.0 { self.flat_sum / self.flat_n } else { 0.0 };
-        let soft = below(click, 0.16, 0.16) * below(grit, 0.36, 0.26) * above(decay, 0.06, 0.16);
-        let hard = above(click, 0.09, 0.14) * below(attack, 0.05, 0.05) * in_range(grit, 0.16, 0.52, 0.24);
-        let indus = above(grit, 0.36, 0.25) * above(click, 0.18, 0.22) * above(decay, 0.05, 0.12);
-        let total = soft + hard + indus;
-        if total > 1e-6 {
-            let k = 0.35;
-            self.soft += (soft / total - self.soft) * k;
-            self.hard += (hard / total - self.hard) * k;
-            self.indus += (indus / total - self.indus) * k;
+        if self.flat_n < 1.0 {
+            return;
         }
-        self.attack = attack;
-        self.decay = decay;
-        self.click = click;
-        self.grit = grit;
-        self.strength = ((1.0 + self.peak_low * 40.0).log10() * 0.6).clamp(0.0, 1.0);
+        self.attack = ((self.peak_at - self.t0) as f32).max(0.004);
+        let end = if self.decay_at > 0.0 { self.decay_at } else { now };
+        self.decay = (end - self.peak_at) as f32;
+        self.grit = self.flat_sum / self.flat_n;
+        // Pitched: the sweep starts high, or it starts in the kick range and
+        // falls a long way.
+        let drop = if self.f1 > 0.0 { self.f0 / self.f1 } else { 1.0 };
+        let pitched = ramp(self.f0, 100.0, 160.0).max(ramp(drop, 1.4, 2.0) * ramp(self.f0, 80.0, 110.0));
+        let noisy = ramp(self.grit, 0.47, 0.57);
+        let soft = 1.0 - pitched;
+        let hard = pitched * (1.0 - noisy);
+        let indus = pitched * noisy;
+        let k = 0.35 * self.trust;
+        self.soft += (soft - self.soft) * k;
+        self.hard += (hard - self.hard) * k;
+        self.indus += (indus - self.indus) * k;
         self.hit = true;
     }
 }
@@ -202,8 +252,8 @@ impl Style {
             weights: Vec::new(),
             raw: Vec::new(),
             s: [0.0; N_FEAT],
-            arche: [0.2; ARCH_N],
-            look: [0.5; LOOK_N],
+            arche: [0.0, 0.0, 1.0, 0.0, 0.0],
+            look: [0.56, 0.58, 0.58, 0.5, 0.5, 0.45, 0.16],
             dominant: -1,
             pending: -1,
             pending_since: 0.0,
@@ -270,7 +320,9 @@ impl Style {
         self.pending = -1;
         self.confidence = 0.0;
         self.top = [(-1, 0.0); 3];
-        self.arche = [0.2; ARCH_N];
+        // The look and the archetypes are NOT reset: a new track eases the
+        // picture from where the last one left it, rather than snapping it to
+        // neutral for the length of a dissolve.
     }
 
     pub fn family_count(&self) -> usize {
@@ -336,8 +388,8 @@ impl Style {
                 self.weights[i] += (self.raw[i] / sum - self.weights[i]) * a;
             }
         }
-        self.arche = [0.0; ARCH_N];
-        self.look = [0.0; LOOK_N];
+        let mut arche = [0f32; ARCH_N];
+        let mut look = [0f32; LOOK_N];
         let mut wsum = 0f32;
         let mut top = [(-1i32, -1f32); 3];
         for (i, f) in self.families.iter().enumerate() {
@@ -355,23 +407,31 @@ impl Style {
             if w <= 0.0 {
                 continue;
             }
-            self.arche[f.arch] += w;
+            arche[f.arch] += w;
             for k in 0..LOOK_N {
-                self.look[k] += f.look[k] * w;
+                look[k] += f.look[k] * w;
             }
             wsum += w;
         }
-        if wsum > 1e-6 {
-            for v in self.arche.iter_mut() {
-                *v /= wsum;
-            }
-            for v in self.look.iter_mut() {
-                *v /= wsum;
-            }
-        } else {
-            // Nothing yet: the neutral groove look.
-            self.look = self.families.get(0).map(|_| [0.56, 0.58, 0.58, 0.5, 0.5, 0.45, 0.16]).unwrap_or([0.5; LOOK_N]);
-            self.arche = [0.0, 0.0, 1.0, 0.0, 0.0];
+        // Normalised, the weights of an opinion only just forming are all
+        // noise: the first family to clear zero owned the whole look for a
+        // frame, and the next one took it over — measured, a single-frame step
+        // of 0.22 in the look of an uptempo record. So the neutral groove look
+        // is blended out as the evidence (the weights' own total) comes in,
+        // and the result is eased over most of a second: a renderer must never
+        // see the picture it is blending toward jump.
+        const NEUTRAL: [f32; LOOK_N] = [0.56, 0.58, 0.58, 0.5, 0.5, 0.45, 0.16];
+        const NEUTRAL_ARCH: [f32; ARCH_N] = [0.0, 0.0, 1.0, 0.0, 0.0];
+        let formed = (wsum * 4.0).clamp(0.0, 1.0);
+        let norm = if wsum > 1e-6 { 1.0 / wsum } else { 0.0 };
+        let a = 1.0 - (-dt / 0.8).exp();
+        for k in 0..ARCH_N {
+            let target = arche[k] * norm * formed + NEUTRAL_ARCH[k] * (1.0 - formed);
+            self.arche[k] += (target - self.arche[k]) * a;
+        }
+        for k in 0..LOOK_N {
+            let target = look[k] * norm * formed + NEUTRAL[k] * (1.0 - formed);
+            self.look[k] += (target - self.look[k]) * a;
         }
         self.top = top;
         let (best, best_w) = top[0];
@@ -404,8 +464,8 @@ impl Style {
     }
 
     /// The kick-shape half, per output frame.
-    pub fn kick_frame(&mut self, kick_at: Option<f64>, low_lin: f32, high_lin: f32, flatness: f32, now: f64) {
-        self.kick.process(kick_at, low_lin, high_lin, flatness, now);
+    pub fn kick_frame(&mut self, kick: Option<KickSeen>, low_lin: f32, flatness: f32, now: f64) {
+        self.kick.process(kick, low_lin, flatness, now);
     }
 }
 

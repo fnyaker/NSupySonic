@@ -4,9 +4,12 @@
 // phone, inside the same frame budget as the rendering, with no download and no
 // warm-up, and its output drives an animation — so being roughly right within a
 // couple of seconds and never flickering matters far more than being exactly
-// right eventually. Every axis it uses is one of the descriptors features.js
-// and tempo.js already produce for other reasons, so the classifier itself is
-// essentially free.
+// right eventually. Every axis it uses is one of the descriptors the rhythm
+// analyser already produces for other reasons (webapp/rhythm/src/features.rs,
+// tempo.rs), so the classifier itself is essentially free. This file is its
+// VOCABULARY — the families, their looks, their tempo ranges and their rules,
+// written as data; the arithmetic runs in rhythm/src/style.rs, on the audio
+// thread, from the table `familyTable()` hands it.
 //
 // TWO OUTPUTS, for two different jobs:
 //
