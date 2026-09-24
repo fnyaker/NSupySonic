@@ -17,6 +17,15 @@
 // This is what makes the tag button pay off immediately: labelling a track
 // gives it a verdict with no measurement at all.
 //
+// The FIRST play is the one a measurement cannot help: the verdict is measured
+// from the archived file, and that play is what archives it. So the server
+// answers with Deezer's published tempo in the meantime, flagged `provisional`
+// (supysonic/deezer/analysis.py#tempo_hints). It is used at once — the tracker
+// starts on it — and it is not the last word: the measured verdict follows the
+// archive, usually inside the first minute. A provisional id therefore stays
+// on the poll until the real one lands or the polls run out, and a later play
+// asks again, at most every REASK_MS.
+//
 // Everything here is best-effort. A track nobody has measured, and nobody can
 // measure, simply has no entry, and the live detector carries it exactly as it
 // did before — so this is an accelerator, never a dependency.
@@ -36,6 +45,8 @@ let flushTimer = null;
 // or that died mid-job, must not keep a player asking forever.
 const POLL_DELAYS = [1500, 3000, 6000, 12000, 25000];
 const awaiting = new Map(); // id -> attempt count
+const REASK_MS = 10 * 60 * 1000;
+const reasked = new Map(); // id -> when a provisional verdict was last re-asked
 let pollTimer = null;
 const listeners = new Set();
 
@@ -106,6 +117,9 @@ function announce(id, verdict) {
 function store(id, verdict) {
   const had = mem.get(id) || null;
   mem.set(id, verdict || null);
+  // The re-ask clock runs from the last time the server could only offer the
+  // published tempo: asking again sooner would get the same answer.
+  if (provisional(verdict)) reasked.set(id, Date.now());
   schedule();
   // A miss is not an event: it is the absence of one, and it is remembered so
   // the same track is not re-asked on every play.
@@ -113,12 +127,15 @@ function store(id, verdict) {
     announce(id, verdict);
 }
 
+const provisional = (v) => !!(v && v.provisional);
+
 /** Come back for these in a moment; the server has them on its queue. */
 function watch(ids) {
   let grew = false;
   for (const id of ids || []) {
     const key = String(id);
-    if (mem.get(key)) continue;
+    const have = mem.get(key);
+    if (have && !provisional(have)) continue;
     if (!awaiting.has(key)) {
       awaiting.set(key, 0);
       grew = true;
@@ -143,18 +160,25 @@ function pollDue() {
       // Back into `awaiting` only if the server still says it is working on it.
       const still = new Set((r && r.pending) || []);
       for (const id of ids) {
-        if (got[id]) {
-          store(id, got[id]);
+        const v = got[id];
+        if (v && !provisional(v)) {
+          store(id, v);
           awaiting.delete(id);
           continue;
         }
+        // A provisional answer is used NOW and the real one still waited for:
+        // it follows the archive, which the server cannot name as pending
+        // until the file is on disk.
+        if (v) store(id, v);
         const n = (awaiting.get(id) || 0) + 1;
-        if (n > POLL_DELAYS.length || (still.size && !still.has(id))) {
+        const interim = provisional(mem.get(id));
+        if (n > POLL_DELAYS.length || (!interim && still.size && !still.has(id))) {
           // Either we have asked enough, or the server has stopped working on
-          // it — an unmeasurable track, or a job that died. Leave the miss in
-          // the cache and stop asking; the live detector carries it.
+          // it — an unmeasurable track, or a job that died. Leave the miss (or
+          // the published tempo) in the cache and stop asking; the live
+          // detector carries the rest.
           awaiting.delete(id);
-          mem.set(id, null);
+          if (!interim) mem.set(id, null);
         } else {
           awaiting.set(id, n);
         }
@@ -173,6 +197,13 @@ function pollDue() {
     });
 }
 
+function reaskDue(id) {
+  const now = Date.now();
+  if (now - (reasked.get(id) || 0) < REASK_MS) return false;
+  reasked.set(id, now);
+  return true;
+}
+
 /**
  * Ask for a run of tracks in one call, skipping the ones already answered.
  * Fire-and-forget: answers land in the cache for `knownAnalysis` to find.
@@ -185,7 +216,8 @@ export function primeAnalyses(ids) {
     // Only Deezer's numeric ids: a local upload has no verdict to serve, and
     // asking for one per play would be a request that can only ever answer no.
     if (!/^\d+$/.test(id)) continue;
-    if (mem.has(id) || pending.has(id)) continue;
+    if (pending.has(id)) continue;
+    if (mem.has(id) && !(provisional(mem.get(id)) && reaskDue(id))) continue;
     want.push(id);
   }
   if (!want.length) return;
@@ -198,12 +230,14 @@ export function primeAnalyses(ids) {
         // Remember a miss as well as a hit: a track that has not been measured
         // must not be re-asked on every play. A reload picks it up once the
         // server has caught up, which is the right cadence for something that
-        // only changes when the archive does.
-        store(id, got[id] || null);
+        // only changes when the archive does. A published tempo already in
+        // hand is kept rather than forgotten when a re-ask comes back empty.
+        store(id, got[id] || mem.get(id) || null);
       }
       // ...unless the server has just started measuring it, in which case the
-      // answer is a moment away and we should be there to catch it.
-      watch(r && r.pending);
+      // answer is a moment away and we should be there to catch it — and a
+      // provisional answer is always followed by the measured one.
+      watch([...((r && r.pending) || []), ...want.filter((id) => provisional(got[id]))]);
     })
     .catch(() => {
       for (const id of want) pending.delete(id);

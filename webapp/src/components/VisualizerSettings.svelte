@@ -418,9 +418,10 @@
     <div class="block-head">
       <span class="block-title">Compensation de latence</span>
       <span class="block-hint muted">
-        L'analyse écoute le son avant vos enceintes, du délai choisi. Une frappe
-        imprévue est alors dessinée pile à l'heure au lieu d'arriver après. Les temps
-        prédits restent alignés quoi qu'il arrive.
+        L'analyse écoute le son avant vos enceintes, du délai choisi. Les temps
+        prédits restent alignés quoi qu'il arrive ; une frappe imprévue demande
+        environ 45 ms d'écoute pour être sûre, donc à partir de 50 ms tout est
+        dessiné pile à l'heure.
       </span>
     </div>
     <div class="slider-row">
@@ -448,7 +449,7 @@
 
   <div class="readout" class:live={$vizBeatDetect && $readout.locked}>
     <div class="ro">
-      <span class="ro-k">Tempo{#if $readout.served} · serveur{/if}</span>
+      <span class="ro-k">Tempo{#if $readout.served === "deezer"} · Deezer{:else if $readout.served} · serveur{/if}</span>
       <span class="ro-v">{$readout.locked ? `${$readout.bpm} BPM` : "—"}</span>
       <span class="bar"><i style={`width:${Math.round($readout.confidence * 100)}%`}></i></span>
     </div>

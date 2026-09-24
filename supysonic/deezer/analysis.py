@@ -51,6 +51,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import OrderedDict, deque
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -897,26 +898,169 @@ def classify(features):
 
 
 # --- the job ----------------------------------------------------------------
-def _deezer_bpm(provider, track):
-    """Deezer's own figure for one of its tracks, or None.
+def published_bpm(provider, deezer_id):
+    """``(bpm, answered)``: Deezer's own figure for one of its tracks.
 
     Its public API publishes a bpm per track. Where it has one it is exact and
     free, which beats anything we could measure — and it is the same reasoning
     that takes the loudness from Deezer's GAIN rather than metering the file.
+
+    ``answered`` says whether Deezer was actually asked and replied: a track it
+    has no figure for (it reports 0) is an answer, an outage is not — and the
+    two are cached for very different lengths of time (see ``tempo_hints``).
     """
-    if not track.deezer_id or provider is None:
-        return None
+    if not deezer_id or provider is None:
+        return None, False
     try:
         if not provider.available():
-            return None
-        data = provider.dz.api.get_track(str(track.deezer_id))
+            return None, False
+        data = provider.dz.api.get_track(str(deezer_id))
     except Exception:
-        return None
+        return None, False
     try:
         bpm = float((data or {}).get("bpm") or 0)
     except (TypeError, ValueError):
+        return None, True
+    return (bpm if MIN_BPM <= bpm <= MAX_BPM else None), True
+
+
+def _deezer_bpm(provider, track):
+    """Deezer's figure for an archived track, or None.
+
+    The first play usually looked it up already (see ``tempo_hints``), so the
+    cached answer is taken before Deezer is asked a second time.
+    """
+    if track is None or not track.deezer_id:
         return None
-    return bpm if MIN_BPM <= bpm <= MAX_BPM else None
+    key = str(track.deezer_id)
+    with _hint_lock:
+        hit = _hints.get(key)
+    if hit is not None and hit[2] and hit[0] > time.monotonic():
+        return hit[1]
+    return published_bpm(provider, key)[0]
+
+
+# --- the published tempo, before there is a file -------------------------------
+# Everything above measures the ARCHIVED file, so the one play it can never help
+# is the first: the file is being written by that very play, and the player asks
+# about the track before a byte of it is on disk. That is also the play where a
+# tempo matters most — nothing has been heard yet, and a cold tracker spends the
+# intro hunting. Deezer's own figure needs no file. So a track the player asks
+# about with no verdict gets its published bpm looked up in the BACKGROUND and
+# kept in memory, and it is served as a PROVISIONAL verdict — the tempo alone,
+# flagged as such — until the measured one replaces it.
+#
+# It is served RAW. The file is what reconciles Deezer's octave
+# (``_reconcile_octave``) and there is no file yet; the client's tracker applies
+# the same one-sided rule live — a served tempo may be doubled by the kicks,
+# never halved (webapp/rhythm/src/tempo.rs) — so a hardcore track published at
+# half its tempo is corrected by the music within seconds instead of being
+# animated at half speed for the length of the track.
+#: A published figure does not change; an answer is good for a day.
+HINT_TTL = 24 * 3600
+#: ...but a lookup that could not reach Deezer is retried soon: an outage says
+#: nothing about the track.
+HINT_RETRY = 120
+#: Entries kept, and ids waiting. The player asks about the next few tracks,
+#: so these bound what a burst of requests can make the server fetch.
+HINT_MAX = 4096
+HINT_QUEUE_MAX = 32
+# deezer id -> (expires at, bpm or None, answered)
+_hints: "OrderedDict[str, tuple]" = OrderedDict()
+_hint_queue: deque = deque()
+_hint_queued: set[str] = set()
+_hint_lock = threading.Lock()
+_hint_worker = None
+
+
+def tempo_hints(ids, provider):
+    """``({id: bpm}, waiting)`` for tracks that have no verdict yet. Never blocks.
+
+    The published figures already in hand come back at once; the ones not
+    looked up yet are queued for ONE background worker (one request at a time:
+    the public API is shared with search and the recommendations) and come back
+    in ``waiting``, so the client knows to ask again in a moment.
+    """
+    known, waiting = {}, []
+    if provider is None:
+        return known, waiting
+    t = time.monotonic()
+    global _hint_worker
+    with _hint_lock:
+        for ident in ids:
+            key = str(ident)
+            hit = _hints.get(key)
+            if hit is not None and hit[0] > t:
+                _hints.move_to_end(key)
+                if hit[1]:
+                    known[key] = hit[1]
+                continue
+            if key in _hint_queued:
+                waiting.append(key)
+                continue
+            if len(_hint_queue) >= HINT_QUEUE_MAX:
+                continue
+            _hint_queue.append(key)
+            _hint_queued.add(key)
+            waiting.append(key)
+        if _hint_queue and _hint_worker is None:
+            _hint_worker = threading.Thread(
+                target=_drain_hints, args=(provider,), name="dz-tempo", daemon=True
+            )
+            _hint_worker.start()
+    return known, waiting
+
+
+def _drain_hints(provider):
+    global _hint_worker
+    while True:
+        with _hint_lock:
+            if not _hint_queue:
+                # Cleared under the same lock producers check it with, so an id
+                # queued after this point starts a new worker rather than
+                # waiting for one that is already on its way out.
+                _hint_worker = None
+                return
+            key = _hint_queue.popleft()
+        try:
+            bpm, answered = published_bpm(provider, key)
+        except Exception:
+            bpm, answered = None, False
+        with _hint_lock:
+            _hint_queued.discard(key)
+            _hints[key] = (
+                time.monotonic() + (HINT_TTL if answered else HINT_RETRY), bpm, answered
+            )
+            _hints.move_to_end(key)
+            while len(_hints) > HINT_MAX:
+                _hints.popitem(last=False)
+
+
+def provisional_payload(bpm):
+    """What the API serves for a track known only by its published tempo.
+
+    The same shape as ``payload_for``, so the client reads it with the same
+    code; ``provisional`` is what tells it to keep asking for the real one.
+    Confidence is below a measured verdict's 0.95: the octave is unchecked.
+    """
+    return {
+        "bpm": bpm,
+        "bpmConfidence": 0.8,
+        "bpmSource": "deezer",
+        "style": None,
+        "styleLabel": "",
+        "styleConfidence": 0,
+        "archetype": None,
+        "archetypes": {},
+        "styleSource": None,
+        "embedded": False,
+        "pulse": 0,
+        "lufs": None,
+        "lra": None,
+        "version": 0,
+        "analysed": False,
+        "provisional": True,
+    }
 
 
 # How far two readings may differ and still be the same tempo. Six per cent is
@@ -954,6 +1098,97 @@ def _reconcile_octave(published, measured, measured_conf, published_conf, source
         # The file says twice what was published, and means it.
         return round(published * 2, 2), min(published_conf, 0.8), "deezer+octave"
     return published, published_conf, source
+
+
+# --- is Deezer's figure right? ---------------------------------------------------
+#: Below this the file's own measurement is not a witness either way.
+AUDIT_MIN_CONF = 0.3
+
+
+def tempo_relation(published, measured):
+    """How Deezer's figure relates to the file's: ``agree``, ``half`` (Deezer
+    lists half the file's tempo — the hardcore case), ``double``, ``triplet``
+    (3:2 either way) or ``other``."""
+    r = measured / published
+    for name, k in (("agree", 1.0), ("half", 2.0), ("double", 0.5),
+                    ("triplet", 1.5), ("triplet", 2 / 3)):
+        if abs(r / k - 1) < _SAME:
+            return name
+    return "other"
+
+
+def audit_published_tempo(provider, limit=200, progress=None):
+    """Deezer's published tempo against the one measured from each archived file.
+
+    "Are Deezer's BPMs right?" has one useful answer, and it is about THIS
+    library: the catalogue is uneven — a figure that is exact for house can sit
+    an octave low for a whole genre (a 200 BPM frenchcore track is very often
+    listed at 100) — and what the player does with it depends on which. So
+    this walks the most-played archived tracks, asks Deezer for its figure,
+    measures the file, and counts how the two relate, per stored style.
+
+    The measurement is a witness, not a referee: its own octave can be wrong,
+    which is why a low-confidence reading is counted apart (``unsure``) and
+    every disagreement is listed for a person to listen to.
+    """
+    say = progress or (lambda *_: None)
+    stats = {
+        "scanned": 0, "published": 0, "none": 0, "unsure": 0,
+        "agree": 0, "half": 0, "double": 0, "triplet": 0, "other": 0,
+        "by_style": {}, "disagree": [],
+        "error": None,
+    }
+    if provider is None:
+        stats["error"] = "the Deezer proxy is disabled: there is no published figure to check"
+        return stats
+    if not ffmpeg_available():
+        stats["error"] = "ffmpeg is not installed (the file's tempo is measured with it)"
+        return stats
+    query = (
+        Track.select()
+        .where(Track.deezer_id.is_null(False), Track.last_modification > 0)
+        .order_by(Track.play_count.desc(), Track.id)
+        .limit(max(1, int(limit)) * 2)
+    )
+    for track in query:
+        if stats["scanned"] >= limit:
+            break
+        if not track.path or not os.path.isfile(track.path):
+            continue
+        stats["scanned"] += 1
+        bpm, answered = published_bpm(provider, track.deezer_id)
+        if not answered:
+            stats["error"] = "Deezer could not be reached; the audit stopped early"
+            stats["scanned"] -= 1
+            break
+        if not bpm:
+            stats["none"] += 1
+            continue
+        stats["published"] += 1
+        try:
+            measured, conf, _grid = _measure_tempo(track.path)
+        except Exception as exc:
+            logger.debug("bpm audit: measuring %s failed: %s", track.path, exc)
+            measured, conf = 0.0, 0.0
+        if not measured or conf < AUDIT_MIN_CONF:
+            stats["unsure"] += 1
+            continue
+        rel = tempo_relation(bpm, measured)
+        stats[rel] += 1
+        row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+        style = (row.style if row is not None else None) or "?"
+        per = stats["by_style"].setdefault(style, {"agree": 0, "total": 0})
+        per["total"] += 1
+        per["agree"] += rel == "agree"
+        if rel != "agree":
+            stats["disagree"].append({
+                "track": f"{track.artist.name} - {track.title}",
+                "style": style, "deezer": bpm, "file": measured,
+                "confidence": conf, "relation": rel,
+            })
+        if stats["scanned"] % 10 == 0:
+            say(f"  {stats['scanned']} checked...")
+    return stats
 
 
 def analyze_track(track: Track, provider=None, force: bool = False):
@@ -1220,16 +1455,21 @@ def request_analysis(track: Track, provider=None) -> bool:
     come back for the answer. A refused request is not an error: it means this
     server has nothing to add, and the client keeps its own reading.
     """
-    if track is None or not ffmpeg_available():
+    if track is None:
+        return False
+    key = str(track.id)
+    # A job already running is worth coming back for whoever started it — the
+    # archiver queues one at the end of every first play, and that is exactly
+    # the verdict a player hearing the track for the first time is waiting on.
+    with _inflight_lock:
+        if key in _inflight:
+            return True
+    if not ffmpeg_available():
         return False
     if not track.path or not os.path.isfile(track.path):
         return False
     if not _can_measure():
         return False
-    key = str(track.id)
-    with _inflight_lock:
-        if key in _inflight:
-            return True
     queue_analysis(track, provider)
     with _inflight_lock:
         return key in _inflight

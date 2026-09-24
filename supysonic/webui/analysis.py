@@ -18,6 +18,13 @@ reading in the meantime, polls for the ids it was told about, and swaps to the
 served genre the moment it lands. That is the difference between "we know the
 genre" and "we will know it shortly", and both are useful.
 
+The FIRST play is the case none of that covers: the verdict is measured from the
+archived file, and the file is being written by that very play. Deezer's own
+tempo needs no file, so a Deezer track with no verdict is looked up in the
+background and served as a PROVISIONAL verdict — the published bpm alone,
+flagged ``provisional`` — until the measurement replaces it (see
+``tempo_hints`` in ``supysonic/deezer/analysis.py``).
+
 Anything the server genuinely cannot measure comes back as a plain absence, and
 the client falls back to its own live detector — which is exactly what it did
 before this existed.
@@ -45,6 +52,10 @@ ANALYSIS_WORKERS_MAX = 8
 # window needs; the cap is what keeps a request for a thousand ids from turning
 # into a thousand decode jobs.
 ANALYSIS_QUEUE_MAX = 3
+# ...and how many PUBLISHED tempos it may have looked up. One small public-API
+# request each, on one background worker; the player's window is the current
+# track and the six after it.
+TEMPO_HINT_MAX = 8
 # The admin's parallelism choice lives in the Meta KV table, like the upload
 # quota: it is a server-wide cost, not a per-request one.
 _WORKERS_META_KEY = "analysis_workers"
@@ -386,6 +397,39 @@ def _queue_missing(ids, limit=ANALYSIS_QUEUE_MAX):
     return accepted
 
 
+def _tempo_hints(ids):
+    """``({id: provisional payload}, waiting)`` for Deezer tracks with no verdict.
+
+    Only for rows the caller may read (an upload has no published tempo, and
+    this is not a way to make the server fetch arbitrary ids), and only a
+    handful per request. Never waits: what is not in hand yet comes back in
+    ``waiting``, for the client to ask again.
+    """
+    from ..deezer import analysis as ana
+    from ..deezer import ids as dz_ids
+
+    provider = getattr(current_app, "deezer", None)
+    if provider is None or not ids:
+        return {}, []
+    keys = {}
+    for ident in ids[:TEMPO_HINT_MAX]:
+        try:
+            keys[dz_ids.track_uuid(ident)] = ident
+        except Exception:
+            continue
+    if not keys:
+        return {}, []
+    allowed = [
+        keys[t.id]
+        for t in Track.select().where(Track.id.in_(list(keys)))
+        if t.deezer_id and _may_access_track(t)
+    ]
+    # Play order, as the caller sent them: the track about to play first.
+    allowed.sort(key=ids.index)
+    known, waiting = ana.tempo_hints(allowed, provider)
+    return {i: ana.provisional_payload(bpm) for i, bpm in known.items()}, waiting
+
+
 @webapi.route("/analysis/<mid>")
 @login_required
 def track_analysis(mid):
@@ -405,7 +449,10 @@ def track_analysis(mid):
         if found:
             return jsonify({"ready": True, **found[str(mid)]})
         pending = _queue_missing([str(mid)])
-        return jsonify({"ready": False, "pending": pending})
+        hints, waiting = _tempo_hints([str(mid)])
+        if hints:
+            return jsonify({"ready": True, **hints[str(mid)], "pending": pending})
+        return jsonify({"ready": False, "pending": pending + [i for i in waiting if i not in pending]})
     track = Track.get_or_none(Track.id == mid)
     if track is None or not _may_access_track(track):
         return jsonify({"ready": False})
@@ -433,7 +480,13 @@ def track_analyses():
         return jsonify({"error": "ids must be a list"}), 400
     ids = list(dict.fromkeys(str(x) for x in raw if _valid_id(x)))[:ANALYSIS_BATCH_MAX]
     found = _rows_for(ids)
+    missing = _missing(ids, found)
     # Only the tracks the player is about to reach, and only while the server
     # has a way to reach a verdict. `pending` is the client's to-do list.
-    pending = _queue_missing(_missing(ids, found))
+    pending = _queue_missing(missing)
+    # A track nobody has measured still has a tempo, if Deezer published one:
+    # served now when it is in hand, looked up for the next poll when it is not.
+    hints, waiting = _tempo_hints(missing)
+    found.update(hints)
+    pending += [i for i in waiting if i not in pending]
     return jsonify({"analyses": found, "pending": pending})

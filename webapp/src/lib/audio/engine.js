@@ -99,6 +99,11 @@ let lastTrackId;
 // See lib/analysis.js: it is an accelerator, never a dependency.
 let verdict = null;
 let verdictSeeded = false;
+// The tempo last handed to the tracker for this track. A later verdict with the
+// same figure is not sent again: the first may have been a published tempo the
+// kicks have since doubled (a hardcore track Deezer lists at half), and seeding
+// the same number a second time would put the grid back at half speed.
+let seededBpm = 0;
 // How many tracks ahead to ask for. The queue moves one at a time and the
 // answers are tiny, so a short window keeps every upcoming track's verdict in
 // hand well before it starts.
@@ -282,12 +287,14 @@ export const readout = writable({
   styleConfidence: 0,
   kick: "",
   archetype: "",
-  served: false,
+  // Where the tempo came from: "server", "deezer" (published, not yet checked
+  // against the file) or "" (the tracker's own).
+  served: "",
 });
 let lastReadout = 0;
 const readoutState = {
   bpm: 0, locked: false, confidence: 0, style: "", styleLabel: "",
-  styleConfidence: 0, kick: "", archetype: "", served: false,
+  styleConfidence: 0, kick: "", archetype: "", served: "",
 };
 
 function publishReadout(now) {
@@ -305,7 +312,7 @@ function publishReadout(now) {
     b.locked === readoutState.locked &&
     style === readoutState.style &&
     kick === readoutState.kick &&
-    !!verdict === readoutState.served &&
+    servedFrom() === readoutState.served &&
     Math.abs(b.confidence - readoutState.confidence) < 0.05 &&
     Math.abs((st?.confidence || 0) - readoutState.styleConfidence) < 0.05
   )
@@ -318,11 +325,19 @@ function publishReadout(now) {
   readoutState.styleConfidence = st?.confidence || 0;
   readoutState.kick = kick;
   readoutState.archetype = st?.archetype || "";
-  readoutState.served = !!verdict;
+  readoutState.served = servedFrom();
   readout.set({ ...readoutState });
 }
 
 // --- the served verdict ---------------------------------------------------------
+
+// Where the tempo on screen came from, for the settings readout: "server" once
+// the track has been measured, "deezer" while only its published figure is in
+// hand, "" when the tracker found it alone.
+function servedFrom() {
+  if (!verdict?.bpm) return "";
+  return verdict.provisional ? "deezer" : "server";
+}
 
 // Ask for this track and the next few in one call. Done from here rather than
 // from the player because the engine is the only thing that wants them: a
@@ -368,7 +383,10 @@ function adoptVerdict(id, late = false) {
   // verdict comes over the network, behind the audio in the request ladder,
   // and a late seed moves the grid's LEVEL while keeping its phase, so it
   // cannot make the animation jump (rhythm/src/tempo.rs#seed).
-  if (v.bpm) send({ t: "seed", bpm: +v.bpm, conf: v.bpmConfidence ?? 0.9 });
+  if (v.bpm && Math.abs(+v.bpm / (seededBpm || 1) - 1) > 0.01) {
+    send({ t: "seed", bpm: +v.bpm, conf: v.bpmConfidence ?? 0.9 });
+    seededBpm = +v.bpm;
+  }
 }
 
 // A verdict that lands late — the server had to measure the track first, or an
@@ -711,7 +729,9 @@ function deliver(q, nowMs, heard) {
       // it heard the whole piece, this one has heard a few seconds of it. The
       // kick stays the live reading either way — that is a per-event property
       // and no whole-file average can stand in for it.
-      frame.style = verdict ? merged(styleOut, verdict) : styleOut;
+      // A verdict that is only a published tempo names no style: the live
+      // reading stands until the measured one arrives.
+      frame.style = verdict?.style ? merged(styleOut, verdict) : styleOut;
       for (let i = 0; i < GENRE_KEYS.length; i++) genreOut[GENRE_KEYS[i]] = buf[I.genre + i];
       frame.genre = genreOut;
     } else {
@@ -871,6 +891,7 @@ function newTrack(id) {
   frame.pattern = null;
   verdict = null;
   verdictSeeded = false;
+  seededBpm = 0;
   send({ t: "reset", gen });
   // No verdict yet: the tempo range back to the default, and the live
   // classifier's say in it back on.
@@ -927,6 +948,7 @@ function fallbackTick() {
     frame.trackId = id;
     verdict = null;
     verdictSeeded = false;
+    seededBpm = 0;
     primeAround(id);
   }
   an.lo.getFloatFrequencyData(fb.lo);
@@ -1046,7 +1068,10 @@ function recomputeLevel() {
     // confident but wrong verdict for a few seconds); the served verdict is
     // then re-applied on the next frame.
     send({ t: "level", level: lv });
-    if (lv > LEVEL.SPECTRUM) verdictSeeded = false;
+    if (lv > LEVEL.SPECTRUM) {
+      verdictSeeded = false;
+      seededBpm = 0;
+    }
   }
 }
 

@@ -617,6 +617,57 @@ def deezer_analyze(config, force, limit, workers):
     _echo_failures(stats)
 
 
+@deezer.command("bpm-audit")
+@click.option("--limit", type=int, default=200, show_default=True,
+              help="How many archived tracks to check, most played first.")
+@click.pass_obj
+def deezer_bpm_audit(config, limit):
+    """Check Deezer's published tempo against your own files.
+
+    For the most-played archived tracks: Deezer's figure, the tempo measured
+    from the file, and how the two relate. The measurement can be wrong too,
+    so every disagreement is listed for you to listen to. Nothing is written.
+    """
+    from .deezer import get_provider
+    from .deezer.analysis import audit_published_tempo
+
+    provider = get_provider(config)
+    click.echo(f"Checking Deezer's tempo against up to {limit} archived tracks...")
+    s = audit_published_tempo(provider, limit=limit, progress=click.echo)
+    if s["error"] and not s["scanned"]:
+        raise ClickException(s["error"])
+    measured = s["agree"] + s["half"] + s["double"] + s["triplet"] + s["other"]
+
+    def pct(n, of):
+        return f"{100 * n / of:.0f}%" if of else "-"
+
+    click.echo(f"Checked {s['scanned']} tracks.")
+    click.echo(f"  Deezer publishes a tempo for {s['published']} ({pct(s['published'], s['scanned'])}); "
+               f"none for {s['none']}.")
+    click.echo(f"  The file's own reading was too unsure to judge {s['unsure']} of them.")
+    click.echo(f"  Of the {measured} left:")
+    for key, what in (
+        ("agree", "agree with the file"),
+        ("half", "are HALF the file's tempo (listed an octave low)"),
+        ("double", "are DOUBLE the file's tempo"),
+        ("triplet", "are 3:2 or 2:3 off"),
+        ("other", "disagree otherwise"),
+    ):
+        click.echo(f"    {s[key]:>5} ({pct(s[key], measured):>4}) {what}")
+    if s["by_style"]:
+        click.echo("  By style (agreeing / checked):")
+        for style, per in sorted(s["by_style"].items(), key=lambda kv: -kv[1]["total"]):
+            click.echo(f"    {style:<22} {per['agree']:>4} / {per['total']:<4} "
+                       f"({pct(per['agree'], per['total'])})")
+    if s["disagree"]:
+        click.echo("  Disagreements (listen before trusting either figure):")
+        for d in s["disagree"]:
+            click.echo(f"    {d['track']} [{d['style']}]: Deezer {d['deezer']:g}, "
+                       f"file {d['file']:g} (confidence {d['confidence']:.2f}, {d['relation']})")
+    if s["error"]:
+        click.echo(f"Stopped early: {s['error']}")
+
+
 @deezer.command("embed")
 @click.option("--force", is_flag=True, help="Re-extract even tracks that already have a vector.")
 @click.option("--limit", type=int, default=None, help="Stop after N extracted tracks.")

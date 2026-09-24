@@ -3556,6 +3556,266 @@ class TrackAnalysisTestCase(unittest.TestCase):
 
         self.assertIsNone(ana._deezer_bpm(Dead(), t))
 
+    # -- the published tempo, before there is a file ---------------------
+
+    class _TempoProvider:
+        """Enough of DeezerProvider for the published-tempo lookup."""
+
+        def __init__(self, bpm=None, up=True):
+            self.bpm = bpm
+            self.up = up
+            self.asked = []
+            self.dz = self
+            self.api = self
+
+        def available(self):
+            return self.up
+
+        def get_track(self, sid):
+            self.asked.append(str(sid))
+            return {"bpm": self.bpm}
+
+    def _fresh_hints(self):
+        from supysonic.deezer import analysis as ana
+
+        self._drain()
+        with ana._hint_lock:
+            ana._hints.clear()
+            ana._hint_queue.clear()
+            ana._hint_queued.clear()
+
+    def _drain(self):
+        """Wait for the background lookup to finish (it is one daemon thread)."""
+        from supysonic.deezer import analysis as ana
+
+        deadline = time.monotonic() + 5
+        while ana._hint_worker is not None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertIsNone(ana._hint_worker, "the tempo lookup never finished")
+
+    def _ask(self, *ids):
+        return self.client.post("/api/analyses", json={"ids": list(ids)}).get_json()
+
+    def test_first_play_serves_the_published_tempo(self):
+        """No file, no verdict — but Deezer's figure needs neither.
+
+        The first ask never waits on Deezer: it names the track in `pending`,
+        the lookup runs in the background, and the next poll is served the
+        published bpm as a PROVISIONAL verdict. One lookup, however many polls.
+        """
+        self._fresh_hints()
+        self._login()
+        t = self._deezer_track()
+        prov = self._TempoProvider(bpm=174)
+        self.app.deezer = prov
+        try:
+            first = self._ask(t.deezer_id)
+            self.assertEqual(first["analyses"], {})
+            self.assertEqual(first["pending"], [str(t.deezer_id)])
+            self._drain()
+            second = self._ask(t.deezer_id)
+            got = second["analyses"][str(t.deezer_id)]
+            self.assertEqual(got["bpm"], 174.0)
+            self.assertTrue(got["provisional"])
+            self.assertEqual(got["bpmSource"], "deezer")
+            self.assertIsNone(got["style"])
+            self.assertLess(got["bpmConfidence"], 0.95)
+            self.assertNotIn(str(t.deezer_id), second["pending"])
+            self._ask(t.deezer_id)
+            self.assertEqual(prov.asked, [str(t.deezer_id)])
+            # The single-track endpoint serves the same thing.
+            one = self.client.get(f"/api/analysis/{t.deezer_id}").get_json()
+            self.assertTrue(one["ready"])
+            self.assertTrue(one["provisional"])
+            self.assertEqual(one["bpm"], 174.0)
+        finally:
+            self.app.deezer = None
+            self._fresh_hints()
+
+    def test_a_measured_verdict_outranks_the_published_tempo(self):
+        from supysonic.db import TrackAnalysis
+
+        self._fresh_hints()
+        self._login()
+        t = self._deezer_track()
+        TrackAnalysis.create(
+            track=t, version=2, bpm=200.0, bpm_confidence=0.8,
+            bpm_source="deezer+octave", style="frenchcore", style_confidence=0.7,
+            archetype="hard", data="{}",
+        )
+        prov = self._TempoProvider(bpm=100)
+        self.app.deezer = prov
+        try:
+            got = self._ask(t.deezer_id)["analyses"][str(t.deezer_id)]
+            self.assertEqual(got["bpm"], 200.0)
+            self.assertNotIn("provisional", got)
+            self._drain()
+            self.assertEqual(prov.asked, [])
+        finally:
+            self.app.deezer = None
+
+    def test_no_published_figure_is_an_answer_and_an_outage_is_not(self):
+        """Deezer's 0 is remembered for a day; an outage for two minutes.
+
+        Neither is served as a tempo, and neither is an exception. A track
+        Deezer has no figure for is not looked up again on the next poll; one
+        it could not be asked about is, once the retry window has passed.
+        """
+        from supysonic.deezer import analysis as ana
+
+        self._fresh_hints()
+        self._login()
+        t = self._deezer_track("515151")
+        u = self._deezer_track("525252")
+        none = self._TempoProvider(bpm=0)
+        self.app.deezer = none
+        try:
+            self._ask(t.deezer_id)
+            self._drain()
+            again = self._ask(t.deezer_id)
+            self.assertEqual(again["analyses"], {})
+            self.assertEqual(again["pending"], [])
+            self.assertEqual(none.asked, [str(t.deezer_id)])
+            with ana._hint_lock:
+                self.assertGreater(ana._hints[str(t.deezer_id)][0] - time.monotonic(),
+                                   ana.HINT_RETRY * 10)
+
+            down = self._TempoProvider(bpm=140, up=False)
+            self.app.deezer = down
+            self._ask(u.deezer_id)
+            self._drain()
+            again = self._ask(u.deezer_id)
+            self.assertEqual(again["analyses"], {})
+            self.assertEqual(down.asked, [])  # the breaker said no: nobody was called
+            with ana._hint_lock:
+                left = ana._hints[str(u.deezer_id)][0] - time.monotonic()
+            self.assertLessEqual(left, ana.HINT_RETRY)
+        finally:
+            self.app.deezer = None
+            self._fresh_hints()
+
+    def test_published_tempo_only_for_known_tracks_and_a_few_at_a_time(self):
+        """Not a way to make the server fetch arbitrary ids, nor many at once."""
+        from supysonic.webui import analysis as web_ana
+
+        self._fresh_hints()
+        self._login()
+        tracks = [self._deezer_track(str(600000 + i)) for i in range(12)]
+        prov = self._TempoProvider(bpm=128)
+        self.app.deezer = prov
+        try:
+            body = self._ask("777777", *[t.deezer_id for t in tracks])
+            self._drain()
+            self.assertNotIn("777777", prov.asked)  # no row: never looked up
+            self.assertNotIn("777777", body["pending"])
+            self.assertLessEqual(len(prov.asked), web_ana.TEMPO_HINT_MAX)
+            # ...and in play order: the track about to play is looked up first.
+            self.assertEqual(prov.asked[0], str(tracks[0].deezer_id))
+        finally:
+            self.app.deezer = None
+            self._fresh_hints()
+
+    def test_the_measurement_reuses_the_first_plays_lookup(self):
+        """The archive's analysis takes the figure the first play already got."""
+        from supysonic.deezer import analysis as ana
+
+        self._fresh_hints()
+        self._login()
+        t = self._deezer_track()
+        self.app.deezer = self._TempoProvider(bpm=150)
+        try:
+            self._ask(t.deezer_id)
+            self._drain()
+        finally:
+            self.app.deezer = None
+
+        class Refuses:
+            def available(self):
+                raise AssertionError("Deezer asked twice for the same figure")
+
+        self.assertEqual(ana._deezer_bpm(Refuses(), t), 150.0)
+        self._fresh_hints()
+
+    def test_bpm_audit_counts_how_deezer_relates_to_the_file(self):
+        """The audit's arithmetic, on a library whose answers are known.
+
+        The measurement is stubbed (the ffmpeg pass is not what is pinned
+        here); what is pinned is the classification and the bookkeeping: the
+        hardcore case — Deezer listing half the file's tempo — is named as
+        such, a file too unsure to judge is counted apart rather than as a
+        disagreement, and a track Deezer has no figure for is neither.
+        """
+        from supysonic.deezer import analysis as ana
+
+        cases = {
+            # deezer id: (Deezer's figure, the file's reading, its confidence)
+            "700001": (100.0, 200.4, 0.8),   # frenchcore listed at half
+            "700002": (128.0, 127.9, 0.9),   # house: exact
+            "700003": (87.0, 174.2, 0.7),    # dnb listed at half
+            "700004": (140.0, 139.0, 0.1),   # the file cannot tell
+            "700005": (0, 120.0, 0.9),       # Deezer has no figure
+            "700006": (150.0, 100.1, 0.8),   # 3:2
+        }
+        by_path = {}
+        for i, (sid, (_dz, file_bpm, conf)) in enumerate(cases.items()):
+            t = self._deezer_track(sid)
+            path = os.path.join(self.archive, f"{sid}.flac")
+            with open(path, "wb") as f:
+                f.write(b"fLaC")
+            t.path = path
+            t.last_modification = 1
+            t.play_count = 100 - i
+            t.save()
+            by_path[path] = (file_bpm, conf, 0.5)
+
+        class Prov(self._TempoProvider):
+            def get_track(self, sid):
+                self.asked.append(str(sid))
+                return {"bpm": cases[str(sid)][0]}
+
+        orig_measure, orig_ff = ana._measure_tempo, ana.ffmpeg_available
+        ana._measure_tempo = lambda path: by_path[path]
+        ana.ffmpeg_available = lambda: True
+        try:
+            s = ana.audit_published_tempo(Prov(), limit=10)
+        finally:
+            ana._measure_tempo, ana.ffmpeg_available = orig_measure, orig_ff
+        self.assertIsNone(s["error"])
+        self.assertEqual(s["scanned"], 6)
+        self.assertEqual(s["published"], 5)
+        self.assertEqual(s["none"], 1)
+        self.assertEqual(s["unsure"], 1)
+        self.assertEqual((s["agree"], s["half"], s["triplet"], s["other"]), (1, 2, 1, 0))
+        self.assertEqual(
+            sorted((d["deezer"], d["relation"]) for d in s["disagree"]),
+            [(87.0, "half"), (100.0, "half"), (150.0, "triplet")],
+        )
+        # Nothing written: an audit is not a re-measure.
+        from supysonic.db import TrackAnalysis
+
+        self.assertEqual(TrackAnalysis.select().count(), 0)
+        # ...and without Deezer there is nothing to audit, which it says.
+        self.assertIsNotNone(ana.audit_published_tempo(None)["error"])
+
+    def test_a_running_job_is_pending_whatever_the_server_could_start(self):
+        """The archiver's own job is worth coming back for.
+
+        A first play is archived, and the archive queues the analysis. A server
+        with no head and no extractor would refuse to START a job for a client,
+        but one already running is still the verdict that client is waiting on.
+        """
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+        orig_can = ana._can_measure
+        ana._can_measure = lambda: False
+        ana._inflight.add(str(t.id))
+        try:
+            self.assertTrue(ana.request_analysis(t))
+        finally:
+            ana._can_measure = orig_can
+            ana._inflight.discard(str(t.id))
+
     # -- the backfill job --------------------------------------------------
 
     def test_analysis_backfill_requires_login(self):
