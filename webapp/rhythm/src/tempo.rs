@@ -44,6 +44,8 @@
 //! which is what keeps a half-time groove — kick on one, snare on three —
 //! from dragging a 140 BPM track to 70.
 
+use crate::util::MinMax;
+
 pub const MIN_BPM: f32 = 55.0;
 pub const MAX_BPM: f32 = 300.0;
 const HARMONICS: usize = 3;
@@ -206,14 +208,14 @@ impl Tempo {
         let len = (8.0 * fps).round() as usize;
         let lag_min = (60.0 * fps / MAX_BPM).floor() as usize;
         let lag_max = (60.0 * fps / MIN_BPM).ceil() as usize;
-        let acf_max = (len - (2.0 * fps) as usize).min(lag_max * HARMONICS);
+        let acf_max = (len - (2.0 * fps) as usize).fmin(lag_max * HARMONICS);
         let mut harm_w = 1.0;
         for h in 2..=HARMONICS {
             harm_w += 1.0 / h as f32;
         }
         // The smoothing kernel, sigma in slots of 10 ms scaled to this rate.
         let sigma = ODF_SIGMA * fps / 100.0;
-        let r = (sigma * 2.5).ceil().max(1.0) as i32;
+        let r = (sigma * 2.5).ceil().fmax(1.0) as i32;
         let mut kernel = Vec::with_capacity((2 * r + 1) as usize);
         let mut sum = 0.0;
         for i in -r..=r {
@@ -361,7 +363,7 @@ impl Tempo {
             return base;
         }
         let d = (lag / self.seed_lag).log2();
-        (base * SEED_FLOOR_W).max((-(d * d) / (2.0 * SEED_SIGMA * SEED_SIGMA)).exp())
+        (base * SEED_FLOOR_W).fmax((-(d * d) / (2.0 * SEED_SIGMA * SEED_SIGMA)).exp())
     }
 
     fn weight_for(&self, lag: f32) -> f32 {
@@ -383,7 +385,7 @@ impl Tempo {
             return 0.0;
         }
         let gq = self.grid_quality(l as f32);
-        self.tg[l].max(0.0) * (0.45 + 0.55 * gq) * self.level_prior(l as f32, faster_free)
+        self.tg[l].fmax(0.0) * (0.45 + 0.55 * gq) * self.level_prior(l as f32, faster_free)
     }
 
     fn grid_quality(&mut self, p: f32) -> f32 {
@@ -403,7 +405,7 @@ impl Tempo {
             return 0.0;
         }
         let r = (self.kernel.len() - 1) / 2;
-        let w = r.max((pp as f32 * 0.04).round() as usize) as isize;
+        let w = r.fmax((pp as f32 * 0.04).round() as usize) as isize;
         let mut best = 0.0;
         for k in 0..pp as isize {
             let mut s = 0.0;
@@ -415,8 +417,8 @@ impl Tempo {
             }
         }
         let share = best / total;
-        let baseline = ((2 * w + 1) as f32 / pp as f32).min(1.0);
-        ((share - baseline) / (1.0 - baseline).max(1e-6)).max(0.0)
+        let baseline = ((2 * w + 1) as f32 / pp as f32).fmin(1.0);
+        ((share - baseline) / (1.0 - baseline).fmax(1e-6)).fmax(0.0)
     }
 
     /// How strong the half-period position of a fold is against its peak.
@@ -436,7 +438,7 @@ impl Tempo {
         if total < 1e-5 {
             return -1.0;
         }
-        let w = ((0.03 * self.fps).round() as isize).max(1);
+        let w = ((0.03 * self.fps).round() as isize).fmax(1);
         let around = |fold: &[f32], c: isize| -> f32 {
             let mut s = 0.0;
             for j in -w..=w {
@@ -460,7 +462,7 @@ impl Tempo {
         let a = around(fold, p0 as isize) - floor_w;
         let b = around(fold, p0 as isize + (pp as f32 / 2.0).round() as isize) - floor_w;
         if a > 1e-6 {
-            b.max(0.0) / a
+            b.fmax(0.0) / a
         } else {
             0.0
         }
@@ -480,7 +482,7 @@ impl Tempo {
     fn pulse_lag(&self) -> Option<f32> {
         let mut ev = [0f64; PULSE_KEEP];
         let mut n = 0;
-        for &t in self.hits.iter().take(self.hits_n.min(PULSE_KEEP)) {
+        for &t in self.hits.iter().take(self.hits_n.fmin(PULSE_KEEP)) {
             if t >= self.now_t - PULSE_WINDOW && t <= self.now_t + 0.05 {
                 ev[n] = t;
                 n += 1;
@@ -609,7 +611,7 @@ impl Tempo {
         // Moving AWAY from the seed toward a slower level is put beyond reach;
         // moving faster is judged on the ordinary prior (see the header).
         let faster = to < from;
-        let g = self.level_prior(to, faster) / self.level_prior(from, faster).max(1e-9);
+        let g = self.level_prior(to, faster) / self.level_prior(from, faster).fmax(1e-9);
         (OCT_ON * g.powf(-0.35)).clamp(0.3, 2.5)
     }
 
@@ -646,7 +648,7 @@ impl Tempo {
                     self.oct_vote = 0.0;
                 }
             } else if self.seed_up > 0.0 {
-                self.seed_up = (self.seed_up - self.est_every * 2.0).max(0.0);
+                self.seed_up = (self.seed_up - self.est_every * 2.0).fmax(0.0);
             }
         }
         if !self.locked {
@@ -686,7 +688,7 @@ impl Tempo {
             for i in 0..n {
                 let mut s = 0.0;
                 let lo = i.saturating_sub(r);
-                let hi = (i + r).min(n - 1);
+                let hi = (i + r).fmin(n - 1);
                 for x in lo..=hi {
                     s += buf[x] * k[x + r - i];
                 }
@@ -702,7 +704,7 @@ impl Tempo {
             return;
         }
         self.fill_work();
-        let r_n = n.min((self.fps * 1.5).round() as usize);
+        let r_n = n.fmin((self.fps * 1.5).round() as usize);
         let mut recent = 0.0;
         for i in n - r_n..n {
             recent += self.work[i];
@@ -756,7 +758,7 @@ impl Tempo {
         }
         self.est_count += 1;
         let tg_alpha = 1.0 - (-self.est_every / TG_TAU).exp();
-        let a = tg_alpha.max(1.0 / self.est_count as f32);
+        let a = tg_alpha.fmax(1.0 / self.est_count as f32);
         for lag in self.lag_min..=self.lag_max {
             let mut s = self.acf[lag];
             for h in 2..=HARMONICS {
@@ -847,14 +849,14 @@ impl Tempo {
         }
 
         let margin = if runner_up > 0.0 {
-            ((winner_score - runner_up) / (winner_score + 1e-6)).max(0.0)
+            ((winner_score - runner_up) / (winner_score + 1e-6)).fmax(0.0)
         } else {
             1.0
         };
         let conf = (self.tg[winner] * 2.2).clamp(0.0, 1.0) * (0.35 + 0.65 * margin);
         self.confidence = self.confidence * 0.55 + conf * 0.45;
         if self.seed_lag > 0.0 && ((self.period * self.fps / self.seed_lag).ln()).abs() < BUMP_W {
-            self.confidence = self.confidence.max(SEED_FLOOR);
+            self.confidence = self.confidence.fmax(SEED_FLOOR);
         }
         let ratio = new_period / self.period;
         if !self.locked {
@@ -914,7 +916,7 @@ impl Tempo {
             return;
         }
         let r = (self.kernel.len() - 1) / 2;
-        let w = r.max((pp as f32 * 0.05).round() as usize) as isize;
+        let w = r.fmax((pp as f32 * 0.05).round() as usize) as isize;
         let mut best = 0.0;
         for k in 0..pp as isize {
             let mut s2 = 0.0;
@@ -926,9 +928,9 @@ impl Tempo {
             }
         }
         let share = best / total;
-        let baseline = ((2 * w + 1) as f32 / pp as f32).min(1.0);
-        let norm = ((share - baseline) / (1.0 - baseline).max(1e-6)).max(0.0);
-        self.kick_pulse = self.kick_pulse * 0.7 + (norm * 1.25).min(1.0) * 0.3;
+        let baseline = ((2 * w + 1) as f32 / pp as f32).fmin(1.0);
+        let norm = ((share - baseline) / (1.0 - baseline).fmax(1e-6)).fmax(0.0);
+        self.kick_pulse = self.kick_pulse * 0.7 + (norm * 1.25).fmin(1.0) * 0.3;
     }
 
     /// Feed one frame: the raw SuperFlux, the low-band evidence, and the
@@ -937,29 +939,29 @@ impl Tempo {
         let dt = dt.clamp(1e-4, 0.25);
         self.clock += dt;
         self.now_t = t;
-        let mean_tau = MEAN_TAU.max(MEAN_BEATS * self.period);
+        let mean_tau = MEAN_TAU.fmax(MEAN_BEATS * self.period);
         let a_mean = 1.0 - (-dt / mean_tau).exp();
         let a_scale = 1.0 - (-dt / SCALE_TAU).exp();
         self.flux_mean += (flux - self.flux_mean) * a_mean;
         self.low_mean += (low_flux - self.low_mean) * a_mean;
         self.mid_mean += (mid_flux - self.mid_mean) * a_mean;
-        let d_flux = (flux - self.flux_mean).max(0.0);
-        let d_low = (low_flux - self.low_mean).max(0.0);
-        let d_mid = (mid_flux - self.mid_mean).max(0.0);
+        let d_flux = (flux - self.flux_mean).fmax(0.0);
+        let d_low = (low_flux - self.low_mean).fmax(0.0);
+        let d_mid = (mid_flux - self.mid_mean).fmax(0.0);
         self.flux_scale += (d_flux - self.flux_scale) * a_scale;
         self.low_scale += (d_low - self.low_scale) * a_scale;
         self.mid_scale += (d_mid - self.mid_scale) * a_scale;
-        let c_flux = (d_flux / (self.flux_scale + 1e-9)).min(SCALE_CLIP) / SCALE_CLIP;
-        let c_low = (d_low / (self.low_scale + 1e-9)).min(SCALE_CLIP) / SCALE_CLIP;
+        let c_flux = (d_flux / (self.flux_scale + 1e-9)).fmin(SCALE_CLIP) / SCALE_CLIP;
+        let c_low = (d_low / (self.low_scale + 1e-9)).fmin(SCALE_CLIP) / SCALE_CLIP;
         // A confirmed kick is the best evidence there is of where the beat is
         // in every genre this player is pointed at; it rides on the bass half.
-        let c_low = (c_low + kick * 0.25).min(1.0);
-        let c_mix = (c_flux + c_low * 0.8).min(1.0);
+        let c_low = (c_low + kick * 0.25).fmin(1.0);
+        let c_mix = (c_flux + c_low * 0.8).fmin(1.0);
         // The BODY of the music — bass and mids, no cymbals — is the witness
         // for "does anything happen between these beats" (see
         // `octave_evidence`): a snare on the backbeat does, a hi-hat does not.
-        let c_mid = (d_mid / (self.mid_scale + 1e-9)).min(SCALE_CLIP) / SCALE_CLIP;
-        let c_body = (c_low + c_mid * 0.8).min(1.0);
+        let c_mid = (d_mid / (self.mid_scale + 1e-9)).fmin(SCALE_CLIP) / SCALE_CLIP;
+        let c_body = (c_low + c_mid * 0.8).fmin(1.0);
         // One slot per frame: the analysis rate is fixed, so no resampling.
         self.odf[self.head] = c_mix;
         self.odf_low[self.head] = c_low;
@@ -999,7 +1001,7 @@ impl Tempo {
         if !(seed_bpm >= MIN_BPM && seed_bpm <= MAX_BPM) {
             return false;
         }
-        let conf = seed_conf.min(1.0).max(0.0);
+        let conf = seed_conf.fmin(1.0).fmax(0.0);
         let conf = if conf > 0.0 { conf } else { 0.9 };
         self.seed_lag = self.bpm_to_lag(seed_bpm);
         self.seed_up = 0.0;
@@ -1013,7 +1015,7 @@ impl Tempo {
                 }
                 self.period = 60.0 / seed_bpm;
                 self.bpm = seed_bpm;
-                self.confidence = self.confidence.max(conf);
+                self.confidence = self.confidence.fmax(conf);
                 self.challenger = 0.0;
                 self.challenge_count = 0;
             }
@@ -1021,7 +1023,7 @@ impl Tempo {
         }
         self.period = 60.0 / seed_bpm;
         self.bpm = seed_bpm;
-        self.confidence = self.confidence.max(conf);
+        self.confidence = self.confidence.fmax(conf);
         self.locked = true;
         self.challenger = 0.0;
         self.challenge_count = 0;

@@ -19,6 +19,8 @@
 //! Every one of them is relative to the track's own history, so the same
 //! reading means the same thing on a quiet folk record and a limitered wall.
 
+use crate::util::MinMax;
+
 pub const N: usize = 8;
 
 pub struct Genre {
@@ -71,34 +73,34 @@ impl Genre {
         kick_grit: f32,
         dynamics: f32,
     ) {
-        let dt = dt.max(1e-4);
+        let dt = dt.fmax(1e-4);
         // The track's own reference for the sustained lead energy: up fast,
         // down over half a minute, like the loudness reference.
-        let pitched = harm_mid * (1.0 - harm_flat).max(0.0);
+        let pitched = harm_mid * (1.0 - harm_flat).fmax(0.0);
         let flat = harm_mid * harm_flat;
         let up = |r: &mut f32, v: f32| {
             let tau = if v > *r { 0.8 } else { 30.0 };
             *r += (v - *r) * (1.0 - (-dt / tau).exp());
-            *r = r.max(1e-7);
+            *r = r.fmax(1e-7);
         };
         up(&mut self.lead_ref, pitched);
         up(&mut self.buzz_ref, flat);
         let lead_now = ((pitched / self.lead_ref) * (0.5 + 0.5 * melody)).clamp(0.0, 1.0);
         let buzz_now = ((flat / self.buzz_ref) * harm_flat.powf(0.5) * 1.3).clamp(0.0, 1.0);
-        let a = 1.0 - (-dt / (beat * 0.5).max(0.05)).exp();
-        self.lead += (lead_now * dynamics.max(0.2) - self.lead) * a;
-        self.buzz += (buzz_now * dynamics.max(0.2) - self.buzz) * a;
+        let a = 1.0 - (-dt / (beat * 0.5).fmax(0.05)).exp();
+        self.lead += (lead_now * dynamics.fmax(0.2) - self.lead) * a;
+        self.buzz += (buzz_now * dynamics.fmax(0.2) - self.buzz) * a;
 
         // Screeches: a spike of the mid band's flux that is not a drum.
         let d = mid_flux - self.onset_avg;
         self.onset_avg += d * 0.04;
         self.onset_var += (d * d - self.onset_var) * 0.04;
-        let thr = self.onset_avg + self.onset_var.max(1e-12).sqrt() * 2.0;
+        let thr = self.onset_avg + self.onset_var.fmax(1e-12).sqrt() * 2.0;
         if mid_flux > thr && !kick_or_snare && harm_flat < 0.6 {
             let p = ((mid_flux - thr) / (thr + 1e-6)).clamp(0.3, 1.0);
-            self.screech = self.screech.max(p);
+            self.screech = self.screech.fmax(p);
         }
-        self.screech *= (-dt / (beat * 0.25).max(0.03)).exp();
+        self.screech *= (-dt / (beat * 0.25).fmax(0.03)).exp();
 
         // The bottom two octaves' share of the POWER. The six energies are
         // per-bin means, and the bands are 40 Hz to 10 kHz wide: summed as
@@ -119,7 +121,7 @@ impl Genre {
         // the whole band), turned into a rate in beats. Counting frames a
         // hat was sounding instead read every hard record at the ceiling.
         let rate = onsets_this_frame / dt * beat;
-        self.density += (rate - self.density) * (1.0 - (-dt / (beat * 2.0).max(0.2)).exp());
+        self.density += (rate - self.density) * (1.0 - (-dt / (beat * 2.0).fmax(0.2)).exp());
 
         self.out = [
             self.lead,

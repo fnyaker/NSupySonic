@@ -16,6 +16,7 @@
 //! a list and a sorted copy of every family, ninety times a second.
 
 use crate::util::{above, below, in_range};
+use crate::util::MinMax;
 
 pub const N_FEAT: usize = 19;
 // Descriptor slots, in the order style.js's RULE_FEATURES names them.
@@ -210,14 +211,14 @@ impl KickShape {
         if self.flat_n < 1.0 {
             return;
         }
-        self.attack = ((self.peak_at - self.t0) as f32).max(0.004);
+        self.attack = ((self.peak_at - self.t0) as f32).fmax(0.004);
         let end = if self.decay_at > 0.0 { self.decay_at } else { now };
         self.decay = (end - self.peak_at) as f32;
         self.grit = self.flat_sum / self.flat_n;
         // Pitched: the sweep starts high, or it starts in the kick range and
         // falls a long way.
         let drop = if self.f1 > 0.0 { self.f0 / self.f1 } else { 1.0 };
-        let pitched = ramp(self.f0, 100.0, 160.0).max(ramp(drop, 1.4, 2.0) * ramp(self.f0, 80.0, 110.0));
+        let pitched = ramp(self.f0, 100.0, 160.0).fmax(ramp(drop, 1.4, 2.0) * ramp(self.f0, 80.0, 110.0));
         let noisy = ramp(self.grit, 0.47, 0.57);
         let soft = 1.0 - pitched;
         let hard = pitched * (1.0 - noisy);
@@ -294,8 +295,8 @@ impl Style {
             let mut terms = Vec::with_capacity(n);
             for _ in 0..n {
                 let op = next(&mut i).unwrap_or(0.0) as u8;
-                let a = (next(&mut i).unwrap_or(0.0) as usize).min(N_FEAT - 1);
-                let b = (next(&mut i).unwrap_or(0.0) as usize).min(N_FEAT - 1);
+                let a = (next(&mut i).unwrap_or(0.0) as usize).fmin(N_FEAT - 1);
+                let b = (next(&mut i).unwrap_or(0.0) as usize).fmin(N_FEAT - 1);
                 let p1 = next(&mut i).unwrap_or(0.0);
                 let p2 = next(&mut i).unwrap_or(0.0);
                 let p3 = next(&mut i).unwrap_or(0.0);
@@ -304,7 +305,7 @@ impl Style {
             if i > t.len() {
                 return false;
             }
-            fams.push(Family { arch: arch.min(ARCH_N - 1), tempo_free, look, range: (lo, hi), terms });
+            fams.push(Family { arch: arch.fmin(ARCH_N - 1), tempo_free, look, range: (lo, hi), terms });
         }
         self.weights = vec![0.0; fams.len()];
         self.raw = vec![0.0; fams.len()];
@@ -344,7 +345,7 @@ impl Style {
                 2 => above(s[t.a], t.p1, t.p2),
                 3 => below(s[t.a], t.p1, t.p2),
                 4 => s[t.a] * t.p1,
-                5 => (s[t.a] * t.p1).max(s[t.b] * t.p2),
+                5 => (s[t.a] * t.p1).fmax(s[t.b] * t.p2),
                 _ => 1.0,
             };
             w *= v;
@@ -355,7 +356,7 @@ impl Style {
         if !f.tempo_free {
             w *= tempo_trust;
         }
-        w.max(0.0)
+        w.fmax(0.0)
     }
 
     /// One output frame. `s` must already hold this frame's descriptors
@@ -449,8 +450,8 @@ impl Style {
         } else {
             self.pending = -1;
         }
-        let t0 = top[0].1.max(0.0);
-        let t1 = top[1].1.max(0.0);
+        let t0 = top[0].1.fmax(0.0);
+        let t1 = top[1].1.fmax(0.0);
         self.confidence = (t0 * 2.4 * (0.45 + 0.55 * if t0 > 1e-6 { (t0 - t1) / t0 } else { 0.0 })).clamp(0.0, 1.0);
     }
 

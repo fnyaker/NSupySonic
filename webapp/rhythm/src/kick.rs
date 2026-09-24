@@ -31,6 +31,7 @@
 
 use crate::features::Features;
 use crate::util::{butterworth_qs, Biquad, Kind};
+use crate::util::MinMax;
 
 /// How late the FFT witnesses agree after the true onset, seconds (for the
 /// snares they report; kicks carry their own onset).
@@ -217,7 +218,7 @@ impl KickDetector {
         &self.cycles[(self.cyc_head + CYC - 1 - back) % CYC]
     }
     fn env_at(&self, h: &[f32; ENV_N], back: usize) -> f32 {
-        h[(self.env_head + ENV_N - 1 - back.min(ENV_N - 1)) % ENV_N]
+        h[(self.env_head + ENV_N - 1 - back.fmin(ENV_N - 1)) % ENV_N]
     }
 
     /// One sample of the mono signal: six biquads and a comparison.
@@ -305,8 +306,8 @@ impl KickDetector {
         let (mut lo, mut hi) = (f64::INFINITY, 0f64);
         for i in 0..BUZZ_RESTARTS - 1 {
             let g = at(i) - at(i + 1);
-            lo = lo.min(g);
-            hi = hi.max(g);
+            lo = lo.fmin(g);
+            hi = hi.fmax(g);
         }
         if lo >= BUZZ_MIN_GAP && hi <= BUZZ_MAX_GAP && hi <= lo * BUZZ_EVEN {
             let level = self.recent_low();
@@ -316,7 +317,7 @@ impl KickDetector {
             }
             self.buzz_rate = ((BUZZ_RESTARTS - 1) as f64 / (at(0) - at(BUZZ_RESTARTS - 1))) as f32;
             self.buzz_until = t + hi * 1.6;
-            self.buzz_level = self.buzz_level.max(level);
+            self.buzz_level = self.buzz_level.fmax(level);
         }
     }
 
@@ -326,7 +327,7 @@ impl KickDetector {
     fn recent_low(&self) -> f32 {
         let mut m = 0f32;
         for k in 0..40 {
-            m = m.max(self.env_at(&self.low_hist, k));
+            m = m.fmax(self.env_at(&self.low_hist, k));
         }
         m
     }
@@ -369,17 +370,17 @@ impl KickDetector {
         }
         let back = back as usize;
         let mut after = 0f32;
-        for k in back.saturating_sub(10)..=(back + 2).min(ENV_N - 1) {
-            after = after.max(self.env_at(&self.hi_hist, k));
+        for k in back.saturating_sub(10)..=(back + 2).fmin(ENV_N - 1) {
+            after = after.fmax(self.env_at(&self.hi_hist, k));
         }
         let mut before = f32::INFINITY;
-        for k in (back + 4)..(back + 14).min(ENV_N) {
-            before = before.min(self.env_at(&self.hi_hist, k));
+        for k in (back + 4)..(back + 14).fmin(ENV_N) {
+            before = before.fmin(self.env_at(&self.hi_hist, k));
         }
         if !before.is_finite() || before <= 0.0 {
             return if after > 0.0 { 20.0 } else { 0.0 };
         }
-        20.0 * (after / before).max(1e-6).log10()
+        20.0 * (after / before).fmax(1e-6).log10()
     }
 
     /// The pitch drop over the cycles within 60 ms of `onset`: the highest
@@ -389,12 +390,12 @@ impl KickDetector {
         let t1 = (onset + 0.06) * self.sr;
         let mut hi = 0f32;
         let mut last = 0f32;
-        for back in (0..self.cyc_len.min(24)).rev() {
+        for back in (0..self.cyc_len.fmin(24)).rev() {
             let c = self.cycle(back);
             if c.tau < t0 || c.tau > t1 {
                 continue;
             }
-            hi = hi.max(c.f);
+            hi = hi.fmax(c.f);
             last = c.f;
         }
         if last > 0.0 {
@@ -412,7 +413,7 @@ impl KickDetector {
         let span = SWEEP_SPAN * self.sr;
         let mut j = 0usize;
         let mut peak = k.a;
-        while j + 1 < self.cyc_len.min(14) {
+        while j + 1 < self.cyc_len.fmin(14) {
             let newer = self.cycle(j);
             let older = self.cycle(j + 1);
             if k.tau - older.tau > span || older.tau <= self.used_until {
@@ -422,7 +423,7 @@ impl KickDetector {
             if step < 1.0 / SWEEP_TOL || step > MAX_STEP {
                 break;
             }
-            peak = peak.max(older.a);
+            peak = peak.fmax(older.a);
             j += 1;
         }
         if j < 2 {
@@ -457,20 +458,20 @@ impl KickDetector {
         let onset = match self.jump {
             Some(jp) if (jp.onset - onset).abs() < 0.035 => {
                 self.jump = None;
-                jp.onset.min(onset)
+                jp.onset.fmin(onset)
             }
             _ => onset,
         };
         let click = self.click_at(onset);
         let low = self.low_peak_after(onset);
-        self.judge(onset, peak.max(low * 1.5), first.f, k.f, 1.0, click, ratio);
+        self.judge(onset, peak.fmax(low * 1.5), first.f, k.f, 1.0, click, ratio);
     }
 
     fn low_peak_after(&self, onset: f64) -> f32 {
-        let back = ((self.now() - onset) * 1000.0).round().max(0.0) as usize;
+        let back = ((self.now() - onset) * 1000.0).round().fmax(0.0) as usize;
         let mut m = 0f32;
-        for k in 0..=back.min(ENV_N - 1) {
-            m = m.max(self.env_at(&self.low_hist, k));
+        for k in 0..=back.fmin(ENV_N - 1) {
+            m = m.fmax(self.env_at(&self.low_hist, k));
         }
         m
     }
@@ -484,7 +485,7 @@ impl KickDetector {
                 self.jump = None;
                 let (drop, f0, f1) = self.drop_after(jp.onset);
                 let click = self.click_at(jp.onset);
-                let low = self.low_peak_after(jp.onset).max(jp.low);
+                let low = self.low_peak_after(jp.onset).fmax(jp.low);
                 self.judge(jp.onset, low * 1.5, f0, f1, 2.0, click, drop);
             }
         }
@@ -492,7 +493,7 @@ impl KickDetector {
         let past = self.env_at(&self.low_hist, 8);
         let mut floor = f32::INFINITY;
         for k in 8..24 {
-            floor = floor.min(self.env_at(&self.low_hist, k));
+            floor = floor.fmin(self.env_at(&self.low_hist, k));
         }
         if self.jump.is_none() && floor > 0.0 && cur > past * JUMP && cur > floor * (JUMP * 1.3) {
             // Where it started: the last millisecond still near the floor.
@@ -578,11 +579,11 @@ impl KickDetector {
         if f.kick_candidate && !near_kick && f.w_click >= 0.45 && f.sub_db - f.reg_db < -3.0 {
             self.push_snare(t - DETECT_LATENCY, f.w_click.clamp(0.2, 1.0));
         }
-        let m = f.mid_flux / f.dynamics.max(0.05);
+        let m = f.mid_flux / f.dynamics.fmax(0.05);
         let d = m - self.snare_avg;
         self.snare_avg += d * 0.03;
         self.snare_var += (d * d - self.snare_var) * 0.03;
-        let thr = self.snare_avg + self.snare_var.max(1e-12).sqrt() * 2.2;
+        let thr = self.snare_avg + self.snare_var.fmax(1e-12).sqrt() * 2.2;
         if m > thr && m > 0.004 && !f.kick_candidate && !near_kick {
             self.push_snare(t - DETECT_LATENCY, ((m - thr) / (thr + 1e-6)).clamp(0.2, 1.0));
         }

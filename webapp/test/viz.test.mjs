@@ -23,6 +23,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createGeometry } from "../src/lib/viz/geometry.js";
+import { vizCoreFromBytes } from "../src/lib/viz/core.js";
 import { createScene, MODES, effectiveMode, levelFor } from "../src/lib/viz/index.js";
 import { tierPreset, TIERS } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
@@ -31,6 +32,10 @@ import { WORLD_META, GROUPS, worldFor } from "../src/lib/viz/worlds/catalogue.js
 import { worldIds, loadWorld, hasWorld } from "../src/lib/viz/worlds/index.js";
 import { SKINS, ALIASES, skinId, skinFor, skinCount } from "../src/lib/viz/skins.js";
 import { worldFragment, particleVertex, particleFragment, WORLD_UNIFORMS } from "../src/lib/viz/gl/glsl.js";
+
+// The scenes' arithmetic is Rust (lib/viz/core.js); in the app the core loads
+// with the scene, here it is instantiated once from the shipped binary.
+vizCoreFromBytes(readFileSync(new URL("../src/lib/audio/rhythm.wasm", import.meta.url)));
 
 // --- a canvas that remembers where it was drawn on --------------------------
 //

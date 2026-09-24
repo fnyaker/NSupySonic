@@ -15,6 +15,7 @@
 //! bin, the peak (not the mean) inside a band, and dB in, 0..1 out.
 
 use crate::util::fast_log10;
+use crate::util::MinMax;
 
 pub const BAND_COUNT: usize = 120;
 pub const FLOOR_DB: f32 = -96.0;
@@ -51,8 +52,8 @@ fn bin_spec(f0: f32, f1: f32, n: usize, hz_per_bin: f32) -> BinSpec {
     let i1 = b.floor() as i32;
     if i1 > i0 {
         return BinSpec {
-            i0: i0.max(0),
-            i1: i1.min(n as i32 - 1),
+            i0: i0.fmax(0),
+            i1: i1.fmin(n as i32 - 1),
             frac: -1.0,
         };
     }
@@ -65,8 +66,8 @@ impl BandPlan {
     /// `lo_n` / `hi_n` how many bins each has.
     pub fn new(sr: f32, lo_hz: f32, lo_n: usize, hi_hz: f32, hi_n: usize) -> BandPlan {
         let nyquist = sr / 2.0;
-        let top = 18000f32.min(nyquist * 0.92);
-        let lowest = 10f32.max(22f32.min(top / 4.0));
+        let top = 18000f32.fmin(nyquist * 0.92);
+        let lowest = 10f32.fmax(22f32.fmin(top / 4.0));
         let mut bands = Vec::with_capacity(BAND_COUNT);
         let dummy = BinSpec { i0: -1, i1: -1, frac: 0.0 };
         for i in 0..BAND_COUNT {
@@ -122,8 +123,8 @@ fn read_spec(data: &[f32], s: &BinSpec) -> f32 {
     }
     let i = s.frac.floor() as usize;
     let t = s.frac - i as f32;
-    let a = data[i].max(FLOOR_DB);
-    let b = data[i + 1].max(FLOOR_DB);
+    let a = data[i].fmax(FLOOR_DB);
+    let b = data[i + 1].fmax(FLOOR_DB);
     a + (b - a) * t
 }
 
@@ -147,8 +148,8 @@ impl EnergyPlan {
         for (k, (f0, f1)) in ENERGY_BANDS.iter().enumerate() {
             let use_lo = *f1 <= BLEND_HI;
             let (hz, n) = if use_lo { (lo_hz, lo_n) } else { (hi_hz, hi_n) };
-            let i0 = ((f0 / hz).floor() as usize).min(n - 1);
-            let i1 = ((f1 / hz).ceil() as usize).min(n - 1);
+            let i0 = ((f0 / hz).floor() as usize).fmin(n - 1);
+            let i1 = ((f1 / hz).ceil() as usize).fmin(n - 1);
             spec[k] = (use_lo, i0, i1);
         }
         EnergyPlan { spec }
@@ -168,7 +169,7 @@ impl EnergyPlan {
             }
             let mean = if n > 0.0 { sum / n } else { 0.0 };
             let db = if mean > 0.0 { 10.0 * fast_log10(mean) } else { FLOOR_DB };
-            let db = db.max(FLOOR_DB);
+            let db = db.fmax(FLOOR_DB);
             out_db[k] = db;
             out_lin[k] = 10f32.powf(db / 10.0);
         }

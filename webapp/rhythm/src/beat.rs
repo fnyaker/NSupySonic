@@ -37,6 +37,7 @@
 //! music does too, and the first kick of the drop finds it where it left it.
 
 use crate::tempo::TempoOut;
+use crate::util::MinMax;
 
 pub const KIND_KICK: u8 = 0;
 pub const KIND_LOW: u8 = 1;
@@ -268,7 +269,7 @@ impl Grid {
     /// The phase density of the recent evidence on the current grid.
     fn build_density(&mut self, now: f64) -> f32 {
         self.density = [0.0; BINS];
-        let mem = (MEMORY_BEATS * self.p).max(MEMORY_MIN_S);
+        let mem = (MEMORY_BEATS * self.p).fmax(MEMORY_MIN_S);
         let mut total = 0f32;
         for i in 0..self.ev_len {
             let e = self.ev[(self.ev_head + EV_CAP - 1 - i) % EV_CAP];
@@ -276,7 +277,7 @@ impl Grid {
             if age > mem * 1.5 || age < -0.05 {
                 continue;
             }
-            let w = e.w * Self::kind_weight(e.kind) * (-age.max(0.0) / mem).exp() as f32;
+            let w = e.w * Self::kind_weight(e.kind) * (-age.fmax(0.0) / mem).exp() as f32;
             let psi = wrap((e.t - self.t0) / self.p);
             let pos = (psi + 0.5) * BINS as f64;
             let c = pos.floor() as i64;
@@ -300,7 +301,7 @@ impl Grid {
     /// corrections (phase in beats, relative period change) and how many
     /// beats of spread the fit rests on.
     fn fit(&self, now: f64) -> Option<(f64, f64, f64)> {
-        let mem = (MEMORY_BEATS * self.p).max(MEMORY_MIN_S);
+        let mem = (MEMORY_BEATS * self.p).fmax(MEMORY_MIN_S);
         let (mut sw, mut sk, mut st, mut skk, mut skt) = (0f64, 0f64, 0f64, 0f64, 0f64);
         let mut kmin = f64::INFINITY;
         let mut kmax = f64::NEG_INFINITY;
@@ -326,8 +327,8 @@ impl Grid {
             st += w * t;
             skk += w * k * k;
             skt += w * k * t;
-            kmin = kmin.min(k);
-            kmax = kmax.max(k);
+            kmin = kmin.fmin(k);
+            kmax = kmax.fmax(k);
             n += 1;
         }
         if n < 4 || kmax - kmin < 3.0 || sw <= 0.0 {
@@ -412,9 +413,9 @@ impl Grid {
         let (peak, peak_v) = self.peak();
         let near = self.mass_near(0.0, 0.12);
         let far = self.mass_near(0.5, 0.12);
-        let sum: f32 = self.density.iter().sum::<f32>().max(1e-9);
-        self.clarity = if total > 0.0 { (near / sum).min(1.0) } else { self.clarity * 0.995 };
-        self.offbeat += ((far / (near + far + 1e-6)) - self.offbeat) * (dt as f32 / 2.0).min(1.0);
+        let sum: f32 = self.density.iter().sum::<f32>().fmax(1e-9);
+        self.clarity = if total > 0.0 { (near / sum).fmin(1.0) } else { self.clarity * 0.995 };
+        self.offbeat += ((far / (near + far + 1e-6)) - self.offbeat) * (dt as f32 / 2.0).fmin(1.0);
         if total > 0.0 {
             if peak.abs() > JUMP_MIN && peak_v > self.density_at(0.0) * JUMP_RATIO {
                 // A mode well away from the grid and clearly stronger than
@@ -426,8 +427,8 @@ impl Grid {
                     self.jump_count = 1;
                     self.jump_target = peak;
                 }
-                let need = (JUMP_BEATS as f64 * self.p / dt.max(1e-3)) as u32;
-                if self.jump_count >= need.max(1) {
+                let need = (JUMP_BEATS as f64 * self.p / dt.fmax(1e-3)) as u32;
+                if self.jump_count >= need.fmax(1) {
                     self.t0 += peak * self.p;
                     self.jump_count = 0;
                 }
@@ -458,7 +459,7 @@ impl Grid {
         } else {
             // A grid starting over after an unlock: its first beat comes after
             // the last one numbered.
-            self.idx_off = self.an_n.max(self.last_n) + 1 - ((now - self.t0) / self.p).round() as i64;
+            self.idx_off = self.an_n.fmax(self.last_n) + 1 - ((now - self.t0) / self.p).round() as i64;
         }
         if new_bar {
             self.restart_bar();
@@ -473,8 +474,8 @@ impl Grid {
         }
 
         // --- confidence ----------------------------------------------------
-        let c = (tempo.confidence * 1.4).min(1.0) * (0.35 + 0.65 * self.clarity);
-        self.confidence += (c - self.confidence) * (dt as f32 / 1.5).min(1.0);
+        let c = (tempo.confidence * 1.4).fmin(1.0) * (0.35 + 0.65 * self.clarity);
+        self.confidence += (c - self.confidence) * (dt as f32 / 1.5).fmin(1.0);
 
         // --- what the downbeat needs, one beat at a time ---------------------
         self.gather(now, chroma, level);
@@ -570,7 +571,7 @@ impl Grid {
         self.cur_frames += 1.0;
         if idx > self.an_n {
             // Beat `an_idx + 1` has just begun. Close the interval that ended.
-            let n = self.cur_frames.max(1.0);
+            let n = self.cur_frames.fmax(1.0);
             let mut mean = [0f32; 12];
             let mut dist = 0f32;
             let mut norm = 0f32;
@@ -613,18 +614,18 @@ impl Grid {
                 continue;
             }
             match e.kind {
-                KIND_KICK => f.kick = f.kick.max(e.w),
-                KIND_SNARE => f.snare = f.snare.max(e.w),
-                KIND_LOW => f.low = f.low.max(e.w),
+                KIND_KICK => f.kick = f.kick.fmax(e.w),
+                KIND_SNARE => f.snare = f.snare.fmax(e.w),
+                KIND_LOW => f.low = f.low.fmax(e.w),
                 _ => {}
             }
         }
         self.feats[(b.rem_euclid(16)) as usize] = f;
         // Energy novelty: this beat against the running level.
-        let nov = (f.level - self.level_avg).max(0.0) / (self.level_avg + 0.05);
+        let nov = (f.level - self.level_avg).fmax(0.0) / (self.level_avg + 0.05);
         self.level_avg += (f.level - self.level_avg) * 0.15;
         // How much this beat looks like the START of a bar, and like beat 2/4.
-        let down = f.chord * 1.4 + f.kick * 0.35 + f.low * 0.25 + nov.min(2.0) * 0.8 - f.snare * 0.9;
+        let down = f.chord * 1.4 + f.kick * 0.35 + f.low * 0.25 + nov.fmin(2.0) * 0.8 - f.snare * 0.9;
         let back = f.snare * 1.0 - f.chord * 0.3;
         for i in 0..4 {
             self.score4[i] *= 0.965;
@@ -741,8 +742,8 @@ impl Grid {
         let m = self.meter as i64;
         o.bar_pos = cur.rem_euclid(m) as u32;
         o.downbeat = o.beat && o.bar_pos == 0;
-        o.since_beat = (t - self.last_beat_t).max(0.0) as f32;
-        o.phrase_bar = ((cur - self.phrase_start).max(0) / m) as u32;
+        o.since_beat = (t - self.last_beat_t).fmax(0.0) as f32;
+        o.phrase_bar = ((cur - self.phrase_start).fmax(0) / m) as u32;
     }
 
     pub fn period(&self) -> f64 {

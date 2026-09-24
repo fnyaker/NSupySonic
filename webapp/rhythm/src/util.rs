@@ -2,6 +2,71 @@
 //! per-bin loops, the fuzzy memberships the classifier is written in, and a
 //! biquad for the time-domain taps.
 
+/// `max` and `min` WITHOUT a library call, for the hot paths.
+///
+/// `f32::max` promises to return the other operand when one is NaN, and
+/// WebAssembly has no instruction that means that (its `f32.max` propagates
+/// the NaN instead), so on wasm every call to it compiles to a call into a
+/// libm routine. There were a hundred and fifty of them in this crate, a good
+/// share inside per-bin and per-column loops; in the scope's reduction alone
+/// nine a column made it 2.5x slower in the browser than natively. These keep
+/// Rust's exact semantics — the non-NaN operand wins — with comparisons, which
+/// are one instruction each. Implemented for the integers too (as `Ord`), so
+/// one spelling serves every call site and the compiler checks each of them.
+pub trait MinMax: Sized {
+    fn fmax(self, other: Self) -> Self;
+    fn fmin(self, other: Self) -> Self;
+}
+
+macro_rules! float_minmax {
+    ($t:ty) => {
+        impl MinMax for $t {
+            #[inline(always)]
+            fn fmax(self, other: $t) -> $t {
+                if self > other {
+                    self
+                } else if other > self {
+                    other
+                } else if self != self {
+                    other
+                } else {
+                    self
+                }
+            }
+            #[inline(always)]
+            fn fmin(self, other: $t) -> $t {
+                if self < other {
+                    self
+                } else if other < self {
+                    other
+                } else if self != self {
+                    other
+                } else {
+                    self
+                }
+            }
+        }
+    };
+}
+float_minmax!(f32);
+float_minmax!(f64);
+
+macro_rules! int_minmax {
+    ($($t:ty),*) => {$(
+        impl MinMax for $t {
+            #[inline(always)]
+            fn fmax(self, other: $t) -> $t {
+                Ord::max(self, other)
+            }
+            #[inline(always)]
+            fn fmin(self, other: $t) -> $t {
+                Ord::min(self, other)
+            }
+        }
+    )*};
+}
+int_minmax!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
+
 /// log2(x) for x > 0, to about 1e-4 — plenty for an onset function or a
 /// flatness measure, and several times cheaper than the libm call it
 /// replaces in the per-bin loops. Uses the float's own exponent and a
@@ -52,9 +117,9 @@ pub fn in_range(x: f32, lo: f32, hi: f32, w: f32) -> f32 {
     if x >= lo && x <= hi {
         1.0
     } else if x < lo {
-        (1.0 - (lo - x) / w).max(0.0)
+        (1.0 - (lo - x) / w).fmax(0.0)
     } else {
-        (1.0 - (x - hi) / w).max(0.0)
+        (1.0 - (x - hi) / w).fmax(0.0)
     }
 }
 
@@ -97,7 +162,7 @@ pub enum Kind {
 
 impl Biquad {
     pub fn new(kind: Kind, freq: f32, q: f32, sr: f32) -> Biquad {
-        let w = 2.0 * core::f32::consts::PI * (freq / sr).min(0.49);
+        let w = 2.0 * core::f32::consts::PI * (freq / sr).fmin(0.49);
         let (s, c) = w.sin_cos();
         let al = s / (2.0 * q);
         let (b0, b1, b2) = match kind {

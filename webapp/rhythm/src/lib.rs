@@ -40,6 +40,9 @@ mod spectrum;
 mod style;
 mod tempo;
 mod util;
+pub mod viz;
+pub mod viz_bars;
+pub mod viz_scope;
 
 use beat::{Grid, KIND_FULL, KIND_KICK, KIND_LOW, KIND_SNARE};
 use features::{FeatureExtractor, Features};
@@ -51,6 +54,7 @@ use spectrum::{BandPlan, EnergyPlan, BAND_COUNT, FLOOR_DB};
 use style::Style;
 use tempo::Tempo;
 use util::{fast_log10, Biquad, Kind};
+use crate::util::MinMax;
 
 pub const LOOKAHEAD: usize = kick::DECISION_FRAMES;
 const FFT_HI: usize = 2048;
@@ -373,7 +377,7 @@ impl Analyzer {
     }
 
     pub fn set_level(&mut self, level: u32) {
-        let level = level.min(LEVEL_SMART);
+        let level = level.fmin(LEVEL_SMART);
         if level > self.level {
             self.reset();
         }
@@ -465,7 +469,7 @@ impl Analyzer {
         for h in self.kick.kicks.iter() {
             self.hits.push(Hit { t: h.t, strength: h.strength, snare: false, detail: [h.f0, h.f1, h.path, h.click, h.rel, h.score] });
             self.tempo.note_hit(h.t);
-            kick_now = kick_now.max(h.strength.min(1.0));
+            kick_now = kick_now.fmax(h.strength.fmin(1.0));
             if self.level >= LEVEL_RHYTHM {
                 self.grid.add_event(h.t, h.strength.clamp(0.3, 1.0), KIND_KICK);
             }
@@ -488,7 +492,7 @@ impl Analyzer {
             let d = odf_full - self.on_mean;
             self.on_mean += d * 0.02;
             self.on_var += (d * d - self.on_var) * 0.02;
-            let sd = self.on_var.max(1e-12).sqrt();
+            let sd = self.on_var.fmax(1e-12).sqrt();
             let thr = self.on_mean + sd * 1.6;
             if odf_full > thr && t - self.on_last > 0.055 {
                 self.on_last = t;
@@ -501,7 +505,7 @@ impl Analyzer {
             let d = odf_low - self.low_mean;
             self.low_mean += d * 0.02;
             self.low_var += (d * d - self.low_var) * 0.02;
-            let sd = self.low_var.max(1e-12).sqrt();
+            let sd = self.low_var.fmax(1e-12).sqrt();
             let thr = self.low_mean + sd * 1.8;
             if odf_low > thr && t - self.low_last > 0.07 {
                 self.low_last = t;
@@ -568,7 +572,7 @@ impl Analyzer {
         for s in self.snaps.iter() {
             if s.frame >= j {
                 let raw = ((s.f.level_db - (s.f.loud_ref_db - 24.0)) / 24.0).clamp(0.0, 1.0);
-                dyn_ahead = dyn_ahead.max(s.f.dynamics).max(raw);
+                dyn_ahead = dyn_ahead.fmax(s.f.dynamics).fmax(raw);
             }
         }
 
@@ -662,7 +666,7 @@ impl Analyzer {
             }
             self.genre.update(
                 dt as f32,
-                b.period.max(0.15),
+                b.period.fmax(0.15),
                 f.harm_mid,
                 f.harm_flat,
                 f.melody,
@@ -736,7 +740,7 @@ impl Analyzer {
         o[at!("rollDiv")] = p.roll_div;
         o[at!("rollNotes")] = p.roll_notes;
         o[at!("drop")] = if p.drop { 1.0 } else { 0.0 };
-        o[at!("sinceDrop")] = p.since_drop.min(999.0);
+        o[at!("sinceDrop")] = p.since_drop.fmin(999.0);
         o[at!("dropped")] = p.dropped;
         o[at!("breakdown")] = p.breakdown;
         o[at!("build")] = p.build;
@@ -863,7 +867,7 @@ pub extern "C" fn rhythm_input_cap() -> u32 {
 #[no_mangle]
 pub extern "C" fn rhythm_process(n: u32) -> u32 {
     let gl = g();
-    let n = (n as usize).min(IN_CAP);
+    let n = (n as usize).fmin(IN_CAP);
     match gl.a.as_mut() {
         Some(a) => a.push(&gl.input[..n]) as u32,
         None => 0,
@@ -939,14 +943,14 @@ pub extern "C" fn rhythm_reset() {
 #[no_mangle]
 pub extern "C" fn rhythm_families(n: u32) -> *mut f32 {
     let gl = g();
-    gl.fam = vec![0.0; (n as usize).min(1 << 16)];
+    gl.fam = vec![0.0; (n as usize).fmin(1 << 16)];
     gl.fam.as_mut_ptr()
 }
 
 #[no_mangle]
 pub extern "C" fn rhythm_load_families(n: u32) -> u32 {
     let gl = g();
-    let n = (n as usize).min(gl.fam.len());
+    let n = (n as usize).fmin(gl.fam.len());
     match gl.a.as_mut() {
         Some(a) => a.load_families(&gl.fam[..n]) as u32,
         None => 0,

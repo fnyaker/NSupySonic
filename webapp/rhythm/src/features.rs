@@ -12,6 +12,7 @@
 //! chroma — is the same arithmetic.
 
 use crate::util::{alpha, fast_log10, fast_log2};
+use crate::util::MinMax;
 
 const LOG_C: f32 = 1000.0;
 const ODF_LAG: f32 = 0.022;
@@ -179,7 +180,7 @@ impl FeatureExtractor {
         let mut cm_hi = [0usize; CM_N];
         for j in 0..CM_N {
             cm_lo[j] = b(CM_HZ[j]);
-            cm_hi[j] = cm_lo[j].max(b(CM_HZ[j + 1]).saturating_sub(1));
+            cm_hi[j] = cm_lo[j].fmax(b(CM_HZ[j + 1]).saturating_sub(1));
         }
         let mut cm_of = vec![-1i8; n_hi];
         let mut cm_width = [0f32; CM_N];
@@ -189,7 +190,7 @@ impl FeatureExtractor {
             }
             cm_width[j] = (cm_hi[j] - cm_lo[j] + 1) as f32;
         }
-        let mel0 = b(60.0).max(1);
+        let mel0 = b(60.0).fmax(1);
         let mel1 = b(4000.0);
         let mut pitch_of = vec![-1i8; n_hi];
         let mut class_bins = [0f32; 12];
@@ -215,7 +216,7 @@ impl FeatureExtractor {
         let mut reg_wt = vec![0f32; n_hi];
         let mut reg_wt_sum = 0f32;
         for i in reg0..=reg1 {
-            reg_wt[i] = 1.0 / i.max(1) as f32;
+            reg_wt[i] = 1.0 / i.fmax(1) as f32;
             reg_wt_sum += reg_wt[i];
         }
         let mut fx = FeatureExtractor {
@@ -442,11 +443,11 @@ impl FeatureExtractor {
             }
         }
         o.flux = flux / n as f32;
-        let low_odf = low_flux / (self.low1 - self.low0 + 1).max(1) as f32;
-        let mid_norm = mid_flux / (self.midf1 - self.midf0).max(1) as f32;
+        let low_odf = low_flux / (self.low1 - self.low0 + 1).fmax(1) as f32;
+        let mid_norm = mid_flux / (self.midf1 - self.midf0).fmax(1) as f32;
         o.mid_flux = mid_norm * sd;
         o.mid_odf = mid_norm;
-        o.high_flux = (high_flux / (top - self.hif0 + 1).max(1) as f32) * sd;
+        o.high_flux = (high_flux / (top - self.hif0 + 1).fmax(1) as f32) * sd;
 
         let head = self.hist_head;
         self.hist_t[head] = self.clock;
@@ -459,7 +460,7 @@ impl FeatureExtractor {
             for i in self.click0..=self.click1 {
                 s += self.mag[i];
             }
-            (s / (self.click1 - self.click0 + 1) as f32).max(1e-9)
+            (s / (self.click1 - self.click0 + 1) as f32).fmax(1e-9)
         };
         let dtc = dt.clamp(1.0 / 400.0, 0.02);
         let mut reg_sum = 0f32;
@@ -471,9 +472,9 @@ impl FeatureExtractor {
         }
         let mut cm_now = [0f32; CM_N];
         for j in 0..CM_N {
-            cm_now[j] = 20.0 * fast_log10((cm_sum[j] / self.cm_width[j]).max(1e-9));
+            cm_now[j] = 20.0 * fast_log10((cm_sum[j] / self.cm_width[j]).fmax(1e-9));
         }
-        let reg_db = 20.0 * fast_log10((reg_sum / self.reg_wt_sum).max(1e-9));
+        let reg_db = 20.0 * fast_log10((reg_sum / self.reg_wt_sum).fmax(1e-9));
         let reg_cent = if reg_sum > 1e-12 { reg_w / reg_sum } else { self.log2hz[self.reg0] };
         let click_db = 20.0 * fast_log10(click_lo);
         if !self.kick_primed {
@@ -509,8 +510,8 @@ impl FeatureExtractor {
         cm_step.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         let median = (cm_step[CM_N / 2 - 1] + cm_step[CM_N / 2]) / 2.0;
         let spread = cm_step[CM_N - 2] - cm_step[1];
-        let uniform = (1.0 - spread / CM_SPREAD_DB).max(0.0);
-        let common = median.max(0.0) * uniform;
+        let uniform = (1.0 - spread / CM_SPREAD_DB).fmax(0.0);
+        let common = median.fmax(0.0) * uniform;
         let sub_step_db = sub_raw - common;
         let lift_db = reg_db - self.atk_reg[rf] - common;
         let pitch_oct = reg_cent - self.atk_cent[rf];
@@ -537,10 +538,10 @@ impl FeatureExtractor {
         }
         adapt(&mut self.reg_top, reg_db);
         let voiced = ((REG_MUTE_DB - (self.reg_top - reg_db)) / (REG_MUTE_DB - REG_VOICED_DB)).clamp(0.0, 1.0);
-        let w_lift = lift_db.max(0.0) / MIN_LIFT_DB.max(self.lift_ref);
-        let w_pitch = (voiced * pitch_oct.max(0.0)) / MIN_PITCH_OCT.max(self.pitch_ref);
-        let w_click = click_step_db.max(0.0) / MIN_CLICK_DB.max(self.click_ref);
-        let w_sub = sub_step_db.max(0.0) / MIN_SUB_DB.max(self.sub_ref);
+        let w_lift = lift_db.fmax(0.0) / MIN_LIFT_DB.fmax(self.lift_ref);
+        let w_pitch = (voiced * pitch_oct.fmax(0.0)) / MIN_PITCH_OCT.fmax(self.pitch_ref);
+        let w_click = click_step_db.fmax(0.0) / MIN_CLICK_DB.fmax(self.click_ref);
+        let w_sub = sub_step_db.fmax(0.0) / MIN_SUB_DB.fmax(self.sub_ref);
         let mut votes = 0;
         if w_lift >= WITNESS {
             votes += 1;
@@ -565,7 +566,7 @@ impl FeatureExtractor {
         let struck = w_click >= STRIKE_MIN;
         let low = low_side >= LOW_STRONG || (w_pitch >= RESTART_MIN && w_click >= RESTART_MIN);
         let mut kick_now = if (struck && low) || w_sub >= SUB_ALONE {
-            best.min(if votes >= 2 { 1.0 } else { KICK_ON * 0.9 }).max(0.0)
+            best.fmin(if votes >= 2 { 1.0 } else { KICK_ON * 0.9 }).fmax(0.0)
         } else {
             0.0
         };
@@ -590,12 +591,12 @@ impl FeatureExtractor {
             self.kick_armed = true;
         }
         if !o.kick_candidate && !self.kick_armed {
-            kick_now = kick_now.min(self.last_kick_strength);
+            kick_now = kick_now.fmin(self.last_kick_strength);
         }
         kick_now *= sd;
-        o.kick = if kick_now > o.kick { kick_now } else { o.kick * (1.0 - dtc / 0.16).max(0.0) };
+        o.kick = if kick_now > o.kick { kick_now } else { o.kick * (1.0 - dtc / 0.16).fmax(0.0) };
         o.kick_strength = self.last_kick_strength;
-        o.low_flux = low_odf + 0.0025 * lift_db.max(0.0);
+        o.low_flux = low_odf + 0.0025 * lift_db.fmax(0.0);
 
         // --- sustained vs struck, and the melody in the sustained half ------------
         let t_alpha = alpha(dt, 0.25);
@@ -624,9 +625,9 @@ impl FeatureExtractor {
             if pc < 0 {
                 continue;
             }
-            let lo = ((i as f32 / 1.26).floor() as usize).max(1);
-            let hi = ((i as f32 * 1.26).ceil() as usize).min(top);
-            let env = (self.cumul[hi + 1] - self.cumul[lo]) / (hi - lo + 1).max(1) as f32;
+            let lo = ((i as f32 / 1.26).floor() as usize).fmax(1);
+            let hi = ((i as f32 * 1.26).ceil() as usize).fmin(top);
+            let env = (self.cumul[hi + 1] - self.cumul[lo]) / (hi - lo + 1).fmax(1) as f32;
             let peakiness = self.harm[i] - env;
             if peakiness > 0.0 {
                 chroma[pc as usize] += peakiness;
@@ -658,10 +659,10 @@ impl FeatureExtractor {
         let c_avg = if c_max > 1e-9 { c_avg_raw / (12.0 * c_max) } else { 1.0 };
         let clarity = ((1.0 - c_avg) * 1.6).clamp(0.0, 1.0);
         let strength = (salience * 9.0).clamp(0.0, 1.0);
-        self.s_melody += (clarity * strength * (o.tonal * 2.2).min(1.0) - self.s_melody) * 0.06;
+        self.s_melody += (clarity * strength * (o.tonal * 2.2).fmin(1.0) - self.s_melody) * 0.06;
         o.melody = self.s_melody;
         if mel_energy > 1e-9 {
-            let hz = ((mel_weighted / mel_energy) * self.hz_per_bin).max(60.0);
+            let hz = ((mel_weighted / mel_energy) * self.hz_per_bin).fmax(60.0);
             let lo = 60f32.ln();
             let span = 4000f32.ln() - lo;
             let p = ((hz.ln() - lo) / span).clamp(0.0, 1.0);
@@ -684,10 +685,10 @@ impl FeatureExtractor {
             self.chroma_ref_at = self.clock;
             self.chroma_ref = self.chroma_smooth;
         }
-        self.s_chord += ((dist / 4.0).min(1.0) - self.s_chord) * 0.1;
+        self.s_chord += ((dist / 4.0).fmin(1.0) - self.s_chord) * 0.1;
         o.chord_change = self.s_chord * sd;
         o.chroma = chroma;
-        o.melody_flux = mid_norm * (o.tonal * 2.0).min(1.0) * sd;
+        o.melody_flux = mid_norm * (o.tonal * 2.0).fmin(1.0) * sd;
 
         // Centroid.
         let mut wsum = 0f32;
@@ -701,7 +702,7 @@ impl FeatureExtractor {
         o.centroid = self.s_centroid;
         let c_lo = 40f32.ln();
         let c_span = 16000f32.ln() - c_lo;
-        o.centroid_n = ((self.s_centroid.max(40.0).ln() - c_lo) / c_span).clamp(0.0, 1.0);
+        o.centroid_n = ((self.s_centroid.fmax(40.0).ln() - c_lo) / c_span).clamp(0.0, 1.0);
 
         // Flatness over the band where "tonal vs noisy" is informative.
         let mut log_sum = 0f32;
@@ -726,14 +727,14 @@ impl FeatureExtractor {
         let mut h_ari = 0f32;
         let mut h_cnt = 0f32;
         for i in self.mid0..=self.mid1 {
-            let h = self.harm[i].max(1e-7);
+            let h = self.harm[i].fmax(1e-7);
             h_log += fast_log2(h);
             h_ari += h;
             h_cnt += 1.0;
         }
         o.harm_mid = if h_cnt > 0.0 { h_ari / h_cnt } else { 0.0 };
         let h_geo = if h_cnt > 0.0 { (h_log / h_cnt * core::f32::consts::LN_2).exp() } else { 0.0 };
-        o.harm_flat = if h_ari > 1e-7 { (h_geo / (h_ari / h_cnt.max(1.0))).clamp(0.0, 1.0) } else { 0.0 };
+        o.harm_flat = if h_ari > 1e-7 { (h_geo / (h_ari / h_cnt.fmax(1.0))).clamp(0.0, 1.0) } else { 0.0 };
 
         // 85% rolloff.
         let target = msum * 0.85;
@@ -749,10 +750,10 @@ impl FeatureExtractor {
         let rolloff = rb as f32 * self.hz_per_bin;
         self.s_rolloff = rolloff * 0.08 + self.s_rolloff * 0.92;
         o.rolloff = self.s_rolloff;
-        o.rolloff_n = ((self.s_rolloff.max(40.0).ln() - c_lo) / c_span).clamp(0.0, 1.0);
+        o.rolloff_n = ((self.s_rolloff.fmax(40.0).ln() - c_lo) / c_span).clamp(0.0, 1.0);
 
         // Percussivity: flux against level.
-        let p_ratio = o.flux / o.level.max(PERC_MIN_LEVEL);
+        let p_ratio = o.flux / o.level.fmax(PERC_MIN_LEVEL);
         let perc = ((p_ratio - PERC_LO) / (PERC_HI - PERC_LO)).clamp(0.0, 1.0);
         self.s_perc = if perc > self.s_perc {
             perc * 0.35 + self.s_perc * 0.65
@@ -766,11 +767,11 @@ impl FeatureExtractor {
         for i in self.mid0..=self.mid1 {
             mid_e += self.mag[i];
         }
-        mid_e /= (self.mid1 - self.mid0 + 1).max(1) as f32;
+        mid_e /= (self.mid1 - self.mid0 + 1).fmax(1) as f32;
         self.mid_fast += (mid_e - self.mid_fast) * alpha(dt, 0.045);
         self.mid_slow += (mid_e - self.mid_slow) * alpha(dt, 0.9);
         let mod_raw = if self.mid_slow > 1e-6 { (self.mid_fast - self.mid_slow).abs() / self.mid_slow } else { 0.0 };
-        self.mod_avg += (mod_raw.min(1.5) - self.mod_avg) * alpha(dt, 1.6);
+        self.mod_avg += (mod_raw.fmin(1.5) - self.mod_avg) * alpha(dt, 1.6);
         o.vocal_mod = (self.mod_avg * 1.6 * (1.0 - o.flatness * 1.4)).clamp(0.0, 1.0);
 
         &self.out

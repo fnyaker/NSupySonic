@@ -1,3 +1,9 @@
+// THE ORACLE. This is lib/viz/scenes/scope.js as it was in JavaScript, before
+// its arithmetic moved to Rust (webapp/rhythm/src/viz_scope.rs). It is kept,
+// unchanged, for one job: test/vizcore.test.mjs runs it side by side with the
+// Rust core on the same windows and holds the two to the same trace, gain and
+// lock. It is not imported by the app.
+
 // The oscilloscope: the signal itself, one trace per channel.
 //
 // Every other scene in here draws something ABOUT the music — a spectrum, a
@@ -33,23 +39,29 @@
 //     scope with both probes on one signal shows.
 //
 // PRECISION IS THE QUALITY SETTING, and the timebase deliberately is not: the
-// window is a fixed slice of TIME at every tier (42 ms), because showing eight
+// window below is a fixed slice of TIME at every tier, because showing eight
 // times as much waveform at ultra would not be more precision, it would be a
 // different (and unreadable) picture. What the tier moves is how faithfully
 // that same slice is drawn — see `scope` in lib/viz/quality.js.
-//
-// THE ARITHMETIC IS RUST (webapp/rhythm/src/viz_scope.rs): the trigger — a
-// one-pole filter at 320 Hz and a Schmitt gate scaled to the signal's own
-// weight, hunted back through up to 250 ms of samples on every analysis
-// frame — the reduction of each window to one MIN/MAX pair per column, and
-// the auto-range. It was the one animation whose JavaScript cost showed:
-// 20-120 us an analysis frame against a few for everything else. This file
-// keeps what is the page's business — where the lanes go and how the trace is
-// drawn on a canvas, for a device with no WebGL2 — and the reasoning behind
-// every number now lives next to the number, in the Rust.
 
-import { clamp, hsl } from "../util.js";
-import { ScopeCore, vizCore } from "../core.js";
+import { approach, clamp, envelope, hsl } from "../../src/lib/viz/util.js";
+
+// The timebase: how much time one lane shows, end to end. ~42 ms is a shade
+// over two cycles of a 50 Hz bass and about forty of a 1 kHz lead — dense
+// enough to look like music, open enough to read a kick's shape.
+const WINDOW_MS = 42;
+// How far back the trigger may hunt for its edge is the TIER's (quality.js
+// #SCOPE.search), bounded by whatever room the analyser's buffer actually
+// leaves above the window. This is the fallback for a preset without one.
+const SEARCH_MS = 40;
+// The trigger's coupling filter. Low enough to be deaf to hats and air, high
+// enough to follow a kick's pitch sweep rather than lagging behind it.
+const TRIG_HZ = 320;
+// How far the trigger signal must fall back before another rising edge counts —
+// a Schmitt gate, as a share of the trigger signal's own weight, so it scales
+// with the material instead of being a number that suits one master.
+const TRIG_HYST = 0.12;
+const TRIG_FLOOR = 0.002; // ...and an absolute floor, for near-silence
 
 // The phosphor. Expressed as a TIME CONSTANT and converted per frame, so the
 // trail lasts as long at a 30 fps cap as at 144 — the alternative is a
@@ -80,9 +92,33 @@ const HALO_BRIGHT = 0.2;
 // "nearly at the top" rather than as a signal pinned against the border.
 const DEFLECT = 0.88;
 
+// The auto-range. A scope has a volts/div knob; this is the auto version of it,
+// and it deliberately COMPRESSES rather than normalises: raising a quiet
+// passage to full height would throw away the one thing a waveform is best at
+// showing. At 0.6 a passage 20 dB down draws at 40% of the loud part's height
+// instead of at 10% — visibly quieter, never a dead line.
+//
+// THE REFERENCE IS DELIBERATELY NOT THE PEAK. It used to be a peak envelope
+// with a long release, and on anything with transients in it that is a scale
+// set by the loudest instant and held there: measured on a kick every half
+// second over a quiet lead, the reference sat near 0.85 while most windows
+// held 0.09, and the trace drew at six per cent of its lane — technically
+// honest, unreadable in practice. A SLOW ATTACK is what fixes it, with the
+// existing envelope rather than a new statistic: a 0.15 s kick can only pull a
+// 0.35 s attack part of the way up, so the reference lands near the level the
+// music actually spends its time at and the transients clip to the rails,
+// which is exactly what a scope does and what they should look like.
+const AGC_TARGET = 0.8;
+const AGC_SOFT = 0.6;
+const AGC_MIN = 0.8;
+const AGC_MAX = 8;
+const AGC_FLOOR = 0.02;
+const AGC_ATTACK = 0.35;
+const AGC_RELEASE = 0.9;
+
 // A tier that somehow arrives without a scope block still has to draw.
 const FALLBACK = {
-  buffer: 4096, search: 40, points: 512,
+  buffer: 4096, search: SEARCH_MS, points: 512,
   exact: false, fine: false, interp: false, divisions: 6, passes: 2,
 };
 
@@ -100,15 +136,18 @@ export const SCOPE_COLOURS = [
 const ORIENTATIONS = new Set(SCOPE_ORIENTATIONS.map((o) => o.id));
 const COLOURS = new Set(SCOPE_COLOURS.map((c) => c.id));
 
+/** One sample, read at a fractional position. */
+function lerpSample(buf, p, n) {
+  if (p <= 0) return buf[0];
+  if (p >= n - 1) return buf[n - 1];
+  const i = p | 0;
+  const f = p - i;
+  return buf[i] + (buf[i + 1] - buf[i]) * f;
+}
+
 export function createScopeScene(opts = {}) {
   const preset = opts.preset || {};
   const sc = preset.scope || FALLBACK;
-  const core = opts.core || vizCore();
-  if (!core) throw new Error("scope: the animation core is not loaded");
-  const rs = new ScopeCore(core);
-  rs.config(sc);
-  // Channel B's pairs start this far into the trace (see ScopeCore#trace).
-  const B = rs.maxCols * 2;
   // `glow` is read as a HALO weight and floored: at `low` there is no post pass
   // at all (POST.low is null), so the scene's own halo is the only one there
   // will be, and the tier's 0.45 left the beam with no light around it
@@ -118,14 +157,21 @@ export function createScopeScene(opts = {}) {
   let orientation = ORIENTATIONS.has(opts.orientation) ? opts.orientation : "horizontal";
   let tint = COLOURS.has(opts.colour) ? opts.colour : "duo";
 
-  // How many columns the lanes are reduced to (the Rust core holds them).
+  // Per-column min/max, one pair per channel. Sized on resize, never per frame.
   let cols = 0;
+  let loA = null;
+  let hiA = null;
+  let loB = null;
+  let hiB = null;
   // Where each lane is and which way it runs. See `layout`.
   let lanes = null;
   let coreW = 1.4;
 
   let gain = 1;
+  let peakEnv = 0.3;
+  let trigEnv = 0.05;
   let locked = 0;
+  let signal = false; // a tap is actually feeding us samples
   let lastDraw = 0;
   let lastSize = null;
 
@@ -199,7 +245,7 @@ export function createScopeScene(opts = {}) {
     // One column per CSS pixel of timebase is as precise as the display can
     // ever be; the tier's ceiling is what takes it below that.
     const len = Math.max(lanes[0].len, lanes[1].len);
-    const want = clamp(Math.round(len), 32, Math.min(sc.points, rs.maxCols));
+    const want = clamp(Math.round(len), 32, sc.points);
     // THE BEAM GETS WIDER AS THE COLUMNS GET COARSER, which is not a cosmetic
     // choice: a stroke of a given alpha laid along 256 long diagonal segments
     // puts far less ink on any one pixel than the same stroke laid along 1548
@@ -211,12 +257,104 @@ export function createScopeScene(opts = {}) {
     coreW = clamp(Math.min(lanes[0].span, lanes[1].span) * 0.02, 1, 2.6) * coarse;
     if (want === cols) return;
     cols = want;
-    rs.cols(cols);
+    loA = new Float32Array(cols);
+    hiA = new Float32Array(cols);
+    loB = new Float32Array(cols);
+    hiB = new Float32Array(cols);
   }
 
   function resize(w, h, _preset, geom) {
     if (!w || !h) return;
     layout(w, h, geom);
+  }
+
+  /**
+   * Reduce one channel's window to `cols` columns, and return its true peak.
+   *
+   * `exact` is a real DSO's answer: every column carries the MIN and the MAX of
+   * the samples that land in it, so nothing between two vertices is invented.
+   * Without it the window is decimated peak-preserving (the sample furthest
+   * from zero in each group wins), which keeps the envelope honest and the
+   * shape simplified — the same reasoning as groupBands taking the peak rather
+   * than the mean. Either way the maximum over the columns IS the window's true
+   * peak, so the auto-range does not change with the tier.
+   */
+  function reduce(buf, size, base, lo, hi, win) {
+    const step = win / cols;
+    const exact = sc.exact;
+    const interp = sc.interp;
+    const fine = sc.fine;
+    let peak = 0;
+    for (let c = 0; c < cols; c++) {
+      const p0 = base + c * step;
+      const p1 = p0 + step;
+      let i0 = Math.ceil(p0);
+      let i1 = Math.floor(p1);
+      if (i0 < 0) i0 = 0;
+      if (i1 > size - 1) i1 = size - 1;
+      let a;
+      let b;
+      if (i1 < i0) {
+        // Finer than the samples themselves: one reading at the column's
+        // centre. Interpolated at the tier that can afford it, which is what
+        // turns a stair-step into a resampled curve.
+        const mid = (p0 + p1) * 0.5;
+        const v = interp ? lerpSample(buf, mid, size) : buf[clamp(Math.round(mid), 0, size - 1)];
+        a = b = v;
+      } else if (exact) {
+        a = b = buf[i0];
+        for (let i = i0 + 1; i <= i1; i++) {
+          const v = buf[i];
+          if (v < a) a = v;
+          if (v > b) b = v;
+        }
+        if (fine) {
+          // THE COLUMN'S INTERVAL IS FRACTIONAL AND ITS ENDS ARE PART OF IT.
+          // Taking only the whole samples inside it is what silently threw the
+          // sub-sample trigger away again: `base` carries a fraction, `ceil`
+          // rounds it off, and the trace went back to moving a whole sample at
+          // a time. Reading the two ends by interpolation is what makes the
+          // fractional trigger show up on screen — and it also closes the
+          // hairline gap between one column and the next, since a column's
+          // last point is now exactly the next one's first. Measured on a
+          // steady tone, this is the whole of the difference between the tiers
+          // that interpolate the trigger and the tiers that do not: 1.03 px of
+          // frame-to-frame drift against 0.007 px.
+          const e0 = lerpSample(buf, p0, size);
+          const e1 = lerpSample(buf, p1, size);
+          if (e0 < a) a = e0;
+          if (e0 > b) b = e0;
+          if (e1 < a) a = e1;
+          if (e1 > b) b = e1;
+        }
+      } else {
+        let best = buf[i0];
+        let bestAbs = best < 0 ? -best : best;
+        for (let i = i0 + 1; i <= i1; i++) {
+          const v = buf[i];
+          const m = v < 0 ? -v : v;
+          if (m > bestAbs) {
+            bestAbs = m;
+            best = v;
+          }
+        }
+        a = b = best;
+      }
+      lo[c] = a;
+      hi[c] = b;
+      const m = Math.max(a < 0 ? -a : a, b < 0 ? -b : b);
+      if (m > peak) peak = m;
+    }
+    return peak;
+  }
+
+  function flatten() {
+    if (!cols || !signal) return;
+    signal = false;
+    loA.fill(0);
+    hiA.fill(0);
+    loB.fill(0);
+    hiB.fill(0);
   }
 
   function update(frame, dt) {
@@ -225,19 +363,71 @@ export function createScopeScene(opts = {}) {
     if (!wv || !wv.size || !wv.left) {
       // No tap: the graph is not built yet, or this is an older projector feed.
       // A scope with no probe on it shows a flat line, which is the truth.
-      rs.idle(dt);
-    } else {
-      rs.update(wv, dt);
+      flatten();
+      locked = approach(locked, 0, 0.4, dt);
+      return;
     }
-    const st = rs.state();
-    gain = st.gain;
-    locked = st.locked;
+    const { left, right, size, sampleRate } = wv;
+    const sr = sampleRate || 48000;
+    const win = Math.min(size - 2, Math.max(64, Math.round((sr * WINDOW_MS) / 1000)));
+    const lastStart = size - win - 1;
+    const search = Math.min(lastStart, Math.round((sr * (sc.search || SEARCH_MS)) / 1000));
+    const from = Math.max(1, lastStart - search);
+
+    // --- the trigger --------------------------------------------------------
+    // One forward pass: filter and test in the same loop, keeping the LATEST
+    // valid edge so the window shown is the freshest one that is also stable.
+    // Measured at ~6k samples of search and 94 analysis frames a second this is
+    // about half a million multiply-adds a second — well under the cost of the
+    // spectrum pass it rides alongside.
+    const k = 1 - Math.exp((-2 * Math.PI * TRIG_HZ) / sr);
+    const hyst = Math.max(TRIG_FLOOR, trigEnv * TRIG_HYST);
+    let y = 0;
+    let prev = 0;
+    let armed = false;
+    let hit = -1;
+    let frac = 0;
+    let tpeak = 0;
+    for (let i = from; i <= lastStart; i++) {
+      prev = y;
+      y += k * ((left[i] + right[i]) * 0.5 - y);
+      const m = y < 0 ? -y : y;
+      if (m > tpeak) tpeak = m;
+      if (y < -hyst) armed = true;
+      else if (armed && y >= 0 && prev < 0) {
+        hit = i - 1;
+        // Sub-sample interpolation: one sample at 48 kHz is ~0.95 px of
+        // horizontal jitter on a 1920-wide lane, which reads as a shimmer
+        // along the whole trace. This is what removes it.
+        frac = sc.fine && y !== prev ? clamp(-prev / (y - prev), 0, 1) : 0;
+        armed = false;
+      }
+    }
+    trigEnv = envelope(trigEnv, tpeak, dt, 0.08, 1.2);
+    const base = hit >= 0 ? hit + frac : lastStart;
+    locked = approach(locked, hit >= 0 ? 1 : 0, hit >= 0 ? 0.12 : 0.5, dt);
+
+    // --- the two windows ----------------------------------------------------
+    signal = true;
+    const pa = reduce(left, size, base, loA, hiA, win);
+    const pb = reduce(right, size, base, loB, hiB, win);
+
+    // --- the auto-range -----------------------------------------------------
+    // Shared between the channels on purpose: two independent ranges would
+    // hide the very thing a stereo scope is for, which is that one side is
+    // louder than the other.
+    peakEnv = envelope(peakEnv, Math.max(pa, pb), dt, AGC_ATTACK, AGC_RELEASE);
+    const want = clamp(
+      Math.pow(AGC_TARGET / Math.max(AGC_FLOOR, peakEnv), AGC_SOFT),
+      AGC_MIN,
+      AGC_MAX
+    );
+    gain = approach(gain, want, 0.35, dt);
   }
 
   // --- drawing ---------------------------------------------------------------
 
-  // `tr` holds `[lo, hi]` per column from `at` on (see ScopeCore#trace).
-  function strokeLane(g, lane, tr, at, scale, style, width, alpha) {
+  function strokeLane(g, lane, lo, hi, scale, style, width, alpha) {
     const { ox, oy, ax, ay, vx, vy } = lane;
     g.strokeStyle = style;
     g.lineWidth = width;
@@ -247,8 +437,8 @@ export function createScopeScene(opts = {}) {
       const t = c / (cols - 1 || 1);
       const bx = ox + ax * t;
       const by = oy + ay * t;
-      const a = clamp(tr[at + c * 2 + 1] * scale, -1, 1);
-      const b = clamp(tr[at + c * 2] * scale, -1, 1);
+      const a = clamp(hi[c] * scale, -1, 1);
+      const b = clamp(lo[c] * scale, -1, 1);
       // Max then min, column after column: with one sample per column this is
       // an ordinary polyline, and where a column holds several it draws their
       // true vertical extent — which is exactly the classic scope look, dense
@@ -375,28 +565,24 @@ export function createScopeScene(opts = {}) {
     g.globalCompositeOperation = "lighter";
     g.lineJoin = "round";
     g.lineCap = "round";
-    const tr = rs.trace();
     for (let ch = 0; ch < 2; ch++) {
       const lane = lanes[ch];
       if (!(lane.len > 2) || !(lane.span > 1)) continue;
-      const at = ch === 0 ? 0 : B;
+      const lo = ch === 0 ? loA : loB;
+      const hi = ch === 0 ? hiA : hiB;
       // The halo is what makes a one-pixel stroke read as light rather than as
       // ink; the post pass then widens it further. Three passes at the tiers
       // that can afford it, two where they cannot — the core is never the one
       // dropped.
-      strokeLane(g, lane, tr, at, scale,
+      strokeLane(g, lane, lo, hi, scale,
         strokeStyleFor(g, lane, ch, pal, 0.5, 1), coreW * 5.5, wash * HALO_BRIGHT * glow);
       if (sc.passes > 2)
-        strokeLane(g, lane, tr, at, scale,
+        strokeLane(g, lane, lo, hi, scale,
           strokeStyleFor(g, lane, ch, pal, 0.62, 1), coreW * 2.3, wash * BODY_BRIGHT * glow);
-      strokeLane(g, lane, tr, at, scale,
+      strokeLane(g, lane, lo, hi, scale,
         strokeStyleFor(g, lane, ch, pal, 0.88, 1), coreW, wash * CORE_BRIGHT);
     }
     g.globalCompositeOperation = "source-over";
-  }
-
-  function dispose() {
-    rs.free();
   }
 
   return {
@@ -404,7 +590,6 @@ export function createScopeScene(opts = {}) {
     update,
     draw,
     setOptions,
-    dispose,
     get cols() {
       return cols;
     },

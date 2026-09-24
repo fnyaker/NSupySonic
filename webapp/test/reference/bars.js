@@ -1,3 +1,7 @@
+// THE ORACLE. lib/viz/scenes/bars.js as it was in JavaScript, before its
+// levelling moved to Rust (webapp/rhythm/src/viz_bars.rs); test/vizcore.test.mjs
+// holds the Rust core to the same heights and caps. Not imported by the app.
+
 // The spectrum bars, rebuilt on the precise band data.
 //
 // The levelling is the part worth reading. One global auto-gain across the whole
@@ -12,26 +16,35 @@
 // slow-release envelope so bars are lively rather than parked in the middle,
 // and peak caps that fall slowly — which is what makes a spectrum readable
 // rather than just busy.
-//
-// THE LEVELLING IS RUST (webapp/rhythm/src/viz_bars.rs, through
-// lib/viz/core.js): the grouping, the three zone gains, the gamma, the
-// envelopes and the caps. This file draws what it computed.
 
-import { clamp, hsl, roundRect } from "../util.js";
-import { BarsCore, vizCore } from "../core.js";
+import { approach, clamp, groupBands, hsl, roundRect } from "../../src/lib/viz/util.js";
+
+const CENTRES = [1 / 6, 0.5, 5 / 6];
 
 export function createBarsScene(opts = {}) {
   const layout = opts.layout || "strip"; // "strip" (centred) | "full" (grounded)
-  const core = opts.core || vizCore();
-  if (!core) throw new Error("bars: the animation core is not loaded");
-  const rb = new BarsCore(core);
   let bars = 0;
+  let grouped = null;
+  let smooth = null;
+  let peaks = null;
+  const agc = [0.15, 0.15, 0.15];
   let width = 0;
+  let level = 0;
+
+  function gainAt(gain, t) {
+    if (t <= CENTRES[0]) return gain[0];
+    if (t >= CENTRES[2]) return gain[2];
+    const z = t < CENTRES[1] ? 0 : 1;
+    const f = (t - CENTRES[z]) / (CENTRES[z + 1] - CENTRES[z]);
+    return gain[z] * (1 - f) + gain[z + 1] * f;
+  }
 
   function setCount(n) {
     if (n === bars) return;
-    bars = Math.min(n, rb.max);
-    rb.count(bars);
+    bars = n;
+    grouped = new Float32Array(n);
+    smooth = new Float32Array(n);
+    peaks = new Float32Array(n);
   }
 
   function resize(w, h, preset) {
@@ -44,8 +57,35 @@ export function createBarsScene(opts = {}) {
   }
 
   function update(frame, dt) {
-    if (!bars || !frame.bands) return;
-    rb.update(frame.bands, frame.features?.level || 0, dt);
+    if (!bars) return;
+    groupBands(frame.bands, grouped);
+    level = approach(level, frame.features?.level || 0, 0.15, dt);
+
+    // Per-zone slow level → per-zone gain.
+    const zoneSum = [0, 0, 0];
+    const zoneN = [0, 0, 0];
+    for (let i = 0; i < bars; i++) {
+      const z = i < bars / 3 ? 0 : i < (2 * bars) / 3 ? 1 : 2;
+      zoneSum[z] += grouped[i];
+      zoneN[z] += 1;
+    }
+    const gain = [0, 0, 0];
+    for (let z = 0; z < 3; z++) {
+      const mean = zoneN[z] ? zoneSum[z] / zoneN[z] : 0;
+      agc[z] = approach(agc[z], mean, 0.9, dt);
+      gain[z] = 0.62 / Math.max(0.1, agc[z]);
+    }
+
+    for (let i = 0; i < bars; i++) {
+      const t = i / bars;
+      let v = Math.min(1, grouped[i] * gainAt(gain, t));
+      v = Math.pow(v, 1.7); // gamma → quiet/loud contrast
+      smooth[i] =
+        v > smooth[i] ? approach(smooth[i], v, 0.035, dt) : approach(smooth[i], v, 0.16, dt);
+      // Peak caps: instant up, then a slow, accelerating fall.
+      if (smooth[i] > peaks[i]) peaks[i] = smooth[i];
+      else peaks[i] = Math.max(smooth[i], peaks[i] - dt * (0.22 + peaks[i] * 0.35));
+    }
   }
 
   function draw(g, w, h, pal) {
@@ -62,8 +102,6 @@ export function createBarsScene(opts = {}) {
     const radius = Math.min(body / 2, 3);
     const full = layout === "full";
     const maxH = full ? h * 0.92 : h;
-    const smooth = rb.smooth;
-    const peaks = rb.peaks;
 
     for (let i = 0; i < bars; i++) {
       const t = i / (bars - 1 || 1);
@@ -102,9 +140,5 @@ export function createBarsScene(opts = {}) {
     }
   }
 
-  function dispose() {
-    rb.free();
-  }
-
-  return { resize, update, draw, dispose, get bars() { return bars; }, get level() { return rb.level; } };
+  return { resize, update, draw, get bars() { return bars; }, get level() { return level; } };
 }

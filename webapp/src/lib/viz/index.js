@@ -20,6 +20,7 @@
 // scene the right surface: a canvas cannot switch context type once it has one.
 
 export { MODES, MODE_BY_ID, effectiveMode, levelFor, needsWave } from "./modes.js";
+import { loadVizCore } from "./core.js";
 
 // The world each fixed mode shows. Smart has none: the music decides.
 const FIXED = { bars: "spectrum", pulse: "pulse", aurora: "aurora" };
@@ -51,7 +52,10 @@ const barsModule = () => load("bars", () => import("./scenes/bars.js"));
  * which discards a scene whose mode is no longer the one on screen.
  */
 export function createScene(mode, opts = {}) {
-  if (mode === "scope") return scopeModule().then((m) => m.createScopeScene(opts));
+  // The scope's arithmetic is Rust (lib/viz/core.js): the module and the core
+  // load together, and the scene is built once both are in hand.
+  if (mode === "scope")
+    return Promise.all([scopeModule(), loadVizCore()]).then(([m, core]) => m.createScopeScene({ ...opts, core }));
   if (mode === "smart" || FIXED[mode])
     return glModule().then((m) => m.createGLScene({ ...opts, fixed: FIXED[mode] || null }));
   return null;
@@ -63,7 +67,7 @@ export function createScene(mode, opts = {}) {
  * that works is better than a black one.
  */
 export function createFallback(opts = {}) {
-  return barsModule().then((m) => m.createBarsScene(opts));
+  return Promise.all([barsModule(), loadVizCore()]).then(([m, core]) => m.createBarsScene({ ...opts, core }));
 }
 
 /** Start fetching a scene without building it. Fire-and-forget. */

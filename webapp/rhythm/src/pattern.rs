@@ -33,6 +33,8 @@
 //! eval's four hardcore records. It anchors the grid's phrase there (beat.rs),
 //! so every phrase clock downstream turns over on it.
 
+use crate::util::MinMax;
+
 pub const SEC_UNKNOWN: u8 = 0;
 pub const SEC_FULL: u8 = 1;
 pub const SEC_BREAKDOWN: u8 = 2;
@@ -240,7 +242,7 @@ impl Pattern {
     }
 
     fn stat(&self, back: usize) -> Option<&BeatStat> {
-        if back >= self.hist_n.min(HIST) {
+        if back >= self.hist_n.fmin(HIST) {
             return None;
         }
         Some(&self.hist[(self.hist_n - 1 - back) % HIST])
@@ -280,10 +282,10 @@ impl Pattern {
         if let Some((kt, power)) = i.kick {
             o.kick_hit = i.dynamics > 0.12;
             o.kick_strength = power;
-            self.kick_env = self.kick_env.max(power.min(1.0) * i.dynamics);
+            self.kick_env = self.kick_env.fmax(power.fmin(1.0) * i.dynamics);
             let gap = kt - self.last_kick;
             let ph = if i.locked { i.psi_kick.map(|p| p.abs()).unwrap_or(0.5) } else { 0.0 };
-            let grid = ON_GRID.max(ON_GRID_MIN / beat);
+            let grid = ON_GRID.fmax(ON_GRID_MIN / beat);
             let on_grid = !i.locked || ph <= grid;
             let tight = gap < beat * ROLL_GAP;
             if on_grid && !(tight && ph > grid * 0.5) {
@@ -298,18 +300,18 @@ impl Pattern {
                 // the pattern.
                 let g = ((kt - self.last_main) / beat) as f32;
                 if g > 0.4 && g < 8.5 {
-                    self.gap_avg += (g.min(4.5) - self.gap_avg) * 0.1;
+                    self.gap_avg += (g.fmin(4.5) - self.gap_avg) * 0.1;
                 }
                 self.last_main = kt;
             } else if tight {
-                let per_beat = (beat / gap.max(1e-3)) as f32;
+                let per_beat = (beat / gap.fmax(1e-3)) as f32;
                 self.roll_div = nearest_div(per_beat);
                 self.roll_notes += 1.0;
                 self.roll_until = kt + beat * ROLL_HOLD;
                 o.roll_kick = o.kick_hit;
             } else {
                 o.roll_kick = o.kick_hit;
-                self.roll_until = self.roll_until.max(kt + beat * 0.4);
+                self.roll_until = self.roll_until.fmax(kt + beat * 0.4);
             }
             self.last_kick = kt;
             self.cur.kicks += 1.0;
@@ -321,31 +323,31 @@ impl Pattern {
         if i.buzz > 0.0 {
             let div = nearest_div(i.buzz * beat as f32);
             self.roll_div = if div > 0.0 { div } else { DIVS[DIVS.len() - 1] };
-            self.roll_notes = self.roll_notes.max(3.0);
-            self.roll_until = self.roll_until.max(self.clock + beat * ROLL_HOLD);
+            self.roll_notes = self.roll_notes.fmax(3.0);
+            self.roll_until = self.roll_until.fmax(self.clock + beat * ROLL_HOLD);
         }
         o.main_power = self.main_power;
-        self.kick_env *= (1.0 - dt as f32 / 0.16).max(0.0);
+        self.kick_env *= (1.0 - dt as f32 / 0.16).fmax(0.0);
         o.kick_env = self.kick_env;
         if self.clock > self.roll_until {
             self.roll_notes = 0.0;
             self.roll_div = 0.0;
         }
-        let roll_left = ((self.roll_until - self.clock).max(0.0) / (beat * ROLL_HOLD)) as f32;
-        o.roll = (roll_left * (self.roll_notes / 3.0 + 0.34).min(1.0)).min(1.0);
+        let roll_left = ((self.roll_until - self.clock).fmax(0.0) / (beat * ROLL_HOLD)) as f32;
+        o.roll = (roll_left * (self.roll_notes / 3.0 + 0.34).fmin(1.0)).fmin(1.0);
         o.roll_div = self.roll_div;
         o.roll_notes = self.roll_notes;
         self.cur.onsets += i.snares as f32 + if i.hat { 0.5 } else { 0.0 };
 
         // --- per-beat bookkeeping --------------------------------------------------
         self.cur.level += i.dynamics;
-        self.cur.bright += i.rolloff_n.max(i.centroid_n);
+        self.cur.bright += i.rolloff_n.fmax(i.centroid_n);
         self.cur.low += i.low_share;
         self.cur_frames += 1.0;
         let new_beat = i.beat && i.beat_index != self.last_beat_index;
         if new_beat {
             self.last_beat_index = i.beat_index;
-            let n = self.cur_frames.max(1.0);
+            let n = self.cur_frames.fmax(1.0);
             let st = BeatStat {
                 onsets: self.cur.onsets,
                 kicks: self.cur.kicks,
@@ -360,7 +362,7 @@ impl Pattern {
         }
 
         // --- the arrangement -------------------------------------------------------
-        let now = (i.level * (0.55 + 0.45 * i.percussivity)) * i.dynamics.max(0.0);
+        let now = (i.level * (0.55 + 0.45 * i.percussivity)) * i.dynamics.fmax(0.0);
         self.energy += (now - self.energy) * (1.0 - (-dt / 0.35).exp()) as f32;
         let up = self.energy > self.energy_ref;
         self.energy_ref += (self.energy - self.energy_ref) * (1.0 - (-dt / if up { 3.0 } else { 25.0 }).exp()) as f32;
@@ -389,7 +391,7 @@ impl Pattern {
             self.quiet_since = -1.0;
         }
         let gap = self.quiet_since >= 0.0
-            && self.clock - self.quiet_since >= (0.6 * beat).max(0.15)
+            && self.clock - self.quiet_since >= (0.6 * beat).fmax(0.15)
             && self.has_kicks > 0.3;
 
         // BUILD evidence, from the beat history: onsets accelerating, the
@@ -409,7 +411,7 @@ impl Pattern {
             // A dense roll is itself a build even once it has stopped
             // accelerating: two or more hits a beat, the groove out.
             let dense = ((d_new - 1.6) / 2.0).clamp(0.0, 1.0);
-            rising = (acc * 0.5 + bright * 0.45 + louder * 0.35 + dense * 0.45).min(1.0);
+            rising = (acc * 0.5 + bright * 0.45 + louder * 0.35 + dense * 0.45).fmin(1.0);
         }
         // The groove being IN cancels a build: a full drop with a busy hat
         // pattern is not a riser.
@@ -439,7 +441,7 @@ impl Pattern {
                 next = SEC_FULL;
             } else if self.build_raw > 0.42 {
                 next = SEC_BUILD;
-            } else if kick_out > 4.0 * spacing.max(1.0).sqrt().max(1.0) + (spacing - 1.0) {
+            } else if kick_out > 4.0 * spacing.fmax(1.0).sqrt().fmax(1.0) + (spacing - 1.0) {
                 next = if self.build_raw > 0.3 && prev == SEC_BUILD { SEC_BUILD } else { SEC_BREAKDOWN };
             }
         } else {
@@ -478,7 +480,7 @@ impl Pattern {
         // ...then a main kick, with the level there to back it (the analyser
         // has already heard the next few frames).
         if o.main_kick {
-            if self.lull >= (beat * 3.5).max(1.2) && i.dyn_ahead > 0.6 && self.clock - self.drop_at > beat * 8.0 && self.heard > 6.0 {
+            if self.lull >= (beat * 3.5).fmax(1.2) && i.dyn_ahead > 0.6 && self.clock - self.drop_at > beat * 8.0 && self.heard > 6.0 {
                 o.drop = true;
                 self.drop_at = self.clock;
                 anchor = true;
@@ -495,16 +497,16 @@ impl Pattern {
         }
         let bd_target = if self.section == SEC_BREAKDOWN { 1.0 } else { 0.0 };
         self.breakdown += (bd_target - self.breakdown) * (1.0 - (-dt / 0.6).exp()) as f32;
-        let bl_target = if self.section == SEC_BUILD { self.build_raw.max(0.45).min(1.0) } else { 0.0 };
+        let bl_target = if self.section == SEC_BUILD { self.build_raw.fmax(0.45).fmin(1.0) } else { 0.0 };
         self.build += (bl_target - self.build) * (1.0 - (-dt / (beat * 0.8)).exp()) as f32;
         o.breakdown = self.breakdown;
         o.build = self.build;
         o.pause = self.section == SEC_PAUSE;
         o.section = self.section;
         o.since_drop = (self.clock - self.drop_at) as f32;
-        o.dropped = (1.0 - (self.clock - self.drop_at) / DROP_HOLD).max(0.0) as f32;
+        o.dropped = (1.0 - (self.clock - self.drop_at) / DROP_HOLD).fmax(0.0) as f32;
         o.drop_in = if self.section == SEC_BUILD {
-            let bpb = i.beats_per_bar.max(2) as f64;
+            let bpb = i.beats_per_bar.fmax(2) as f64;
             let ph = 4.0 * bpb;
             (ph - i.beat_index.rem_euclid(ph)) as f32
         } else {

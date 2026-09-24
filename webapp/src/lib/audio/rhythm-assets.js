@@ -31,3 +31,23 @@ export function rhythmWasmUrl() {
 }
 
 export { workletUrl };
+
+// The binary, fetched and compiled ONCE per page: the analyser's AudioWorklet
+// is handed the compiled module (with the bytes as the fallback for a browser
+// that cannot pass a module to a worklet), and the animations instantiate the
+// same module on the page for their own arithmetic (lib/viz/core.js). Two
+// consumers, one download, one compile.
+let binary = null;
+export function rhythmBinary() {
+  if (!binary) {
+    binary = fetch(rhythmWasmUrl())
+      .then((res) => {
+        if (!res.ok) throw new Error(`rhythm.wasm: HTTP ${res.status}`);
+        return res.arrayBuffer();
+      })
+      .then(async (bytes) => ({ bytes, module: await WebAssembly.compile(bytes) }));
+    // Offline and not cached yet: the next caller tries again.
+    binary.catch(() => (binary = null));
+  }
+  return binary;
+}

@@ -411,11 +411,8 @@ let assets = null;
 function loadAssets() {
   if (!assets)
     assets = import("./rhythm-assets.js")
-      .then(async ({ rhythmWasmUrl, workletUrl }) => {
-        const res = await fetch(rhythmWasmUrl());
-        if (!res.ok) throw new Error(`rhythm.wasm: HTTP ${res.status}`);
-        const bytes = await res.arrayBuffer();
-        const module = await WebAssembly.compile(bytes);
+      .then(async ({ rhythmBinary, workletUrl }) => {
+        const { bytes, module } = await rhythmBinary();
         return { bytes, module, workletUrl };
       })
       .catch((err) => {
