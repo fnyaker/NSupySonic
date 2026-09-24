@@ -138,19 +138,38 @@ try {
     const from = 5;
     const win = (xs) => xs.filter((t) => t >= from && t <= until);
     const shift = (xs) => (rec.playCtx == null ? xs : xs.map((t) => t - rec.playCtx));
-    const kicks = align(win(shift(rec.kicks)), win(truth.kicks), 0.035);
+    // A kick closer than the detector's refractory (42 ms) to the one before
+    // it cannot be a kick of its own: frenchcore's builds end on a bar of
+    // thirty-second notes, 37.5 ms apart at 200 BPM — a 27 Hz buzz, not a
+    // pulse — and a detector that split them would split every kick's own
+    // body in two. Measured on that record (Node eval, the same analyser):
+    // 59 of the 60 kicks it misses are those notes, and it finds 99% of the
+    // rest. So the kick score is held to the kicks that can be told apart,
+    // and the buzz to the layer that DOES resolve it: the roll reading must
+    // be up for it.
+    const truthK = win(truth.kicks);
+    const apart = truthK.filter((t, i) => i === 0 || t - truthK[i - 1] >= 0.042);
+    const buzz = truthK.filter((t, i) => i > 0 && t - truthK[i - 1] < 0.042);
+    const estK = win(shift(rec.kicks));
+    const kicks = align(estK, apart, 0.035);
+    const kicksAll = align(estK, truthK, 0.035);
+    const rolls = shift(rec.rolls);
+    const heard = buzz.filter((t) => rolls.some((r) => Math.abs(r - kicks.off - t) < 0.06)).length;
+    const rollCover = buzz.length ? heard / buzz.length : 1;
     const beats = align(win(shift(rec.beats)), win(truth.beats), 0.07);
     const bpm = rec.bpm.length ? rec.bpm[rec.bpm.length - 1] : 0;
     const late = rec.late.slice().sort((a, b) => a - b);
-    const ok = rec.frames > seconds * 80 && kicks.r > 0.8 && beats.r > 0.8 && Math.abs(bpm - truth.bpm) < 1.5;
+    const ok =
+      rec.frames > seconds * 80 && kicks.r > 0.8 && beats.r > 0.8 && Math.abs(bpm - truth.bpm) < 1.5 && rollCover >= 0.8;
     if (!ok) failed++;
     const pct = (x) => `${Math.round(x * 100)}%`;
     const ms = (x) => (Number.isFinite(x) ? `${(x * 1000).toFixed(1)} ms` : "-");
     console.log(
       `${ok ? "ok  " : "FAIL"} ${id.padEnd(16)} frames ${rec.frames} (${(rec.frames / seconds).toFixed(1)}/s, gap p50 ${ms(rec.gapP50)} p99 ${ms(rec.gapP99)})` +
-        `  bpm ${bpm.toFixed(1)}/${truth.bpm}  kicks P ${pct(kicks.p)} R ${pct(kicks.r)} ±${ms(kicks.res50)} p95 ${ms(kicks.res95)}` +
+        `  bpm ${bpm.toFixed(1)}/${truth.bpm}  kicks P ${pct(kicksAll.p)} R ${pct(kicks.r)} ±${ms(kicks.res50)} p95 ${ms(kicks.res95)}` +
+        (buzz.length ? ` (every note ${pct(kicksAll.r)}; roll read on ${pct(rollCover)} of ${buzz.length} buzz notes)` : "") +
         `  beats P ${pct(beats.p)} R ${pct(beats.r)} ±${ms(beats.res50)}  late p50 ${ms(late[late.length >> 1])} p95 ${ms(late[Math.floor(late.length * 0.95)])}` +
-        `  readout ${rec.readout?.bpm} ${rec.readout?.style || ""}${rec.readout?.served ? " (served)" : ""}`
+        `  readout ${rec.readout?.bpm} ${rec.readout?.style || ""}${rec.readout?.served ? ` (${rec.readout.served})` : ""}`
     );
     for (const l of logs.slice(0, 5)) console.log("     ", l);
   }

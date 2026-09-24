@@ -698,6 +698,37 @@ test("on arranged hard-dance records, the beats, the tempo and the drops are rig
   }
 });
 
+test("with nothing served, the drums' own pulse settles the octave an offbeat bass would double", () => {
+  // Techno's rolling bass on every offbeat: kick and rumble alternate, every
+  // onset lands on an eighth-note grid, and the onset function scores 264 BPM
+  // over 132 (grid quality 0.73 to 0.28). Measured cold, before the kicks'
+  // spacing was a witness: right 67% of the time, a third of it at 264. Now:
+  // 100%, and nothing else in the 26-record eval moved. The guard is the
+  // other half of the rule: a kick-snare-kick-snare groove is a beat per hit,
+  // so boom bap stays at 90 (not 45), and house's offbeat hats change nothing.
+  for (const id of ["techno-132", "boombap-90", "house-124"]) {
+    const { pcm, truth } = loadSong(SONG_BY_ID.get(id));
+    const rec = { beats: [], downbeats: [], kicks: [], mains: [], drops: [], bpm: [], breakdown: [], build: [], dt: 0 };
+    const r = analyser({});
+    rec.dt = r.hop / SR;
+    drive(
+      r,
+      pcm,
+      (t, get) => {
+        if (get("beat")) rec.beats.push(t);
+        if (get("locked")) rec.bpm.push([t, get("bpm")]);
+        rec.breakdown.push(get("breakdown"));
+        rec.build.push(get("build"));
+      },
+      { quantum: 4096 }
+    );
+    const s = score(rec, truth);
+    assert.ok(s.tempo > 0.97, `${id}: tempo right ${(s.tempo * 100) | 0}% of the time`);
+    assert.equal(s.oct, 0, `${id}: ${(s.oct * 100) | 0}% at the wrong octave`);
+    assert.ok(s.F70 > 0.94, `${id}: beats F70 ${s.F70.toFixed(2)}`);
+  }
+});
+
 // --- the cost ---------------------------------------------------------------------------------------
 
 test("the analyser keeps up with real time with room to spare", () => {

@@ -38,7 +38,7 @@ window.bench = {
     audio.src = URL.createObjectURL(wavBlob(pcm, sr));
     player.playQueue([{ id: "bench", deezer_id: id, title: "bench" }], 0);
     registerSource(audio);
-    const rec = { frames: 0, kicks: [], beats: [], downbeats: [], mains: [], drops: [], bpm: [], late: [], errors: [] };
+    const rec = { frames: 0, kicks: [], beats: [], downbeats: [], mains: [], drops: [], rolls: [], bpm: [], late: [], errors: [] };
     let playCtx = null;
     let lastT = 0;
     const gaps = [];
@@ -52,6 +52,7 @@ window.bench = {
       if (f.beat?.downbeat) rec.downbeats.push(f.ctxT + (f.lateBy || 0));
       if (f.pattern?.mainKick) rec.mains.push(f.ctxT);
       if (f.pattern?.drop) rec.drops.push(f.ctxT);
+      if (f.pattern?.roll > 0.5) rec.rolls.push(f.ctxT);
       if (f.beat?.locked) rec.bpm.push(f.beat.bpm);
     }, level);
     audio.addEventListener("playing", () => {

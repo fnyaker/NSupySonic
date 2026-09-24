@@ -106,6 +106,9 @@ pub struct FrameIn<'a> {
     /// The highest dynamics reading in the next few frames (the analyser
     /// runs ahead of the output, so a drop's own level is already known).
     pub dyn_ahead: f32,
+    /// Notes per second of a kick roll too fast to be separate kicks (see
+    /// kick.rs, BUZZ), or 0.
+    pub buzz: f32,
     pub _p: core::marker::PhantomData<&'a ()>,
 }
 
@@ -311,6 +314,15 @@ impl Pattern {
             self.last_kick = kt;
             self.cur.kicks += 1.0;
             self.cur.onsets += 1.0;
+        }
+        // A buzz has no kicks in it to count — the notes run together — so it
+        // is read here as what it is: the densest roll there is, for as long
+        // as it sounds.
+        if i.buzz > 0.0 {
+            let div = nearest_div(i.buzz * beat as f32);
+            self.roll_div = if div > 0.0 { div } else { DIVS[DIVS.len() - 1] };
+            self.roll_notes = self.roll_notes.max(3.0);
+            self.roll_until = self.roll_until.max(self.clock + beat * ROLL_HOLD);
         }
         o.main_power = self.main_power;
         self.kick_env *= (1.0 - dt as f32 / 0.16).max(0.0);

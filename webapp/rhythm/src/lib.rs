@@ -464,6 +464,7 @@ impl Analyzer {
         let mut kick_now = 0f32;
         for h in self.kick.kicks.iter() {
             self.hits.push(Hit { t: h.t, strength: h.strength, snare: false, detail: [h.f0, h.f1, h.path, h.click, h.rel, h.score] });
+            self.tempo.note_hit(h.t);
             kick_now = kick_now.max(h.strength.min(1.0));
             if self.level >= LEVEL_RHYTHM {
                 self.grid.add_event(h.t, h.strength.clamp(0.3, 1.0), KIND_KICK);
@@ -471,6 +472,7 @@ impl Analyzer {
         }
         for h in self.kick.snares.iter() {
             self.hits.push(Hit { t: h.t, strength: h.strength, snare: true, detail: [0.0; 6] });
+            self.tempo.note_hit(h.t);
             if self.level >= LEVEL_RHYTHM {
                 self.grid.add_event(h.t, h.strength, KIND_SNARE);
             }
@@ -478,7 +480,7 @@ impl Analyzer {
         let mut c_flux = 0.0;
         let mut onset_now = 0f32;
         if self.level >= LEVEL_RHYTHM {
-            let tempo = self.tempo.process(f.flux, f.low_flux, f.mid_odf, kick_now, dt);
+            let tempo = self.tempo.process(t, f.flux, f.low_flux, f.mid_odf, kick_now, dt);
             let (odf_full, odf_low) = (tempo.odf_full, tempo.odf_low);
             c_flux = odf_full;
             // The raw onset stream (tempo.js's peak picker), which is both
@@ -593,6 +595,7 @@ impl Analyzer {
                 beat: b.beat,
                 beat_index: b.beat_index,
                 beats_per_bar: b.beats_per_bar,
+                buzz: self.kick.buzz(t),
                 level: f.level,
                 level_db: f.level_db,
                 loud_ref_db: f.loud_ref_db,

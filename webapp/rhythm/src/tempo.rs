@@ -25,6 +25,24 @@
 //! to a SLOWER level (a half-time dubstep groove is not 70 BPM because it
 //! feels like it), and it no longer forbids moving to a FASTER one when the
 //! kicks land on every beat of that faster grid.
+//!
+//! THE DRUMS HAVE THE LAST WORD ON THE OCTAVE WHEN THEY ARE STEADY. The onset
+//! function cannot tell a rolling techno bass on every offbeat from a beat:
+//! the kick and the rumble alternate, everything lands on an eighth-note
+//! grid, and both the fold and the level score prefer it — measured on the
+//! techno record, 264 BPM beat 132 on grid quality 0.73 to 0.28, and the
+//! tracker locked there for a minute. What says 132 is the KICKS: the
+//! detector finds every one of them and never one on an offbeat. So the
+//! kicks and snares the detector confirms are kept, merged when they land
+//! together (a clap on a kick is one hit), and when they form a steady pulse
+//! at a plausible tempo that pulse is a witness no onset function can be:
+//! a grid twice as fast as it is voted down, and a move faster than it is
+//! refused. Snares count because the backbeat is part of the pulse — a hip
+//! hop groove of kick, snare, kick, snare is a beat per hit, not one per
+//! kick — and nothing else does, because an offbeat bass or hat is exactly
+//! what must not. "Plausible" is the prior's plateau (or the genre's range),
+//! which is what keeps a half-time groove — kick on one, snare on three —
+//! from dragging a 140 BPM track to 70.
 
 pub const MIN_BPM: f32 = 55.0;
 pub const MAX_BPM: f32 = 300.0;
@@ -58,6 +76,18 @@ const SEED_SIGMA: f32 = 0.18;
 const SEED_FLOOR_W: f32 = 0.1;
 const PEAK_SLOTS: f32 = 4.0;
 const SHORTLIST: usize = 5;
+/// The drums' pulse (see the module header): how much of the past it reads,
+/// how many intervals it needs, how close an interval must be to count, and
+/// how many hits it keeps.
+const PULSE_WINDOW: f64 = 8.0;
+const PULSE_MIN: usize = 6;
+const PULSE_TOL: f64 = 0.07;
+const PULSE_KEEP: usize = 64;
+/// Two confirmed hits closer than this are one: a clap on a kick.
+const PULSE_MERGE: f64 = 0.03;
+/// What a steady pulse adds to the vote for its own level — the vote's full
+/// scale, so on its own it settles the octave within a few estimates.
+const PULSE_VOTE: f32 = 1.0;
 
 #[inline]
 fn bump(ratio: f32) -> f32 {
@@ -71,6 +101,20 @@ fn bump(ratio: f32) -> f32 {
         (-0.5 * d * d).exp()
     }
 }
+/// Insertion sort, for the pulse's few dozen hits: the standard library's
+/// sort is several kilobytes of WebAssembly for a job this small.
+fn sort_small(v: &mut [f64]) {
+    for i in 1..v.len() {
+        let x = v[i];
+        let mut j = i;
+        while j > 0 && v[j - 1] > x {
+            v[j] = v[j - 1];
+            j -= 1;
+        }
+        v[j] = x;
+    }
+}
+
 #[inline]
 fn ramp_up(x: f32, t: f32, w: f32) -> f32 {
     ((x - t) / w).clamp(0.0, 1.0)
@@ -124,6 +168,9 @@ pub struct Tempo {
     confidence: f32,
     locked: bool,
     kick_pulse: f32,
+    hits: [f64; PULSE_KEEP],
+    hits_n: usize,
+    now_t: f64,
     est_count: u32,
     oct_vote: f32,
     last_oct_at: f32,
@@ -200,6 +247,9 @@ impl Tempo {
             confidence: 0.0,
             locked: false,
             kick_pulse: 0.0,
+            hits: [0.0; PULSE_KEEP],
+            hits_n: 0,
+            now_t: 0.0,
             est_count: 0,
             oct_vote: 0.0,
             last_oct_at: -1e9,
@@ -266,6 +316,7 @@ impl Tempo {
         self.confidence = 0.0;
         self.locked = false;
         self.kick_pulse = 0.0;
+        self.hits_n = 0;
         self.est_count = 0;
         self.oct_vote = 0.0;
         self.last_oct_at = -1e9;
@@ -415,6 +466,93 @@ impl Tempo {
         }
     }
 
+    /// A kick or snare the detector confirmed, at `t` (the analyser's clock).
+    pub fn note_hit(&mut self, t: f64) {
+        self.hits[self.hits_n % PULSE_KEEP] = t;
+        self.hits_n += 1;
+    }
+
+    /// The drums' pulse as a lag in frames, when the confirmed hits of the last
+    /// few seconds are steady and their tempo is a plausible beat. Anything
+    /// denser than the pulse more than now and then (a roll, a fill, a
+    /// syncopated kick) means there is no single pulse to read, and it says
+    /// nothing.
+    fn pulse_lag(&self) -> Option<f32> {
+        let mut ev = [0f64; PULSE_KEEP];
+        let mut n = 0;
+        for &t in self.hits.iter().take(self.hits_n.min(PULSE_KEEP)) {
+            if t >= self.now_t - PULSE_WINDOW && t <= self.now_t + 0.05 {
+                ev[n] = t;
+                n += 1;
+            }
+        }
+        if n <= PULSE_MIN {
+            return None;
+        }
+        let ev = &mut ev[..n];
+        sort_small(ev);
+        let mut m = 0;
+        for i in 0..n {
+            if m == 0 || ev[i] - ev[m - 1] >= PULSE_MERGE {
+                ev[m] = ev[i];
+                m += 1;
+            }
+        }
+        if m <= PULSE_MIN {
+            return None;
+        }
+        let k = m - 1;
+        let mut ioi = [0f64; PULSE_KEEP];
+        for i in 0..k {
+            ioi[i] = ev[i + 1] - ev[i];
+        }
+        let mut sorted = ioi;
+        let sorted = &mut sorted[..k];
+        sort_small(sorted);
+        let med = sorted[k / 2];
+        if !(med > 0.0) {
+            return None;
+        }
+        // Each interval is a pulse, a pulse split by one hit between (a stray
+        // detection, a ghost note: ONE extra hit, not two short intervals), a
+        // pulse with a hit missing, or something else — a roll, a fill, a
+        // syncopation — which, if it happens more than now and then, means
+        // there is no single pulse here to read.
+        let (mut on, mut extra, mut multiple, mut other, mut sum) = (0usize, 0usize, 0usize, 0usize, 0f64);
+        let near = |x: f64, k: f64| (x / (med * k) - 1.0).abs() < PULSE_TOL;
+        let mut i = 0;
+        while i < k {
+            let x = ioi[i];
+            if near(x, 1.0) {
+                on += 1;
+                sum += x;
+                i += 1;
+            } else if x < med && i + 1 < k && near(x + ioi[i + 1], 1.0) {
+                on += 1;
+                extra += 1;
+                sum += x + ioi[i + 1];
+                i += 2;
+            } else if near(x, 2.0) || near(x, 3.0) {
+                // A hit that did not come (or was not heard): the pulse holds.
+                multiple += 1;
+                i += 1;
+            } else {
+                other += 1;
+                i += 1;
+            }
+        }
+        let units = on + multiple + other;
+        if on < PULSE_MIN || extra * 5 > on || other * 10 > units {
+            return None;
+        }
+        let period = sum / on as f64;
+        let bpm = 60.0 / period;
+        if bpm < self.prior_lo as f64 * 0.97 || bpm > self.prior_hi as f64 * 1.03 {
+            return None;
+        }
+        Some((period * self.fps as f64) as f32)
+    }
+
     fn octave_evidence(&mut self, lag_f: f32) -> f32 {
         let here = self.level_score(lag_f, false);
         let here_free = self.level_score(lag_f, true);
@@ -431,8 +569,18 @@ impl Tempo {
             0.0
         };
         let mut v = 0.0;
+        // The drums' pulse, against this level: twice as fast as it (the grid
+        // is counting the offbeats too) or the pulse itself (nothing faster).
+        let (pulse_slower, pulse_holds) = match self.pulse_lag() {
+            Some(pl) => {
+                let r = pl / lag_f;
+                ((r - 2.0).abs() < 0.14, (r - 1.0).abs() < 0.07)
+            }
+            None => (false, false),
+        };
         #[cfg(feature = "trace")]
         {
+            eprintln!("  pulse {:?} slower={} holds={}", self.pulse_lag().map(|l| 60.0 * self.fps / l), pulse_slower, pulse_holds);
             let dbl = if lag_f * 2.0 <= self.lag_max as f32 { self.fold_half_ratio(lag_f * 2.0, true) } else { -9.0 };
             let half = if lag_f / 2.0 >= self.lag_min as f32 { self.fold_half_ratio(lag_f, false) } else { -9.0 };
             eprintln!("  oct lag={:.1} here={:.3} rSlow={:.2} rFast={:.2} dbl={:.2} half={:.2} lagmax={} lagmin={}", lag_f, here, r_slow, r_fast, dbl, half, self.lag_max, self.lag_min);
@@ -443,8 +591,11 @@ impl Tempo {
                 v += ramp_down(dbl, 0.45, 0.22) * (1.0 - ramp_down(r_slow, LEVEL_VETO, 0.25));
             }
             v += ramp_up(r_slow, LEVEL_EDGE, LEVEL_SPAN);
+            if pulse_slower {
+                v += PULSE_VOTE;
+            }
         }
-        if lag_f / 2.0 >= self.lag_min as f32 {
+        if lag_f / 2.0 >= self.lag_min as f32 && !pulse_slower && !pulse_holds {
             let half = self.fold_half_ratio(lag_f, false);
             if half >= 0.0 {
                 v -= ramp_up(half, 0.72, 0.22) * (1.0 - ramp_down(r_fast, LEVEL_VETO, 0.25));
@@ -782,9 +933,10 @@ impl Tempo {
 
     /// Feed one frame: the raw SuperFlux, the low-band evidence, and the
     /// strength of a kick CONFIRMED on this frame (0 when none).
-    pub fn process(&mut self, flux: f32, low_flux: f32, mid_flux: f32, kick: f32, dt: f32) -> &TempoOut {
+    pub fn process(&mut self, t: f64, flux: f32, low_flux: f32, mid_flux: f32, kick: f32, dt: f32) -> &TempoOut {
         let dt = dt.clamp(1e-4, 0.25);
         self.clock += dt;
+        self.now_t = t;
         let mean_tau = MEAN_TAU.max(MEAN_BEATS * self.period);
         let a_mean = 1.0 - (-dt / mean_tau).exp();
         let a_scale = 1.0 - (-dt / SCALE_TAU).exp();

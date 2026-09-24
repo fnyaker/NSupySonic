@@ -62,6 +62,30 @@ const KICK_REFRACTORY: f64 = 0.042;
 const JUMP: f32 = 2.5;
 /// ...and how long a jump waits for the sweep that may explain it, seconds.
 const JUMP_WAIT: f64 = 0.03;
+/// A BUZZ: a kick roll too fast to be separate kicks. Frenchcore's builds end
+/// on a bar of thirty-second notes, 37.5 ms apart at 200 BPM, which never
+/// release the trigger — so none of its notes is a kick of its own (and a
+/// detector that split them would split every kick's own body in two). It is
+/// still plainly there: every note restarts the pitch high. Measured on that
+/// bar, one ~20 ms cycle at 49 Hz and then a jump to 114-117 Hz every
+/// 37.4-37.6 ms, where the sixteenth-note bar before it (75 ms apart, every
+/// note found as a kick) jumps once per note too. So a TRAIN of restarts this
+/// close together and this regular is published as its rate, and the pattern
+/// layer reads it as the densest roll there is.
+const BUZZ_MIN_GAP: f64 = 0.015;
+const BUZZ_MAX_GAP: f64 = 0.05;
+/// Restarts in the train (so one fewer interval), and how uneven it may be.
+const BUZZ_RESTARTS: usize = 5;
+const BUZZ_EVEN: f64 = 1.4;
+/// Once identified, a buzz HOLDS while the bottom stays full (at least this
+/// share of its level when it was identified) and no kick has come: as the
+/// roll's notes get louder, the distortion folds each note's high restart
+/// into its first cycle — measured, from the middle of that bar on, every
+/// note is one 49 Hz and one 58 Hz cycle and there is no restart left to
+/// see. Nothing else is taken as a buzz from that alone: a distorted sub
+/// bass looks the same, which is why the train has to be seen first.
+const BUZZ_HOLD_LEVEL: f32 = 0.4;
+const BUZZ_HOLD_MAX: f64 = 2.5;
 
 #[derive(Clone, Copy, Default)]
 struct Cycle {
@@ -130,6 +154,12 @@ pub struct KickDetector {
     pub kicks: Vec<Hit>,
     pub snares: Vec<Hit>,
     pub last_f0: f32,
+    restarts: [f64; 8],
+    restart_n: usize,
+    buzz_rate: f32,
+    buzz_until: f64,
+    buzz_start: f64,
+    buzz_level: f32,
 }
 
 impl KickDetector {
@@ -169,6 +199,12 @@ impl KickDetector {
             kicks: Vec::with_capacity(8),
             snares: Vec::with_capacity(4),
             last_f0: 0.0,
+            restarts: [0.0; 8],
+            restart_n: 0,
+            buzz_rate: 0.0,
+            buzz_until: -1.0,
+            buzz_start: -1.0,
+            buzz_level: 0.0,
         }
     }
 
@@ -231,6 +267,15 @@ impl KickDetector {
             if self.last_cross >= 0.0 {
                 let f = (self.sr / (tau - self.last_cross)) as f32;
                 if (22.0..=420.0).contains(&f) {
+                    let prev_f = if self.cyc_len > 0 { self.cycle(0).f } else { 0.0 };
+                    if prev_f > 0.0
+                        && f >= prev_f * RESTART
+                        && (SWEEP_START_MIN_HZ..=SWEEP_START_MAX_HZ).contains(&f)
+                        && self.kick_ref > 0.0
+                        && self.cyc_peak >= self.kick_ref * 0.2
+                    {
+                        self.restart_at(tau / self.sr);
+                    }
                     self.cycles[self.cyc_head] = Cycle { tau, f, a: self.cyc_peak };
                     self.cyc_head = (self.cyc_head + 1) % CYC;
                     if self.cyc_len < CYC {
@@ -247,6 +292,72 @@ impl KickDetector {
 
     fn now(&self) -> f64 {
         self.n as f64 / self.sr
+    }
+
+    /// The pitch restarted high at `t`: one more note, if a buzz is running.
+    fn restart_at(&mut self, t: f64) {
+        self.restarts[self.restart_n % 8] = t;
+        self.restart_n += 1;
+        if self.restart_n < BUZZ_RESTARTS {
+            return;
+        }
+        let at = |back: usize| self.restarts[(self.restart_n - 1 - back) % 8];
+        let (mut lo, mut hi) = (f64::INFINITY, 0f64);
+        for i in 0..BUZZ_RESTARTS - 1 {
+            let g = at(i) - at(i + 1);
+            lo = lo.min(g);
+            hi = hi.max(g);
+        }
+        if lo >= BUZZ_MIN_GAP && hi <= BUZZ_MAX_GAP && hi <= lo * BUZZ_EVEN {
+            let level = self.recent_low();
+            if self.buzz_rate <= 0.0 {
+                self.buzz_start = t;
+                self.buzz_level = 0.0;
+            }
+            self.buzz_rate = ((BUZZ_RESTARTS - 1) as f64 / (at(0) - at(BUZZ_RESTARTS - 1))) as f32;
+            self.buzz_until = t + hi * 1.6;
+            self.buzz_level = self.buzz_level.max(level);
+        }
+    }
+
+    /// The bottom octave's loudest millisecond over the last 40: a roll's
+    /// notes are a few tens of milliseconds apart, and between two of them
+    /// the envelope dips.
+    fn recent_low(&self) -> f32 {
+        let mut m = 0f32;
+        for k in 0..40 {
+            m = m.max(self.env_at(&self.low_hist, k));
+        }
+        m
+    }
+
+    /// Every millisecond: an identified buzz holds while the bottom stays
+    /// full and no kick has come; otherwise it is over.
+    fn hold_buzz(&mut self) {
+        if self.buzz_rate <= 0.0 {
+            return;
+        }
+        let now = self.now();
+        if now <= self.buzz_until {
+            return;
+        }
+        let held = now - self.buzz_start < BUZZ_HOLD_MAX
+            && self.last_kick < self.buzz_start
+            && self.recent_low() >= self.buzz_level * BUZZ_HOLD_LEVEL;
+        if held {
+            self.buzz_until = now;
+        } else {
+            self.buzz_rate = 0.0;
+        }
+    }
+
+    /// Notes per second of the buzz sounding at `t`, or 0.
+    pub fn buzz(&self, t: f64) -> f32 {
+        if t <= self.buzz_until {
+            self.buzz_rate
+        } else {
+            0.0
+        }
     }
 
     /// The crack above 2.5 kHz around `onset`, in dB over what was there
@@ -366,6 +477,7 @@ impl KickDetector {
 
     /// Every millisecond: the jump path, and any jump whose wait is over.
     fn ms_tick(&mut self) {
+        self.hold_buzz();
         let now = self.now();
         if let Some(jp) = self.jump {
             if now >= jp.decide_at {
