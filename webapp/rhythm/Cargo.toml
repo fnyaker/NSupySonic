@@ -1,0 +1,30 @@
+[package]
+name = "rhythm"
+version = "0.1.0"
+edition = "2021"
+description = "NSupySonic's real-time rhythm analyser: spectrum, onsets, kick, tempo, beat grid, sections and style, for an AudioWorklet."
+license = "AGPL-3.0-only"
+publish = false
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+# No dependencies, on purpose: the Docker image builds this with nothing but
+# the toolchain, and every line that runs on the audio thread is in this tree.
+
+[features]
+# Diagnostic prints from the tempo estimator (native builds only).
+trace = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+[profile.dev]
+opt-level = 1

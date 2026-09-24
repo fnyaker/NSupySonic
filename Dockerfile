@@ -1,15 +1,36 @@
 # syntax=docker/dockerfile:1
 
 # ---------------------------------------------------------------------------
+# Rhythm builder: compile the real-time rhythm analyser (webapp/rhythm, Rust)
+# to WebAssembly — a baseline build and a SIMD128 one, the SPA picks whichever
+# the browser supports. The output is the same bytes whatever the image's
+# architecture, so this runs on the BUILD platform: no emulation for arm64.
+# The crate has no dependencies, so nothing is fetched but the toolchain.
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM rust:1-slim AS wasmbuilder
+
+RUN rustup target add wasm32-unknown-unknown
+WORKDIR /rhythm
+COPY webapp/rhythm/ ./
+RUN cargo build --release --target wasm32-unknown-unknown --target-dir /out/base \
+ && RUSTFLAGS="-C target-feature=+simd128" \
+    cargo build --release --target wasm32-unknown-unknown --target-dir /out/simd
+
+# ---------------------------------------------------------------------------
 # Web builder: compile the Svelte discovery SPA (vite -> supysonic/webui/dist)
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS webbuilder
+# JavaScript out, like the WebAssembly above: build it natively once.
+FROM --platform=$BUILDPLATFORM node:20-slim AS webbuilder
 
 WORKDIR /web/webapp
 # Install deps first for layer caching, then build (outDir is ../supysonic/...).
 COPY webapp/package*.json ./
 RUN npm install
 COPY webapp/ ./
+# The analyser as compiled from the source in THIS build, over the committed
+# copies (which exist so a checkout builds without Rust).
+COPY --from=wasmbuilder /out/base/wasm32-unknown-unknown/release/rhythm.wasm src/lib/audio/rhythm.wasm
+COPY --from=wasmbuilder /out/simd/wasm32-unknown-unknown/release/rhythm.wasm src/lib/audio/rhythm-simd.wasm
 RUN npm run build   # writes /web/supysonic/webui/dist
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,3 @@
+test/eval/.cache/
+rhythm/target/
+rhythm/target-simd/

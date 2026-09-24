@@ -148,11 +148,12 @@ const FAMILIES = [
     label: "Ambient",
     a: "sustain",
     // No pulse, nothing moving, nothing bright.
-    w: (s) =>
-      below(s.pulse, 0.35, 0.35) *
-      below(s.perc, 0.3, 0.3) *
-      below(s.flat, 0.45, 0.35) *
-      below(s.level, 0.72, 0.4),
+    rule: [
+      ["below", "pulse", 0.35, 0.35],
+      ["below", "perc", 0.3, 0.3],
+      ["below", "flat", 0.45, 0.35],
+      ["below", "level", 0.72, 0.4],
+    ],
   },
   {
     id: "strings",
@@ -160,148 +161,164 @@ const FAMILIES = [
     a: "sustain",
     // Very tonal, very sustained, real dynamic range (high crest — nothing has
     // been squashed by a limiter), and no machine pulse.
-    w: (s) =>
-      below(s.flat, 0.3, 0.25) *
-      below(s.perc, 0.35, 0.3) *
-      below(s.kickPulse, 0.35, 0.35) *
-      above(s.crest, 3.2, 4) *
-      inRange(s.centroid, 0.2, 0.55),
+    rule: [
+      ["below", "flat", 0.3, 0.25],
+      ["below", "perc", 0.35, 0.3],
+      ["below", "kickPulse", 0.35, 0.35],
+      ["above", "crest", 3.2, 4],
+      ["in", "centroid", 0.2, 0.55],
+    ],
   },
   {
     id: "jazz",
     label: "Jazz / acoustique",
     a: "voice",
-    w: (s) =>
-      inRange(s.bpm, 80, 165, 45) *
-      below(s.flat, 0.5, 0.3) *
-      below(s.kickPulse, 0.55, 0.3) *
-      above(s.crest, 2.6, 3) *
-      inRange(s.centroid, 0.25, 0.6),
+    rule: [
+      ["in", "bpm", 80, 165, 45],
+      ["below", "flat", 0.5, 0.3],
+      ["below", "kickPulse", 0.55, 0.3],
+      ["above", "crest", 2.6, 3],
+      ["in", "centroid", 0.25, 0.6],
+    ],
   },
   {
     id: "vocalPop",
     label: "Pop / chanson",
     a: "voice",
     // The syllabic-rate modulation is the whole tell here.
-    w: (s) =>
-      above(s.vocal, 0.28, 0.35) *
-      inRange(s.bpm, 84, 138, 32) *
-      below(s.flat, 0.55, 0.3) *
-      inRange(s.centroid, 0.25, 0.65),
+    rule: [
+      ["above", "vocal", 0.28, 0.35],
+      ["in", "bpm", 84, 138, 32],
+      ["below", "flat", 0.55, 0.3],
+      ["in", "centroid", 0.25, 0.65],
+    ],
   },
   {
     id: "rnb",
     label: "R&B / soul",
     a: "voice",
-    w: (s) =>
-      above(s.vocal, 0.3, 0.35) *
-      inRange(s.bpm, 60, 100, 25) *
-      above(s.subRatio, 0.16, 0.2) *
-      below(s.flat, 0.5, 0.3),
+    rule: [
+      ["above", "vocal", 0.3, 0.35],
+      ["in", "bpm", 60, 100, 25],
+      ["above", "subRatio", 0.16, 0.2],
+      ["below", "flat", 0.5, 0.3],
+    ],
   },
   {
     id: "hiphop",
     label: "Hip-hop",
     a: "groove",
-    w: (s) =>
-      inRange(s.bpm, 70, 105, 22) *
-      above(s.subRatio, 0.2, 0.2) *
-      above(s.vocal, 0.2, 0.4) *
-      below(s.kickPulse, 0.8, 0.4),
+    rule: [
+      ["in", "bpm", 70, 105, 22],
+      ["above", "subRatio", 0.2, 0.2],
+      ["above", "vocal", 0.2, 0.4],
+      ["below", "kickPulse", 0.8, 0.4],
+    ],
   },
   {
     id: "house",
     label: "House",
     a: "groove",
-    w: (s) =>
-      inRange(s.bpm, 116, 128, 12) *
-      above(s.kickPulse, 0.45, 0.35) *
-      s.kSoft *
-      below(s.flat, 0.55, 0.3),
+    rule: [
+      ["in", "bpm", 116, 128, 12],
+      ["above", "kickPulse", 0.45, 0.35],
+      ["raw", "kSoft"],
+      ["below", "flat", 0.55, 0.3],
+    ],
   },
   {
     id: "techno",
     label: "Techno",
     a: "groove",
-    w: (s) =>
-      inRange(s.bpm, 125, 150, 16) *
-      above(s.kickPulse, 0.5, 0.3) *
-      below(s.vocal, 0.45, 0.4) *
-      Math.max(s.kSoft, s.kHard * 0.8),
+    rule: [
+      ["in", "bpm", 125, 150, 16],
+      ["above", "kickPulse", 0.5, 0.3],
+      ["below", "vocal", 0.45, 0.4],
+      ["max", "kSoft", 1, "kHard", 0.8],
+    ],
   },
   {
     id: "trance",
     label: "Trance",
     a: "groove",
-    w: (s) =>
-      inRange(s.bpm, 132, 145, 12) *
-      above(s.kickPulse, 0.45, 0.35) *
-      below(s.flat, 0.5, 0.3) *
-      above(s.airRatio, 0.1, 0.18),
+    rule: [
+      ["in", "bpm", 132, 145, 12],
+      ["above", "kickPulse", 0.45, 0.35],
+      ["below", "flat", 0.5, 0.3],
+      ["above", "airRatio", 0.1, 0.18],
+    ],
   },
   {
     id: "dance",
     label: "Dance / EDM",
     a: "groove",
     // Mainstage: a clean four-on-the-floor kick under bright leads and hats.
-    w: (s) =>
-      inRange(s.bpm, 118, 136, 10) *
-      above(s.kickPulse, 0.5, 0.3) *
-      above(s.airRatio, 0.1, 0.18) *
-      below(s.flat, 0.55, 0.3) *
-      s.kSoft,
+    rule: [
+      ["in", "bpm", 118, 136, 10],
+      ["above", "kickPulse", 0.5, 0.3],
+      ["above", "airRatio", 0.1, 0.18],
+      ["below", "flat", 0.55, 0.3],
+      ["raw", "kSoft"],
+    ],
   },
   {
     id: "dnb",
     label: "Drum & bass",
     a: "groove",
     // Breakbeats: a steady tempo but a syncopated kick, and a lot of sub.
-    w: (s) =>
-      inRange(s.bpm, 160, 182, 10) *
-      inRange(s.kickPulse, 0.2, 0.65, 0.25) *
-      above(s.subRatio, 0.2, 0.2) *
-      above(s.perc, 0.5, 0.3),
+    rule: [
+      ["in", "bpm", 160, 182, 10],
+      ["in", "kickPulse", 0.2, 0.65, 0.25],
+      ["above", "subRatio", 0.2, 0.2],
+      ["above", "perc", 0.5, 0.3],
+    ],
   },
   {
     id: "dubstep",
     label: "Dubstep",
     a: "groove",
     // Half-time and sparse: the kick is rare and the sub carries the drop.
-    w: (s) =>
-      inRange(s.bpm, 136, 148, 8) *
-      below(s.kickPulse, 0.55, 0.3) *
-      above(s.subRatio, 0.28, 0.2) *
-      below(s.centroid, 0.55, 0.25),
+    rule: [
+      ["in", "bpm", 136, 148, 8],
+      ["below", "kickPulse", 0.55, 0.3],
+      ["above", "subRatio", 0.28, 0.2],
+      ["below", "centroid", 0.55, 0.25],
+    ],
   },
   {
     id: "disco",
     label: "Disco / funk",
     a: "groove",
     // Played, not programmed: four-on-the-floor with real dynamics left in it.
-    w: (s) =>
-      inRange(s.bpm, 106, 124, 10) *
-      above(s.kickPulse, 0.45, 0.3) *
-      below(s.flat, 0.45, 0.25) *
-      above(s.crest, 2.6, 2.5) *
-      inRange(s.centroid, 0.25, 0.6),
+    rule: [
+      ["in", "bpm", 106, 124, 10],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["below", "flat", 0.45, 0.25],
+      ["above", "crest", 2.6, 2.5],
+      ["in", "centroid", 0.25, 0.6],
+    ],
   },
   {
     id: "psytrance",
     label: "Psytrance",
     a: "groove",
     // A rolling bassline on a fast grid, bright and clean.
-    w: (s) =>
-      inRange(s.bpm, 138, 152, 10) *
-      above(s.kickPulse, 0.55, 0.3) *
-      inRange(s.flat, 0.25, 0.55, 0.2) *
-      above(s.airRatio, 0.12, 0.18),
+    rule: [
+      ["in", "bpm", 138, 152, 10],
+      ["above", "kickPulse", 0.55, 0.3],
+      ["in", "flat", 0.25, 0.55, 0.2],
+      ["above", "airRatio", 0.12, 0.18],
+    ],
   },
   {
     id: "hardstyle",
     label: "Hardstyle",
     a: "hard",
-    w: (s) =>
-      inRange(s.bpm, 145, 162, 12) * above(s.kickPulse, 0.45, 0.3) * s.kHard,
+    rule: [
+      ["in", "bpm", 145, 162, 12],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["raw", "kHard"],
+    ],
   },
   {
     id: "hardtekk",
@@ -309,11 +326,12 @@ const FAMILIES = [
     a: "hard",
     // German hardtekk: hard kick, offbeat bass, a shade under hardstyle tempo
     // and considerably more raw in the mids.
-    w: (s) =>
-      inRange(s.bpm, 138, 165, 14) *
-      above(s.kickPulse, 0.45, 0.3) *
-      s.kHard *
-      above(s.flat, 0.3, 0.3),
+    rule: [
+      ["in", "bpm", 138, 165, 14],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["raw", "kHard"],
+      ["above", "flat", 0.3, 0.3],
+    ],
   },
   {
     id: "zaag",
@@ -321,21 +339,23 @@ const FAMILIES = [
     a: "hard",
     // "Saw": a harmonically dense, gliding lead carrying the tune rather than a
     // pad — lots of mid/high content that is rich but not pure noise.
-    w: (s) =>
-      inRange(s.bpm, 150, 210, 28) *
-      inRange(s.flat, 0.34, 0.62, 0.22) *
-      above(s.midRatio, 0.3, 0.25) *
-      Math.max(s.kHard, s.kIndus * 0.7),
+    rule: [
+      ["in", "bpm", 150, 210, 28],
+      ["in", "flat", 0.34, 0.62, 0.22],
+      ["above", "midRatio", 0.3, 0.25],
+      ["max", "kHard", 1, "kIndus", 0.7],
+    ],
   },
   {
     id: "frenchcore",
     label: "Frenchcore",
     a: "hard",
-    w: (s) =>
-      inRange(s.bpm, 185, 230, 25) *
-      above(s.kickPulse, 0.4, 0.3) *
-      above(s.flat, 0.4, 0.3) *
-      Math.max(s.kHard * 0.8, s.kIndus),
+    rule: [
+      ["in", "bpm", 185, 230, 25],
+      ["above", "kickPulse", 0.4, 0.3],
+      ["above", "flat", 0.4, 0.3],
+      ["max", "kHard", 0.8, "kIndus", 1],
+    ],
   },
   {
     id: "uptempo",
@@ -345,11 +365,12 @@ const FAMILIES = [
     // at 280 BPM a beat is 210 ms and the onset grid only has twenty slots to
     // describe it, so the grid measurement is at the limit of its own
     // resolution up here. The tempo itself is already most of the evidence.
-    w: (s) =>
-      inRange(s.bpm, 220, 300, 35) *
-      above(s.kickPulse, 0.22, 0.3) *
-      above(s.flat, 0.45, 0.3) *
-      s.kIndus,
+    rule: [
+      ["in", "bpm", 220, 300, 35],
+      ["above", "kickPulse", 0.22, 0.3],
+      ["above", "flat", 0.45, 0.3],
+      ["raw", "kIndus"],
+    ],
   },
   {
     id: "krach",
@@ -357,93 +378,101 @@ const FAMILIES = [
     a: "hard",
     // Extreme, loud, and deliberately ugly: barely any crest left, the spectrum
     // nearly flat, and a kick that is mostly distortion.
-    w: (s) =>
-      inRange(s.bpm, 190, 300, 45) *
-      above(s.flat, 0.55, 0.25) *
-      below(s.crest, 3.2, 2) *
-      s.kIndus,
+    rule: [
+      ["in", "bpm", 190, 300, 45],
+      ["above", "flat", 0.55, 0.25],
+      ["below", "crest", 3.2, 2],
+      ["raw", "kIndus"],
+    ],
   },
   {
     id: "pieep",
     label: "Pieep",
     a: "hard",
     // Squeaky, very high-register tonal leads over a fast kick.
-    w: (s) =>
-      inRange(s.bpm, 170, 260, 40) *
-      above(s.airRatio, 0.2, 0.18) *
-      above(s.centroid, 0.62, 0.2) *
-      below(s.flat, 0.55, 0.3),
+    rule: [
+      ["in", "bpm", 170, 260, 40],
+      ["above", "airRatio", 0.2, 0.18],
+      ["above", "centroid", 0.62, 0.2],
+      ["below", "flat", 0.55, 0.3],
+    ],
   },
   {
     id: "hardcore",
     label: "Hardcore",
     a: "hard",
     // Mainstream hardcore: a distorted kick on every beat, squashed flat.
-    w: (s) =>
-      inRange(s.bpm, 148, 195, 18) *
-      above(s.kickPulse, 0.45, 0.3) *
-      inRange(s.flat, 0.4, 0.75, 0.2) *
-      Math.max(s.kHard, s.kIndus * 0.8),
+    rule: [
+      ["in", "bpm", 148, 195, 18],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["in", "flat", 0.4, 0.75, 0.2],
+      ["max", "kHard", 1, "kIndus", 0.8],
+    ],
   },
   {
     id: "tribecore",
     label: "Tribe",
     a: "hard",
     // Tribe: percussive and mid-heavy rather than one wall of noise.
-    w: (s) =>
-      inRange(s.bpm, 150, 190, 20) *
-      above(s.kickPulse, 0.45, 0.3) *
-      inRange(s.flat, 0.32, 0.62, 0.2) *
-      above(s.perc, 0.5, 0.3) *
-      above(s.midRatio, 0.3, 0.25) *
-      Math.max(s.kHard, s.kIndus * 0.7),
+    rule: [
+      ["in", "bpm", 150, 190, 20],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["in", "flat", 0.32, 0.62, 0.2],
+      ["above", "perc", 0.5, 0.3],
+      ["above", "midRatio", 0.3, 0.25],
+      ["max", "kHard", 1, "kIndus", 0.7],
+    ],
   },
   {
     id: "speedcore",
     label: "Speedcore",
     a: "hard",
     // Past 250 BPM the grid is at its limit; only the noise is left.
-    w: (s) =>
-      inRange(s.bpm, 245, 300, 22) *
-      above(s.flat, 0.5, 0.22) *
-      above(s.kIndus, 0.4, 0.3) *
-      below(s.crest, 3.5, 2.5),
+    rule: [
+      ["in", "bpm", 245, 300, 22],
+      ["above", "flat", 0.5, 0.22],
+      ["above", "kIndus", 0.4, 0.3],
+      ["below", "crest", 3.5, 2.5],
+    ],
   },
   {
     id: "industrial",
     label: "Indus",
     a: "hard",
     // A metallic, noisy kick is the whole tell.
-    w: (s) =>
-      inRange(s.bpm, 140, 185, 22) *
-      above(s.kickPulse, 0.4, 0.3) *
-      above(s.flat, 0.45, 0.25) *
-      above(s.kIndus, 0.45, 0.3) *
-      below(s.crest, 3.6, 2.6),
+    rule: [
+      ["in", "bpm", 140, 185, 22],
+      ["above", "kickPulse", 0.4, 0.3],
+      ["above", "flat", 0.45, 0.25],
+      ["above", "kIndus", 0.45, 0.3],
+      ["below", "crest", 3.6, 2.6],
+    ],
   },
   {
     id: "rawstyle",
     label: "Rawstyle",
     a: "hard",
     // Hardstyle's harder cousin: same grid, a rougher, more distorted kick.
-    w: (s) =>
-      inRange(s.bpm, 148, 163, 10) *
-      above(s.kickPulse, 0.45, 0.3) *
-      inRange(s.flat, 0.45, 0.72, 0.18) *
-      above(s.kHard, 0.5, 0.3) *
-      below(s.crest, 3.2, 2.4),
+    rule: [
+      ["in", "bpm", 148, 163, 10],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["in", "flat", 0.45, 0.72, 0.18],
+      ["above", "kHard", 0.5, 0.3],
+      ["below", "crest", 3.2, 2.4],
+    ],
   },
   {
     id: "hardtechno",
     label: "Hard techno",
     a: "hard",
     // Looped, driving and harder than techno proper, without the hardstyle kick.
-    w: (s) =>
-      inRange(s.bpm, 138, 162, 12) *
-      above(s.kickPulse, 0.55, 0.3) *
-      inRange(s.flat, 0.3, 0.6, 0.2) *
-      Math.max(s.kHard, s.kIndus * 0.6) *
-      below(s.crest, 4, 2.8),
+    rule: [
+      ["in", "bpm", 138, 162, 12],
+      ["above", "kickPulse", 0.55, 0.3],
+      ["in", "flat", 0.3, 0.6, 0.2],
+      ["max", "kHard", 1, "kIndus", 0.6],
+      ["below", "crest", 4, 2.8],
+    ],
   },
   {
     id: "rock",
@@ -451,33 +480,36 @@ const FAMILIES = [
     a: "rock",
     // Guitars: a continuously loud, fairly noisy mid band, with a kick that is
     // played rather than gridded.
-    w: (s) =>
-      inRange(s.bpm, 95, 170, 35) *
-      above(s.midRatio, 0.32, 0.25) *
-      inRange(s.flat, 0.35, 0.68, 0.22) *
-      below(s.kickPulse, 0.62, 0.3),
+    rule: [
+      ["in", "bpm", 95, 170, 35],
+      ["above", "midRatio", 0.32, 0.25],
+      ["in", "flat", 0.35, 0.68, 0.22],
+      ["below", "kickPulse", 0.62, 0.3],
+    ],
   },
   {
     id: "metal",
     label: "Metal",
     a: "rock",
-    w: (s) =>
-      inRange(s.bpm, 130, 220, 45) *
-      above(s.midRatio, 0.34, 0.22) *
-      above(s.flat, 0.5, 0.25) *
-      below(s.crest, 4, 2.5) *
-      below(s.kickPulse, 0.7, 0.3),
+    rule: [
+      ["in", "bpm", 130, 220, 45],
+      ["above", "midRatio", 0.34, 0.22],
+      ["above", "flat", 0.5, 0.25],
+      ["below", "crest", 4, 2.5],
+      ["below", "kickPulse", 0.7, 0.3],
+    ],
   },
   {
     id: "brutal",
     label: "Death / brutal",
     a: "rock",
     // Blast beats: very fast, wall-like, almost no dynamic range left.
-    w: (s) =>
-      inRange(s.bpm, 200, 300, 40) *
-      above(s.flat, 0.58, 0.22) *
-      below(s.crest, 3, 1.8) *
-      above(s.midRatio, 0.3, 0.25),
+    rule: [
+      ["in", "bpm", 200, 300, 40],
+      ["above", "flat", 0.58, 0.22],
+      ["below", "crest", 3, 1.8],
+      ["above", "midRatio", 0.3, 0.25],
+    ],
   },
   // --- urbain / global ------------------------------------------------------
   {
@@ -485,98 +517,107 @@ const FAMILIES = [
     label: "Rap",
     a: "voice",
     // Words over a beat: the syllabic modulation is the tell, not the grid.
-    w: (s) =>
-      inRange(s.bpm, 80, 105, 18) *
-      above(s.vocal, 0.32, 0.3) *
-      below(s.flat, 0.45, 0.25) *
-      inRange(s.centroid, 0.25, 0.6),
+    rule: [
+      ["in", "bpm", 80, 105, 18],
+      ["above", "vocal", 0.32, 0.3],
+      ["below", "flat", 0.45, 0.25],
+      ["in", "centroid", 0.25, 0.6],
+    ],
   },
   {
     id: "trap",
     label: "Trap",
     a: "groove",
     // Half-time 808: sparse kicks, a lot of sub, hats doing the motion.
-    w: (s) =>
-      inRange(s.bpm, 128, 152, 12) *
-      above(s.subRatio, 0.3, 0.2) *
-      below(s.kickPulse, 0.62, 0.3) *
-      above(s.perc, 0.4, 0.3),
+    rule: [
+      ["in", "bpm", 128, 152, 12],
+      ["above", "subRatio", 0.3, 0.2],
+      ["below", "kickPulse", 0.62, 0.3],
+      ["above", "perc", 0.4, 0.3],
+    ],
   },
   {
     id: "reggaeton",
     label: "Reggaeton",
     a: "groove",
     // Dembow: a steady mid-tempo grid with a heavy, round low end.
-    w: (s) =>
-      inRange(s.bpm, 86, 104, 10) *
-      above(s.kickPulse, 0.45, 0.3) *
-      above(s.subRatio, 0.22, 0.2) *
-      below(s.flat, 0.5, 0.25),
+    rule: [
+      ["in", "bpm", 86, 104, 10],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["above", "subRatio", 0.22, 0.2],
+      ["below", "flat", 0.5, 0.25],
+    ],
   },
   {
     id: "afrohouse",
     label: "Afro house",
     a: "groove",
     // Percussive and organic: busy transients over a four-on-the-floor.
-    w: (s) =>
-      inRange(s.bpm, 116, 126, 8) *
-      above(s.kickPulse, 0.5, 0.3) *
-      above(s.perc, 0.5, 0.3) *
-      below(s.flat, 0.45, 0.25),
+    rule: [
+      ["in", "bpm", 116, 126, 8],
+      ["above", "kickPulse", 0.5, 0.3],
+      ["above", "perc", 0.5, 0.3],
+      ["below", "flat", 0.45, 0.25],
+    ],
   },
   {
     id: "amapiano",
     label: "Amapiano",
     a: "groove",
     // The log drum: sub-heavy, sparse and slow for a house grid.
-    w: (s) =>
-      inRange(s.bpm, 106, 120, 8) *
-      above(s.subRatio, 0.28, 0.2) *
-      below(s.kickPulse, 0.62, 0.3) *
-      below(s.centroid, 0.55, 0.25),
+    rule: [
+      ["in", "bpm", 106, 120, 8],
+      ["above", "subRatio", 0.28, 0.2],
+      ["below", "kickPulse", 0.62, 0.3],
+      ["below", "centroid", 0.55, 0.25],
+    ],
   },
   {
     id: "garage",
     label: "UK garage",
     a: "groove",
     // Shuffled two-step: sub bass, busy percussion, off-grid hits.
-    w: (s) =>
-      inRange(s.bpm, 126, 140, 8) *
-      inRange(s.kickPulse, 0.25, 0.65, 0.25) *
-      above(s.subRatio, 0.24, 0.2) *
-      above(s.perc, 0.5, 0.3),
+    rule: [
+      ["in", "bpm", 126, 140, 8],
+      ["in", "kickPulse", 0.25, 0.65, 0.25],
+      ["above", "subRatio", 0.24, 0.2],
+      ["above", "perc", 0.5, 0.3],
+    ],
   },
   {
     id: "breakbeat",
     label: "Breakbeat",
     a: "groove",
     // A broken beat under a steady tempo — the kick is not on every beat.
-    w: (s) =>
-      inRange(s.bpm, 125, 152, 10) *
-      inRange(s.kickPulse, 0.25, 0.65, 0.25) *
-      above(s.perc, 0.55, 0.3),
+    rule: [
+      ["in", "bpm", 125, 152, 10],
+      ["in", "kickPulse", 0.25, 0.65, 0.25],
+      ["above", "perc", 0.55, 0.3],
+    ],
   },
   {
     id: "dancehall",
     label: "Dancehall",
     a: "groove",
     // Riddim: mid-tempo, sub-heavy, less strictly gridded than house.
-    w: (s) =>
-      inRange(s.bpm, 88, 112, 10) *
-      above(s.kickPulse, 0.45, 0.3) *
-      above(s.subRatio, 0.22, 0.2) *
-      below(s.flat, 0.45, 0.25),
+    rule: [
+      ["in", "bpm", 88, 112, 10],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["above", "subRatio", 0.22, 0.2],
+      ["below", "flat", 0.45, 0.25],
+    ],
   },
   {
     id: "reggae",
     label: "Reggae",
     a: "groove",
     // The offbeat skank over a slow, deep one-drop.
-    w: (s) =>
-      inRange(s.bpm, 58, 92, 12) *
-      above(s.subRatio, 0.24, 0.2) *
-      below(s.flat, 0.45, 0.25) *
-      above(s.perc, 0.4, 0.3),
+    rule: [
+      ["in", "bpm", 58, 92, 12],
+      ["above", "subRatio", 0.24, 0.2],
+      ["below", "flat", 0.45, 0.25],
+      ["above", "perc", 0.4, 0.3],
+    ],
   },
   // --- house / downtempo ----------------------------------------------------
   {
@@ -584,33 +625,36 @@ const FAMILIES = [
     label: "Synthwave",
     a: "groove",
     // Retro: a clean grid under warm, sustained analogue pads.
-    w: (s) =>
-      inRange(s.bpm, 98, 122, 10) *
-      above(s.kickPulse, 0.4, 0.3) *
-      below(s.flat, 0.42, 0.22) *
-      inRange(s.centroid, 0.3, 0.65),
+    rule: [
+      ["in", "bpm", 98, 122, 10],
+      ["above", "kickPulse", 0.4, 0.3],
+      ["below", "flat", 0.42, 0.22],
+      ["in", "centroid", 0.3, 0.65],
+    ],
   },
   {
     id: "funk",
     label: "Funk",
     a: "groove",
     // Played and syncopated, bright and dry rather than distorted.
-    w: (s) =>
-      inRange(s.bpm, 95, 125, 12) *
-      above(s.kickPulse, 0.4, 0.3) *
-      above(s.perc, 0.55, 0.3) *
-      below(s.flat, 0.45, 0.25),
+    rule: [
+      ["in", "bpm", 95, 125, 12],
+      ["above", "kickPulse", 0.4, 0.3],
+      ["above", "perc", 0.55, 0.3],
+      ["below", "flat", 0.45, 0.25],
+    ],
   },
   {
     id: "lofi",
     label: "Lo-fi",
     a: "sustain",
     // Slow, soft and warm, with the top end rolled off.
-    w: (s) =>
-      inRange(s.bpm, 68, 98, 12) *
-      below(s.kickPulse, 0.5, 0.3) *
-      below(s.centroid, 0.5, 0.22) *
-      below(s.perc, 0.5, 0.3),
+    rule: [
+      ["in", "bpm", 68, 98, 12],
+      ["below", "kickPulse", 0.5, 0.3],
+      ["below", "centroid", 0.5, 0.22],
+      ["below", "perc", 0.5, 0.3],
+    ],
   },
   // --- voix / racines -------------------------------------------------------
   {
@@ -618,55 +662,60 @@ const FAMILIES = [
     label: "Pop",
     a: "voice",
     // A sung hook, clean and bright, on a light grid.
-    w: (s) =>
-      inRange(s.bpm, 88, 132, 14) *
-      above(s.vocal, 0.3, 0.3) *
-      below(s.flat, 0.45, 0.25) *
-      inRange(s.centroid, 0.3, 0.68),
+    rule: [
+      ["in", "bpm", 88, 132, 14],
+      ["above", "vocal", 0.3, 0.3],
+      ["below", "flat", 0.45, 0.25],
+      ["in", "centroid", 0.3, 0.68],
+    ],
   },
   {
     id: "soul",
     label: "Soul",
     a: "voice",
     // A warm, vocal, played mid-tempo with dynamics left in.
-    w: (s) =>
-      inRange(s.bpm, 58, 102, 16) *
-      above(s.vocal, 0.3, 0.3) *
-      below(s.flat, 0.45, 0.25) *
-      inRange(s.centroid, 0.25, 0.6),
+    rule: [
+      ["in", "bpm", 58, 102, 16],
+      ["above", "vocal", 0.3, 0.3],
+      ["below", "flat", 0.45, 0.25],
+      ["in", "centroid", 0.25, 0.6],
+    ],
   },
   {
     id: "blues",
     label: "Blues",
     a: "voice",
     // Live instruments, real crest, a wide dynamic range.
-    w: (s) =>
-      inRange(s.bpm, 58, 122, 18) *
-      below(s.flat, 0.45, 0.25) *
-      above(s.crest, 2.8, 2.5) *
-      inRange(s.centroid, 0.25, 0.6),
+    rule: [
+      ["in", "bpm", 58, 122, 18],
+      ["below", "flat", 0.45, 0.25],
+      ["above", "crest", 2.8, 2.5],
+      ["in", "centroid", 0.25, 0.6],
+    ],
   },
   {
     id: "country",
     label: "Country",
     a: "voice",
     // Acoustic and sung, again with the dynamics a limiter would erase.
-    w: (s) =>
-      inRange(s.bpm, 78, 142, 20) *
-      above(s.vocal, 0.25, 0.3) *
-      below(s.flat, 0.45, 0.25) *
-      above(s.crest, 2.8, 2.5),
+    rule: [
+      ["in", "bpm", 78, 142, 20],
+      ["above", "vocal", 0.25, 0.3],
+      ["below", "flat", 0.45, 0.25],
+      ["above", "crest", 2.8, 2.5],
+    ],
   },
   {
     id: "folk",
     label: "Folk",
     a: "voice",
     // Sparse and acoustic: tonal, quiet transients, no machine pulse.
-    w: (s) =>
-      inRange(s.bpm, 78, 132, 18) *
-      below(s.flat, 0.4, 0.22) *
-      below(s.perc, 0.45, 0.3) *
-      above(s.crest, 3, 2.5),
+    rule: [
+      ["in", "bpm", 78, 132, 18],
+      ["below", "flat", 0.4, 0.22],
+      ["below", "perc", 0.45, 0.3],
+      ["above", "crest", 3, 2.5],
+    ],
   },
   // --- rock ----------------------------------------------------------------
   {
@@ -674,33 +723,36 @@ const FAMILIES = [
     label: "Punk",
     a: "rock",
     // Fast, raw and loud, but played rather than programmed.
-    w: (s) =>
-      inRange(s.bpm, 140, 205, 20) *
-      above(s.flat, 0.42, 0.22) *
-      above(s.midRatio, 0.3, 0.25) *
-      below(s.kickPulse, 0.65, 0.3),
+    rule: [
+      ["in", "bpm", 140, 205, 20],
+      ["above", "flat", 0.42, 0.22],
+      ["above", "midRatio", 0.3, 0.25],
+      ["below", "kickPulse", 0.65, 0.3],
+    ],
   },
   {
     id: "indie",
     label: "Indie",
     a: "rock",
     // Guitars and a live kit, less saturated than metal or hard rock.
-    w: (s) =>
-      inRange(s.bpm, 98, 152, 18) *
-      inRange(s.flat, 0.32, 0.62, 0.2) *
-      above(s.midRatio, 0.28, 0.25) *
-      below(s.kickPulse, 0.6, 0.3),
+    rule: [
+      ["in", "bpm", 98, 152, 18],
+      ["in", "flat", 0.32, 0.62, 0.2],
+      ["above", "midRatio", 0.28, 0.25],
+      ["below", "kickPulse", 0.6, 0.3],
+    ],
   },
   {
     id: "hardrock",
     label: "Hard rock",
     a: "rock",
     // Distorted guitars and a real drum kit, short of metal's wall.
-    w: (s) =>
-      inRange(s.bpm, 98, 152, 18) *
-      above(s.flat, 0.42, 0.22) *
-      above(s.midRatio, 0.32, 0.25) *
-      below(s.kickPulse, 0.62, 0.3),
+    rule: [
+      ["in", "bpm", 98, 152, 18],
+      ["above", "flat", 0.42, 0.22],
+      ["above", "midRatio", 0.32, 0.25],
+      ["below", "kickPulse", 0.62, 0.3],
+    ],
   },
   // --- scène / party --------------------------------------------------------
   {
@@ -708,36 +760,39 @@ const FAMILIES = [
     label: "Phonk",
     a: "groove",
     // Memphis 808: a cowbell hook over a distorted, sub-heavy half-time beat.
-    w: (s) =>
-      inRange(s.bpm, 128, 168, 14) *
-      below(s.kickPulse, 0.72, 0.3) *
-      above(s.subRatio, 0.3, 0.2) *
-      below(s.crest, 3.6, 2.5) *
-      above(s.perc, 0.4, 0.3),
+    rule: [
+      ["in", "bpm", 128, 168, 14],
+      ["below", "kickPulse", 0.72, 0.3],
+      ["above", "subRatio", 0.3, 0.2],
+      ["below", "crest", 3.6, 2.5],
+      ["above", "perc", 0.4, 0.3],
+    ],
   },
   {
     id: "hardpingpong",
     label: "Hard pingpong",
     a: "hard",
     // Hardtek ping-pong: a kick on the beat, a saw bass between them, busy.
-    w: (s) =>
-      inRange(s.bpm, 155, 200, 18) *
-      above(s.kickPulse, 0.5, 0.3) *
-      above(s.flat, 0.4, 0.22) *
-      above(s.perc, 0.55, 0.3) *
-      Math.max(s.kHard, s.kIndus * 0.7),
+    rule: [
+      ["in", "bpm", 155, 200, 18],
+      ["above", "kickPulse", 0.5, 0.3],
+      ["above", "flat", 0.4, 0.22],
+      ["above", "perc", 0.55, 0.3],
+      ["max", "kHard", 1, "kIndus", 0.7],
+    ],
   },
   {
     id: "germanparty",
     label: "German party",
     a: "hard",
     // Party hardtekk with chanted German vocals over a hard kick.
-    w: (s) =>
-      inRange(s.bpm, 148, 185, 16) *
-      above(s.kickPulse, 0.45, 0.3) *
-      inRange(s.flat, 0.38, 0.68, 0.2) *
-      above(s.vocal, 0.28, 0.3) *
-      Math.max(s.kHard, s.kIndus * 0.7),
+    rule: [
+      ["in", "bpm", 148, 185, 16],
+      ["above", "kickPulse", 0.45, 0.3],
+      ["in", "flat", 0.38, 0.68, 0.2],
+      ["above", "vocal", 0.28, 0.3],
+      ["max", "kHard", 1, "kIndus", 0.7],
+    ],
   },
   {
     id: "electronic",
@@ -745,7 +800,11 @@ const FAMILIES = [
     a: "groove",
     // The catch-all for "clearly machine-made, clearly rhythmic, nothing more
     // specific fits". Weak on purpose: it should only ever win by default.
-    w: (s) => 0.28 * above(s.pulse, 0.3, 0.4) * above(s.perc, 0.25, 0.3),
+    rule: [
+      ["k", 0.28],
+      ["above", "pulse", 0.3, 0.4],
+      ["above", "perc", 0.25, 0.3],
+    ],
   },
 ];
 
@@ -977,306 +1036,107 @@ const TEMPO_ALIASES = {
   hardrockband: "hardrock",
 };
 
-// --- the kick ---------------------------------------------------------------
-// A kick is classified from its SHAPE, not its level: how fast it arrives, how
-// much broadband click rides on top of it, how noisy it is, and how long it
-// rings. Those four separate a house kick from a hardstyle one from an
-// industrial one far more reliably than any single amplitude reading.
-const KICK_TYPES = ["soft", "hard", "industrial"];
+// --- the rules, as data -------------------------------------------------------
+//
+// Every family above is a PRODUCT of fuzzy memberships over the frame's
+// descriptors, written as data rather than as a function so the same table can
+// be handed to the analyser that actually runs it (webapp/rhythm/src/style.rs,
+// on the audio thread) and still be read and edited here. The terms:
+//
+//   ["in", x, lo, hi, w?]   trapezoid, soft shoulders w wide (default 45% of the span)
+//   ["above", x, t, w]      0 below t, 1 at t + w
+//   ["below", x, t, w]      1 at t - w, 0 at t
+//   ["raw", x]              the descriptor itself (the kick-shape scores)
+//   ["max", x, kx, y, ky]   max(x * kx, y * ky)
+//   ["k", c]                a constant
+//
+// The descriptor names, in the order the analyser stores them.
+export const RULE_FEATURES = [
+  "bpm", "pulse", "kickPulse", "flat", "centroid", "perc", "vocal", "crest", "level",
+  "subRatio", "midRatio", "airRatio", "kSoft", "kHard", "kIndus", "melody", "tonalness",
+  "chord", "dyn",
+];
+const FEATURE_INDEX = new Map(RULE_FEATURES.map((k, i) => [k, i]));
+const OPS = { k: 0, in: 1, above: 2, below: 3, raw: 4, max: 5 };
+// The two families that do not need a tempo to be judged: everything else is
+// damped while the beat grid is not locked.
+const TEMPO_FREE = new Set(["ambient", "strings"]);
 
-function createKickAnalyser() {
-  let capturing = false;
-  let t0 = 0;
-  let peakLow = 0;
-  let peakAt = 0;
-  let peakHigh = 0;
-  let flatSum = 0;
-  let flatN = 0;
-  let decayAt = 0;
-  let lastKickAt = -1;
-  let fluxAvg = 0;
-  let fluxVar = 0;
-  // Smoothed type scores, so one odd hit cannot re-colour the whole scene.
-  const score = { soft: 0.34, hard: 0.33, industrial: 0.33 };
-  const res = {
-    type: "soft",
-    strength: 0,
-    attack: 0,
-    decay: 0,
-    click: 0,
-    grit: 0,
-    hit: false,
-    ...score,
-  };
-
-  function process(f, energyLin, now, dt) {
-    res.hit = false;
-    const lowLin = energyLin.sub + energyLin.bass;
-    const highLin = energyLin.high + energyLin.air;
-
-    // Adaptive threshold on the bass onset function.
-    const d = f.lowFlux - fluxAvg;
-    fluxAvg += d * 0.02;
-    fluxVar += (d * d - fluxVar) * 0.02;
-    const sd = Math.sqrt(Math.max(fluxVar, 1e-12));
-    const thr = fluxAvg + sd * 1.7;
-
-    if (!capturing && f.lowFlux > thr && now - lastKickAt > 0.085) {
-      capturing = true;
-      lastKickAt = now;
-      t0 = now;
-      peakLow = lowLin;
-      peakAt = now;
-      peakHigh = highLin;
-      flatSum = f.flatness;
-      flatN = 1;
-      decayAt = 0;
-    } else if (capturing) {
-      if (lowLin > peakLow) {
-        peakLow = lowLin;
-        peakAt = now;
-      }
-      if (highLin > peakHigh) peakHigh = highLin;
-      flatSum += f.flatness;
-      flatN++;
-      if (!decayAt && lowLin < peakLow * 0.25 && now - peakAt > 0.01) decayAt = now;
-      if (now - t0 > 0.42 || (decayAt && now - decayAt > 0.02)) {
-        finish(now);
-      }
+/** One family's raw weight for a descriptor object — the reference the
+ * analyser's evaluator is tested against. */
+export function ruleWeight(rule, s) {
+  let w = 1;
+  for (const t of rule) {
+    const [op, x] = t;
+    const v = s[x];
+    switch (op) {
+      case "in":
+        w *= t[4] == null ? inRange(v, t[2], t[3]) : inRange(v, t[2], t[3], t[4]);
+        break;
+      case "above":
+        w *= above(v, t[2], t[3]);
+        break;
+      case "below":
+        w *= below(v, t[2], t[3]);
+        break;
+      case "raw":
+        w *= v;
+        break;
+      case "max":
+        w *= Math.max(v * t[2], s[t[3]] * t[4]);
+        break;
+      case "k":
+        w *= t[1];
+        break;
+      default:
+        break;
     }
-    void dt;
-    res.soft = score.soft;
-    res.hard = score.hard;
-    res.industrial = score.industrial;
-    let best = "soft";
-    for (const k of KICK_TYPES) if (score[k] > score[best]) best = k;
-    res.type = best;
-    return res;
   }
-
-  function finish(now) {
-    capturing = false;
-    const attack = Math.max(0.004, peakAt - t0);
-    const decay = (decayAt || now) - peakAt;
-    const click = peakLow > 1e-9 ? peakHigh / peakLow : 0;
-    const grit = flatN ? flatSum / flatN : 0;
-
-    // Three soft votes, then normalize. Overlapping on purpose: a kick that is
-    // half hard and half industrial should read as exactly that, because the
-    // renderer blends the two looks rather than picking one.
-    const soft =
-      below(click, 0.16, 0.16) * below(grit, 0.36, 0.26) * above(decay, 0.06, 0.16);
-    const hard =
-      above(click, 0.09, 0.14) * below(attack, 0.05, 0.05) * inRange(grit, 0.16, 0.52, 0.24);
-    const indus =
-      above(grit, 0.36, 0.25) * above(click, 0.18, 0.22) * above(decay, 0.05, 0.12);
-    const total = soft + hard + indus;
-    if (total > 1e-6) {
-      const k = 0.35; // per-hit blend — a few kicks to settle, not a few bars
-      score.soft += ((soft / total) - score.soft) * k;
-      score.hard += ((hard / total) - score.hard) * k;
-      score.industrial += ((indus / total) - score.industrial) * k;
-    }
-    res.attack = attack;
-    res.decay = decay;
-    res.click = click;
-    res.grit = grit;
-    res.strength = Math.max(0, Math.min(1, Math.log10(1 + peakLow * 40) * 0.6));
-    res.hit = true;
-  }
-
-  function reset() {
-    capturing = false;
-    lastKickAt = -1;
-    fluxAvg = fluxVar = 0;
-    score.soft = score.hard = score.industrial = 1 / 3;
-  }
-
-  return { process, reset, out: res };
+  return Math.max(0, w);
 }
 
-// --- the classifier ---------------------------------------------------------
-export function createStyleClassifier() {
-  const kick = createKickAnalyser();
-  const weights = new Map(FAMILIES.map((f) => [f.id, 0]));
-  const arche = { sustain: 0.2, voice: 0.2, groove: 0.2, hard: 0.2, rock: 0.2 };
-  const look = {};
-  for (const k of LOOK_KEYS) look[k] = ARCHETYPE_LOOK.groove[k];
-  let dominant = "";
-  let dominantSince = 0;
-  let pendingDominant = "";
-  let pendingSince = 0;
-
-  const out = {
-    kick: kick.out,
-    families: [], // [{id, label, weight}], strongest first
-    archetypes: arche,
-    // Seven numbers saying what this music should LOOK like, blended across
-    // the families exactly as the archetypes are. See LOOK_KEYS.
-    look,
-    dominant: "",
-    dominantLabel: "",
-    archetype: "groove",
-    confidence: 0,
-  };
-
-  /**
-   * @param {object} f        features.js frame
-   * @param {object} beat     tempo.js frame
-   * @param {object} energy   linear energy per band: {sub,bass,lowMid,mid,high,air}
-   * @param {number} now      seconds (monotonic)
-   * @param {number} dt       seconds since the previous frame
-   */
-  function process(f, beat, energy, now, dt) {
-    const k = kick.process(f, energy, now, dt);
-
-    const total =
-      energy.sub + energy.bass + energy.lowMid + energy.mid + energy.high + energy.air + 1e-12;
-    const s = {
-      bpm: beat.locked ? beat.bpm : 0,
-      pulse: beat.confidence,
-      kickPulse: beat.kickPulse,
-      flat: f.flatness,
-      centroid: f.centroidN,
-      perc: f.percussivity,
-      vocal: f.vocalMod,
-      crest: f.crest,
-      level: f.level,
-      subRatio: (energy.sub + energy.bass) / total,
-      midRatio: (energy.lowMid + energy.mid) / total,
-      airRatio: (energy.high + energy.air) / total,
-      kSoft: k.soft,
-      kHard: k.hard,
-      kIndus: k.industrial,
-      // The melodic channel (features.js). Available to every weighting
-      // function; used sparingly, because a genre is mostly rhythm and timbre.
-      melody: f.melody,
-      tonalness: f.tonal,
-      chord: f.chordChange,
-      dyn: f.dynamics,
-    };
-
-    // No stable tempo → every tempo-driven family is guessing. Rather than let
-    // them score off a BPM of 0 (which `inRange` would read as "far below the
-    // band", i.e. near zero anyway, but only by accident), damp them explicitly
-    // and let the two tempo-free families carry the frame.
-    const tempoTrust = beat.locked ? Math.max(0.25, Math.min(1, beat.confidence * 1.6)) : 0;
-
-    let sum = 0;
-    const raw = [];
-    for (const fam of FAMILIES) {
-      let w = fam.w(s);
-      if (fam.id !== "ambient" && fam.id !== "strings") w *= tempoTrust;
-      w = Math.max(0, w);
-      raw.push(w);
-      sum += w;
-    }
-    // Nothing matched (a silent passage, or an intro with no character yet):
-    // decay toward neutral instead of dividing by ~0 and amplifying noise.
-    //
-    // ...and LEARN MORE SLOWLY WHEN THE MUSIC IS QUIET. A breakdown has no
-    // drums, no pulse and no grit, so every measurement the classifier runs on
-    // says "ambient" — and the look of the whole scene would change halfway
-    // through a hardcore track and change back at the drop. A quiet passage is
-    // not a different genre, it is the same genre with the drums out, so the
-    // classifier holds what it knows and re-forms its opinion when there is
-    // something to form it from.
-    // Squared, so the damping bites where it matters: a passage at half level
-    // is still musically informative and only slows down a little, while a real
-    // breakdown — a twentieth of the level — all but freezes the opinion until
-    // the music comes back.
-    const dyn = f.dynamics ?? 1;
-    const a = (1 - Math.exp(-dt / 2.5)) * (0.04 + 0.96 * dyn * dyn);
-    if (sum < 1e-4) {
-      for (const fam of FAMILIES) weights.set(fam.id, weights.get(fam.id) * (1 - a));
-    } else {
-      for (let i = 0; i < FAMILIES.length; i++) {
-        const id = FAMILIES[i].id;
-        weights.set(id, weights.get(id) + (raw[i] / sum - weights.get(id)) * a);
+/**
+ * The whole vocabulary, flattened for the analyser (style.rs#load_families):
+ * [count, then per family: archetype, tempoFree, look x7, rangeLo, rangeHi,
+ *  nTerms, then per term: op, a, b, p1, p2, p3].
+ */
+export function familyTable() {
+  const out = [FAMILIES.length];
+  for (const f of FAMILIES) {
+    out.push(Math.max(0, ARCHETYPES.indexOf(f.a)), TEMPO_FREE.has(f.id) ? 1 : 0);
+    const look = FAMILY_LOOK.get(f.id);
+    for (const k of LOOK_KEYS) out.push(look[k]);
+    const range = TEMPO_BANDS[f.id] || [0, 0];
+    out.push(range[0], range[1], f.rule.length);
+    for (const t of f.rule) {
+      const op = OPS[t[0]];
+      if (op == null) throw new Error(`unknown rule op ${t[0]} in ${f.id}`);
+      if (t[0] === "k") {
+        out.push(op, 0, 0, t[1], 0, 0);
+        continue;
       }
-    }
-
-    // Archetype mix: the families' weights, pooled. And the look vector, from
-    // the same weights — one pass, so a subgenre-accurate animation costs
-    // nothing beyond what the archetypes already cost.
-    for (const key of ARCHETYPES) arche[key] = 0;
-    for (const key of LOOK_KEYS) look[key] = 0;
-    let wsum = 0;
-    for (const fam of FAMILIES) {
-      const w = weights.get(fam.id);
-      if (w <= 0) continue;
-      arche[fam.a] += w;
-      const l = FAMILY_LOOK.get(fam.id);
-      for (const key of LOOK_KEYS) look[key] += l[key] * w;
-      wsum += w;
-    }
-    if (wsum > 1e-6) {
-      for (const key of ARCHETYPES) arche[key] /= wsum;
-      for (const key of LOOK_KEYS) look[key] /= wsum;
-    }
-
-    // Dominant family, with hysteresis: a challenger has to stay ahead by a
-    // clear margin for a second and a half before it takes the name. Without
-    // this, two neighbouring hardcore subgenres trade the label several times a
-    // bar and anything keyed to the name strobes.
-    let bestId = dominant;
-    let bestW = -1;
-    for (const fam of FAMILIES) {
-      const w = weights.get(fam.id);
-      if (w > bestW) {
-        bestW = w;
-        bestId = fam.id;
-      }
-    }
-    if (!dominant) {
-      dominant = bestId;
-      dominantSince = now;
-    } else if (bestId !== dominant) {
-      const cur = weights.get(dominant);
-      if (bestW > cur * 1.2) {
-        if (pendingDominant !== bestId) {
-          pendingDominant = bestId;
-          pendingSince = now;
-        } else if (now - pendingSince > 1.5) {
-          dominant = bestId;
-          dominantSince = now;
-          pendingDominant = "";
-        }
+      const a = FEATURE_INDEX.get(t[1]);
+      if (a == null) throw new Error(`unknown descriptor ${t[1]} in ${f.id}`);
+      if (t[0] === "max") {
+        const b = FEATURE_INDEX.get(t[3]);
+        if (b == null) throw new Error(`unknown descriptor ${t[3]} in ${f.id}`);
+        out.push(op, a, b, t[2], t[4], 0);
+      } else if (t[0] === "raw") {
+        out.push(op, a, 0, 1, 0, 0);
+      } else if (t[0] === "in") {
+        out.push(op, a, 0, t[2], t[3], t[4] ?? 0);
       } else {
-        pendingDominant = "";
+        out.push(op, a, 0, t[2], t[3], 0);
       }
-    } else {
-      pendingDominant = "";
     }
-    void dominantSince;
-
-    const sorted = FAMILIES.map((fam) => ({
-      id: fam.id,
-      label: fam.label,
-      weight: weights.get(fam.id),
-    })).sort((x, y) => y.weight - x.weight);
-
-    out.families = sorted;
-    out.dominant = dominant;
-    out.dominantLabel = FAMILY_BY_ID.get(dominant)?.label || "";
-    out.archetype = FAMILY_BY_ID.get(dominant)?.a || "groove";
-    // How sure the whole read is: the top family's share, tempered by how much
-    // it stands out from the second.
-    const top = sorted[0]?.weight || 0;
-    const next = sorted[1]?.weight || 0;
-    out.confidence = Math.max(
-      0,
-      Math.min(1, top * 2.4 * (0.45 + 0.55 * (top > 1e-6 ? (top - next) / top : 0)))
-    );
-    return out;
   }
-
-  function reset() {
-    kick.reset();
-    for (const fam of FAMILIES) weights.set(fam.id, 0);
-    dominant = "";
-    pendingDominant = "";
-  }
-
-  return { process, reset, out };
+  return new Float32Array(out);
 }
+
+/** The family behind an index the analyser reports, or null. */
+export function familyAt(index) {
+  return index >= 0 && index < FAMILIES.length ? FAMILY_LIST[index] : null;
+}
+
+// The kick types the analyser names (style.rs `KickShape.kind`), in order.
+export const KICK_TYPES = ["soft", "hard", "industrial"];

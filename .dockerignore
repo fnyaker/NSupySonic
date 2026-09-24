@@ -30,6 +30,12 @@ dist
 webapp/node_modules
 webapp/dist
 supysonic/webui/dist
+# The rhythm analyser's Rust build output (rebuilt in the wasmbuilder stage)
+# and the eval's cache of rendered test audio (hundreds of megabytes).
+webapp/rhythm/target
+webapp/rhythm/target-simd
+webapp/test/eval/.cache
+webapp/test/render/out
 
 # Coverage / editor
 .coverage

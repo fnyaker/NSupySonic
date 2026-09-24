@@ -534,3 +534,15 @@ export function renderTrack({
   const pcm = limit(buf, { ceil });
   return { pcm, kicks: kicks.filter((t) => t < seconds), spectra: analyse(pcm, seconds) };
 }
+
+// ---------------------------------------------------------------------------
+// The instruments themselves, for test/songs.mjs, which arranges whole tracks
+// out of them. Exported rather than duplicated: a second copy of the kick
+// would be a second theory of what a kick is.
+// ---------------------------------------------------------------------------
+export { renderKick, renderScreech, renderReverseBass, renderHat, renderPad, limit, shape, clip };
+/** The shared noise source, reseeded so every render is deterministic. */
+export function seedNoise(s = 1) {
+  rndState = s >>> 0 || 1;
+}
+export { noise, rnd };
