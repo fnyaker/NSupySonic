@@ -31,17 +31,17 @@ export const GROUPS = [
 
 export const WORLD_META = {
   // --- hard ------------------------------------------------------------------
-  forge: { group: "hard", label: "Forge", blurb: "L'enclume frappée à chaque kick, des gerbes d'étincelles qui roulent au sol, l'hymne en ruban d'or." },
-  piano: { group: "hard", label: "Piano", blurb: "Un clavier de lumière : la mélodie monte au-dessus des touches qui la jouent, et tout bat sous le kick." },
+  forge: { group: "hard", label: "Forge", blurb: "L'enclume du rawstyle frappée à chaque kick, des gerbes d'étincelles qui roulent au sol, l'hymne en ruban d'or." },
+  cymatics: { group: "hard", label: "Cymatique", blurb: "La mélodie dessinée dans le sable d'une plaque qui vibre : chaque note son motif, et le kick qui fait sauter le sable." },
   shatter: { group: "hard", label: "Éclats", blurb: "Le cadre vole en éclats de verre qui réfractent la lumière, relancés à chaque kick." },
   lasers: { group: "hard", label: "Lasers", blurb: "La mainstage vue de la foule : lasers dans la fumée, flammes sur les gros kicks, les mains qui se lèvent sur le drop." },
   bounce: { group: "hard", label: "Rebond", blurb: "Une bille de gelée lumineuse qui s'écrase sur le kick et rebondit sur le temps." },
-  saw: { group: "hard", label: "Scie", blurb: "Une lame qui tourne et des dents de scie laser — le zaag, littéralement." },
+  saw: { group: "hard", label: "Scie", blurb: "Une lame d'acier qui tourne et crache ses étincelles, des dents de scie laser derrière — l'industriel à vif." },
   stairs: { group: "hard", label: "Arpège", blurb: "Un escalier de lumière dont chaque marche s'allume sur une note de l'arpège." },
   pingpong: { group: "hard", label: "Ping-pong", blurb: "Un échange au néon : deux raquettes de verre qui renvoient une balle de lumière sur chaque temps." },
   soundsystem: { group: "hard", label: "Sound system", blurb: "Un mur d'enceintes dont les membranes pompent sous chaque basse, la foule devant." },
   static: { group: "hard", label: "Parasites", blurb: "La pochette en signal qui se déchire : bandes décalées, pixels triés, blocs corrompus." },
-  microwave: { group: "hard", label: "Micro-ondes", blurb: "Un four vu à travers sa porte grillagée : la lampe qui grésille sur le kick, le plateau qui tourne, des arcs qui claquent sur le bord doré." },
+  microwave: { group: "hard", label: "Micro-ondes", blurb: "Un four vu à travers sa porte grillagée : la lampe qui grésille sur le kick, des arcs qui claquent — et selon le genre, une lame de scie ou du pop-corn qui éclate sur le plateau." },
   fireworks: { group: "hard", label: "Feu d'artifice", blurb: "Des bouquets aux couleurs d'un vrai spectacle, sur les temps forts, au-dessus de la ville et de l'eau." },
 
   // --- techno & machines -------------------------------------------------------
@@ -83,6 +83,7 @@ export const WORLD_META = {
   // --- calme -----------------------------------------------------------------
   nebula: { group: "calm", label: "Nébuleuse", blurb: "Des nuages de gaz et de poussière d'étoiles, sans un seul à-coup." },
   aurora: { group: "calm", label: "Aurore", blurb: "Des rideaux d'aurore boréale au-dessus de l'eau." },
+  piano: { group: "calm", label: "Piano", blurb: "Un clavier de lumière : la mélodie monte au-dessus des touches qui la jouent, les accords éclairent la salle." },
   ocean: { group: "calm", label: "Océan", blurb: "La houle de nuit sous la lune, qui se gonfle avec la basse." },
   cathedral: { group: "calm", label: "Nef", blurb: "Une rosace gothique et sa lumière dans la poussière, au bout d'une nef de colonnes." },
   ink: { group: "calm", label: "Encre", blurb: "De l'encre qui s'épanouit dans l'eau, une volute par note." },

@@ -892,11 +892,4 @@ impl Tempo {
         self.prior_hi = hi.clamp(self.prior_lo + 1.0, MAX_BPM);
     }
 
-    pub fn seeded(&self) -> bool {
-        self.seed_lag > 0.0
-    }
-
-    pub fn fps(&self) -> f32 {
-        self.fps
-    }
 }

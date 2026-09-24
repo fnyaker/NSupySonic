@@ -153,6 +153,13 @@ export function createMusical() {
     warm: 0.5,
     melodic: 0.5,
     chaos: 0.4,
+    // --- the GENRE CHANNEL (webapp/rhythm/src/genre.rs) ----------------------
+    // What only some genres are made of, 0..1 each: the sung lead, the BUZZ
+    // (a saw stack, a distorted kick's tail — zaag, krach), a screech, how
+    // much of the power sits in the bottom two octaves, the offbeat's share of
+    // the groove, onsets per beat, how long the kick rings and how noisy it
+    // is. Eased over a beat, so a world can read them raw.
+    genre: { lead: 0, buzz: 0, screech: 0, sub: 0, offbeat: 0, density: 0, tail: 0, grit: 0 },
 
     /** Seconds for `n` beats — a lifetime, a decay, a fade. */
     overBeats(n) {
@@ -374,6 +381,8 @@ export function createMusical() {
         m.melodic = m.ease(m.melodic, look.melodic, 3, dt);
         m.chaos = m.ease(m.chaos, look.chaos, 3, dt);
       }
+      const gch = frame.genre;
+      if (gch) for (const k in m.genre) m.genre[k] = m.ease(m.genre[k], gch[k] || 0, 1, dt);
       return m;
     },
   };

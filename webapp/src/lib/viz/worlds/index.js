@@ -16,6 +16,7 @@ const LOADERS = {
   aurora: () => import("./aurora.js"),
   forge: () => import("./forge.js"),
   piano: () => import("./piano.js"),
+  cymatics: () => import("./cymatics.js"),
   lasers: () => import("./lasers.js"),
   shatter: () => import("./shatter.js"),
   bounce: () => import("./bounce.js"),

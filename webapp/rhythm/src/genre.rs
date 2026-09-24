@@ -100,11 +100,24 @@ impl Genre {
         }
         self.screech *= (-dt / (beat * 0.25).max(0.03)).exp();
 
-        let total: f32 = energy_lin.iter().sum::<f32>() + 1e-12;
-        let sub_now = ((energy_lin[0] + energy_lin[1] * 0.5) / total * 2.2).clamp(0.0, 1.0);
+        // The bottom two octaves' share of the POWER. The six energies are
+        // per-bin means, and the bands are 40 Hz to 10 kHz wide: summed as
+        // they are, the sub read 1.0 on every record with a kick, which is to
+        // say it read nothing. Weighted by width they are powers, and a mix
+        // sits between a third (a pop record) and nine tenths (a hardcore
+        // drop) of it down there.
+        const WIDTH: [f32; 6] = [40.0, 100.0, 340.0, 1500.0, 4000.0, 10000.0];
+        let mut total = 1e-12f32;
+        for k in 0..6 {
+            total += energy_lin[k] * WIDTH[k];
+        }
+        let low = energy_lin[0] * WIDTH[0] + energy_lin[1] * WIDTH[1];
+        let sub_now = ((low / total - 0.35) / 0.6).clamp(0.0, 1.0);
         self.sub += (sub_now - self.sub) * (1.0 - (-dt / 0.3).exp());
 
-        // Onsets per beat: the frame's count, turned into a rate in beats.
+        // Onsets per beat: EVENTS this frame (a kick, a snare, an onset of
+        // the whole band), turned into a rate in beats. Counting frames a
+        // hat was sounding instead read every hard record at the ceiling.
         let rate = onsets_this_frame / dt * beat;
         self.density += (rate - self.density) * (1.0 - (-dt / (beat * 2.0).max(0.2)).exp());
 
@@ -114,7 +127,8 @@ impl Genre {
             self.screech,
             self.sub,
             offbeat.clamp(0.0, 1.0),
-            (self.density / 8.0).clamp(0.0, 1.0),
+            // Four onsets a beat — sixteenths — is a full reading.
+            (self.density / 4.0).clamp(0.0, 1.0),
             (kick_decay / 0.4).clamp(0.0, 1.0),
             kick_grit.clamp(0.0, 1.0),
         ];

@@ -38,7 +38,6 @@ struct BandSpec {
 
 pub struct BandPlan {
     bands: Vec<BandSpec>,
-    pub centers: Vec<f32>,
 }
 
 fn smoothstep(t: f32) -> f32 {
@@ -69,13 +68,11 @@ impl BandPlan {
         let top = 18000f32.min(nyquist * 0.92);
         let lowest = 10f32.max(22f32.min(top / 4.0));
         let mut bands = Vec::with_capacity(BAND_COUNT);
-        let mut centers = Vec::with_capacity(BAND_COUNT);
         let dummy = BinSpec { i0: -1, i1: -1, frac: 0.0 };
         for i in 0..BAND_COUNT {
             let f0 = lowest * (top / lowest).powf(i as f32 / BAND_COUNT as f32);
             let f1 = lowest * (top / lowest).powf((i + 1) as f32 / BAND_COUNT as f32);
             let fc = (f0 * f1).sqrt();
-            centers.push(fc);
             let mix = if fc <= BLEND_LO {
                 0.0
             } else if fc >= BLEND_HI {
@@ -89,7 +86,7 @@ impl BandPlan {
                 hi: if mix > 0.0 { bin_spec(f0, f1, hi_n, hi_hz) } else { dummy },
             });
         }
-        BandPlan { bands, centers }
+        BandPlan { bands }
     }
 
     /// dB spectra in, bands out: `out_db` in dB and `out01` over [floor, ceil].

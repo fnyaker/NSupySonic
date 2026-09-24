@@ -325,10 +325,6 @@ impl Style {
         // neutral for the length of a dissolve.
     }
 
-    pub fn family_count(&self) -> usize {
-        self.families.len()
-    }
-
     pub fn range_of(&self, id: i32) -> Option<(f32, f32)> {
         let f = self.families.get(id as usize)?;
         if f.range.1 > f.range.0 && f.range.0 > 0.0 {

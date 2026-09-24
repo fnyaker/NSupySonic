@@ -667,7 +667,7 @@ impl Analyzer {
                 kick.is_some() || snares > 0,
                 &snap.energy_lin,
                 b.offbeat,
-                (kick.is_some() as u32 + snares) as f32 + if f.high_flux > 0.02 { 0.5 } else { 0.0 },
+                (kick.is_some() as u32 + snares) as f32 + if snap.onset > 0.0 && kick.is_none() && snares == 0 { 1.0 } else { 0.0 },
                 self.style.kick.decay,
                 self.style.kick.grit,
                 f.dynamics,

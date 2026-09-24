@@ -95,7 +95,6 @@ pub struct Features {
 }
 
 pub struct FeatureExtractor {
-    n_hi: usize,
     hz_per_bin: f32,
     floor_db: f32,
     mag: Vec<f32>,
@@ -220,7 +219,6 @@ impl FeatureExtractor {
             reg_wt_sum += reg_wt[i];
         }
         let mut fx = FeatureExtractor {
-            n_hi,
             hz_per_bin,
             floor_db,
             mag: vec![0.0; n_hi],
@@ -778,7 +776,4 @@ impl FeatureExtractor {
         &self.out
     }
 
-    pub fn n_bins(&self) -> usize {
-        self.n_hi
-    }
 }

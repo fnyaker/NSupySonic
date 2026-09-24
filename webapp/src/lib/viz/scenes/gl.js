@@ -479,6 +479,9 @@ export function createGLScene(opts = {}) {
       put("uChroma", c ? c[i * 4] : 0, c ? c[i * 4 + 1] : 0, c ? c[i * 4 + 2] : 0, c ? c[i * 4 + 3] : 0, i);
     }
     put("uCount", m.beatIndex, m.count.bar, m.count.kick, m.count.drop);
+    const gch = m.genre;
+    put("uGenre", gch.lead, gch.buzz, gch.screech, gch.sub, 0);
+    put("uGenre", gch.offbeat, gch.density, gch.tail, gch.grit, 1);
     put(
       "uSince",
       Math.min(999, beatsNow - st.kick),

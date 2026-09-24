@@ -24,7 +24,7 @@
 // projector FOLLOWS ONE: it prefers a tab that reports playback, keeps it while
 // its heartbeat holds, and only lets another take over once it goes quiet.
 
-import { setBackgroundAnalysis, BAND_COUNT } from "../audio/engine.js";
+import { setBackgroundAnalysis, BAND_COUNT, GENRE_KEYS } from "../audio/engine.js";
 import { LOOK_KEYS } from "../audio/style.js";
 
 const CHANNEL = "nsupysonic-viz";
@@ -310,6 +310,8 @@ export function createPublisher({ onViewers, channel } = {}) {
              hadDrop ? 1 : 0, frame.pattern.sinceDrop, frame.pattern.dropped,
              frame.pattern.breakdown, frame.pattern.build, frame.pattern.energy]
           : null,
+        // The genre channel (rhythm/src/genre.rs): continuous, sampled.
+        g: frame.genre ? GENRE_KEYS.map((k) => frame.genre[k]) : null,
         s: st
           ? {
               d: st.dominant,
@@ -384,6 +386,8 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2, ini
   };
   const look = {};
   for (const k of LOOK_KEYS) look[k] = 0;
+  const genre = {};
+  for (const k of GENRE_KEYS) genre[k] = 0;
   const style = {
     dominant: "", dominantLabel: "", confidence: 0, archetypes: null, look: null, kick,
   };
@@ -394,7 +398,7 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2, ini
   const frame = {
     t: 0, dt: 1 / 60,
     bands: new Float32Array(BAND_COUNT),
-    energy, features, beat, pattern: null, style: null, silent: true,
+    energy, features, beat, pattern: null, style: null, genre: null, silent: true,
     wave: null,
   };
   let lastAt = 0;
@@ -508,6 +512,10 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2, ini
         kick.decay = m.s.k[2]; kick.hit = !!m.s.k[3];
         frame.style = style;
       } else frame.style = null;
+      if (m.g) {
+        for (let i = 0; i < GENRE_KEYS.length; i++) genre[GENRE_KEYS[i]] = m.g[i] || 0;
+        frame.genre = genre;
+      } else frame.genre = null;
       if (m.w && m.w2 && m.w.length) {
         const n = m.w.length;
         if (!wave.left || wave.left.length !== n) {

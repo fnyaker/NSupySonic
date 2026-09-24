@@ -68,15 +68,6 @@ pub fn below(x: f32, t: f32, w: f32) -> f32 {
     clamp01((t - x) / w)
 }
 
-/// One step of an exponential approach with time constant `tau` seconds.
-#[inline]
-pub fn approach(cur: f32, target: f32, tau: f32, dt: f32) -> f32 {
-    if tau <= 0.0 {
-        return target;
-    }
-    cur + (target - cur) * (1.0 - (-dt / tau).exp())
-}
-
 #[inline]
 pub fn alpha(dt: f32, tau: f32) -> f32 {
     if tau <= 0.0 {
@@ -147,10 +138,6 @@ impl Biquad {
         }
     }
 
-    pub fn reset(&mut self) {
-        self.z1 = 0.0;
-        self.z2 = 0.0;
-    }
 }
 
 /// Butterworth Q values for the sections of an order-`2k` cascade.
@@ -162,23 +149,6 @@ pub fn butterworth_qs(sections: usize) -> Vec<f32> {
             1.0 / (2.0 * theta.cos())
         })
         .collect()
-}
-
-/// A deterministic xorshift PRNG for anything that needs noise.
-pub struct Rng(u32);
-impl Rng {
-    pub fn new(seed: u32) -> Rng {
-        Rng(if seed == 0 { 0x9e37_79b9 } else { seed })
-    }
-    #[inline]
-    pub fn next(&mut self) -> f32 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.0 = x;
-        (x >> 8) as f32 / (1u32 << 24) as f32
-    }
 }
 
 #[cfg(test)]

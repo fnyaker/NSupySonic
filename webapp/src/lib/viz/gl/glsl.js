@@ -60,6 +60,14 @@ export const MUSIC_SLOTS = [
   // the envelopes above, for worlds that build their own shapes in time — a
   // shock front's radius is (since × speed), exact at any frame rate.
   ["uSince", 1],
+  // THE GENRE CHANNEL (rhythm/src/genre.rs), 0..1 each: what only some genres
+  // are made of, so a world can draw what its genre is about rather than what
+  // every genre has. [0] x the sung LEAD, y the BUZZ (a saw stack, a kick so
+  // distorted it is a tone — zaag, krach), z a SCREECH attack, w the SUB's
+  // share of the power. [1] x the OFFBEAT's share of the groove, y onsets per
+  // beat (DENSITY, a full reading at sixteenths), z how long the kick rings
+  // (TAIL), w how noisy it is (GRIT).
+  ["uGenre", 2],
   // The palette, in LINEAR light and luminance-normalised (so a pale sleeve and
   // a dark one expose the same). w carries the raw numbers: saturation,
   // lightness, hue / 360, spread / 360.

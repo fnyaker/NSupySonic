@@ -79,10 +79,6 @@ impl RealFft {
         }
     }
 
-    pub fn size(&self) -> usize {
-        self.n
-    }
-
     /// Magnitudes |X[k]| / N for k in 0..N/2, of the N samples formed by
     /// `a` followed by `b` (a ring buffer's two halves), windowed.
     pub fn magnitudes(&mut self, a: &[f32], b: &[f32], out: &mut [f32]) {

@@ -1,11 +1,12 @@
 // PIANO — a keyboard of light, with the melody rising above it.
 //
-// Frenchcore is the melodic side of hardcore: a 200 BPM kick under a lead, a
-// piano, strings — the part people sing. The forge drew the kick; this draws
-// the TUNE, the way piano covers of it are shown everywhere: a keyboard across
-// the bottom of the frame and the notes as bars of light over the keys that
-// play them — here rising away from the keys, a piano roll of what has just
-// been played.
+// Piano music, drawn the way piano performances are shown everywhere: a
+// keyboard across the bottom of the frame and the notes as bars of light over
+// the keys that play them — here rising away from the keys, a piano roll of
+// what has just been played. (It was written for frenchcore's piano leads and
+// keeps a kick response for whatever drums a piano record has; frenchcore
+// itself now has the Chladni plate, cymatics.js, which moves the way a
+// 200 BPM kick does.)
 //
 //   THE NOTES are read from the music, not invented. The spectrum is 120
 //   log-spaced bands over 22 Hz-18 kHz — about one per semitone — so every

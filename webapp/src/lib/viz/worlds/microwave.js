@@ -34,17 +34,28 @@
 //   with the twelve pitch classes of what is playing; and the power dial,
 //   its pointer on the drive and its ring of LEDs a level meter.
 //
+//   WHAT IS COOKING — the one SHAPE switch, because three genres share this
+//   oven and are not the same record. Deutscher Krach cooks the artwork on a
+//   gilt-rimmed dish (the arcs' anchor). Zaag — Dutch for SAW — puts a
+//   circular saw blade on the plate, on its own spindle: it idles round
+//   faster the more the tail buzzes and BITES on every main kick, its teeth
+//   flaring — and blurring into their swept ring while it bites, the way a
+//   camera sees a blade at speed.
+//   Uptempo cooks POPCORN: kernels on the plate that burst on the kicks, and
+//   on every note of a roll — the genre's rolls, made visible.
+//
 // Parameters:
 //   hum    how hard the lamp and the hot spots answer the kick
 //   arcs   how many arcs, and how bright     mesh   the door screen (0 = none)
 //   field  how visible the hot spots are     spin   turntable speed
+//   dish   0 the artwork's dish (krach), 1 a saw blade (zaag), 2 popcorn (uptempo)
 
 import { eventRing, onStamp, hashN } from "./kit.js";
 
 export default {
   id: "microwave",
   uses: ["sdf"],
-  params: { hum: 1, arcs: 1, mesh: 1, field: 1, spin: 1 },
+  params: { hum: 1, arcs: 1, mesh: 1, field: 1, spin: 1, dish: 0 },
   look: { exposure: 1.0, bloom: 1.15, threshold: 0.75, saturation: 1.1 },
 
   fragment: `
@@ -120,6 +131,84 @@ vec2 seg7(vec2 q, int mask) {
     if (((mask >> i) & 1) == 1) lit = min(lit, d);
   }
   return vec2(lit, every);
+}
+
+// --- what is cooking (P_DISH) -------------------------------------------------------
+// ZAAG: a circular saw blade on its own spindle, in the plate's plane: steel
+// with grinding marks under a highlight that stays where the lamp puts it (a
+// reflection does not turn with the disc — the teeth do), and a sawtooth rim
+// whose tips flare on every kick. It idles round with the buzz and BITES on
+// the main kick (the driver's angle, uS0.z). uS0.w is how many teeth pass in
+// one drawn frame: past about half of one they are drawn as what a camera
+// sees at that speed, the swept ring, because a pattern that moves more than
+// half its period a frame does not look fast — it aliases into one crawling
+// backwards.
+vec3 sawBlade(vec2 q, float R, float fw, vec3 under, vec3 lampC, float lampI, vec3 arcC, float arcI) {
+  vec2 qb = rot(-uS0.z) * q;
+  float rb = length(qb);
+  float ab = atan(qb.y, qb.x);
+  float Rb = 0.66 * R;
+  float teeth = 0.06 * R;
+  float blur = smoothstep(0.3, 0.7, uS0.w);
+  float tooth = fract(ab / TAU * 26.0);
+  float edge = Rb + teeth * tooth;
+  // The rim as it stands, and as it sweeps: the share of a turn a tooth
+  // covers at this radius.
+  float sharp = smoothstep(edge + fw, edge - fw, rb);
+  float swept = clamp(1.0 - (rb - Rb) / teeth, 0.0, 1.0);
+  float hub = smoothstep(0.08 * R - fw, 0.08 * R + fw, rb);
+  float disc = mix(sharp, swept, blur) * hub;
+  if (disc <= 0.0) return under;
+  vec3 steel = mix(vec3(0.5, 0.52, 0.56), uPalHigh.rgb, 0.18);
+  float marks = 0.75 + 0.25 * sin(rb * 220.0);
+  float sheen = pow(max(0.0, cos(atan(q.y, q.x) * 2.0 - 0.6)), 10.0);
+  vec3 blade = steel * marks * (0.18 + 0.55 * lampI) + lampC * lampI * sheen * 0.7 + arcC * arcI * 0.35;
+  // The gullets between the teeth read darker; the tips catch the kick.
+  // Swept, each becomes its own average round the ring.
+  float ring = smoothstep(Rb - 0.03 * R, Rb, rb);
+  blade *= 1.0 - 0.35 * mix(smoothstep(0.0, 0.2, tooth), 0.9, blur) * ring;
+  float tip = mix(smoothstep(0.75, 1.0, tooth) * smoothstep(Rb, edge, rb), 0.15 * swept * step(Rb, rb), blur);
+  blade += mix(vec3(1.0, 0.72, 0.35), uPalAcc.rgb, 0.35) * tip * (0.25 + 1.8 * uHit.x);
+  return mix(under, blade, disc);
+}
+
+// UPTEMPO: popcorn on the plate. Each kernel pops on a kick of its own —
+// every kick pops a fresh few, a roll pops a fresh few on every note — and a
+// popped kernel stays white until its turn comes round again.
+vec3 popcorn(vec2 q, float R, vec3 under, vec3 lampC, float lampI) {
+  vec3 col = under;
+  float cellS = 0.13 * R;
+  vec2 cq = q / cellS;
+  vec2 ci = floor(cq);
+  for (int j = -1; j <= 1; j++)
+  for (int i = -1; i <= 1; i++) {
+    vec2 cell = ci + vec2(float(i), float(j));
+    vec3 hh = hash32(cell + 17.0);
+    vec2 cp = (cell + 0.2 + 0.6 * hh.xy) * cellS;
+    if (length(cp) > 0.8 * R) continue;
+    // Which kick is this kernel's: it pops when the kick count comes round
+    // to its slot, and stays popped for the next eleven.
+    float slot = floor(hh.z * 24.0);
+    float age = mod(uCount.z - slot, 24.0);
+    bool popped = age < 12.0;
+    float fresh = age < 0.5 ? smoothstep(0.0, 0.12, uSince.x) : 1.0;
+    vec2 d = q - cp;
+    // A hop on its own pop, and on every main kick after it.
+    d.y -= 0.02 * R * envB(age < 0.5 ? uSince.x : uSince.y, 0.25);
+    if (popped) {
+      // A cloud of three lobes, bursting out to full size.
+      float sz = 0.045 * R * (0.3 + 0.7 * fresh) * (0.85 + 0.3 * hh.x);
+      float m = min(length(d - vec2(0.3, 0.1) * sz), min(length(d + vec2(0.35, -0.05) * sz), length(d - vec2(0.0, 0.4) * sz))) - 0.55 * sz;
+      float body = smoothstep(0.004 * R, -0.004 * R, m);
+      vec3 white = vec3(1.0, 0.97, 0.9) * (0.35 + 0.6 * lampI) + lampC * lampI * 0.25;
+      col = mix(col, white * (1.0 + 1.5 * (1.0 - fresh)), body);
+    } else {
+      float m = length(d * vec2(1.0, 1.4)) - 0.018 * R;
+      float seed = smoothstep(0.003 * R, -0.003 * R, m);
+      col = mix(col, vec3(0.75, 0.5, 0.15) * (0.25 + 0.6 * lampI), seed);
+    }
+  }
+  return col;
 }
 
 // --- the cavity -----------------------------------------------------------------
@@ -225,6 +314,8 @@ vec3 cavity(vec2 p, vec2 vp, vec4 C, vec4 H, float lampI, vec3 lampC, vec3 arcL3
         // The gilt rim: the thing the arcs start from.
         float rim = smoothstep(0.03 + fw, 0.0, abs(r - R + 0.02));
         glass += mix(vec3(1.0, 0.75, 0.35), uPalHigh.rgb, 0.3) * rim * (0.35 * lampI + 0.8 * arcI);
+        if (P_DISH > 0.5 && P_DISH < 1.5) glass = sawBlade(q, R, fw, glass, lampC, lampI, arcC, arcI);
+        else if (P_DISH >= 1.5) glass = popcorn(rot(uS0.x) * q, R, glass, lampC, lampI);
         col = mix(col, glass, inside);
         t = min(t, tp);
       } else if (floorHit) {
@@ -577,10 +668,14 @@ void main() {
     let stir = 0;
     let stirTo = 0;
     let n = 0;
+    // Zaag's saw: its angle, and the extra speed a kick's bite gives it.
+    let blade = 0;
+    let bite = 0;
     const arc = (at, power) => ring.push(at, power, hashN(n++), hashN(n * 7 + 3));
     const main = onStamp((m) => m.stamp.main, (s, m) => {
       // The stirrer moves the hot spots one step on every main kick.
       stirTo += 1;
+      bite = Math.min(1.5, bite + (m.bigKick ? 0.9 : 0.6));
       if (m.breakdown > 0.5 || m.drive < 0.3) return;
       const p = 0.5 + 0.6 * Math.min(1.2, m.mainPower || m.kick || 0.8);
       arc(s, p);
@@ -611,8 +706,17 @@ void main() {
           stirTo -= 315;
           stir -= 315;
         }
+        // The saw idles round with the buzz and bites on the kick — in turns
+        // a beat, so it bites at the music's speed. What it turned THIS frame,
+        // in teeth, is what the shader blurs by.
+        const turns = (0.08 + 0.3 * (m.genre?.buzz ?? 0)) * (1 - 0.7 * m.breakdown) + bite;
+        bite = m.ease(bite, 0, 0.35, dt);
+        const turned = (dt / m.beat) * turns;
+        blade = (blade + turned * Math.PI * 2) % (Math.PI * 2);
         state[0] = angle;
         state[1] = stir;
+        state[2] = blade;
+        state[3] = turned * 26;
       },
     };
   },
