@@ -277,6 +277,20 @@ unreachable, and the parts that do need Deezer must fail *fast* and *without a v
 archives the FLAC, then the existing transcode/cache/`send_file` path runs unchanged. The permanent
 FLAC archive is separate from supysonic's capped `transcode_cache`.
 
+**Decrypting a stream** (`provider.decrypt_blocks` / `iter_decrypted`). Deezer encrypts the 2048-byte
+blocks at FILE offsets 0, 6144, 12288… — every third one, each its own CBC chain (IV `00..07`), never
+a short last block. The body is re-cut into those blocks by byte count, whatever pieces the network
+delivers it in: a chunked response arrives in HTTP chunks of any size (`iter_content(2048)` caps a
+piece, it never fills one), and counting pieces — which the code did until a test ran it over a real
+connection — decrypted every chunked response into noise. One ECB cipher per stream with the chain
+applied by hand, not a CBC cipher per block: re-running Blowfish's key schedule 6800 times was 70% of
+the cost (0.44 → 0.16 s of CPU per 40 MB FLAC, same bytes). **Nothing that does not open like audio
+is archived**: the first decrypted bytes must be `fLaC`, `ID3` or an MPEG frame sync
+(`looks_like_audio`), an empty body is an error, and `download_to` removes its `.part` whatever
+stopped it. An archive is forever — a file on disk is what "archived" means — so noise kept there
+would never be fetched, or play, again. `/api/stream` reads the first block before answering, so
+that refusal is its 502 rather than a response dying half-sent.
+
 **Podcasts** are Deezer *shows*/*episodes*, kept in dedicated `PodcastChannel`/`PodcastEpisode` tables
 (not Track rows — episodes have no artist/album and map onto Subsonic's podcast types). The gw methods
 (`deezer.pageShow`, `show.add/deleteFavorite`, `episode.bookmarkSet`) were confirmed from a HAR capture;
@@ -1696,7 +1710,13 @@ All proxy/web tests run offline with mocks: `tests/test_deezer.py` (mock provide
 adapter that times out / answers garbage, pinning the rules above: the breaker opens and stops
 costing sockets, retries stay inside their budget, and no transport failure ever condemns a track or
 a show). Note that its circuit breaker is a process-wide singleton — reset it in `setUp` when a test
-trips it. `tests/net/` hits real services and is CI-only.
+trips it. `tests/test_deezer_stream.py` runs the audio path for real, where every other test replaced
+the download with one writing zeros (which the archive then kept as a FLAC): the key and the cipher
+against vectors from Node's md5 and OpenSSL's bf-cbc, the body over a loopback HTTP connection that
+delivers it in pieces aligned with nothing — Content-Length and chunked, cut short, refused, and
+gated to prove the first block is handed on before the rest has even been sent — through
+`open_live_stream` and `/api/stream` to a tagged archive. `tests/net/` hits real services and is
+CI-only.
 `tests/test_webui.py::GenreStudioTestCase` covers the studio's API without onnxruntime (which is
 the normal install): the vectors it reads are written by `struct`, so the whole tagging/training/
 shipping path is exercised on a stock server. It also covers the extractor's upload/delete round

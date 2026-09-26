@@ -332,6 +332,60 @@ def blowfish_key(track_id) -> bytes:
     return bytes(ord(md5[i]) ^ ord(md5[i + 16]) ^ _SECRET[i] for i in range(16))
 
 
+def decrypt_blocks(pieces, key: bytes):
+    """Deezer's stream, decrypted, from its body in pieces of any size.
+
+    Deezer encrypts the 2048-byte blocks at offsets 0, 6144, 12288... of the
+    FILE — every third block, each on its own CBC chain, never a short last one.
+    Those are offsets in the file, not in the network's delivery of it: a
+    chunked response arrives in HTTP chunks of whatever size the server chose,
+    and ``iter_content`` only caps a piece at the size asked for, it never fills
+    one. Counting pieces instead of bytes decrypted such a stream into noise, so
+    the body is re-cut into blocks here. Yields runs of whole blocks, then the
+    tail.
+
+    One key schedule per stream: a CBC cipher per block re-ran Blowfish's key
+    setup (521 block encryptions) some 6800 times per 40 MB FLAC, which was 70%
+    of the cost of decrypting it. The chain is applied by hand over ECB
+    instead — plain = D(block) xor (IV + block[:-8]) — for the same bytes.
+    """
+    ecb = Blowfish.new(key, Blowfish.MODE_ECB)
+    buf = bytearray()
+    index = 0
+    for piece in pieces:
+        buf += piece
+        whole = len(buf) - len(buf) % _CHUNK
+        if not whole:
+            continue
+        for offset in range(0, whole, _CHUNK):
+            if index % 3 == 0:
+                end = offset + _CHUNK
+                block = bytes(buf[offset:end])
+                plain = int.from_bytes(ecb.decrypt(block), "big") ^ int.from_bytes(
+                    _BF_IV + block[:-8], "big"
+                )
+                buf[offset:end] = plain.to_bytes(_CHUNK, "big")
+            index += 1
+        yield bytes(buf[:whole])
+        del buf[:whole]
+    if buf:
+        yield bytes(buf)
+
+
+def looks_like_audio(head: bytes) -> bool:
+    """Whether a decrypted stream opens the way the audio Deezer serves does.
+
+    FLAC starts with its ``fLaC`` marker, MP3 with an ID3 tag or a frame sync.
+    A wrong key, a CDN error page answered with a 200 or a scheme Deezer has
+    changed all decrypt to something else — and an archive is forever: a file
+    on disk is what makes a track "archived", so noise kept there would never be
+    fetched again, and never play again.
+    """
+    if head[:4] == b"fLaC" or head[:3] == b"ID3":
+        return True
+    return len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0
+
+
 class DeezerProvider:
     def __init__(self, arl: str, archive_dir: str, default_quality: str = "FLAC"):
         self.arl = arl
@@ -1046,26 +1100,49 @@ class DeezerProvider:
     # -- streaming download + decryption ---------------------------------
 
     def iter_decrypted(self, url: str, track_id):
-        """Yield decrypted audio bytes from a Deezer stream URL."""
+        """Yield decrypted audio bytes from a Deezer stream URL, as they arrive.
+
+        A stream that does not decrypt to audio — or is empty — raises
+        ``DeezerError`` before a byte of it is handed on (``looks_like_audio``).
+        """
         key = blowfish_key(track_id)
         with self.dz.session.get(
             url, headers=self.dz.http_headers, stream=True, timeout=(10, 120)
         ) as resp:
             resp.raise_for_status()
-            for i, chunk in enumerate(resp.iter_content(_CHUNK)):
-                if i % 3 == 0 and len(chunk) == _CHUNK:
-                    chunk = Blowfish.new(key, Blowfish.MODE_CBC, _BF_IV).decrypt(chunk)
-                yield chunk
+            first = True
+            for data in decrypt_blocks(resp.iter_content(_CHUNK), key):
+                if first:
+                    if not looks_like_audio(data):
+                        raise DeezerError(
+                            f"the stream of track {track_id} did not decrypt to "
+                            f"audio (it starts {data[:8]!r})"
+                        )
+                    first = False
+                yield data
+            if first:
+                raise DeezerError(f"the stream of track {track_id} was empty")
 
     def download_to(self, url: str, track_id, dest: Path) -> None:
-        """Stream-decrypt `url` into `dest` (atomic via a .part temp file)."""
+        """Stream-decrypt `url` into `dest` (atomic via a .part temp file).
+
+        Whatever stops the download, the partial goes with it: it is not an
+        archive, and nothing else would ever remove it.
+        """
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".part")
-        with open(tmp, "wb") as fh:
-            for chunk in self.iter_decrypted(url, track_id):
-                fh.write(chunk)
-        tmp.replace(dest)
+        try:
+            with open(tmp, "wb") as fh:
+                for chunk in self.iter_decrypted(url, track_id):
+                    fh.write(chunk)
+            tmp.replace(dest)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def fetch_cover(self, md5_image: str, size: int = 1000) -> bytes | None:
         # Album covers come straight from the image CDN (not rate-limited).
