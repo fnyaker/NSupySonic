@@ -230,6 +230,12 @@ class ScannerProcessingQueue(Thread):
                 if path.startswith(basepath):
                     del self.__queue[path]
 
+    @property
+    def pending(self):
+        """How many paths are waiting for their delay to elapse."""
+        with self.__cond:
+            return len(self.__queue)
+
     def __wakeup(self):
         with self.__cond:
             self.__cond.notify()
@@ -315,3 +321,8 @@ class SupysonicWatcher:
             and self.__queue.is_alive()
             and self.__observer.is_alive()
         )
+
+    @property
+    def pending(self):
+        """Paths the watcher has been told about and not processed yet."""
+        return self.__queue.pending if self.__queue is not None else 0

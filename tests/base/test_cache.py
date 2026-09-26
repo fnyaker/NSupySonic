@@ -9,10 +9,20 @@
 import os
 import unittest
 import shutil
-import time
 import tempfile
 
+from supysonic import cache as cache_module
 from supysonic.cache import Cache, CacheMiss, ProtectedError
+
+
+class _Clock:
+    """What supysonic.cache reads as ``time()``, moved by hand."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
 
 
 class CacheTestCase(unittest.TestCase):
@@ -22,6 +32,22 @@ class CacheTestCase(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.__dir)
 
+    def _clock(self, now=1000.0):
+        # Expiry is whole seconds (int(time()) + min_time), so a test that
+        # slept "one second" passed or failed on where in the second it
+        # started. A clock the test moves says exactly which side of the
+        # boundary each check is on, and costs no wall time.
+        clock = _Clock(now)
+        original = cache_module.time
+        cache_module.time = clock
+        self.addCleanup(setattr, cache_module, "time", original)
+        return clock
+
+    def _backdate(self, key, seconds):
+        path = os.path.join(self.__dir, key)
+        then = os.stat(path).st_mtime - seconds
+        os.utime(path, (then, then))
+
     def test_existing_files_order(self):
         cache = Cache(self.__dir, 30)
         val = b"0123456789"
@@ -30,8 +56,11 @@ class CacheTestCase(unittest.TestCase):
         cache.set("key3", val)
         self.assertEqual(cache.size, 30)
 
-        # file mtime is accurate to the second
-        time.sleep(1)
+        # A restarted cache orders what it finds by mtime. Make the three
+        # files old, then read key1: reading touches it, so it is now the
+        # NEWEST and the first to survive a prune.
+        for key in ("key1", "key2", "key3"):
+            self._backdate(key, 60)
         cache.get_value("key1")
 
         cache = Cache(self.__dir, 30, min_time=0)
@@ -229,31 +258,40 @@ class CacheTestCase(unittest.TestCase):
         self.assertEqual(cache.size, 10)
 
     def test_min_time_clear(self):
+        clock = self._clock(1000.0)
         cache = Cache(self.__dir, 40, min_time=1)
         val = b"0123456789"
 
-        cache.set("key1", val)
+        cache.set("key1", val)  # protected until 1001
         cache.set("key2", val)
-        time.sleep(1)
-        cache.set("key3", val)
+        clock.now = 1001.5
+        cache.set("key3", val)  # protected until 1002
         cache.set("key4", val)
 
         self.assertEqual(cache.size, 40)
         cache.clear()
         self.assertEqual(cache.size, 20)
-        time.sleep(1)
+        self.assertFalse(cache.has("key1"))
+        self.assertTrue(cache.has("key3"))
+        self.assertTrue(cache.has("key4"))
+        clock.now = 1002.0
         cache.clear()
         self.assertEqual(cache.size, 0)
 
     def test_not_expired(self):
+        clock = self._clock(1000.0)
         cache = Cache(self.__dir, 40, min_time=1)
         val = b"0123456789"
-        cache.set("key1", val)
+        cache.set("key1", val)  # protected until 1001
         with self.assertRaises(ProtectedError):
             cache.delete("key1")
-        time.sleep(1)
+        clock.now = 1000.999
+        with self.assertRaises(ProtectedError):
+            cache.delete("key1")
+        clock.now = 1001.0
         cache.delete("key1")
         self.assertEqual(cache.size, 0)
+        self.assertFalse(os.listdir(self.__dir))
 
     def test_missing_cache_file(self):
         cache = Cache(self.__dir, 10, min_time=0)
