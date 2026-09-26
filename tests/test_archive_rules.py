@@ -432,6 +432,200 @@ class CleanupTestCase(RulesTestBase):
         )
         self.assertEqual(cleanup.candidates(self.app), [])
 
+    # -- the trigger itself, never mocked ----------------------------------
+    # Every test above replaces deficit() with a number. What decides whether
+    # anything is deleted at all is this function, so it gets real inputs:
+    # a floor from the rules and a free-space figure from the disk.
+
+    def _free(self, value):
+        original = cleanup.free_bytes
+        cleanup.free_bytes = lambda path: value
+        self.addCleanup(setattr, cleanup, "free_bytes", original)
+
+    def test_the_deficit_is_the_floor_minus_what_is_free(self):
+        # Literal bytes, not cleanup.GB: a test that computes its expectation
+        # from the constant under test cannot notice the constant is wrong.
+        # The floor is in binary gigabytes, like the disk figures beside it.
+        self._enable(clean_min_free_gb=2.0)
+        self._free(1_610_612_736)  # 1.5 GiB free
+        self.assertEqual(cleanup.deficit(self.app), 536_870_912)  # 0.5 GiB short
+        self._free(1_073_741_824 * 2 - 100)
+        self.assertEqual(cleanup.deficit(self.app), 100)
+        self._free(3_221_225_472)
+        self.assertEqual(cleanup.deficit(self.app), 0)
+
+    def test_no_floor_means_nothing_is_ever_short(self):
+        self._enable(clean_min_free_gb=0.0)
+        self._free(0)  # a full disk
+        self.assertEqual(cleanup.deficit(self.app), 0)
+
+    def test_an_unreadable_disk_never_triggers_a_deletion(self):
+        """free_bytes answers -1 when statvfs fails. Unknown is not "full"."""
+        self._enable(clean_min_free_gb=50.0)
+        self._free(-1)
+        self.assertEqual(cleanup.deficit(self.app), 0)
+        old = now() - timedelta(days=400)
+        track = self._track("1", played=old)
+        self.assertEqual(cleanup.run(self.app)["deleted"], 0)
+        self.assertTrue(os.path.isfile(Track[track.id].path))
+
+    def test_a_missing_archive_dir_is_not_a_deficit(self):
+        self._enable(clean_min_free_gb=50.0)
+        self._free(0)
+        self.app.config["DEEZER"]["archive_dir"] = os.path.join(self.archive, "nope")
+        self.assertEqual(cleanup.deficit(self.app), 0)
+
+    def test_a_forced_run_on_a_healthy_disk_deletes_nothing(self):
+        """The button frees what is NEEDED; with no deficit that is nothing."""
+        self._enable(clean_min_free_gb=1.0)
+        self._free(10 * cleanup.GB)
+        track = self._track("1", played=now() - timedelta(days=400))
+        stats = cleanup.run(self.app, force=True)
+        self.assertEqual((stats["deleted"], stats["freed"]), (0, 0))
+        self.assertTrue(os.path.isfile(Track[track.id].path))
+
+    def test_a_real_shortfall_is_reclaimed_end_to_end(self):
+        """No mock of the decision: the floor, the disk and the ordering."""
+        self._enable(clean_min_free_gb=1.0)
+        old = now() - timedelta(days=400)
+        first = self._track("1", size=3000, played=old - timedelta(days=5))
+        second = self._track("2", size=3000, played=old)
+        # 2500 bytes short of the floor: the least recently played file
+        # (3000 bytes) covers it, and the run stops there.
+        self._free(cleanup.GB - 2500)
+        stats = cleanup.run(self.app)
+        self.assertEqual((stats["deleted"], stats["freed"]), (1, 3000))
+        self.assertFalse(os.path.isfile(Track[first.id].path))
+        self.assertTrue(os.path.isfile(Track[second.id].path))
+
+    def test_the_staleness_window_is_honoured_at_its_edge(self):
+        self._enable(clean_stale_days=30)
+        inside = self._track("1", played=now() - timedelta(days=29))
+        outside = self._track("2", played=now() - timedelta(days=31))
+        never = self._track("3", played=None)  # never played here: stale
+        ids = {t.id for t, _ in cleanup.candidates(self.app)}
+        self.assertEqual(ids, {outside.id, never.id})
+        self.assertNotIn(inside.id, ids)
+
+    def test_a_file_already_gone_is_not_counted(self):
+        self._enable()
+        track = self._track("1", played=now() - timedelta(days=400))
+        os.remove(track.path)
+        self.assertEqual(cleanup.candidates(self.app), [])
+
+    def test_a_file_that_cannot_be_removed_is_not_counted_as_freed(self):
+        """Or the run would stop early, believing space it never got."""
+        self._enable()
+        old = now() - timedelta(days=400)
+        stuck = self._track("1", size=1000, played=old - timedelta(days=9))
+        freed = self._track("2", size=1000, played=old)
+        real_remove = os.remove
+
+        def remove(path):
+            if path == stuck.path:
+                raise PermissionError(13, "read-only", path)
+            return real_remove(path)
+
+        cleanup.os.remove = remove
+        original = cleanup.deficit
+        cleanup.deficit = lambda app, settings=None: 1500
+        try:
+            stats = cleanup.run(self.app, force=True)
+        finally:
+            cleanup.os.remove = real_remove
+            cleanup.deficit = original
+        self.assertEqual((stats["deleted"], stats["freed"]), (1, 1000))
+        # The stuck file keeps its "archived" flag: it IS still on disk.
+        self.assertEqual(Track[stuck.id].last_modification, 1)
+        self.assertEqual(Track[freed.id].last_modification, 0)
+
+    def test_one_cleanup_at_a_time(self):
+        self._enable()
+        track = self._track("1", played=now() - timedelta(days=400))
+        original = cleanup.deficit
+        cleanup.deficit = lambda app, settings=None: 10**9
+        self.assertTrue(cleanup._lock.acquire(blocking=False))
+        try:
+            self.assertTrue(cleanup.is_running())
+            stats = cleanup.run(self.app, force=True)
+        finally:
+            cleanup._lock.release()
+            cleanup.deficit = original
+        self.assertTrue(stats["skipped"])
+        self.assertTrue(os.path.isfile(Track[track.id].path))
+
+    def test_an_episode_removed_is_flagged_not_archived(self):
+        from supysonic.db import PodcastChannel, PodcastEpisode
+
+        self._enable(clean_keep_podcast=False)
+        user = User.get(User.name == "alice")
+        channel = PodcastChannel.create(user=user, url="u", title="Show", status="completed")
+        path = os.path.join(self.archive, "ep.mp3")
+        with open(path, "wb") as fh:
+            fh.write(b"\0" * 500)
+        ep = PodcastEpisode.create(
+            channel=channel, title="Ep", path=path, status="completed",
+            publish_date=now() - timedelta(days=400),
+        )
+        original = cleanup.deficit
+        cleanup.deficit = lambda app, settings=None: 10**9
+        try:
+            stats = cleanup.run(self.app, force=True)
+        finally:
+            cleanup.deficit = original
+        self.assertEqual(stats["deleted"], 1)
+        self.assertFalse(os.path.isfile(path))
+        row = PodcastEpisode[ep.id]
+        self.assertIsNone(row.path)  # plays again from the feed, archives again
+        self.assertEqual(row.status, "new")
+
+    def test_an_episode_listened_to_or_just_published_is_kept(self):
+        from supysonic.db import PodcastChannel, PodcastEpisode, PodcastProgress
+
+        self._enable(clean_keep_podcast=False, clean_stale_days=30)
+        user = User.get(User.name == "alice")
+        channel = PodcastChannel.create(user=user, url="u", title="Show", status="completed")
+
+        def episode(name, published):
+            path = os.path.join(self.archive, name + ".mp3")
+            with open(path, "wb") as fh:
+                fh.write(b"\0" * 500)
+            return PodcastEpisode.create(
+                channel=channel, title=name, path=path, publish_date=published
+            )
+
+        old = now() - timedelta(days=400)
+        heard = episode("heard", old)
+        PodcastProgress.create(user=user, episode=heard, position=60, updated=now())
+        fresh = episode("fresh", now() - timedelta(days=2))
+        stale = episode("stale", old)
+        ids = {row.id for row, _ in cleanup.candidates(self.app)}
+        self.assertEqual(ids, {stale.id})
+
+    def test_the_event_trigger_only_fires_on_a_real_shortfall(self):
+        started = []
+        original_thread = cleanup.threading.Thread
+
+        class Recorder:
+            def __init__(self, target=None, args=(), **kw):
+                started.append(target)
+
+            def start(self):
+                pass
+
+        cleanup.threading.Thread = Recorder
+        self.addCleanup(setattr, cleanup.threading, "Thread", original_thread)
+
+        self._free(0)  # the disk is full...
+        cleanup.maybe_run(self.app)  # ...but the feature is off
+        self._enable(clean_min_free_gb=1.0)
+        self._free(10 * cleanup.GB)
+        cleanup.maybe_run(self.app)  # on, and nothing is short
+        self.assertEqual(started, [])
+        self._free(0)
+        cleanup.maybe_run(self.app)  # on, and short: a run starts
+        self.assertEqual(len(started), 1)
+
     def test_preview_deletes_nothing(self):
         self._enable()
         old = now() - timedelta(days=400)
