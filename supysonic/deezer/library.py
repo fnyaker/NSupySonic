@@ -512,19 +512,41 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
 
     try:
         track = Track[tid]
-        # Refresh mutable metadata; keep path/bitrate/has_art if already archived.
-        track.title = f["title"]
-        track.artist = artist
-        track.album = album
-        _sync_credits(track, f["credits"], artist, cache=cache)
-        track.disc = f["disc"]
-        track.number = f["number"]
-        track.duration = f["duration"]
-        track.year = f["year"]
-        track.deezer_id = f["sng_id"]
+        # Refresh the mutable metadata, and write only the columns whose value
+        # actually CHANGED. A plain save() rewrote every column of every row on
+        # every sync — measured, re-syncing an unchanged 2000-track playlist
+        # issued 2001 UPDATEs — and a full-row write is also a lost update: an
+        # archive finishing between the read above and that save had its
+        # path/bitrate/last_modification put back to the values read here, and
+        # the track read as not archived again.
+        fresh = {
+            "title": f["title"],
+            "artist": artist,
+            "album": album,
+            "disc": f["disc"],
+            "number": f["number"],
+            "duration": f["duration"],
+            "year": f["year"],
+            "deezer_id": f["sng_id"],
+        }
         if f["gain"] is not None:
-            track.gain = f["gain"]
-        track.save()
+            fresh["gain"] = f["gain"]
+        _sync_credits(track, f["credits"], artist, cache=cache)
+        changed = [
+            name
+            for name, value in fresh.items()
+            if (
+                getattr(track, name + "_id") != value.id
+                if name in ("artist", "album")
+                else getattr(track, name) != value
+            )
+        ]
+        # Assigned whatever changed, so the returned row carries the objects
+        # (callers read track.artist without paying a query for it).
+        for name, value in fresh.items():
+            setattr(track, name, value)
+        if changed:
+            track.save(only=[Track._meta.fields[name] for name in changed])
         return track
     except Track.DoesNotExist:
         ext = EXT_FOR_FORMAT.get(default_quality, ".flac")
