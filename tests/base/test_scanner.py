@@ -23,7 +23,14 @@ class ScannerTestCase(unittest.TestCase):
     def setUp(self):
         db.init_database("sqlite:")
 
-        folder = FolderManager.add("folder", os.path.abspath("tests/assets/folder"))
+        # A private copy: these tests write temporary tracks next to the
+        # fixture, and tests/assets/folder is scanned by other test modules
+        # too — run in parallel, one of them listed a copy this one was
+        # deleting and failed on the missing file.
+        self.__library = tempfile.mkdtemp()
+        library = os.path.join(self.__library, "folder")
+        shutil.copytree("tests/assets/folder", library)
+        folder = FolderManager.add("folder", library)
         self.assertIsNotNone(folder)
 
         self.folderid = folder.id
@@ -31,6 +38,7 @@ class ScannerTestCase(unittest.TestCase):
 
     def tearDown(self):
         db.release_database()
+        shutil.rmtree(self.__library, ignore_errors=True)
 
     @contextmanager
     def __temporary_track_copy(self):
@@ -170,6 +178,39 @@ class ScannerTestCase(unittest.TestCase):
             self.assertEqual(copy.album.name, "Crappy album")
             self.assertIsNotNone(db.Artist.get(name="Some artist"))
             self.assertIsNotNone(db.Album.get(name="Awesome album"))
+
+    def test_a_file_vanishing_mid_scan_does_not_abort_it(self):
+        # Listed by scandir, gone by the time it is stat()ed: a file moved or
+        # deleted while a scan runs. It used to raise FileNotFoundError out of
+        # the scan and leave every file after it unscanned.
+        track = db.Track.select().first()
+        folder = os.path.dirname(track.path)
+        doomed = os.path.join(folder, "a-doomed.mp3")
+        survivor = os.path.join(folder, "z-survivor.mp3")
+        shutil.copyfile(track.path, doomed)
+        shutil.copyfile(track.path, survivor)
+
+        from supysonic import scanner as scanner_module
+
+        real_scandir = scanner_module.os.scandir
+
+        def scandir(path):
+            with real_scandir(path) as it:
+                entries = sorted(it, key=lambda e: e.name)
+            for entry in entries:
+                if entry.path == doomed:
+                    os.remove(doomed)  # after listing, before stat()
+                yield entry
+
+        scanner_module.os.scandir = scandir
+        try:
+            self.__scan()
+        finally:
+            scanner_module.os.scandir = real_scandir
+
+        paths = {t.path for t in db.Track.select()}
+        self.assertIn(survivor, paths)
+        self.assertNotIn(doomed, paths)
 
     def test_stats(self):
         stats = self.scanner.stats()
