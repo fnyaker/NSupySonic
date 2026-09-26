@@ -192,7 +192,10 @@ def audio_edges(mid):
         return jsonify({"ready": False, "duration": db_duration})
 
     cache = current_app.cache
-    ckey = f"edges-{key}-{mtime}-{threshold:g}"
+    # "edges2": bounds cached before the EOF-closed trailing silence was read
+    # (see _edges) have an untrimmed end; a new key makes every file measure
+    # again once, and the stale entries age out of the LRU.
+    ckey = f"edges2-{key}-{mtime}-{threshold:g}"
     if cache.has(ckey):
         return send_file(cache.get(ckey), mimetype="application/json")
 
