@@ -272,7 +272,7 @@ class Deezer:
         if not self.current_user.get('license_token'):
             return []
         if (track_format == "FLAC" or track_format.startswith("MP4_RA")) and not self.current_user.get('can_stream_lossless') or track_format == "MP3_320" and not self.current_user.get('can_stream_hq'):
-            raise WrongLicense(format)
+            raise WrongLicense(track_format)
 
         result = []
         try:

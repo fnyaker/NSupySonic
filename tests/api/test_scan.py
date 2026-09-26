@@ -5,7 +5,9 @@
 #
 # Distributed under terms of the GNU AGPLv3 license.
 
-from time import sleep
+import os
+import time
+
 from threading import Thread
 
 from supysonic.daemon.server import Daemon
@@ -36,7 +38,14 @@ class ScanWithDaemonTestCase(ApiTestBase):
         self._daemon = Daemon(self.config)
         self._thread = Thread(target=self._daemon.run)
         self._thread.start()
-        sleep(0.2)  # Wait a bit for the daemon thread to initialize
+        # Wait for the daemon's socket rather than for a fixed 0.2 s: once it
+        # exists the listener is bound, and a client connecting before accept()
+        # runs just waits in the backlog.
+        deadline = time.monotonic() + 10
+        while not os.path.exists(self.config.DAEMON["socket"]):
+            if time.monotonic() > deadline:
+                self.fail("the daemon never opened its socket")
+            time.sleep(0.005)
 
     def tearDown(self):
         self._daemon.terminate()

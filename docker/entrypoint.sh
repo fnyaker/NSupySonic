@@ -183,19 +183,30 @@ bootstrap_admin() {
             ;;
     esac
 
-    # `user add` initializes the DB schema and is non-interactive with -p.
-    # It fails if the user already exists, which we treat as "nothing to do".
+    # `user add` initializes the DB schema and is non-interactive with
+    # --password-stdin. It fails if the user already exists, which is "nothing
+    # to do" — and ONLY that is silenced. Every failure used to go to
+    # /dev/null, which is how a broken --password-stdin shipped: fresh
+    # containers booted with no admin and nothing in the log said why.
     #
     # The password goes in on stdin: passing it as an argv element exposes it to
     # every process on the host through `ps`.
-    if printf '%s' "$SUPYSONIC_ADMIN_PASSWORD" \
-        | supysonic-cli user add "$SUPYSONIC_ADMIN_USER" --password-stdin 2>/dev/null; then
+    if out=$(printf '%s' "$SUPYSONIC_ADMIN_PASSWORD" \
+        | supysonic-cli user add "$SUPYSONIC_ADMIN_USER" --password-stdin 2>&1); then
         supysonic-cli user setroles "$SUPYSONIC_ADMIN_USER" -A 2>/dev/null || true
         echo "Created admin user '$SUPYSONIC_ADMIN_USER'."
         if [ -n "$GENERATED_PASSWORD" ]; then
             echo "Generated admin password: $SUPYSONIC_ADMIN_PASSWORD"
             echo "Store it now — it is not printed again."
         fi
+    else
+        case "$out" in
+            *"User '$SUPYSONIC_ADMIN_USER' exists"*) ;;  # already there
+            *)
+                echo "Could not create the admin user '$SUPYSONIC_ADMIN_USER':" >&2
+                echo "$out" | tail -n 5 >&2
+                ;;
+        esac
     fi
 }
 

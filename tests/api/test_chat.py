@@ -7,7 +7,8 @@
 
 import unittest
 
-import time
+from supysonic.api import chat
+from supysonic.db import ChatMessage
 
 from .apitestbase import ApiTestBase
 
@@ -28,9 +29,10 @@ class ChatTestCase(ApiTestBase):
 
     def test_get_messages(self):
         self._make_request("addChatMessage", {"message": "Hello"}, skip_post=True)
-        # ChatMessage.time has 1-second resolution, so space the two messages
-        # into distinct seconds; that makes their stored timestamps differ.
-        time.sleep(1)
+        # ChatMessage.time has 1-second resolution, so put the first message
+        # in an earlier second than the second one — by writing its timestamp,
+        # not by sleeping across a boundary.
+        ChatMessage.update(time=ChatMessage.time - 5).execute()
         self._make_request(
             "addChatMessage", {"message": "Is someone there?"}, skip_post=True
         )
@@ -52,6 +54,47 @@ class ChatTestCase(ApiTestBase):
         self.assertEqual(child[0].get("message"), "Is someone there?")
 
         self._make_request("getChatMessages", {"since": "invalid timestamp"}, error=0)
+
+    # -- the abuse limits (supysonic/api/chat.py) ---------------------------
+
+    def _post(self, message, user=("alice", "Alic3"), error=None):
+        args = {"message": message, "u": user[0], "p": user[1]}
+        return self._make_request("addChatMessage", args, error=error, skip_post=True)
+
+    def test_blank_message_is_refused(self):
+        self._post("   \t ", error=0)
+        self.assertEqual(ChatMessage.select().count(), 0)
+
+    def test_long_message_is_cut_to_the_column(self):
+        self._post("x" * (chat.MAX_MESSAGE_LENGTH * 3))
+        stored = ChatMessage.get().message
+        self.assertEqual(len(stored), chat.MAX_MESSAGE_LENGTH)
+
+    def test_a_flood_is_refused_per_user(self):
+        for i in range(chat.MAX_MESSAGES_PER_USER):
+            self._post(f"m{i}")
+        self._post("one too many", error=0)
+        self.assertEqual(ChatMessage.select().count(), chat.MAX_MESSAGES_PER_USER)
+        # The limit is alice's, not the room's.
+        self._post("hi", user=("bob", "B0b"))
+        # And it is a WINDOW: once her messages are older than it, she may
+        # post again.
+        ChatMessage.update(time=ChatMessage.time - chat.MESSAGE_WINDOW - 1).where(
+            ChatMessage.message != "hi"
+        ).execute()
+        self._post("back again")
+
+    def test_the_table_keeps_only_the_newest(self):
+        cap = 5
+        original = chat.MAX_MESSAGES
+        chat.MAX_MESSAGES = cap
+        self.addCleanup(setattr, chat, "MAX_MESSAGES", original)
+        for i in range(cap + 3):
+            self._post(f"m{i}")
+            # Distinct seconds, oldest first, so "oldest" is unambiguous.
+            ChatMessage.update(time=ChatMessage.time - 1).execute()
+        kept = [m.message for m in ChatMessage.select().order_by(ChatMessage.time)]
+        self.assertEqual(kept, [f"m{i}" for i in range(3, cap + 3)])
 
 
 if __name__ == "__main__":

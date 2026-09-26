@@ -9,7 +9,6 @@ import logging
 import os
 import stat
 import sys
-import time
 
 from multiprocessing.connection import Listener, Client
 from threading import Thread, Event
@@ -112,8 +111,9 @@ class Daemon:
         close_connection()
 
         Thread(target=self.__listen).start()
-        while not self.__stopped.is_set():
-            time.sleep(1)
+        # Wait on the event itself rather than polling it once a second: a
+        # terminate() used to take up to a second to be noticed.
+        self.__stopped.wait()
 
     def __listen(self):
         while not self.__stopped.is_set():

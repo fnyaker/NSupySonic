@@ -3,11 +3,15 @@
 #
 # Distributed under terms of the GNU AGPLv3 license.
 
+import collections
+import contextlib
 import os
 import os.path
 import tempfile
 import unittest
 from pathlib import Path
+
+import peewee
 
 from supysonic.db import (
     Track,
@@ -25,6 +29,28 @@ from supysonic.deezer.provider import DeezerProvider
 from supysonic.deezer import archive, importer
 
 from .testbase import TestBase
+
+
+@contextlib.contextmanager
+def count_statements():
+    """Count the SQL statements issued inside the block, by verb.
+
+    A statement count is what a "the import is fast" test should assert: it is
+    exact, it does not depend on the machine, and an N+1 query — the way an
+    import actually gets slow — moves it by thousands.
+    """
+    counts = collections.Counter()
+    original = peewee.Database.execute_sql
+
+    def execute_sql(self, sql, *args, **kwargs):
+        counts[sql.split(None, 1)[0].upper()] += 1
+        return original(self, sql, *args, **kwargs)
+
+    peewee.Database.execute_sql = execute_sql
+    try:
+        yield counts
+    finally:
+        peewee.Database.execute_sql = original
 
 
 def raw_track(sid, title="Title", art=("1", "Artist"), alb=("10", "Album"),
@@ -664,13 +690,19 @@ class DeezerTestCase(TestBase):
         self.assertIn("2", got)  # still on Deezer
         self.assertNotIn("3", got)  # dropped and not archived → removed
 
-    def test_sync_large_playlist_is_fast(self):
-        import time
-
-        # 2000 tracks across ~100 albums/artists (exercises the import cache).
+    def test_sync_large_playlist_has_a_statement_budget(self):
+        # 1000 tracks across 100 albums/artists (exercises the import cache).
+        # Budgets are what the code does today, measured, plus a little room:
+        # a first import costs 4.76 statements per row it inserts (check,
+        # savepoint, insert, release — create_or_get is what keeps concurrent
+        # imports safe — plus the path check), and a re-sync of an unchanged
+        # playlist is 2.3 a track and writes NO track row. It used to rewrite
+        # every one of them (2001 UPDATEs for 2000 tracks), which the "< 15 s"
+        # time bound this replaced had no way to notice.
+        n = 1000
         gw = self.provider._dz.gw
         gw.playlists = [{"id": "500", "title": "Big", "description": None}]
-        big = [
+        gw.playlist_tracks["500"] = [
             raw_track(
                 i,
                 f"T{i}",
@@ -678,21 +710,81 @@ class DeezerTestCase(TestBase):
                 alb=(str(i % 100), f"Alb{i % 100}"),
                 num=i,
             )
-            for i in range(1, 2001)
+            for i in range(1, n + 1)
         ]
-        gw.playlist_tracks["500"] = big
 
-        imp = importer.DeezerImporter(self.provider, "alice")
-        start = time.monotonic()
-        imp.sync_playlists()
-        elapsed = time.monotonic() - start
-
+        with count_statements() as first:
+            importer.DeezerImporter(self.provider, "alice").sync_playlists()
         pl = Playlist.get(Playlist.deezer_id == "500")
-        self.assertEqual(len(pl.get_tracks()), 2000)
+        self.assertEqual(len(pl.get_tracks()), n)
         self.assertEqual(Artist.select().count(), 100)
-        # Single transaction + bulk insert: thousands of rows in well under a
-        # second on any sane machine. Generous bound to avoid CI flakiness.
-        self.assertLess(elapsed, 15, f"import too slow: {elapsed:.1f}s")
+        self.assertEqual(Album.select().count(), 100)
+        # Every row inserted once: the tracks, 100 artists, 100 albums, their
+        # 100 folders, and the playlist.
+        self.assertLessEqual(first["INSERT"], n + 3 * 100 + 5, first)
+        self.assertLessEqual(sum(first.values()), 5 * first["INSERT"], first)
+
+        with count_statements() as again:
+            importer.DeezerImporter(self.provider, "alice").sync_playlists()
+        self.assertEqual(len(pl.get_tracks()), n)
+        self.assertLessEqual(sum(again.values()), 2.5 * n, again)
+        # One UPDATE: the playlist row itself. None for the tracks.
+        self.assertLessEqual(again["UPDATE"], 1, again)
+
+    def test_a_resync_does_not_undo_an_archive_that_just_finished(self):
+        """The lost update a full-row save() made possible.
+
+        upsert_track reads the row, refreshes the credits, then writes. If an
+        archive completes in that window (it sets path, bitrate and
+        last_modification), writing every column puts back the values read
+        before it — and the track reads as not archived again.
+        """
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        t = library.upsert_track(raw_track(1, "Song"), root, "FLAC")
+        self.assertEqual(t.last_modification, 0)
+
+        real_sync_credits = library._sync_credits
+
+        def archive_finishes_meanwhile(track, *args, **kwargs):
+            Track.update(last_modification=1_700_000_000, bitrate=1411).where(
+                Track.id == track.id
+            ).execute()
+            return real_sync_credits(track, *args, **kwargs)
+
+        library._sync_credits = archive_finishes_meanwhile
+        try:
+            library.upsert_track(raw_track(1, "Song (remastered)"), root, "FLAC")
+        finally:
+            library._sync_credits = real_sync_credits
+
+        row = Track[t.id]
+        self.assertEqual(row.last_modification, 1_700_000_000)
+        self.assertEqual(row.bitrate, 1411)
+        # ...while what Deezer changed is still written.
+        self.assertEqual(row.title, "Song (remastered)")
+
+    def test_a_resync_writes_what_deezer_changed(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        t = library.upsert_track(raw_track(1, "Song", num=3, dur=200), root, "FLAC")
+        with count_statements() as same:
+            library.upsert_track(raw_track(1, "Song", num=3, dur=200), root, "FLAC")
+        self.assertEqual(same["UPDATE"], 0, same)
+
+        moved = raw_track(
+            1, "Song", art=("2", "Other"), alb=("20", "Elsewhere"), num=7, dur=201
+        )
+        back = library.upsert_track(moved, root, "FLAC")
+        row = Track[t.id]
+        self.assertEqual((row.number, row.duration), (7, 201))
+        self.assertEqual(row.artist.deezer_id, "2")
+        self.assertEqual(row.album.deezer_id, "20")
+        # The returned object carries the new relations, not stale ones.
+        self.assertEqual(back.artist.name, "Other")
+        self.assertEqual(back.album.name, "Elsewhere")
 
     # -- importer: favorites + unstar ------------------------------------
 
@@ -716,6 +808,85 @@ class DeezerTestCase(TestBase):
         }
         self.assertIn(ids.track_uuid("1"), starred)
         self.assertNotIn(ids.track_uuid("2"), starred)
+
+    # -- flow, recommendations, what the nightly sync runs --------------
+
+    def _flow(self):
+        pl = Playlist.get_or_none(Playlist.id == ids.playlist_uuid(importer.RECO_FLOW))
+        return None if pl is None else [t.deezer_id for t in pl.get_tracks()]
+
+    def test_the_flow_is_a_playlist_that_follows_deezer_day_to_day(self):
+        dz = self.provider._dz
+        dz.gw.tracks_by_id = {str(i): raw_track(i, f"T{i}") for i in (1, 2, 3)}
+        imp = importer.DeezerImporter(self.provider, "alice")
+        dz.api.flow = {"data": [{"id": 1}, {"id": 2}]}
+        self.assertEqual(imp.sync_flow(), 2)
+        self.assertEqual(self._flow(), ["1", "2"])
+        flow = Playlist[ids.playlist_uuid(importer.RECO_FLOW)]
+        self.assertEqual((flow.name, flow.user.name), ("Deezer · Flow", "alice"))
+        # The next day's Flow replaces it wholesale, in Deezer's order, in place.
+        dz.api.flow = {"data": [{"id": 3}, {"id": 1}]}
+        self.assertEqual(imp.sync_flow(), 2)
+        self.assertEqual(self._flow(), ["3", "1"])
+        self.assertEqual(Playlist.select().where(Playlist.name == "Deezer · Flow").count(), 1)
+        # A day Deezer hands back nothing keeps the last one rather than an empty list.
+        dz.api.flow = {"data": []}
+        self.assertEqual(imp.sync_flow(), 0)
+        self.assertEqual(self._flow(), ["3", "1"])
+
+    def test_a_flow_that_cannot_be_read_does_not_stop_the_recommendations(self):
+        # Some accounts need OAuth for the Flow endpoint; that must cost the
+        # Flow, not the smart playlists fetched alongside it.
+        dz = self.provider._dz
+        dz.api.get_user_flow = lambda user_id, limit=25: (_ for _ in ()).throw(RuntimeError("OAuth"))
+        dz.gw.smart_tracklists = {
+            "discovery": {"DATA": {"TITLE": "Discovery"}, "SONGS": {"data": [raw_track(5)]}}
+        }
+        with self.assertLogs("supysonic.deezer.importer", "WARNING"):
+            out = importer.DeezerImporter(self.provider, "alice").sync_recommendations(
+                smart_ids=["discovery"], flow=True
+            )
+        self.assertEqual(out, {"smart": {"discovery": 1}})
+        pl = Playlist.get(Playlist.id == ids.playlist_uuid("smart:discovery"))
+        self.assertEqual((pl.name, [t.deezer_id for t in pl.get_tracks()]), ("Deezer · Discovery", ["5"]))
+
+    def test_smart_playlists_retire_the_old_new_releases_list(self):
+        alice = User.get(name="alice")
+        legacy = Playlist.create(id=ids.playlist_uuid("reco:newreleases"), user=alice, name="Nouveautés")
+        importer.DeezerImporter(self.provider, "alice").sync_recommendations(
+            smart_ids=["new-releases"], flow=False
+        )
+        self.assertIsNone(Playlist.get_or_none(Playlist.id == legacy.id))
+        # An empty smart list is skipped, not written as an empty playlist.
+        self.assertIsNone(Playlist.get_or_none(Playlist.id == ids.playlist_uuid("smart:new-releases")))
+
+    def test_the_sync_runs_what_the_config_asks_for_and_nothing_else(self):
+        imp = importer.DeezerImporter(self.provider, "alice")
+        calls = []
+        for name in ("sync_playlists", "sync_favorites", "sync_podcasts", "sync_recommendations"):
+            setattr(imp, name, lambda *a, _n=name, **k: calls.append((_n, a, k)) or 0)
+
+        self.assertEqual(imp.sync({}), {})
+        self.assertEqual(calls, [])
+
+        imp.sync({"sync_playlists": True, "sync_podcasts": True, "podcast_episodes": "12"})
+        self.assertEqual(calls, [("sync_playlists", (), {}), ("sync_podcasts", (12,), {})])
+
+        calls.clear()
+        imp.sync({"import_new_releases": True, "smart_tracklists": "discovery, monthly-top"})
+        self.assertEqual(
+            calls,
+            [("sync_recommendations", (), {"smart_ids": ["discovery", "monthly-top"], "flow": False})],
+        )
+
+        calls.clear()
+        imp.sync({"import_flow": True, "sync_favorites": True})
+        self.assertEqual(
+            calls,
+            [("sync_favorites", (), {}), ("sync_recommendations", (), {"smart_ids": None, "flow": True})],
+        )
+        # No list configured means the whole default set.
+        self.assertEqual(importer.smart_ids_from_config({}), importer.DEFAULT_SMART_TRACKLISTS)
 
     # -- archive: fetch + extension fix ----------------------------------
 

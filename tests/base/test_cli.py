@@ -89,6 +89,39 @@ class CLITestCase(unittest.TestCase):
 
         self.assertEqual(User.select().count(), 1)
 
+    def test_user_add_reads_the_password_from_stdin(self):
+        """What docker/entrypoint.sh uses to create the admin on first boot.
+
+        The flag was declared next to a click.password_option, which PROMPTS
+        before the command body runs: the password line was eaten by the
+        prompt, the confirmation hit EOF, and "Aborted!" went to the
+        entrypoint's /dev/null — so a fresh container never got its admin.
+        """
+        from supysonic.managers.user import UserManager
+
+        rv = self.__runner.invoke(
+            cli,
+            ["user", "add", "alice", "--password-stdin"],
+            input="S3cr3t-pw\n",
+            obj=self.__conf,
+        )
+        self.assertEqual(rv.exit_code, 0, rv.output)
+        self.assertNotIn("Password", rv.output)  # no prompt at all
+        self.assertIsNotNone(UserManager.try_auth("alice", "S3cr3t-pw"))
+
+    def test_user_add_prompts_when_given_no_password(self):
+        from supysonic.managers.user import UserManager
+
+        rv = self.__runner.invoke(
+            cli, ["user", "add", "bob"], input="B0b-pass\nB0b-pass\n", obj=self.__conf
+        )
+        self.assertEqual(rv.exit_code, 0, rv.output)
+        self.assertIsNotNone(UserManager.try_auth("bob", "B0b-pass"))
+        rv = self.__runner.invoke(
+            cli, ["user", "add", "carol"], input="one-pass\ntwo-pass\n", obj=self.__conf
+        )
+        self.assertFalse(User.select().where(User.name == "carol").exists())
+
     def test_user_delete(self):
         self.__invoke("user add -p Alic3 alice")
         self.__invoke("user delete alice")

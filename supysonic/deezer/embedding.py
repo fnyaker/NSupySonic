@@ -735,6 +735,13 @@ def _run(patches):
     return pick.astype(np.float32)
 
 
+# Below this, a half of the stored vector is rounding noise rather than a
+# measurement. The patches are unit vectors, so a real spread has a norm in the
+# tenths; float32 noise sits near 1e-7, and the vector is stored as float16
+# (resolution ~1e-3), which could not carry anything smaller anyway.
+_HALF_FLOOR = 1e-5
+
+
 def _aggregate(rows):
     """Per-patch embeddings (n, 1280) → ONE stored vector (2560,).
 
@@ -756,8 +763,14 @@ def _aggregate(rows):
     std = x.std(axis=0) if x.shape[0] > 1 else np.zeros_like(mean)
     for half in (mean, std):
         n = float(np.linalg.norm(half))
-        if n > 1e-9:
+        if n > _HALF_FLOOR:
             half /= n
+        else:
+            # Nothing there but float32 rounding. Normalizing it would blow
+            # that noise up to half the vector's energy: measured, three
+            # identical patches have a std of norm 6.7e-8, which the old
+            # absolute 1e-9 floor let through and scaled to 1.
+            half[:] = 0.0
     vec = np.concatenate([mean, std]).astype(np.float32)
     norm = float(np.linalg.norm(vec))
     return (vec / norm) if norm > 1e-9 else vec

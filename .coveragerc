@@ -1,3 +1,4 @@
 [run]
-source = supysonic
-
+source =
+    supysonic
+    deezerpy

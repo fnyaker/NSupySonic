@@ -19,6 +19,7 @@ import threading
 import time
 import types
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -26,7 +27,7 @@ import requests
 
 from deezerpy import DEFAULT_TIMEOUT, Deezer
 from deezerpy._circuit import CircuitBreaker, breaker
-from deezerpy.errors import DeezerUnavailable, GWAPIError, is_transport_failure
+from deezerpy.errors import DeezerUnavailable, GWAPIError, WrongLicense, is_transport_failure
 from supysonic.deezer.provider import (
     DeezerError,
     DeezerProvider,
@@ -395,6 +396,199 @@ class VerdictTestCase(unittest.TestCase):
         self._dz(FakeAdapter(raises=requests.ConnectTimeout("nope")))
         self.assertIsNone(self.provider.fetch_cover("somemd5"))
         self.assertIsNone(self.provider.fetch_image("artist", "27"))
+
+
+class DeezerRoutes(requests.adapters.HTTPAdapter):
+    """gw-light.php and media.deezer.com answering the way Deezer does, per track.
+
+    ``tracks`` maps an SNG_ID to its ``song.getData`` results (or to a gateway
+    error payload); ``media`` maps ``(track token, format)`` to a URL, or to
+    "geo" for Deezer's geo-blocking error. Anything absent is Deezer answering
+    that there is nothing in that format. Every question asked is recorded.
+    """
+
+    def __init__(self, tracks, media=None):
+        super().__init__()
+        self.tracks = tracks
+        self.media = media or {}
+        self.asked = []
+
+    def send(self, request, **kwargs):
+        body = json.loads(request.body or b"{}")
+        if "media.deezer.com" in request.url:
+            token = body["track_tokens"][0]
+            fmt = body["media"][0]["formats"][0]["format"]
+            self.asked.append(("get_url", token, fmt))
+            answer = self.media.get((token, fmt))
+            if answer == "geo":
+                data = [{"errors": [{"code": 2002, "message": "Geolocation"}]}]
+            elif answer:
+                data = [{"media": [{"sources": [{"url": answer}]}]}]
+            else:
+                data = [{}]
+            payload = {"data": data}
+        else:
+            method = dict(p.split("=", 1) for p in urlsplit(request.url).query.split("&"))["method"]
+            if method == "deezer.getUserData":
+                payload = {"error": [], "results": {"checkForm": "csrf"}}
+            else:
+                self.asked.append((method, str(body["SNG_ID"])))
+                results = self.tracks[str(body["SNG_ID"])]
+                payload = results if "error" in results else {"error": [], "results": results}
+        resp = requests.Response()
+        resp.status_code = 200
+        resp.url = request.url
+        resp.request = request
+        resp.headers["Content-Type"] = "application/json"
+        resp._content = json.dumps(payload).encode()
+        return resp
+
+
+def song(sid, token, **extra):
+    return dict({"SNG_ID": sid, "SNG_TITLE": f"Song {sid}", "TRACK_TOKEN": token}, **extra)
+
+
+class ResolveTestCase(unittest.TestCase):
+    """Which source a track is played from — and when Deezer has said there is none.
+
+    The real client, the real quality ladder and the real FALLBACK handling,
+    with only the two HTTP endpoints answered locally. A wrong turn here is
+    either a track played at the wrong quality, a track decrypted with another
+    track's key, or — the costly one — a playable track condemned.
+    """
+
+    def setUp(self):
+        breaker.reset()
+        self.addCleanup(breaker.reset)
+        no_backoff(self)
+        # The shared rate limiter paces real traffic; it is not what is tested.
+        patcher = mock.patch("deezerpy.gw.limiter", types.SimpleNamespace(acquire=lambda: None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.archive_dir = tempfile.mkdtemp()
+        self.provider = DeezerProvider("dummy-arl", self.archive_dir, "FLAC")
+        self.relogins = 0
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.archive_dir, ignore_errors=True)
+
+    def _deezer(self, tracks, media=None, lossless=True):
+        dz = Deezer()
+        dz.current_user = {
+            "id": 42,
+            "name": "tester",
+            "license_token": "lt",
+            "can_stream_lossless": lossless,
+            "can_stream_hq": True,
+            "country": "FR",
+        }
+        self.routes = wire(dz, DeezerRoutes(tracks, media))
+        self.provider._dz = dz
+        return dz
+
+    def _session_is_fresh(self):
+        """A re-login just happened: whatever this session answers is final."""
+        self.provider._last_relogin = time.monotonic()
+
+    def _media_asked(self):
+        return [a[1:] for a in self.routes.asked if a[0] == "get_url"]
+
+    def test_the_best_format_the_account_may_stream(self):
+        self._deezer({"1": song("1", "t1")}, {("t1", "FLAC"): "https://cdn/1.flac"})
+        self.assertEqual(self.provider.resolve("1")[:2], ("https://cdn/1.flac", "FLAC"))
+        # A listener who chose 128 kbps is never handed the FLAC.
+        self._deezer({"1": song("1", "t1")}, {("t1", "FLAC"): "https://cdn/1.flac", ("t1", "MP3_128"): "https://cdn/1.mp3"})
+        self.assertEqual(self.provider.resolve("1", quality="MP3_128")[:2], ("https://cdn/1.mp3", "MP3_128"))
+        self.assertEqual(self._media_asked(), [("t1", "MP3_128")])
+
+    def test_an_account_without_lossless_gets_the_mp3_without_asking_for_flac(self):
+        dz = self._deezer({"1": song("1", "t1")}, {("t1", "MP3_320"): "https://cdn/1.mp3"}, lossless=False)
+        url, fmt, _info, used = self.provider.resolve("1")
+        self.assertEqual((url, fmt, used), ("https://cdn/1.mp3", "MP3_320", "1"))
+        self.assertEqual(self._media_asked(), [("t1", "MP3_320")])
+        with self.assertRaises(WrongLicense) as ctx:
+            dz.get_track_url("t1", "FLAC")
+        self.assertEqual(ctx.exception.format, "FLAC")
+
+    def test_a_format_with_no_source_falls_through_to_the_next(self):
+        self._deezer({"1": song("1", "t1")}, {("t1", "MP3_128"): "https://cdn/1.mp3"})
+        self.assertEqual(self.provider.resolve("1")[1], "MP3_128")
+        self.assertEqual(self._media_asked(), [("t1", "FLAC"), ("t1", "MP3_320"), ("t1", "MP3_128")])
+
+    def test_a_track_with_no_source_is_played_as_its_fallback_version(self):
+        """Deezer points a track it cannot serve at another version of it; that
+        version's id is what the stream is encrypted for."""
+        tracks = {"1": song("1", "t1", FALLBACK={"SNG_ID": "2"}), "2": song("2", "t2")}
+        self._deezer(tracks, {("t2", "FLAC"): "https://cdn/2.flac"})
+        url, fmt, info, used = self.provider.resolve("1")
+        self.assertEqual((url, fmt, used, info["SNG_TITLE"]), ("https://cdn/2.flac", "FLAC", "2", "Song 2"))
+        self.assertEqual(self.relogins, 0)
+
+    def test_a_version_the_gateway_substitutes_is_played_with_its_own_id(self):
+        # The gateway can answer song.getData with an error and a FALLBACK
+        # payload; the client re-asks for that id, and what comes back is the
+        # other version's data — the id the stream is encrypted for.
+        tracks = {
+            "1": {"error": {"DATA_ERROR": "gone"}, "payload": {"FALLBACK": {"SNG_ID": "2"}}, "results": {}},
+            "2": song("2", "t2"),
+        }
+        self._deezer(tracks, {("t2", "FLAC"): "https://cdn/2.flac"})
+        url, _fmt, _info, used = self.provider.resolve("1")
+        self.assertEqual((url, used), ("https://cdn/2.flac", "2"))
+
+    def test_a_fallback_to_itself_is_not_followed(self):
+        self._deezer({"1": song("1", "t1", FALLBACK={"SNG_ID": "1"})})
+        self._session_is_fresh()
+        with self.assertRaises(TrackUnavailable):
+            self.provider.resolve("1")
+        self.assertEqual([a for a in self.routes.asked if a[0] == "song.getData"], [("song.getData", "1")])
+
+    def test_what_deezer_answers_is_a_verdict(self):
+        cases = {
+            "no source in any format": ({"1": song("1", "t1")}, {}),
+            "blocked in this country": (
+                {"1": song("1", "t1")},
+                {("t1", f): "geo" for f in ("FLAC", "MP3_320", "MP3_128")},
+            ),
+            "no stream token at all": ({"1": {"SNG_ID": "1", "SNG_TITLE": "x"}}, {}),
+        }
+        for name, (tracks, media) in cases.items():
+            with self.subTest(name):
+                self._deezer(tracks, media)
+                self._session_is_fresh()
+                with self.assertRaises(TrackUnavailable):
+                    self.provider.resolve("1")
+        self.assertEqual(self._media_asked(), [])  # without a token there is nothing to ask
+
+    def test_a_verdict_nobody_could_confirm_is_not_a_verdict(self):
+        """An expired licence token makes every format come back empty, which
+        looks exactly like a track with no source; only a fresh session can say
+        which it is. If that session cannot even be opened, nothing was
+        confirmed — and a condemned track is offered for deletion."""
+        self._deezer({"1": song("1", "t1")})
+
+        def relogin():
+            self.relogins += 1
+            raise DeezerUnavailable("auth.deezer.com is not answering")
+
+        self.provider.relogin = relogin
+        with self.assertRaises(DeezerError) as ctx:
+            self.provider.resolve("1")
+        self.assertNotIsInstance(ctx.exception, TrackUnavailable)
+        self.assertEqual(self.relogins, 1)
+        # A login that failed opens no trust window: the next play asks again.
+        with self.assertRaises(DeezerError):
+            self.provider.resolve("1")
+        self.assertEqual(self.relogins, 2)
+
+    def test_a_failed_relogin_surfaces_what_went_wrong_first(self):
+        self._deezer({"1": {"error": {"DATA_ERROR": "song not found"}, "results": {}}})
+        self.provider.relogin = lambda: (_ for _ in ()).throw(DeezerUnavailable("down"))
+        with self.assertRaises(GWAPIError) as ctx:
+            self.provider.resolve("1")
+        self.assertIn("DATA_ERROR", str(ctx.exception))
 
 
 class PodcastDnsTestCase(unittest.TestCase):

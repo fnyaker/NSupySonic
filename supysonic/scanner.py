@@ -194,18 +194,21 @@ class Scanner(Thread):
         return os.path.splitext(path)[1][1:].lower() in self.__extensions
 
     def scan_file(self, path_or_direntry):
-        if isinstance(path_or_direntry, str):
-            path = path_or_direntry
-
-            if not os.path.exists(path):
-                return
-
-            basename = os.path.basename(path)
-            stat = os.stat(path)
-        else:
-            path = path_or_direntry.path
-            basename = path_or_direntry.name
-            stat = path_or_direntry.stat()
+        # A file can vanish between being listed (or queued by the watcher) and
+        # being looked at: moved, deleted, a download tool renaming its partial
+        # file. That is a file that is simply not there any more, not a reason
+        # to abort the whole scan — which is what an unguarded stat() did.
+        try:
+            if isinstance(path_or_direntry, str):
+                path = path_or_direntry
+                basename = os.path.basename(path)
+                stat = os.stat(path)
+            else:
+                path = path_or_direntry.path
+                basename = path_or_direntry.name
+                stat = path_or_direntry.stat()
+        except FileNotFoundError:
+            return
 
         try:
             path.encode("utf-8")  # Test for badly encoded paths

@@ -249,7 +249,11 @@ def user_list():
 
 @user.command("add")
 @click.argument("name")
-@click.password_option(
+# A plain option, NOT click.password_option: that one prompts before the body
+# runs, so --password-stdin never got a look in — the prompt ate the password
+# line and aborted on the confirmation. The body prompts itself when neither
+# source was given.
+@click.option(
     "-p", "--password", default=None, help="Specifies the user's password"
 )
 @click.option(
@@ -266,7 +270,7 @@ def user_add(name, password, password_stdin, email):
     """
     if password_stdin:
         password = sys.stdin.readline().rstrip("\n")
-    elif password is None:  # pragma: nocover - interactive prompt
+    elif password is None:
         password = click.prompt("Password", hide_input=True, confirmation_prompt=True)
 
     try:

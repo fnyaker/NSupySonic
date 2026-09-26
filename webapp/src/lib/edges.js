@@ -10,7 +10,10 @@
 
 import { api } from "./api.js";
 
-const KEY = "audio.edges";
+// v2: bounds measured before the server read ffmpeg's EOF-closed trailing
+// silence had an untrimmed end. A new key re-asks once; the old one is dropped.
+const KEY = "audio.edges.v2";
+const LEGACY_KEYS = ["audio.edges"];
 const MAX = 400; // ~40 KB of localStorage; the LRU drops the oldest half
 const mem = new Map(); // id -> { start, end, duration, db } | null (known-absent)
 const pending = new Map();
@@ -19,6 +22,11 @@ let dirty = false;
 let flushTimer = null;
 
 function load() {
+  try {
+    for (const k of LEGACY_KEYS) localStorage.removeItem(k);
+  } catch {
+    /* private mode: nothing was stored to begin with */
+  }
   try {
     const raw = JSON.parse(localStorage.getItem(KEY) || "null");
     if (!raw || typeof raw !== "object") return;

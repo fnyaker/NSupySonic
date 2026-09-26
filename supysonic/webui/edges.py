@@ -60,6 +60,12 @@ MIN_SILENCE = 0.1
 # into it would look broken; past this point the right answer is "play it all".
 MAX_TRIM = 30.0
 
+# How far from the decoded duration a silence_end may land and still be the
+# one ffmpeg printed while flushing at EOF. The measured gap is 0-10 ms (the
+# progress line has 10 ms resolution); a sound shorter than this after the
+# last silence would be trimmed with it, which nobody can hear.
+_EOF_SLACK = 0.05
+
 _SIL_START = re.compile(r"silence_start:\s*(-?[\d.]+)")
 _SIL_END = re.compile(r"silence_end:\s*(-?[\d.]+)")
 _TIME = re.compile(r"time=\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
@@ -94,9 +100,10 @@ def _detect(path, threshold):
     cmd = [
         "ffmpeg", "-nostats", "-v", "info", "-i", path,
         "-map", "0:a:0",
-        # Mono at 8 kHz before the filter: silence is a level question, and
-        # resampling down first makes the filter and everything after it cheap.
-        # The decode dominates either way and cannot be avoided.
+        # Mono at 8 kHz for what comes OUT of the filter. Note these are output
+        # options: ffmpeg applies them after the -af graph, so silencedetect
+        # itself sees the source rate and channels (a silence is then one that
+        # holds on every channel). The decode dominates the cost either way.
         "-ac", "1", "-ar", "8000",
         "-af", f"silencedetect=noise={threshold}dB:d={MIN_SILENCE}",
         "-f", "null", "-",
@@ -142,8 +149,16 @@ def _edges(intervals, duration):
         if first_start <= 0.05 and first_end is not None:
             start = first_end
         last_start, last_end = intervals[-1]
-        # A silence with no end ran to EOF: that is the trailing one.
-        if last_end is None and last_start > start:
+        # A silence that runs to EOF is the trailing one. Older ffmpeg left it
+        # open (no silence_end at all); current builds CLOSE it when they flush
+        # at the end of the stream — measured on 6.1, `silence_end: 4.5` for a
+        # file whose last progress line reads 4.49, on mp3, ogg, opus, m4a and
+        # flac alike. Reading only the open form meant the trailing silence was
+        # never trimmed on any recent ffmpeg, so an end at the end counts too.
+        trailing = last_end is None or (
+            duration > 0 and last_end >= duration - _EOF_SLACK
+        )
+        if trailing and last_start > start:
             end = last_start
     # Past the cap the answer is "play it all", not "skip an arbitrary 30 s":
     # a track opening on ninety seconds of near-silence is a hidden-track
@@ -177,7 +192,10 @@ def audio_edges(mid):
         return jsonify({"ready": False, "duration": db_duration})
 
     cache = current_app.cache
-    ckey = f"edges-{key}-{mtime}-{threshold:g}"
+    # "edges2": bounds cached before the EOF-closed trailing silence was read
+    # (see _edges) have an untrimmed end; a new key makes every file measure
+    # again once, and the stale entries age out of the LRU.
+    ckey = f"edges2-{key}-{mtime}-{threshold:g}"
     if cache.has(ckey):
         return send_file(cache.get(ckey), mimetype="application/json")
 

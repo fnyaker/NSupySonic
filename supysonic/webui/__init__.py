@@ -3327,6 +3327,22 @@ def _gone(track, deezer_id):
 _OPUS_BITRATES = {320, 256, 192, 128, 64}
 
 
+def _then(first, rest):
+    """``first`` (already read, or None), then the rest of the generator ``rest``.
+
+    Not ``itertools.chain``: when the client leaves, the WSGI server closes the
+    response iterable, and a chain has no ``close()`` to pass that on — the live
+    stream's cleanup (drop the partial, queue the archive) would then wait for
+    the garbage collector.
+    """
+    try:
+        if first is not None:
+            yield first
+        yield from rest
+    finally:
+        rest.close()
+
+
 def _opus_generator(flac_path, bitrate):
     """ffmpeg: decode the archived FLAC and (re)encode to Opus-in-Ogg."""
     import subprocess
@@ -3607,12 +3623,20 @@ def stream(deezer_id):
                 )
                 try:
                     mimetype, gen = archive.open_live_stream(provider, track, on_abort)
+                    # The first block is read here rather than by the WSGI
+                    # server — which sends the headers with it anyway — so a
+                    # stream refused on its first bytes (the CDN says no, it is
+                    # empty, it does not decrypt to audio) gets this route's 502
+                    # instead of dying with the response half-sent.
+                    first = next(gen, None)
                 except TrackUnavailable:
                     return _gone(track, deezer_id)
                 except Exception:
                     _log_deezer_failure("Live stream failed for %s", deezer_id)
                     return jsonify({"error": "track unavailable"}), 502
-                return current_app.response_class(gen, mimetype=mimetype)
+                return current_app.response_class(
+                    _then(first, gen), mimetype=mimetype
+                )
 
             # Opus on a cold track needs the full FLAC master first.
             from ..deezer import workload
