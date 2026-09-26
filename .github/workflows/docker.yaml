@@ -31,14 +31,20 @@ on:
       - .github/workflows/docker.yaml
   workflow_dispatch:
 
+# A newer push to the same PR makes the running build pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
-    name: Build and push image
+    name: Build, smoke-test and push image
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -52,7 +58,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Only a multi-arch build needs emulation. A PR builds amd64 alone: the
+      # arm64 half runs under QEMU and was most of a PR's Docker time, for an
+      # image nobody pulls. It is still built — and smoke-tested on amd64 —
+      # on every push to master and on tags, before anything is published.
       - name: Set up QEMU
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -80,17 +91,41 @@ jobs:
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      # The image as a user would run it, loaded into the runner's engine so
+      # the smoke test can start it. On a push the multi-arch step below reuses
+      # every amd64 layer built here.
+      - name: Build (amd64, for the smoke test)
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
+          load: true
+          tags: nsupysonic:smoke
           # On a v* tag both this image and the Android APK are built from the
           # same ref, so the tag names the Android release the server should
           # expect its native clients to run.
           build-args: |
             APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          push: ${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha
+
+      - name: Smoke test
+        run: docker/smoke.sh nsupysonic:smoke
+
+      - name: Image size
+        run: |
+          docker image inspect nsupysonic:smoke --format '{{.Size}}' \
+            | awk '{printf "Uncompressed image size: %.0f MB\n", $1 / 1e6}' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and push (all platforms)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -98,4 +133,4 @@ jobs:
           # key as the push run for the same commit — merge a PR promptly and
           # the two race, and the loser dies with "failed to reserve cache" even
           # though it built the image perfectly. PRs still read the cache.
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+          cache-to: type=gha,mode=max

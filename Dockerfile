@@ -19,13 +19,19 @@ RUN cargo build --release --target wasm32-unknown-unknown --target-dir /out/base
 # ---------------------------------------------------------------------------
 # Web builder: compile the Svelte discovery SPA (vite -> supysonic/webui/dist)
 # ---------------------------------------------------------------------------
-# JavaScript out, like the WebAssembly above: build it natively once.
-FROM --platform=$BUILDPLATFORM node:20-slim AS webbuilder
+# JavaScript out, like the WebAssembly above: build it natively once. Node 22:
+# 20 left maintenance in April 2026, and Vite 7 wants 20.19+/22.12+ anyway.
+FROM --platform=$BUILDPLATFORM node:22-slim AS webbuilder
 
 WORKDIR /web/webapp
 # Install deps first for layer caching, then build (outDir is ../supysonic/...).
-COPY webapp/package*.json ./
-RUN npm install
+# `npm ci`, not `npm install`: exactly the committed lockfile, and a lockfile
+# that disagrees with package.json fails here instead of resolving something
+# nobody tested. The cache mount only helps local rebuilds (CI builders start
+# empty), but costs nothing.
+COPY webapp/package.json webapp/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
 COPY webapp/ ./
 # The analyser as compiled from the source in THIS build, over the committed
 # copies (which exist so a checkout builds without Rust).
@@ -39,27 +45,50 @@ RUN npm run build   # writes /web/supysonic/webui/dist
 FROM python:3.13-slim AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_ROOT_USER_ACTION=ignore
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-
 WORKDIR /src
-COPY . /src
+
+# 1. The dependencies, from the packaging metadata ALONE. This used to follow
+#    `COPY . /src`, so any edit anywhere in the tree — a comment, the SPA, the
+#    docs — re-downloaded and re-unpacked ~120 MB of wheels, for both
+#    architectures (arm64 under QEMU). Now the layer is reused by every build
+#    that leaves setup.cfg alone. setuptools/wheel are here to build the
+#    package in step 2 without build isolation (pyproject.toml declares the
+#    sdist-only sphinx dependency); they are removed again below.
+COPY setup.cfg docker/requirements.py ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python requirements.py postgresql embedding > /tmp/requirements.txt \
+ && pip install -r /tmp/requirements.txt gunicorn setuptools wheel
+
+# 2. The package itself — only what the wheel is built from, so an SPA-only
+#    change does not rebuild this either (the SPA arrives from webbuilder).
+COPY setup.py pyproject.toml MANIFEST.in LICENSE README.md config.sample ./
+COPY deezerpy/ deezerpy/
+COPY supysonic/ supysonic/
 # Bundle the built SPA into the package tree so package_data installs it.
 COPY --from=webbuilder /web/supysonic/webui/dist /src/supysonic/webui/dist
 
-# setuptools/wheel are enough to build the wheel; --no-build-isolation avoids
-# pulling the sdist-only sphinx build dependency declared in pyproject.toml.
-# The trailing block copies the built SPA next to the installed package, in case
-# package_data didn't pick up the gitignored dist directory (belt + braces).
-RUN pip install --upgrade pip setuptools wheel \
- && pip install --no-build-isolation ".[postgresql,embedding]" gunicorn \
+# --no-deps: step 1 installed them, and `pip check` fails the build if it
+# missed one. The copy block puts the built SPA next to the installed package
+# in case package_data didn't pick up the gitignored dist directory (belt +
+# braces). Then the build tools go: setuptools, wheel and pip itself are ~25 MB
+# the server never runs (the base image's own pip is still there for anyone
+# who needs one), and numpy's bundled test suite is another ~10 MB.
+RUN pip install --no-deps --no-build-isolation . \
+ && pip check \
  && DEST="$(cd / && python -c 'import os, supysonic.webui as w; print(os.path.dirname(w.__file__))')" \
  && if [ "$DEST" != "/src/supysonic/webui" ]; then \
         mkdir -p "$DEST/dist" \
      && cp -r /src/supysonic/webui/dist/. "$DEST/dist/"; \
-    fi
+    fi \
+ && test -f "$DEST/dist/index.html" \
+ && pip uninstall -y -q setuptools wheel \
+ && python -m pip uninstall -y -q pip \
+ && find /opt/venv/lib -depth -type d -name tests -path "*/site-packages/*" \
+        -exec rm -rf {} +
 
 # ---------------------------------------------------------------------------
 # Runtime
@@ -92,8 +121,7 @@ RUN useradd --system --create-home --uid 1000 supysonic \
  && mkdir -p /data/db /data/cache /data/archive /data/music \
  && chown -R supysonic:supysonic /data
 
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Baked default config so the container boots without a mounted config; a
 # bind-mounted /etc/supysonic overrides it entirely.
