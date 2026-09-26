@@ -53,16 +53,16 @@ run it through these questions. They are not optional polish; they are the bar.
 
 ```sh
 # Python tests (no network). Discovery is driven by tests/__init__.py load_tests.
-python -m unittest                                   # whole suite (~90s)
+python -m unittest                                   # whole suite (~55s serially)
 python -m unittest tests.test_deezer                 # one module
 python -m unittest tests.test_webui.SomeClass.test_x # one test
-coverage run -m unittest                             # what CI runs
-coverage run -a -m unittest tests.net.suite          # network tests (CI only; hit real services)
+python -m unittest tests.net.suite                   # network tests (hit real services; weekly in CI)
 
-# Same suite across processes — ~25s on 4 cores. Takes the same test ids.
+# Same suite across processes — ~12s on 4 cores. Takes the same test ids. What CI runs.
 python tools/partest.py                              # whole suite
 python tools/partest.py -j8 tests.test_webui
 python tools/partest.py --coverage && coverage combine
+NS_REQUIRE_FFMPEG=1 python tools/partest.py          # fail, don't skip, if ffmpeg is missing
 
 # Dev install (a project .venv is expected)
 pip install -e . && pip install lxml coverage        # == ci-requirements.txt
@@ -98,14 +98,25 @@ supysonic-cli deezer embed --self-test                 # check the mel front-end
 
 # Docker (full stack: builds SPA + python image, runs entrypoint that creates admin + auto-sync)
 docker compose up --build                            # web player at :5722/app, Subsonic at :5722/rest
+docker build -t nsupysonic:dev . && docker/smoke.sh nsupysonic:dev   # what CI checks before pushing
 ```
 
 Note: the upstream `tests/` are unittest-based; there is no pytest config.
-`tests/__init__.py` swaps argon2 for cheap parameters — hashing was half the
-suite's wall clock — which is test-only and guarded by a test that pins the
-production defaults. CI runs three
-workflows — `tests.yaml` (unittest across py3.10–3.14), `docker.yaml` (image build) and
-`android.yaml` (native app APK, uploaded as a run artifact / attached to `v*` releases).
+`tests/__init__.py` makes the suite fast in two test-only ways, each guarded by a test: it swaps
+argon2 for cheap parameters (hashing was half the wall clock; `tests.managers.test_manager_user`
+pins the production defaults), and it compiles each distinct werkzeug URL builder once per process
+instead of once per rule per app (~95% of every `create_application`; `tests.test_harness` checks
+every rule's URLs against a fresh werkzeug compilation). CI runs five workflows:
+- `tests.yaml` — two jobs, not a version matrix: **image** (Python 3.13, what the Docker image
+  ships, with ffmpeg + numpy and `NS_REQUIRE_FFMPEG=1`, under coverage) and **minimal** (Python
+  3.10, the oldest `setup.cfg` accepts, bare install). Both via `tools/partest.py`, packed by the
+  previous run's timings (Actions cache). A test that needs ffmpeg or numpy must RUN in the image
+  job — a skip there is the suite testing less than it claims.
+- `webapp.yaml` — `npm ci`, `npm test`, `npm run build`.
+- `docker.yaml` — a PR builds amd64 only (no QEMU) and runs `docker/smoke.sh` on it; master and
+  `v*` tags smoke-test amd64, then build and push both architectures.
+- `network.yaml` — `tests/net` (real third-party services), weekly and on demand.
+- `android.yaml` — the native app APK, uploaded as a run artifact / attached to `v*` releases.
 
 ## Android app
 
@@ -1518,7 +1529,11 @@ at each end, and a crossfade that ignores them fades one track's silence into an
 was meant to remove. The server measures the bounds once per (file, threshold) with ffmpeg's
 `silencedetect` and caches them; it **never archives to answer**, so asking about the next track can
 never start a download, and a file that is not on disk simply answers `ready:false` and plays
-untrimmed. The handover happens at the **start** of the fade, not its end: the incoming element
+untrimmed. A trailing silence is one that runs to EOF — and current ffmpeg CLOSES it at the flush
+(`silence_end` equal to the stream's end, measured on 6.1 across mp3/ogg/opus/m4a/flac), where older
+builds left it open; reading only the open form meant the tail was never trimmed on any recent
+ffmpeg, so both caches are versioned (`edges2-` server-side, `audio.edges.v2` on the device) and a
+fix to the measurement must bump them again. The handover happens at the **start** of the fade, not its end: the incoming element
 becomes `audio` and the queue advances there and then, so the seek bar and the lock screen name the
 track you are beginning to hear. A manual skip is not an overlap — it gets a 60 ms ramp, long enough
 to kill the click of a cut mid-waveform and short enough to be inaudible as a delay. Crossfading
@@ -1699,3 +1714,28 @@ host's track is ever audible once the guest has heard of a move; the host's rule
 of what Player.svelte's store and element really do on a skip and a handover; and the clock estimator under
 simulated asymmetric, heavy-tailed queueing and 60 ppm skew, held to the measured numbers.
 Add a test alongside these when touching the proxy or `/api`.
+
+**What makes a Python test worth keeping** — each rule below replaced a test that passed while
+the code under it was broken:
+- **Wait on the event, never on the clock.** The watcher tests wait for a processing pass to
+  finish with nothing pending (`_settle`), the cache tests move a fake clock, the daemon test waits
+  for its socket. A fixed sleep is both too long and, on a loaded CI machine, too short — and an
+  assertion that something did NOT happen is only meaningful once the thing that could have done
+  it has run.
+- **Count, don't time.** "The import is fast" is a statement budget (`count_statements` in
+  `tests/test_deezer.py`), not `elapsed < 15`: exact, machine-independent, and an N+1 query moves
+  it by thousands. The time bound it replaced could not see a re-sync rewriting every row.
+- **Never compute the expectation from the constant under test** (`cleanup.GB`,
+  `_MAX_OUTAGE_RETRIES + 1`): write the literal. And keep a test's own timeout below the cap it is
+  checking, or "it waited the cap out" passes as "it did not wait".
+- **Real ffmpeg, physical answers** (`tests/test_ffmpeg_integration.py`): the command lines run
+  against a real ffmpeg on lavfi-generated signals whose answer is known (a 1/80-scale 1 kHz sine is
+  −41.07 LUFS; kicks at 174 BPM read 174). Transcripts of stderr pin the parsing; only this pins that
+  the command still means what the parser assumes — it is how the untrimmed trailing silence was
+  found. One known fault is recorded there as an `expectedFailure` with its numbers: a held note
+  with no onset reads as a confident tempo (`_low_envelope` is a per-block peak that ripples with
+  the note's phase); fixing it is an `ANALYSIS_VERSION` change.
+- **Check the test by breaking the code.** Every test added for these rules was run against a
+  deliberate mutation of the line it guards; a test that survives its mutant is decoration.
+- Tests that write files write them in their own temp directory: `tests/assets/folder` is scanned
+  by several modules, from several processes under `partest`.
