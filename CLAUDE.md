@@ -93,6 +93,7 @@ supysonic-cli deezer sync                            # import playlists/favorite
 supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics for archived tracks
 supysonic-cli deezer analyze [--force] [--limit N] [--workers N]  # measure tempo + style for archived tracks
 supysonic-cli deezer bpm-audit [--limit N]             # Deezer's published BPM against the files' measured tempo, per style
+python tools/tempo_eval.py --render /tmp/tempo          # the server's file tempo on the 26 arranged records + beatless tones
 supysonic-cli deezer embed [--force] [--limit N]       # extract genre embeddings (needs onnxruntime)
 supysonic-cli deezer embed --self-test                 # check the mel front-end without a reference
 
@@ -560,7 +561,14 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
 - The TEMPO is **Deezer's own** where Deezer has one: its public API publishes a `bpm` per track,
   exact and free. Anything else (a local upload, a track with no figure) is measured from a
   low-passed envelope — ffmpeg decimates to 1 kHz u8 and the per-frame peak is a `max`/`min` over a
-  ten-byte slice, so no audio sample is ever touched from Python.
+  ten-byte slice, so no audio sample is ever touched from Python — **and only when something in
+  that band STRIKES** (`_attack_rate`, `ANALYSIS_VERSION` 3). The block peak of a steady note
+  ripples with its phase, and the normalised autocorrelation turned that ripple into a confident
+  beat: a held 82 Hz note read 240 BPM at 0.79, a held chord 231 at 0.50, and the player anchored
+  on it. The same bytes, squared and smoothed, now have to rise 1 dB within 30 ms at least 40 times
+  a minute (held tones and chords: 0; the sparsest record with a beat: 99.7). The rise is small on
+  purpose — a limitered hard kick's tail sits 2 dB under its attack, and 3 dB lost those. Every
+  record with a beat measures exactly what it did before; `tools/tempo_eval.py` is the check.
 - The DESCRIPTORS come from ffmpeg's `aspectralstats` and `ebur128`: centroid, spread, flatness,
   entropy, rolloff and flux per frame, plus integrated loudness and **loudness range**. LRA is the
   single best "how squashed is this" axis there is — a limitered hardcore master sits near 3 LU, a
@@ -1756,9 +1764,9 @@ the code under it was broken:
   against a real ffmpeg on lavfi-generated signals whose answer is known (a 1/80-scale 1 kHz sine is
   −41.07 LUFS; kicks at 174 BPM read 174). Transcripts of stderr pin the parsing; only this pins that
   the command still means what the parser assumes — it is how the untrimmed trailing silence was
-  found. One known fault is recorded there as an `expectedFailure` with its numbers: a held note
-  with no onset reads as a confident tempo (`_low_envelope` is a per-block peak that ripples with
-  the note's phase); fixing it is an `ANALYSIS_VERSION` change.
+  found. It is also where the phantom tempo of a held note was recorded, as an `expectedFailure`
+  with its numbers, until the attack gate fixed it — now it pins the gate from both sides: held
+  tones and a chord measure no tempo, a kick train mastered flat (tail at −2.2 dB) keeps its 150.
 - **Check the test by breaking the code.** Every test added for these rules was run against a
   deliberate mutation of the line it guards; a test that survives its mutant is decoration.
 - Tests that write files write them in their own temp directory: `tests/assets/folder` is scanned

@@ -207,36 +207,62 @@ class TempoTestCase(FfmpegTestCase):
         # see the known fault below.)
         self.assertAlmostEqual(bpm, 128, delta=1.0)
 
-    @unittest.expectedFailure
     def test_a_held_note_has_no_tempo(self):
-        """KNOWN FAULT, stated rather than papered over.
+        """A drone, a held chord, a pad: nothing strikes, so there is no beat.
 
-        The envelope _low_envelope builds is the PEAK of each 10 ms block of a
-        signal low-passed at 170 Hz. A steady note whose period does not fit
-        the block grid gives a block peak that ripples with the phase, and the
-        positive steps of that ripple read as an onset train. Measured on pure
-        30 s tones: 40 Hz -> 200 BPM (conf 0.48), 55 Hz -> 300 (0.53),
-        82 Hz -> 240 (0.79), 147 Hz -> 60 (0.67), 220 Hz -> 200 (0.49), and a
-        pad of detuned saws -> 300 (0.36); only 110 Hz reads as no tempo.
-        Drum-less music (ambient, drones, pads) is therefore given a confident
-        phantom tempo, which the client then takes as its anchor.
-
-        The fix is a real amplitude envelope (rectify, then smooth below the
-        lowest bass period) before the decimation — a change to what every
-        measurement reads, so an ANALYSIS_VERSION bump validated on real
-        music, not an edit made from a test. When it lands this test starts
-        passing and unittest reports an "unexpected success": remove the
-        decorator then.
+        The onset function is the PEAK of each 10 ms block of the low band, and
+        a steady note whose period does not fit the block grid gives a peak
+        that ripples with its phase — perfectly periodic, and the
+        autocorrelation normalises it into a confident beat. It used to:
+        40 Hz -> 200 BPM (0.48), 55 Hz -> 300 (0.53), 82 Hz -> 240 (0.79),
+        147 Hz -> 60 (0.67), 220 Hz -> 200 (0.49), a held three-note chord ->
+        231 (0.50), and the player took that as its anchor. The low band's
+        smoothed POWER now has to rise before there is anything to measure
+        (_attack_rate): on all of these it never does (0 attacks a minute).
         """
         from supysonic.deezer.analysis import _measure_tempo
 
-        for freq in (55, 82, 220):
-            with self.subTest(freq=freq):
-                bpm, conf, _grid = _measure_tempo(self.file(
-                    f"tone{freq}", "-f", "lavfi", "-i",
-                    f"sine=frequency={freq}:sample_rate=44100:duration=30",
+        chord = "0.25*sin(2*PI*55*t)+0.2*sin(2*PI*82.4*t)+0.15*sin(2*PI*110*t)"
+        cases = {f"tone{f}": ("-f", "lavfi", "-i", f"sine=frequency={f}:sample_rate=44100:duration=30")
+                 for f in (40, 55, 82, 147, 220)}
+        cases["chord"] = ("-f", "lavfi", "-i", f"aevalsrc='{chord}':s=44100:d=30")
+        for name, graph in cases.items():
+            with self.subTest(name):
+                self.assertEqual(_measure_tempo(self.file(name, *graph)), (None, 0.0, 0.0))
+
+    def test_a_limitered_kick_keeps_its_tempo(self):
+        """What the gate must never swallow: a hard kick mastered flat.
+
+        A hardstyle or hardcore kick's distorted tail holds a few dB under its
+        own attack, so the low band barely steps when the next one lands. With
+        the tail held at 0.78 of the attack (-2.2 dB) the band still rises
+        148 times a minute at 150 BPM, and at 0.75 (-2.5 dB) 198 at 200 BPM —
+        a 3 dB rise requirement found neither. Measured 150.0 (0.62) and
+        200.0 (0.55).
+        """
+        from supysonic.deezer.analysis import _measure_tempo
+
+        for bpm, tail in ((150, 0.78), (200, 0.75)):
+            p = 60.0 / bpm
+            kick = (
+                f"0.9*sin(2*PI*(50+150*exp(-30*mod(t\\,{p})))*mod(t\\,{p}))"
+                f"*({tail}+{1 - tail:.2f}*exp(-14*mod(t\\,{p})))"
+            )
+            with self.subTest(bpm=bpm, tail=tail):
+                bpm_read, conf, _grid = _measure_tempo(self.file(
+                    f"limitered{bpm}", "-f", "lavfi", "-i", f"aevalsrc='{kick}':s=44100:d=30",
                 ))
-                self.assertTrue(bpm is None or conf < 0.1, (bpm, conf))
+                self.assertAlmostEqual(bpm_read, bpm, delta=1.0)
+                self.assertGreater(conf, 0.4)
+
+    def test_a_kick_every_two_seconds_is_not_a_beat(self):
+        # 28 attacks a minute, under the 40 a beat needs; 30 BPM is below the
+        # slowest tempo read anyway (55).
+        from supysonic.deezer.analysis import _measure_tempo
+
+        kick = "0.6*sin(2*PI*(45+160*exp(-35*mod(t\\,2)))*mod(t\\,2))*exp(-9*mod(t\\,2))"
+        path = self.file("sparse", "-f", "lavfi", "-i", f"aevalsrc='{kick}':s=44100:d=30")
+        self.assertEqual(_measure_tempo(path), (None, 0.0, 0.0))
 
 
 class SilenceBoundsTestCase(FfmpegTestCase):
