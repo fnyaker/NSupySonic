@@ -76,7 +76,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-port="$(docker port "$cid" 5722/tcp | head -n1 | sed 's/.*://')"
+mapping="$(docker port "$cid" 5722/tcp)"
+port="$(sed -n '1s/.*://p' <<<"$mapping")"
+[ -n "$port" ] || fail "no host port was published: $mapping"
 base="http://127.0.0.1:$port"
 for _ in $(seq 1 60); do
     if curl -fsS -o /dev/null "$base/app/" 2>/dev/null; then
@@ -87,7 +89,11 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 
-curl -fsS "$base/app/" | grep -qi "<html" || fail "/app/ does not serve the SPA"
+# Output is captured before it is searched, never piped into `grep -q`: grep
+# exits at its first match, the writer then dies of SIGPIPE, and pipefail
+# turns a match into a failure.
+page="$(curl -fsS "$base/app/")" || fail "/app/ did not answer"
+grep -qi "<html" <<<"$page" || fail "/app/ does not serve the SPA"
 
 ping="$(curl -fsS "$base/rest/ping.view?u=smoke&p=$password&c=smoke&v=1.16.0&f=json")"
 grep -q '"status": *"ok"' <<<"$ping" || fail "the admin cannot log in: $ping"
@@ -95,7 +101,8 @@ grep -q '"status": *"ok"' <<<"$ping" || fail "the admin cannot log in: $ping"
 refused="$(curl -fsS "$base/rest/ping.view?u=smoke&p=wrong&c=smoke&v=1.16.0&f=json")"
 grep -q '"status": *"failed"' <<<"$refused" || fail "a wrong password was accepted: $refused"
 
-docker logs "$cid" 2>&1 | grep -q "Created admin user 'smoke'" \
+logs="$(docker logs "$cid" 2>&1)"
+grep -q "Created admin user 'smoke'" <<<"$logs" \
     || fail "the entrypoint did not report creating the admin"
 
 step "healthy"
