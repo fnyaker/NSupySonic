@@ -809,6 +809,85 @@ class DeezerTestCase(TestBase):
         self.assertIn(ids.track_uuid("1"), starred)
         self.assertNotIn(ids.track_uuid("2"), starred)
 
+    # -- flow, recommendations, what the nightly sync runs --------------
+
+    def _flow(self):
+        pl = Playlist.get_or_none(Playlist.id == ids.playlist_uuid(importer.RECO_FLOW))
+        return None if pl is None else [t.deezer_id for t in pl.get_tracks()]
+
+    def test_the_flow_is_a_playlist_that_follows_deezer_day_to_day(self):
+        dz = self.provider._dz
+        dz.gw.tracks_by_id = {str(i): raw_track(i, f"T{i}") for i in (1, 2, 3)}
+        imp = importer.DeezerImporter(self.provider, "alice")
+        dz.api.flow = {"data": [{"id": 1}, {"id": 2}]}
+        self.assertEqual(imp.sync_flow(), 2)
+        self.assertEqual(self._flow(), ["1", "2"])
+        flow = Playlist[ids.playlist_uuid(importer.RECO_FLOW)]
+        self.assertEqual((flow.name, flow.user.name), ("Deezer · Flow", "alice"))
+        # The next day's Flow replaces it wholesale, in Deezer's order, in place.
+        dz.api.flow = {"data": [{"id": 3}, {"id": 1}]}
+        self.assertEqual(imp.sync_flow(), 2)
+        self.assertEqual(self._flow(), ["3", "1"])
+        self.assertEqual(Playlist.select().where(Playlist.name == "Deezer · Flow").count(), 1)
+        # A day Deezer hands back nothing keeps the last one rather than an empty list.
+        dz.api.flow = {"data": []}
+        self.assertEqual(imp.sync_flow(), 0)
+        self.assertEqual(self._flow(), ["3", "1"])
+
+    def test_a_flow_that_cannot_be_read_does_not_stop_the_recommendations(self):
+        # Some accounts need OAuth for the Flow endpoint; that must cost the
+        # Flow, not the smart playlists fetched alongside it.
+        dz = self.provider._dz
+        dz.api.get_user_flow = lambda user_id, limit=25: (_ for _ in ()).throw(RuntimeError("OAuth"))
+        dz.gw.smart_tracklists = {
+            "discovery": {"DATA": {"TITLE": "Discovery"}, "SONGS": {"data": [raw_track(5)]}}
+        }
+        with self.assertLogs("supysonic.deezer.importer", "WARNING"):
+            out = importer.DeezerImporter(self.provider, "alice").sync_recommendations(
+                smart_ids=["discovery"], flow=True
+            )
+        self.assertEqual(out, {"smart": {"discovery": 1}})
+        pl = Playlist.get(Playlist.id == ids.playlist_uuid("smart:discovery"))
+        self.assertEqual((pl.name, [t.deezer_id for t in pl.get_tracks()]), ("Deezer · Discovery", ["5"]))
+
+    def test_smart_playlists_retire_the_old_new_releases_list(self):
+        alice = User.get(name="alice")
+        legacy = Playlist.create(id=ids.playlist_uuid("reco:newreleases"), user=alice, name="Nouveautés")
+        importer.DeezerImporter(self.provider, "alice").sync_recommendations(
+            smart_ids=["new-releases"], flow=False
+        )
+        self.assertIsNone(Playlist.get_or_none(Playlist.id == legacy.id))
+        # An empty smart list is skipped, not written as an empty playlist.
+        self.assertIsNone(Playlist.get_or_none(Playlist.id == ids.playlist_uuid("smart:new-releases")))
+
+    def test_the_sync_runs_what_the_config_asks_for_and_nothing_else(self):
+        imp = importer.DeezerImporter(self.provider, "alice")
+        calls = []
+        for name in ("sync_playlists", "sync_favorites", "sync_podcasts", "sync_recommendations"):
+            setattr(imp, name, lambda *a, _n=name, **k: calls.append((_n, a, k)) or 0)
+
+        self.assertEqual(imp.sync({}), {})
+        self.assertEqual(calls, [])
+
+        imp.sync({"sync_playlists": True, "sync_podcasts": True, "podcast_episodes": "12"})
+        self.assertEqual(calls, [("sync_playlists", (), {}), ("sync_podcasts", (12,), {})])
+
+        calls.clear()
+        imp.sync({"import_new_releases": True, "smart_tracklists": "discovery, monthly-top"})
+        self.assertEqual(
+            calls,
+            [("sync_recommendations", (), {"smart_ids": ["discovery", "monthly-top"], "flow": False})],
+        )
+
+        calls.clear()
+        imp.sync({"import_flow": True, "sync_favorites": True})
+        self.assertEqual(
+            calls,
+            [("sync_favorites", (), {}), ("sync_recommendations", (), {"smart_ids": None, "flow": True})],
+        )
+        # No list configured means the whole default set.
+        self.assertEqual(importer.smart_ids_from_config({}), importer.DEFAULT_SMART_TRACKLISTS)
+
     # -- archive: fetch + extension fix ----------------------------------
 
     def test_ensure_archived_writes_file_and_updates_row(self):
