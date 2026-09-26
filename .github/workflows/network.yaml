@@ -1,0 +1,40 @@
+name: Network tests
+
+# tests/net talks to real third-party services (Last.fm, ListenBrainz, LRCLIB).
+# It used to run on every push, in every Python job, with continue-on-error —
+# so its result was ignored five times per commit and nobody ever saw it fail.
+# It now runs weekly (and on demand), once, and a failure is a red run: the
+# signal that one of those APIs changed under us, which is the only thing
+# these tests can tell.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1" # Mondays, 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  network:
+    name: Third-party services
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            setup.cfg
+            ci-requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r ci-requirements.txt
+
+      - name: Run network tests
+        run: python -m unittest -v tests.net.suite

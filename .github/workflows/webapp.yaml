@@ -1,0 +1,61 @@
+name: Web app
+
+# The SPA's own suite (node --test: the analysis chain on real audio, the
+# rhythm analyser's WebAssembly against its Rust source, the animation
+# catalogue and drivers, the listen-party scheduler, the genre trainers...) and
+# its production build. It used to run nowhere but on a developer's machine.
+#
+# viz.test.mjs reads the genre vocabulary out of supysonic/deezer/analysis.py,
+# so that file is a dependency of this suite too.
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - webapp/**
+      - supysonic/deezer/analysis.py
+      - .github/workflows/webapp.yaml
+  pull_request:
+    paths:
+      - webapp/**
+      - supysonic/deezer/analysis.py
+      - .github/workflows/webapp.yaml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: npm test + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      # `npm ci`: the committed lockfile, exactly — and a lockfile that has
+      # drifted from package.json fails here rather than in the Docker build.
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

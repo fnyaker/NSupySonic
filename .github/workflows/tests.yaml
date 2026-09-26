@@ -1,59 +1,139 @@
-# Inspired by python-package
-
 name: Tests
+
+# Two jobs, not a version matrix. Five Pythons ran the same suite five times
+# and caught nothing the two ends would not: what differs between 3.11 and 3.12
+# is a subset of what differs between 3.10 and 3.13. What DOES change the result
+# is the environment, so each job is a configuration someone really runs:
+#
+#   image    — the Python the Docker image ships (3.13) with everything the image
+#              has: ffmpeg and numpy. The tests that need them are REQUIRED here
+#              (NS_REQUIRE_FFMPEG), never skipped — a skip in CI is the suite
+#              quietly testing less than it claims, and it is how a failing
+#              numpy test and a trailing-silence bug both went unseen.
+#   minimal  — the oldest Python setup.cfg accepts, on a bare install: no ffmpeg,
+#              no numpy. That is where "optional" has to stay optional.
+#
+# Both run the suite across processes (tools/partest.py), packed by the timings
+# the previous run recorded (restored from the Actions cache).
+
 on:
   push:
+    branches:
+      - master
     paths:
-    - supysonic/**
-    - deezerpy/**
-    - tests/**
-    - ci-requirements.txt
-    - pyproject.toml
-    - setup.cfg
-    - setup.py
+      - supysonic/**
+      - deezerpy/**
+      - tests/**
+      - tools/partest.py
+      - tools/_partest_worker.py
+      - ci-requirements.txt
+      - .coveragerc
+      - pyproject.toml
+      - setup.cfg
+      - setup.py
+      - docker/requirements.py
+      - Dockerfile
+      - .github/workflows/tests.yaml
   pull_request:
     paths:
-    - supysonic/**
-    - deezerpy/**
-    - tests/**
-    - ci-requirements.txt
-    - pyproject.toml
-    - setup.cfg
-    - setup.py
+      - supysonic/**
+      - deezerpy/**
+      - tests/**
+      - tools/partest.py
+      - tools/_partest_worker.py
+      - ci-requirements.txt
+      - .coveragerc
+      - pyproject.toml
+      - setup.cfg
+      - setup.py
+      - docker/requirements.py
+      - Dockerfile
+      - .github/workflows/tests.yaml
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
-  build:
-    name: Build
+  python:
+    name: Python ${{ matrix.python }} (${{ matrix.name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
-      matrix:
-        python-version:
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
       fail-fast: false
+      matrix:
+        include:
+          - name: image
+            python: "3.13"
+            full: true
+          - name: minimal
+            python: "3.10"
+            full: false
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r ci-requirements.txt
-    - name: Run tests
-      run: coverage run -m unittest
-    - name: Run network tests (non-blocking; depend on third-party services)
-      continue-on-error: true
-      run: coverage run -a -m unittest tests.net.suite
-    - name: Upload coverage
-      uses: codecov/codecov-action@v4
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-      # Don't fail CI when the Codecov token isn't configured on the fork.
-      continue-on-error: true
-      if: ${{ !cancelled() }}
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            setup.cfg
+            ci-requirements.txt
+
+      - name: Install ffmpeg
+        if: matrix.full
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          ffmpeg -hide_banner -version | head -n1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r ci-requirements.txt ${{ matrix.full && 'numpy' || '' }}
+
+      - name: Restore test timings
+        uses: actions/cache/restore@v4
+        with:
+          path: .partest-timings.json
+          key: partest-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: partest-${{ matrix.name }}-
+
+      - name: Run tests
+        env:
+          NS_REQUIRE_FFMPEG: ${{ matrix.full && '1' || '0' }}
+        run: python tools/partest.py ${{ matrix.full && '--coverage' || '' }}
+
+      - name: Save test timings
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .partest-timings.json
+          key: partest-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Coverage report
+        if: matrix.full && !cancelled()
+        run: |
+          coverage combine
+          coverage xml
+          {
+            echo '### Coverage'
+            echo '```'
+            coverage report --skip-covered --sort=cover
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage
+        if: matrix.full && !cancelled()
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+        # Don't fail CI when the Codecov token isn't configured on the fork.
+        continue-on-error: true
