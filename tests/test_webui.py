@@ -1198,6 +1198,104 @@ class WebUITestCase(unittest.TestCase):
         self._login()
         self.assertEqual(self.client.delete("/api/track/999999").status_code, 404)
 
+    # What a deletion or a replacement does to the admin's REAL Deezer account.
+    # Nothing else in the app writes to a third party on the user's behalf, and
+    # these calls ran in no test: a wrong id here edits somebody's playlists.
+
+    def _dead_everywhere(self, sng_id, deezer_playlist="777"):
+        from supysonic.db import Playlist, PlaylistTrack, StarredTrack
+
+        dead = self._make_deezer_track(sng_id=sng_id, title="Gone", archived=False)
+        alice = User.get(User.name == "alice")
+        mirrored = Playlist.create(user=alice, name="On Deezer", deezer_id=deezer_playlist)
+        local = Playlist.create(user=alice, name="Here only")
+        PlaylistTrack.create(playlist=mirrored, track=dead, index=0)
+        PlaylistTrack.create(playlist=local, track=dead, index=0)
+        StarredTrack.create(user=alice, starred=dead, date=now())
+        return dead
+
+    def _delete(self, sng_id):
+        provider = self.app.deezer
+        orig = provider.resolve
+        provider.resolve = self._dead(provider)
+        try:
+            rv = self.client.delete(f"/api/track/{sng_id}")
+            self.assertEqual(rv.status_code, 200, rv.get_json())
+            return self._await_job(rv.get_json()["job"])
+        finally:
+            provider.resolve = orig
+
+    def test_an_admins_deletion_is_carried_over_to_the_deezer_account(self):
+        gw = self.app.deezer._dz.gw
+        self._dead_everywhere("70")
+        self._login()
+        self.assertTrue(self._delete("70")["ok"])
+        # Out of the one playlist that exists on Deezer, and out of the loved tracks.
+        self.assertEqual(gw.songs_removed, [("777", ["70"])])
+        self.assertEqual(gw.fav_removed, ["70"])
+
+    def test_with_push_to_deezer_off_a_deletion_stays_on_the_server(self):
+        gw = self.app.deezer._dz.gw
+        self._dead_everywhere("71")
+        self.app.config["DEEZER"]["push_to_deezer"] = False
+        self._login()
+        self.assertTrue(self._delete("71")["ok"])
+        self.assertEqual((gw.songs_removed, gw.fav_removed), ([], []))
+
+    def test_a_deezer_failure_never_undoes_a_local_deletion(self):
+        from supysonic.db import Track
+
+        gw = self.app.deezer._dz.gw
+
+        def refuse(playlist_id, songs):
+            raise RuntimeError("Deezer said no")
+
+        gw.remove_songs_from_playlist = refuse
+        dead = self._dead_everywhere("72")
+        self._login()
+        self.assertTrue(self._delete("72")["ok"])
+        self.assertIsNone(Track.get_or_none(Track.id == dead.id))
+        self.assertEqual(gw.fav_removed, ["72"])  # the rest of the purge still ran
+
+    def test_a_users_deletion_only_touches_their_own_lists(self):
+        """Anyone may clear a dead track out of their own lists; the shared
+        library row, other people's lists and the admin's Deezer account are
+        not theirs."""
+        from supysonic.db import Playlist, PlaylistTrack, StarredTrack, Track
+
+        gw = self.app.deezer._dz.gw
+        dead = self._dead_everywhere("73")
+        UserManager.add("bob", "B0b")
+        bob = User.get(User.name == "bob")
+        theirs = Playlist.create(user=bob, name="Bob's")
+        PlaylistTrack.create(playlist=theirs, track=dead, index=0)
+        StarredTrack.create(user=bob, starred=dead, date=now())
+
+        self.client.post("/api/login", json={"username": "bob", "password": "B0b"})
+        self.assertTrue(self._delete("73")["ok"])
+
+        self.assertIsNotNone(Track.get_or_none(Track.id == dead.id))
+        holders = {
+            row.playlist.name
+            for row in PlaylistTrack.select().where(PlaylistTrack.track == dead.id)
+        }
+        self.assertEqual(holders, {"On Deezer", "Here only"})
+        stars = {s.user.name for s in StarredTrack.select().where(StarredTrack.starred == dead.id)}
+        self.assertEqual(stars, {"alice"})
+        self.assertEqual((gw.songs_removed, gw.fav_removed), ([], []))
+
+    def test_an_admins_replacement_is_mirrored_on_their_deezer_playlists(self):
+        gw = self.app.deezer._dz.gw
+        self._dead_everywhere("74", deezer_playlist="888")
+        self._make_deezer_track(sng_id="75", title="Alive", archived=True)
+        self._login()
+        rv = self.client.post("/api/replace", json={"from": "74", "to": "75"})
+        self.assertEqual(rv.status_code, 200, rv.get_json())
+        self.assertTrue(self._await_job(rv.get_json()["job"])["ok"])
+        # The Deezer playlist gets the same swap; the local-only one has nothing to mirror.
+        self.assertEqual(gw.songs_removed, [("888", ["74"])])
+        self.assertEqual(gw.songs_added, [("888", ["75"])])
+
     def test_replace_rejects_nonsense(self):
         self._login()
         self.assertEqual(
