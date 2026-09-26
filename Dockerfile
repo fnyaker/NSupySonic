@@ -40,6 +40,24 @@ COPY --from=wasmbuilder /out/simd/wasm32-unknown-unknown/release/rhythm.wasm src
 RUN npm run build   # writes /web/supysonic/webui/dist
 
 # ---------------------------------------------------------------------------
+# ffmpeg: one static binary, no shared library anywhere
+# ---------------------------------------------------------------------------
+# The apt layer that installed Debian's ffmpeg was 172 MB of the published
+# image's 281 MB (compressed): the package pulls in every library some codec,
+# device or filter could want — video encoders, SDL, X11, Vulkan, speech
+# synthesis — for a server that decodes audio, runs six audio filters and
+# encodes Opus, FLAC, MP3 and AAC. This build is a single ~54 MB (compressed)
+# file with everything the app drives in it, which docker/smoke.sh checks by
+# name. Measured against Ubuntu 24.04's ffmpeg 6.1 on the app's own jobs, it is
+# as fast or faster on every one (Opus 320k -21%, silencedetect -33%, the
+# spectral pass identical) and the analysis it feeds comes out the same to 0.1%
+# on every record of the tempo eval. The digest is
+# the multi-arch INDEX, so amd64 and arm64 come from this one line; the tests
+# workflow reads the line too, so the suite runs against the binary shipped.
+# Only /ffmpeg is copied: ffprobe (another 141 MB) is never called.
+FROM mwader/static-ffmpeg:9.0.2@sha256:7d9bdaaf887f7e6ce6151f67325c344074b5ff1fb75316011c3376503e449a7b AS ffmpeg
+
+# ---------------------------------------------------------------------------
 # Builder: install supysonic (+ vendored deezerpy) and gunicorn into a venv
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim AS builder
@@ -100,12 +118,15 @@ LABEL org.opencontainers.image.title="NSupySonic" \
       org.opencontainers.image.source="https://github.com/fnyaker/NSupySonic" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
-# Transcoders used by the streaming endpoint (ffmpeg covers the generic
-# transcoder; the others back the codec-specific lines in config.sample).
+# The codec-specific command-line tools behind config.sample's lame / mpg123 /
+# oggdec / flac lines, for a mounted config written from it. Everything the app
+# runs itself, and every transcoder in the image's own config, is ffmpeg.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ffmpeg lame flac vorbis-tools mpg123 \
+      lame flac vorbis-tools mpg123 \
  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 
 COPY --from=builder /opt/venv /opt/venv
 # The release this image was built from (CI passes the git tag). The entrypoint

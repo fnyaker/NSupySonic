@@ -109,13 +109,19 @@ pins the production defaults), and it compiles each distinct werkzeug URL builde
 instead of once per rule per app (~95% of every `create_application`; `tests.test_harness` checks
 every rule's URLs against a fresh werkzeug compilation). CI runs five workflows:
 - `tests.yaml` — two jobs, not a version matrix: **image** (Python 3.13, what the Docker image
-  ships, with ffmpeg + numpy and `NS_REQUIRE_FFMPEG=1`, under coverage) and **minimal** (Python
-  3.10, the oldest `setup.cfg` accepts, bare install). Both via `tools/partest.py`, packed by the
-  previous run's timings (Actions cache). A test that needs ffmpeg or numpy must RUN in the image
-  job — a skip there is the suite testing less than it claims.
+  ships, with numpy, `NS_REQUIRE_FFMPEG=1`, under coverage, and the image's OWN ffmpeg binary —
+  the job reads the pinned `FROM mwader/static-ffmpeg…` line out of the Dockerfile and copies
+  `/ffmpeg` from it) and **minimal** (Python 3.10, the oldest `setup.cfg` accepts, bare install).
+  Both via `tools/partest.py`, packed by the previous run's timings (Actions cache). A test that
+  needs ffmpeg or numpy must RUN in the image job — a skip there is the suite testing less than it
+  claims.
 - `webapp.yaml` — `npm ci`, `npm test`, `npm run build`.
 - `docker.yaml` — a PR builds amd64 only (no QEMU) and runs `docker/smoke.sh` on it; master and
-  `v*` tags smoke-test amd64, then build and push both architectures.
+  `v*` tags smoke-test amd64, then build and push both architectures. **ffmpeg in the image is a
+  static build** (one file, no shared library): the apt layer that installed Debian's package was
+  172 MB of the 281 MB compressed image, for a server that only needs audio. The smoke test checks every filter and
+  encoder the app drives BY NAME and writes-then-reads every format it serves; bump the pin (it is
+  the multi-arch index digest) and those two lists are what to re-check.
 - `network.yaml` — `tests/net` (real third-party services), weekly and on demand.
 - `android.yaml` — the native app APK, uploaded as a run artifact / attached to `v*` releases.
 
