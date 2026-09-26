@@ -220,8 +220,15 @@ def _spectral_cmd(path, loudness=True):
         # to leave the graph in.
         "-t", str(MAX_SECONDS), "-i", path,
         "-map", "0:a:0",
-        # Mono at 22 kHz: the descriptors below are about the shape of the
-        # spectrum, not its top octave, and this quarters the filtering cost.
+        # Output options: ffmpeg applies them AFTER the -af graph, so what is
+        # measured is the SOURCE signal — its own rate, every channel (the
+        # stats come per channel, `aspectralstats.1.*`, `.2.*`, and _STAT pools
+        # them). Measured on white noise at 44.1 kHz: centroid 11 kHz, rolloff
+        # 18.7 kHz, both above this output's Nyquist. Every stored verdict
+        # came out of this pipeline; resampling INSIDE the graph would be
+        # cheaper but move every descriptor the classifier's Hz thresholds
+        # read, so it would be an ANALYSIS_VERSION change, not a tidy-up. ebur128 needs the source
+        # channels regardless (BS.1770 loudness is summed per channel).
         "-ac", "1", "-ar", "22050",
         "-af", graph,
         "-f", "null", "-",
