@@ -68,8 +68,8 @@ import { WORLD_META } from "./worlds/catalogue.js";
 export const SKINS = {
   // === hard: the kick is the event ===========================================
   hardcore: { world: "shatter" },
-  frenchcore: { world: "piano" },
-  uptempo: { world: "forge", hue: -12, sat: 1.1, speed: 1.2, p: { heat: 1.5, anthem: 0.5, sparks: 1.6, smoke: 0.6, anvils: 3 } },
+  frenchcore: { world: "cymatics" },
+  uptempo: { world: "microwave", hue: -12, sat: 1.1, speed: 1.2, p: { dish: 2, hum: 1.3, arcs: 0.8, field: 1.15 } },
   gabber: { world: "shatter", hue: -8, p: { shards: 0.55, jag: 1.35, flash: 0.8, leds: 0.6 } },
   speedcore: { world: "shatter", hue: -20, speed: 1.4, p: { shards: 2.1, jag: 0.8, spin: 1.5, burst: 1.2 } },
   terrorcore: { world: "shatter", hue: -28, sat: 1.15, p: { shards: 1.6, jag: 1.5, burst: 0.6, leds: 0.4 } },
@@ -89,7 +89,7 @@ export const SKINS = {
   bouncy: { world: "bounce", hue: 15, p: { height: 1.3, twins: 1 } },
   tekk: { world: "bounce", hue: -10, p: { spikes: 1.2 } },
   makina: { world: "bounce", hue: 60, p: { height: 1.1, spikes: 1.2, twins: 0 } },
-  zaag: { world: "saw" },
+  zaag: { world: "microwave", hue: 20, sat: 1.05, p: { dish: 1, hum: 1.15, arcs: 1.2, spin: 1.3 } },
   pieep: { world: "stairs", hue: 35, p: { steps: 16, trail: 0.7 } },
   acidtechno: { world: "stairs", hue: 70, sat: 1.1, p: { steps: 12, rise: 0.16, trail: 1.4 } },
   acidcore: { world: "stairs", hue: 60, speed: 1.3, p: { steps: 20, rise: 0.1, trail: 0.6 } },
@@ -100,7 +100,7 @@ export const SKINS = {
   krach: { world: "microwave" },
   noise: { world: "static", sat: 0.7, p: { snow: 1.6, tear: 0.8, blocks: 0.8 } },
   industrial: { world: "static", hue: -10, sat: 0.7, p: { blocks: 1.3, split: 0.6 } },
-  industrialhardcore: { world: "static", hue: -20, p: { tear: 1.2, blocks: 1.4, snow: 1.1 } },
+  industrialhardcore: { world: "saw", hue: -20, sat: 0.85, p: { teeth: 30, sparks: 1.3, hot: 1.2 } },
   extratone: { world: "static", speed: 1.5, p: { tear: 1.6, snow: 1.5, split: 1.4 } },
   darkstep: { world: "static", sat: 0.6, p: { tear: 0.9, blocks: 1 } },
   bigroom: { world: "fireworks", p: { shells: 1.4, size: 1.3, smoke: 1.2 } },

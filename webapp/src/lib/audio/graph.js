@@ -738,6 +738,50 @@ export function readScope() {
 }
 
 // How far (seconds) the analysers currently run ahead of the speakers.
+// --- the rhythm analyser's tap -----------------------------------------------
+//
+// lib/audio/engine.js runs the analysis in an AudioWorklet (rhythm.worklet.js)
+// and hands its node here to be fed. It taps `outputNode`, BEFORE the
+// look-ahead delay, like every other reader of the graph — with a look-ahead
+// configured it hears the music before the listener does, which is what lets
+// the engine deliver each frame exactly when its audio is heard. A node that
+// nothing downstream pulls may never be processed, so it gets a silent path to
+// the destination, the same trick the old tick worklet used.
+let rhythmTap = null; // { node, mute }
+
+export function tapRhythm(node) {
+  if (!ctx || !outputNode || !node) return false;
+  untapRhythm();
+  try {
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    outputNode.connect(node);
+    node.connect(mute);
+    mute.connect(ctx.destination);
+    rhythmTap = { node, mute };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function untapRhythm() {
+  if (!rhythmTap) return;
+  const { node, mute } = rhythmTap;
+  rhythmTap = null;
+  try {
+    outputNode?.disconnect(node);
+  } catch {
+    /* already gone */
+  }
+  try {
+    node.disconnect();
+    mute.disconnect();
+  } catch {
+    /* already gone */
+  }
+}
+
 export function lookaheadSeconds() {
   return lookaheadNode ? lookaheadNode.delayTime.value : 0;
 }

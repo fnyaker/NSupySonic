@@ -14,7 +14,33 @@ import { createGeometry } from "../../src/lib/viz/geometry.js";
 import { createPalette } from "../../src/lib/viz/palette.js";
 import { tierPreset } from "../../src/lib/viz/quality.js";
 import { loadWorld } from "../../src/lib/viz/worlds/index.js";
+import { loadVizCore } from "../../src/lib/viz/core.js";
 import { createTrack } from "./music.mjs";
+
+// The samples a scope is fed: the analysis frames above say what the music is
+// doing, and the oscilloscope needs the music itself. A kick on every beat —
+// a sine swept from 225 Hz down to 45, driven into a soft clip, gone in the
+// breakdown — under a two-note lead, both at the section's level; the lead
+// louder on the right, so the two traces differ the way a mix's do.
+const WAVE_SR = 48000;
+const WAVE_N = 8192;
+function waveAt(t, f, bpm) {
+  const beat = 60 / bpm;
+  const level = Math.max(0.05, f.features?.level ?? 0.5);
+  const kicks = (f.pattern?.breakdown ?? 0) > 0.5 ? 0 : 1;
+  const left = new Float32Array(WAVE_N);
+  const right = new Float32Array(WAVE_N);
+  for (let i = 0; i < WAVE_N; i++) {
+    const u = t - (WAVE_N - i) / WAVE_SR;
+    const tau = u - Math.floor(u / beat) * beat;
+    const ph = 2 * Math.PI * (45 * tau + (180 / 26) * (1 - Math.exp(-26 * tau)));
+    const kick = Math.tanh(Math.sin(ph) * 3) * Math.exp(-9 * tau) * 0.8 * kicks;
+    const lead = (Math.sin(2 * Math.PI * 220 * u) * 0.5 + Math.sin(2 * Math.PI * 330 * u) * 0.3) * 0.3;
+    left[i] = (kick + lead * 0.45) * level;
+    right[i] = (kick + lead) * level;
+  }
+  return { left, right, size: WAVE_N, sampleRate: WAVE_SR };
+}
 
 const ANALYSIS_HZ = 94;
 const METRIC_W = 192;
@@ -220,6 +246,8 @@ async function run(opts) {
     // Pinned rather than fixed: the smart engine's own path, skin included.
     skin = false,
   } = opts;
+  // The animation core (Rust): the scope's trace runs through it.
+  await loadVizCore();
   // A feedback world is its own history: judge it after it has had time to
   // build one, the way it would have on screen.
   const def = await loadWorld(world);
@@ -284,6 +312,7 @@ async function run(opts) {
   const advance = (until, drawFrom) => {
     while (t < until) {
       const f = track.frameAt(t);
+      if (world === "scope") f.wave = waveAt(t, f, bpm);
       simT = t;
       pal.update(f, dt);
       scene.update(f, dt, geometry.out);

@@ -19,8 +19,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { createMusical } from "../src/lib/viz/musical.js";
+import { vizCoreFromBytes } from "../src/lib/viz/core.js";
 import { LOOK_KEYS } from "../src/lib/audio/style.js";
 import { worldIds, loadWorld } from "../src/lib/viz/worlds/index.js";
 
@@ -88,6 +90,10 @@ function frameAt(t, { bpm, dt = 1 / 60, steady = false }) {
   };
 }
 
+// The musical reading is Rust (rhythm/src/viz_motion.rs): the very binary the
+// app ships.
+vizCoreFromBytes(readFileSync(new URL("../src/lib/audio/rhythm.wasm", import.meta.url)));
+
 const WORLDS = [];
 for (const id of worldIds()) WORLDS.push([id, await loadWorld(id)]);
 
@@ -146,6 +152,7 @@ function drive(def, { bpm, seconds, dt = 1 / 60, hitchEvery = 0, steady = false 
     if (i > n / 2) for (let k = 0; k < 8; k++) moved += Math.abs(state[k] - prev[k]);
     prev.set(state);
   }
+  m.dispose();
   return { moved, peak, bad, flashes, births };
 }
 
@@ -235,7 +242,7 @@ test("the unleashed strobe plays the kicks of a drop, and leaves the breakdown d
   // stamps read at the render clock, then the ten-a-second cap. Material:
   // frenchcore at 200 BPM through the arrangement above (build 8-16 s, drop at
   // 16 s, breakdown 32-40 s), with the pattern layer's `dropped` held for
-  // eight seconds after each drop exactly as audio/pattern.js holds it.
+  // eight seconds after each drop exactly as rhythm/src/pattern.rs holds it.
   const { strobePower, STROBE_MIN_INTERVAL, FLASH_MIN_INTERVAL } = await import("../src/lib/viz/scenes/gl.js");
   const bpm = 200;
   const dt = 1 / 60;
