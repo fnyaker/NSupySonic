@@ -289,7 +289,11 @@ is archived**: the first decrypted bytes must be `fLaC`, `ID3` or an MPEG frame 
 (`looks_like_audio`), an empty body is an error, and `download_to` removes its `.part` whatever
 stopped it. An archive is forever — a file on disk is what "archived" means — so noise kept there
 would never be fetched, or play, again. `/api/stream` reads the first block before answering, so
-that refusal is its 502 rather than a response dying half-sent.
+that refusal is its 502 rather than a response dying half-sent. Podcast episodes get the same
+guarantee the other way round: their hosts serve every kind of audio, so `iter_episode` refuses what
+is certainly NOT audio — markup or JSON (an error page or a consent wall answered with a 200), or an
+empty body (`looks_like_a_page`) — instead of listing formats it would one day be wrong about, and
+`download_episode_to` drops its partial too.
 
 **Podcasts** are Deezer *shows*/*episodes*, kept in dedicated `PodcastChannel`/`PodcastEpisode` tables
 (not Track rows — episodes have no artist/album and map onto Subsonic's podcast types). The gw methods

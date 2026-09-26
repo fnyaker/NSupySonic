@@ -624,6 +624,69 @@ class LiveStreamTestCase(_CdnMixin, TestBase):
             self.assertEqual(b"".join(stream), FLAC)
 
 
+class EpisodeFetchTestCase(_CdnMixin, unittest.TestCase):
+    """Podcast episodes: plain audio from a third-party host, archived for good."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.provider = self._provider(self.dir)
+        # The SSRF guard refuses loopback by design (its own tests are in
+        # test_deezer_resilience); here the host IS the loopback stand-in.
+        patcher = mock.patch.object(provider_mod, "check_public_url", lambda url: ["127.0.0.1"])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _fetch(self, url):
+        received = []
+        for chunk in self.provider.iter_episode(url):
+            received.append(chunk)
+        return b"".join(received)
+
+    def test_whatever_audio_the_host_serves_arrives_as_it_was_sent(self):
+        formats = {
+            name: (ASSETS / "formats" / f"silence.{name}").read_bytes()
+            for name in ("mp3", "m4a", "ogg", "flac")
+        }
+        # Something nobody listed as a format is still not a page.
+        formats["unknown"] = b"\x00\x00\x01\xba" + bytes(range(256)) * 40
+        for name, body in formats.items():
+            for mode in ("length", "chunked"):
+                with self.subTest(name, mode=mode):
+                    self.assertEqual(self._fetch(self.cdn.serve(f"ep-{name}-{mode}", body, mode)), body)
+
+    def test_a_page_instead_of_the_episode_is_refused(self):
+        pages = {
+            "html": b"<!DOCTYPE html><html><body>Episode removed</body></html>",
+            "indented": b"\r\n  <html><head><title>Consent</title></head></html>",
+            "bom": b"\xef\xbb\xbf<?xml version='1.0'?><error/>",
+            "json": b'{"error": "not found"}',
+            "empty": b"",
+        }
+        for name, body in pages.items():
+            with self.subTest(name):
+                received = []
+                with self.assertRaises(DeezerError):
+                    for chunk in self.provider.iter_episode(self.cdn.serve(f"page-{name}", body)):
+                        received.append(chunk)
+                self.assertEqual(received, [])
+
+    def test_a_failed_episode_download_leaves_nothing_behind(self):
+        dest = Path(self.dir, "Podcasts", "Show", "2026-09-26 Episode.mp3")
+        for name, body, mode in (
+            ("cut", MP3, "length-truncated"),
+            ("page", b"<html>gone</html>", "length"),
+            ("empty", b"", "length"),
+        ):
+            with self.subTest(name):
+                with self.assertRaises(Exception):
+                    self.provider.download_episode_to(self.cdn.serve(f"epdl-{name}", body, mode), dest)
+                self.assertEqual(self._files(self.dir), [])
+        self.provider.download_episode_to(self.cdn.serve("epdl-ok", MP3, "chunked"), dest)
+        self.assertEqual(dest.read_bytes(), MP3)
+        self.assertEqual(self._files(self.dir), [os.path.relpath(dest, self.dir)])
+
+
 class StreamRouteTestCase(_CdnMixin, unittest.TestCase):
     """``/api/stream/<id>``, the web player's first play of a Deezer track."""
 

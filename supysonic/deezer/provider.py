@@ -386,6 +386,18 @@ def looks_like_audio(head: bytes) -> bool:
     return len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0
 
 
+def looks_like_a_page(head: bytes) -> bool:
+    """Whether a podcast host sent a document instead of the episode.
+
+    An error page, a consent wall or a JSON error answered with a 200 would
+    otherwise be archived as the episode, for good. Hosts serve every kind of
+    audio (MP3, AAC, M4A, Ogg...), so this refuses what is certainly NOT audio —
+    markup and JSON, which no audio container starts with — rather than listing
+    what is, and never turns away a format it did not think of.
+    """
+    return head.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] in (b"<", b"{")
+
+
 class DeezerProvider:
     def __init__(self, arl: str, archive_dir: str, default_quality: str = "FLAC"):
         self.arl = arl
@@ -863,23 +875,43 @@ class DeezerProvider:
                         current = urljoin(current, location)
                         continue
                     resp.raise_for_status()
+                    first = True
                     for chunk in resp.iter_content(65536):
                         if chunk:
+                            if first:
+                                if looks_like_a_page(chunk):
+                                    raise DeezerError(
+                                        f"{urlsplit(current).hostname} sent a page, "
+                                        f"not the episode (it starts {chunk[:16]!r})"
+                                    )
+                                first = False
                             yield chunk
+                    if first:
+                        raise DeezerError(f"{urlsplit(current).hostname} sent an empty episode")
                     return
             finally:
                 session.close()
         raise DeezerError(f"too many redirects fetching {url}")
 
     def download_episode_to(self, url: str, dest: Path) -> None:
-        """Stream a podcast episode's MP3 into ``dest`` (atomic .part temp file)."""
+        """Stream a podcast episode's MP3 into ``dest`` (atomic .part temp file).
+
+        As for a track, a download that fails takes its partial with it.
+        """
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".part")
-        with open(tmp, "wb") as fh:
-            for chunk in self.iter_episode(url):
-                fh.write(chunk)
-        tmp.replace(dest)
+        try:
+            with open(tmp, "wb") as fh:
+                for chunk in self.iter_episode(url):
+                    fh.write(chunk)
+            tmp.replace(dest)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def set_episode_position(self, episode_id, offset, duration, is_heard=False) -> bool:
         """Best-effort push of an episode playback position to Deezer."""
