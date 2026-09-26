@@ -2,7 +2,7 @@
 // Getting it wrong is silent: a rung that never runs is a cover that never
 // appears, and a rung that runs too early is the audio waiting behind it again.
 
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { get } from "svelte/store";
 
@@ -11,6 +11,13 @@ const { TIER, audioReady, beginTrack, playable, whenReady } = await import(
 );
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+// A track left un-ready (the skip test's t4) keeps a real 6 s fallback timer
+// armed, and node waits for it before the file can end: six idle seconds per
+// run. Clearing the current track disarms it. (The mocked-clock tests disarm
+// on the real clock first, for the same reason: a mocked clearTimeout cannot
+// clear a real timer.)
+after(() => beginTrack(null));
 
 test("nothing runs until the audio can play, and then in tier order", async () => {
   const ran = [];
@@ -68,17 +75,49 @@ test("a skip abandons the rest: it is about a track nobody is hearing", async ()
   assert.equal(get(playable), null);
 });
 
-test("a track that never reports ready still gets everything, late", async () => {
+test("a track that never reports ready still gets everything, late", async (t) => {
   // A session restored paused has preload="none", so its element genuinely will
   // not say anything until somebody presses play. No artwork and no lyrics for
   // ever is not an acceptable answer to that.
+  //
+  // On a mocked clock: this used to sleep a real 6.1 s, and could not tell a
+  // fallback firing on time from one firing after 100 ms. Now both edges are
+  // pinned — nothing at 5999 ms, everything at 6000.
+  beginTrack(null); // disarm, on the REAL clock, whatever an earlier test left
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  };
   const ran = [];
   beginTrack("t5");
   whenReady(TIER.ART, () => ran.push("art"));
-  assert.deepEqual(ran, []);
-  await new Promise((r) => setTimeout(r, 6100));
+  t.mock.timers.tick(5999);
+  await flush();
+  assert.deepEqual(ran, [], "the fallback is for a track that never loads, not a slow one");
+  assert.equal(get(playable), null);
+  t.mock.timers.tick(1);
+  await flush();
   assert.deepEqual(ran, ["art"]);
   assert.equal(get(playable), "t5");
+});
+
+test("a skip before the fallback cancels it", async (t) => {
+  beginTrack(null);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const ran = [];
+  beginTrack("t5b");
+  whenReady(TIER.ART, () => ran.push("stale"));
+  t.mock.timers.tick(3000);
+  beginTrack("t5c"); // skipped: the old fallback must not fire for t5c's queue
+  whenReady(TIER.ART, () => ran.push("fresh"));
+  t.mock.timers.tick(3000); // 6 s after t5b, 3 s after t5c
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.deepEqual(ran, []);
+  assert.equal(get(playable), null);
+  t.mock.timers.tick(3000); // t5c's own 6 s
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.deepEqual(ran, ["fresh"]);
+  assert.equal(get(playable), "t5c");
 });
 
 test("a rung registered after the audio started simply runs", async () => {
