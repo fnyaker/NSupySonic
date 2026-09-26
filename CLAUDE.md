@@ -74,9 +74,15 @@ export FLASK_APP="supysonic.web:create_application()"; flask run   # backend dev
 # Web UI (Svelte SPA)
 cd webapp && npm install && npm run build            # -> supysonic/webui/dist (gitignored)
 cd webapp && npm run dev                             # hot reload; proxies /api -> localhost:5000
-cd webapp && npm test                                # node --test: the analysis DSP, the animation catalogue/skins/drivers, the scope, the genre trainers, the cover loader.
+cd webapp && npm test                                # node --test: the shipped rhythm analyser on real audio, the animation core against
+                                                     # its JavaScript oracles, the catalogue/skins/drivers, the genre trainers, the cover loader.
                                                      # No test framework — but run the npm install above first: the modules under
                                                      # test reach svelte/store via stores.js, and a pretest guard says so in one line.
+cd webapp && npm run wasm                            # rebuild rhythm.wasm + rhythm-simd.wasm from webapp/rhythm (Rust, target
+                                                     # wasm32-unknown-unknown). Both binaries are COMMITTED; npm test fails if they
+                                                     # were not built from the sources next to them.
+cd webapp && node test/eval/rhythm-eval.mjs          # the analyser on 26 arranged records with ground truth (beats, kicks, tempo, drops)
+cd webapp && node test/rhythm/run.mjs                # ...and end to end in headless Chromium: AudioWorklet, delivery, timing
 cd webapp && node test/render/run.mjs --world piano --genre frenchcore --bpm 200   # render bench: contact sheet in test/render/out/
 cd webapp && node test/render/run.mjs --check        # every world, held to the picture contracts (headless Chromium, no GPU needed)
 
@@ -86,6 +92,7 @@ supysonic-cli deezer import <deezer-url|track|album|playlist <id>>
 supysonic-cli deezer sync                            # import playlists/favorites/new releases
 supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics for archived tracks
 supysonic-cli deezer analyze [--force] [--limit N] [--workers N]  # measure tempo + style for archived tracks
+supysonic-cli deezer bpm-audit [--limit N]             # Deezer's published BPM against the files' measured tempo, per style
 supysonic-cli deezer embed [--force] [--limit N]       # extract genre embeddings (needs onnxruntime)
 supysonic-cli deezer embed --self-test                 # check the mel front-end without a reference
 
@@ -599,11 +606,25 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   second ended every extraction for the life of the process — and it is also how uploading the model
   fixes a running server.
 
+- **A first play gets Deezer's figure, flagged PROVISIONAL.** The verdict is measured from the
+  archived file, and the first play is the one that archives it — so a track heard for the first
+  time used to get no served tempo at all. Deezer's public API publishes a `bpm` per track and that
+  needs no file: `analysis.tempo_hints` looks it up in the background (one worker, one request at a
+  time, a bounded queue, the answer cached a day — two minutes when Deezer could not be reached) and
+  `provisional_payload` serves it RAW, flagged, until the measurement replaces it (which then reuses
+  the cached figure instead of asking again). The client keeps polling a provisional id until the
+  measured verdict lands and keeps the published tempo if it never does. A figure Deezer lists at
+  half the real tempo is the tracker's to correct, by its one-sided rule: a served tempo may be
+  DOUBLED by the kicks, never halved. `supysonic-cli deezer bpm-audit` answers "are Deezer's BPMs
+  right?" on the operator's own library — Deezer's figure against the file's measured tempo, per
+  style, every disagreement listed.
+
 The client takes the global answers and keeps the per-moment ones. `engine.js` primes the verdicts
 for the queue window (one call, like `/api/gains`) and **seeds the beat tracker** with the served
 BPM, so the grid starts locked and only the phase has to be found — the first bar is on the beat
-instead of the fourth. The kick, the onsets and the transients stay live: no whole-file average can
-stand in for an event.
+instead of the fourth. It never seeds the same tempo twice for a track: a second seed would undo a
+correction the kicks already made. The kick, the onsets and the transients stay live: no whole-file
+average can stand in for an event.
 
 **The genre studio** (`supysonic/deezer/embedding.py` + `genre.py`, `supysonic/webui/genre.py`,
 `webapp/src/lib/genre/`, `routes/Genres.svelte`) is the answer to "the classifier does not know MY
@@ -701,26 +722,69 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   hand-applied tag is not a guess at all, so that leads; the live reading covers what nobody has
   measured yet.
 
-**Audio analysis** (`webapp/src/lib/audio/`) is ONE engine, shared. `engine.js` owns a single clock
-and a single pass over the analysers; every view reads the same frame object by reference, so a
-second visualizer on screen costs a function call. It is refcounted — nothing runs until a view asks
-for frames — and it runs at the shallowest level any live subscriber needs (spectrum / rhythm /
-smart). Three things in there are load-bearing:
+**Audio analysis is RUST, ON THE AUDIO THREAD** (`webapp/rhythm/`, compiled to
+`src/lib/audio/rhythm.wasm`; `webapp/src/lib/audio/` is the delivery). The JavaScript engine read
+two AnalyserNodes from the main thread on a clock that was meant to be an AudioWorklet but was loaded
+from a blob: URL the server's CSP forbids — so in production it ran on requestAnimationFrame, sharing
+the frame budget with the WebGL render, and every janky frame was a hole in the analysis (an
+analyser only ever shows its latest window, so a kick that landed inside one was never seen). Now
+`rhythm.worklet.js` runs the crate inside an AudioWorklet fed straight from the graph, and every hop
+of 512 samples (~10.7 ms at 48 kHz) is analysed, in order, whatever the page is doing:
 
+  `spectrum.rs` (the AnalyserNodes' two views, computed: a 2048-point FFT at the full rate and a
+  512-point one of the signal decimated by 16) → `features.rs` (level, dynamics, SuperFlux, the kick
+  witnesses, chroma, the melody) → `kick.rs` (candidates confirmed or refused two frames later) →
+  `tempo.rs` (the period and the metrical level) → `beat.rs` (the grid, the bar, the phrase) →
+  `pattern.rs` (main kick or roll, and the arrangement) → `style.rs` (the family, the archetypes, the
+  look, the kick's shape) → `genre.rs` (the genre channel).
+
+THE OUTPUT RUNS `LOOKAHEAD` FRAMES BEHIND THE ANALYSIS, which is what lets a kick be confirmed after
+its attack and still be published ON the frame it landed on, and a drop be checked against the level
+of the frames after it. `engine.js` no longer analyses anything: it holds each frame until its audio
+reaches the listener (`getOutputTimestamp`, look-ahead included), decodes it by the layout the binary
+publishes (`rhythm_layout`, name:length pairs — neither side hard-codes a slot), and re-expresses the
+beat grid at that instant (`projectBeat`). It is still ONE engine, shared and refcounted: every view
+reads the same frame object by reference, and it runs at the shallowest level any live subscriber
+needs (spectrum / rhythm / smart). Nothing allocates after `rhythm_init`. Measured against the
+JavaScript chain it replaced, on 26 arranged records with ground truth (`test/eval/`): beats
+F-measure at 35 ms **79 → 93** cold, kick precision **46% → 82%**, drops found on every EDM record
+but trap (mostly 0 of 2 before), a half-tempo seed turned into the right tempo **17% → 88%** of the
+time; end to end in headless Chromium (`test/rhythm/run.mjs`) kicks land within 5 ms, beats within
+0.5 ms, frames are handed out 1 ms from their audio.
+
+How it is built and shipped — each part of this is load-bearing:
+
+- **Two binaries**, baseline and SIMD128 (`rhythm-simd.wasm`), from `npm run wasm`
+  (`rhythm/build.mjs`); `rhythm-assets.js` picks SIMD when the engine validates a one-instruction
+  probe. Both are **committed** so a checkout builds without a Rust toolchain, and the Docker image
+  compiles the crate in a stage of its own. `build.rs` hashes `src/*.rs` (FLAT — a module in a
+  subdirectory would escape it) into `rhythm_src_hash`, and `test/rhythm.test.mjs` fails when the
+  committed binary was not built from the sources beside it, and when the SIMD build does not compute
+  the same frames as the baseline. After touching the crate: `npm run wasm`, commit both.
+- **The compiled module is fetched and compiled ONCE** (`rhythm-assets.js#rhythmBinary`) and
+  instantiated twice: in the worklet for the analysis, and on the page for the animations' core (see
+  *The animations' CPU side is Rust too* below).
+- **`f32::max` / `f32::min` are LIBRARY CALLS on wasm32.** Rust promises the non-NaN operand wins and
+  wasm's `f32.max` propagates the NaN, so every call compiles to a call into a libm routine. The crate
+  had 150 of them, some inside per-bin and per-column loops. `util::MinMax` (`.fmax` / `.fmin`) keeps
+  the exact semantics with comparisons, one instruction each: the analyser went from 107.5 to 93.2 µs
+  a frame with the eval identical to the bit. **Never write `f32::max`/`min` in this crate**, and
+  mind `round()` for the same reason (floor-based rounding where it runs per frame).
 - `graph.js` is the Web Audio graph (moved from the old `lib/visualizer.js`). Its normalization gain
   is **per source, not shared**: a crossfade has two tracks audible at once, each with its own
   ReplayGain, and one shared node could only ever be right for one of them. A separate fade gain
   sits after it so the two envelopes are scheduled independently.
-- Two analysers, not one. `spectrum.js` reads the low end from an 8192-point FFT (5.9 Hz bins) and
-  the rest from a 2048-point one (43 ms window), blended across 300-600 Hz, and **interpolates
-  between bins** where a log band is narrower than one. That is what fixed the old visualizer's
-  bass: a single 512-point FFT is a 93 Hz bin, so every bar below ~400 Hz floored onto the same two
-  or three bins and drew as flat groups of identical bars.
-- The clock is the **audio thread** (a tiny AudioWorklet posting every 4 render quanta), not rAF.
-  rAF stops in a hidden tab, which is the normal case for the player once the projector window is
-  in front of it. rAF is the fallback, and carries the first frames while the worklet compiles.
+- `spectrum.js` keeps the band plan the spectra are read through — the low end from the fine FFT,
+  the rest from the coarse one, blended across 300-600 Hz, **interpolated between bins** where a log
+  band is narrower than one (a single 512-point FFT is a 93 Hz bin, which is why every bar below
+  ~400 Hz once drew as flat groups of identical bars) — and `style.js` keeps the TABLES: the family
+  list and each family's look, `tempoRangeFor`, `familyLook`, `LOOK_KEYS`. The classifier that reads
+  them is `style.rs`, loaded with `familyTable()` at start (`rhythm_load_families`).
 
-**`features.js` — three rules, each of which replaced something measurably wrong:**
+The rules below were each measured on the JavaScript chain and ported rule for rule; the file names
+are the Rust ones.
+
+**`features.rs` — three rules, each of which replaced something measurably wrong:**
 
 - The onset function is **SuperFlux** (Böck & Widmer, DAFx-13): log magnitude, differenced against
   a version of the frame ~20 ms back that has been **maximum-filtered across three bins**. A
@@ -749,7 +813,7 @@ smart). Three things in there are load-bearing:
 **THE KICK IS FOUR WITNESSES, AND NONE OF THEM IS THE LEVEL.** The detector used to ratio two
 envelopes of the 25-180 Hz band — a 3 ms attack against a 90 ms release — and it failed on exactly
 the music this player exists for. Measured through the full chain on synthesised hardcore (audio →
-`features.js` → `tempo.js`, pinned by `test/synth.mjs` + `test/audio.test.mjs`): techno **1.94
+features → tempo, pinned by `test/synth.mjs` + `test/rhythm.test.mjs`): techno **1.94
 detections per kick**, frenchcore **2.08**, uptempo **0.40 — sixty per cent missed**, and
 frenchcore under a screech **3.74**. Two assumptions produced all four:
 
@@ -818,6 +882,23 @@ took uptempo from 1.00 back down to 0.27. All of it now reads **1.00-1.01 per ki
 latency** across sixteen records of real audio from trap to speedcore, with `pattern.mainKick`
 scoring 97-100% precision on them.
 
+Three more faults were found by porting the tests onto the shipped binary, and fixed at the source:
+a passage played 6 dB quieter lost 25 of its 26 kicks FOR GOOD, because only an accepted kick moved
+the level reference — a refused candidate with an unmistakable beater now walks it down (26/26 at
+−6 dB); the kick's SHAPE (soft / hard / industrial) was never measured at all, its thresholds three
+orders of magnitude above the ratio computed, so every weight sat at a third — it is now read from
+each kick's own pitch sweep and the noise of its body (frenchcore hard 0.83, uptempo industrial 0.79,
+techno soft 1.00); and the style look jumped 0.22 in one frame while an opinion formed — it now eases
+(worst step 0.003).
+
+**A BUZZ IS A ROLL.** Frenchcore builds end on a bar of thirty-second-note kicks, 37.5 ms apart — a
+27 Hz buzz, under the 42 ms refractory that stops one kick counting twice, so the climax of the build
+read as silence: no kicks and no roll. `kick.rs` recognises a buzz as a regular train of pitch
+restarts closer than 50 ms, and holds it while the bottom stays full and no kick has come (a louder
+note folds the restart into its first cycle); `pattern.rs` reads it as the densest roll. Roll
+coverage of the buzz notes went from 16% to 91%, with kick precision, recall, main kicks, tempo and
+drops unchanged.
+
 **The limit it does have is stated rather than papered over.** A lead whose residue lands inside the
 kick's region, restarting high with an attack on it, is numerically identical to a kick over a
 saturated low end — a 320 Hz stab reads `lift 0.23, pitch 1.00, click 0.95, sub 0.00` and an uptempo
@@ -826,15 +907,15 @@ evidence cost real kicks (a sub veto took uptempo from 1.00 to 0.72). It is sepa
 where the GRID is known: `features.kickHit` is a percussive-attack detector, `pattern.mainKick` is
 the kick answer, and on that exact case it scores **F1 0.99**.
 
-`tempo.js` is a spectral-flux onset function on a fixed 100 Hz grid, an autocorrelation summed over
-harmonics, and a phase-locked loop. Once locked, beats are **predicted**, not detected, so a scene
-lands on the beat instead of a detector's latency after it.
+`tempo.rs` is a spectral-flux onset function on a fixed 100 Hz grid, an autocorrelation summed over
+harmonics, and a phase-locked loop (`beat.rs`). Once locked, beats are **predicted**, not detected,
+so a scene lands on the beat instead of a detector's latency after it.
 
 **The reading has to be ONE number.** A tempo that walks off to a harmonic and back — 120, then 250,
 then 120 — is worse than no tempo at all: everything downstream (the animation's grid, the
 classifier's `tempoTrust`, the label in the header) re-times with it. Six things keep it still, and
-each of them was measured against a tracker that did not have it. The generators in
-`webapp/test/audio.test.mjs` schedule onsets on a timeline and render them into frames (asking "is
+each of them was measured against a tracker that did not have it. The generators the JavaScript
+tracker was tuned on scheduled onsets on a timeline and rendered them into frames (asking "is
 this frame near a beat" silently drops events above ~180 BPM, and a tracker fed a train with holes
 in it is being tested against nothing); across a 70→250 BPM sweep of busy material the old tracker
 got 54 of 74 cases exactly right with 381 tempo jumps between them, this one gets 72 with 1:
@@ -876,6 +957,16 @@ got 54 of 74 cases exactly right with 381 tempo jumps between them, this one get
   slots at 120 BPM and barely one and a half at 240, so up there the shoulder of a peak was
   shortlisted as a rival to the peak itself. That never changed which tempo won, but it collapsed
   the confidence margin — and confidence under the floor is what UNLOCKS the grid.
+- and **the drums' own pulse has a vote.** Techno with a rolling offbeat bass ran at DOUBLE tempo
+  when nothing was served: the kick and the rumble alternate, every onset lands on an eighth-note
+  grid, and both the fold and the level score prefer 264 BPM to 132. The kick detector already knew
+  better — it finds every kick and never one on the offbeat — so `tempo.rs` keeps the confirmed kicks
+  and snares (`note_hit`), merges hits that land together, and counts a hit that SPLITS an interval as
+  one stray rather than two faster intervals. When they form a steady pulse inside the plausible
+  range, that pulse votes down a grid twice as fast as itself and refuses any move faster than
+  itself. Snares count because a kick-snare groove is one beat per hit; the range bound keeps a
+  half-time groove from dragging 140 down to 70. Techno cold went from 67% to 100% tempo (F70 0.83 →
+  0.96) and nothing else moved in any of the eval's four scenarios.
 
 **THE SERVED TEMPO IS AN ANCHOR, NOT A HINT.** Somebody measured the whole track; an eight-second
 window deciding it disagrees is the single most common way this tracker was wrong, and the user's
@@ -909,7 +1000,7 @@ a 125 BPM house track produce the same autocorrelation, at the same lags, in the
 no amount of signal processing separates them. What separates them is knowing which record is
 playing, which the engine does know — the server measured the track, or the live classifier named a
 family. `style.js#tempoRangeFor` is that knowledge written down (frenchcore 170-230, uptempo
-170-260, hardtekk 140-180, hardstyle 140-165, dnb 160-180…), `tempo.js#setTempoRange` moves the
+170-260, hardtekk 140-180, hardstyle 140-165, dnb 160-180…), `rhythm_set_range` moves the
 prior's plateau to it, and `engine.js#applyTempoRange` feeds it in from the verdict or, failing
 that, from the live classifier once it is confident. The ranges are deliberately WIDE: they set a
 plateau, not a target, and all they are for is making the octave either side implausible. **A
@@ -926,26 +1017,25 @@ Two older details are still there for the same reasons they always were: the ODF
 (~20 ms) before the autocorrelation, or a period that is not a whole number of grid slots (174 BPM
 is 34.5) loses half its correlation to its own double; and every candidate is divided by the
 **same** harmonic weight, or slow candidates get a free pass because their harmonics fall off the
-end of the search range. `webapp/test/audio.test.mjs` pins all of it (`npm test`; no
-test framework to install, though `npm install` must have run — `test/preflight.mjs` says that in
-one line rather than letting node abort five files and report them as five DSP failures, which is
-a trap that has already cost one debugging session) — the wall-clock bug it caught would have made
-the tracker drift with the frame rate.
+end of the search range. `webapp/test/rhythm.test.mjs` pins all of it on the shipped binary
+(`npm test`; no test framework to install, though `npm install` must have run —
+`test/preflight.mjs` says that in one line rather than letting node abort five files and report them
+as five DSP failures, which is a trap that has already cost one debugging session).
 
-**`pattern.js` — the MUSICAL reading, above the per-frame one.** `features.js` says "a kick landed
-and it was this hard"; `tempo.js` says "the grid is here"; neither answers the questions an
+**`pattern.rs` — the MUSICAL reading, above the per-frame one.** `features.rs` says "a kick landed
+and it was this hard"; `tempo.rs` says "the grid is here"; neither answers the questions an
 animation wants to ask. At 200 BPM a frenchcore roll fires five hits inside one beat, so a scene
 that throws something on every `kickHit` is a strobe — the user's words: *the blocks should fall on
 the drop and on the main kicks, so there has to be a way of telling them apart*. It publishes
 `mainKick` (on the grid, outside a roll) with `mainPower` and `bigKick`, `rollKick` with `roll` and
 `rollDiv` (the subdivision, 2/3/4/6/8/12/16 — a triplet fill and a sixteenth run are different
 pictures), and the arrangement: `drop` (the frame the music comes back after being out long enough
-to be missed), `dropped`, `build`, `breakdown` and `energy`. It is O(1) per frame — **0.5 µs,
-measured, against 49 µs for `features.process`** — allocates nothing after construction, and is
-read through `m.mainKick` / `m.roll` / `m.drop` in `lib/viz/musical.js` like everything else. Its
-four events cross the projector channel **latched**, for the same reason every other event does.
+to be missed), `dropped`, `build`, `breakdown` and `energy`. It is O(1) per frame, allocates
+nothing, and is read through `m.mainKick` / `m.roll` / `m.drop` in `lib/viz/musical.js` like
+everything else. Its four events cross the projector channel **latched**, for the same reason every
+other event does.
 
-`style.js` reads the kick's shape (attack, decay, click, grit → soft / hard / industrial) and a
+`style.rs` reads the kick's shape (attack, decay, click, grit → soft / hard / industrial) and a
 smoothed family vector (techno, hardtekk, zaag, frenchcore, uptempo, pieep, krach, rock, metal,
 strings, vocal…). It publishes TWO things for two jobs: the family, which is legible and is what the
 UI shows, and a five-way **archetype** mix (sustain / voice / groove / hard / rock), which is what
@@ -973,22 +1063,77 @@ through and change back at the drop. The classifier's adaptation rate is therefo
 `dynamics²`: at half level it only slows a little, at a twentieth it all but freezes and holds what
 it knows until there is something to form an opinion from.
 
+**THE GENRE CHANNEL** (`genre.rs`) is what the look vector cannot say: what only SOME genres are made
+of, eight numbers 0..1 — the sung `lead`, the `buzz` (a saw stack, a kick distorted until it is a
+tone: zaag, Deutscher Krach), `screech` attacks, the `sub`'s share of the power, the `offbeat`'s
+share of the groove, onsets per beat (`density`), how long the kick rings (`tail`) and how noisy it
+is (`grit`). Without it zaag and krach got exactly techno's reading. It crosses the projector
+channel, is eased over a beat into `m.genre`, and reaches every shader as `uGenre[2]`.
+
 **Animations** (`webapp/src/lib/viz/`): a mode registry (`off`, `bars`, `pulse`, `scope`, `aurora`,
 `smart` — `modes.js`), a palette whose SOURCE the user picks (cover art / the spectrum itself / fixed
 schemes), and quality tiers that `auto`-resolve from the device. Two kinds of scene come out of
-`lib/viz/index.js`, and the host has to know which: **`gl`** — every full-screen mode except the
-oscilloscope is the WebGL2 engine (`scenes/gl.js`) with a policy for which WORLD it shows (`pulse`,
-`aurora` and `bars` are one fixed world each — `pulse`, `aurora`, `spectrum` — and `smart` lets the
-genre choose among all 49) — and **`2d`**: the oscilloscope, which draws the samples on a canvas,
-and `scenes/bars.js`, the spectrum on a 2D canvas, which is what a device with no WebGL2 gets instead
-of any world (`createFallback`). `Visualizer.svelte` therefore owns TWO canvases and shows the one the
+`lib/viz/index.js`, and the host has to know which: **`gl`** — EVERY mode is the WebGL2 engine
+(`scenes/gl.js`) with a policy for which WORLD it shows (`pulse`, `aurora`, `bars` and `scope` are
+one fixed world each — `pulse`, `aurora`, `spectrum` and the `scope` instrument — and `smart` lets
+the genre choose among all 50) — and **`2d`**, what a device with no WebGL2 gets instead
+(`createFallback`): `scenes/scope.js`, the oscilloscope on a canvas, for the scope mode, and
+`scenes/bars.js`, the spectrum on a canvas, for every other. `Visualizer.svelte` therefore owns TWO canvases and shows the one the
 scene's `kind` asks for: a canvas has one context type for its whole life. `scene.update()` runs on
 every analysis frame (~94 Hz, so a beat is never missed) and `scene.draw()` on rAF under the user's
 frame cap — the two rates are separate on purpose. Réglages → Animations configures all of it around
 a live preview (sticky, so it stays in view while the controls under it are moving it) and a readout
 of what the engine currently believes, down to the world it chose.
 
-**The oscilloscope** (`lib/viz/scenes/scope.js`, `scope` in the registry) is the one scene that draws the music rather than
+**THE ANIMATIONS' CPU SIDE IS RUST TOO** (`webapp/rhythm/src/viz*.rs`, reached through
+`lib/viz/core.js`). The PIXELS stay on the GPU, in the worlds' GLSL — a browser runs no other
+language there, and drawing them on the CPU in any language would be tens of times slower. What the
+CPU does for them is in the same crate as the analyser, instantiated a second time on the page from
+the module the worklet already compiled (`loadVizCore` → `rhythmBinary`): no second download, no
+second compile, a memory of its own. A core that cannot load (no WebAssembly — which also means no
+analysis to draw) rejects like a chunk that could not be fetched, and the host leaves the canvas
+empty.
+
+- `viz_motion.rs` is the MUSICAL READING (`lib/viz/musical.js` is now its face: the same `m`, the
+  same `stamp` / `count` / `genre` objects for its whole life, refreshed in place after every
+  analysis frame). `viz_scene.rs` is the GL scene's arithmetic: the spectrum resampled onto the
+  texture's 128 texels and max-held between pictures, its release in beats, the band shares, the
+  history row per sixteenth, the clocks extrapolated to the instant of the picture, and the whole
+  uniform block — packed at `glsl.js#MUSIC_OFFSET`, handed over BY NAME once (`SceneCore`), so the
+  layout still lives in one place. A picture is asked for in two halves, `prepare` (the clocks and
+  the spectrum, which the drivers read) and `pack` (the block, once they have run). `viz_scope.rs`
+  is the oscilloscope's trigger, per-column min/max and auto-range; `viz_bars.rs` the canvas bars'
+  levelling.
+- What stays in JavaScript is everything that is not arithmetic — which world, the dissolve, the
+  flash policy, the resolution governor, the WebGL calls — and the worlds' DRIVERS: a few lines
+  each, and crossing into the core and back costs what they do.
+- **Every object is a HANDLE** (a 1-based slot; 0 means none), and nothing allocates once built,
+  so the page's typed-array views on the core's memory stay valid from frame to frame — they are
+  re-made only when a grow replaces the buffer (`viewer`). A FREED object's views must never be
+  written again, since its memory goes back to the allocator: every core class no-ops after `free`
+  (`SceneCore` hands out scratch arrays), and a scene is boxed so the table growing never moves one.
+- **The crossing is the cost, so it is written for V8.** Measured on the reading: the arithmetic is
+  0.25 µs in Rust against 1.23 µs in JavaScript, but copying the result back into `m` through a loop
+  over a list of key names (`st[ORDER[k]] = …`, a keyed store — V8's slow path) cost 0.8-1.5 µs and
+  made the port SLOWER than what it replaced. Every store names its field, every slot index is a
+  constant resolved once from the layout the binary publishes, and the reading is now 0.60 µs a frame
+  all in. The same measurement found two costs in the JavaScript around it: the governor's median
+  was `Array.from(intervals).sort(cmp)` on every picture without a GPU timer (Firefox, Safari) — the
+  most expensive line of the draw — and is now a sort in place; and a closure plus six views were
+  allocated per stage per picture. The scene went from 765 to 502 µs of CPU per second of music
+  (94 frames, 60 pictures). `exp`/`pow` are kept out of line (`util::exp64` / `pow64`) so LTO does
+  not paste a libm routine into every call site.
+- **The JavaScript each port replaced is kept as its ORACLE** (`test/reference/`: `scope.js`,
+  `bars.js`, `musical.js`, `gl.js`, unchanged but for their imports) and `test/vizcore.test.mjs`
+  runs both side by side on the analyser's own reading of real records: the reading field by field
+  (25 302 frames, identical to the bit), the scene's block, spectrum texture and history row picture
+  by picture (9 517 pictures over three worlds, two layouts and 60/144 Hz: 0 of 1 065 904 floats
+  differ), the scope's every drawn point at every tier, the bars' too — and each Rust version has to
+  be measurably faster. Change a rule in Rust, and the oracle is where the old behaviour is written
+  down.
+
+**The oscilloscope** (the `scope` instrument world, `lib/viz/worlds/scope.js`; `lib/viz/scenes/scope.js`
+is its canvas twin for a device without WebGL2) is the one scene that draws the music rather than
 something *about* it, and that changes what "good" means: a scope is only worth looking at if it is
 STABLE and HONEST. Four things carry that, and each was measured.
 
@@ -1014,6 +1159,18 @@ STABLE and HONEST. Four things carry that, and each was measured.
   every render quantum into their ring buffers whether or not anyone reads them — and a mono source
   is up-mixed rather than left with a dead second output, so it shows two identical traces, which is
   what a real scope with both probes on one signal shows.
+
+**On the GPU it is an INSTRUMENT, not a world**: it is not in the catalogue and no genre can land on
+it (`worlds/index.js#INSTRUMENTS`), only the scope mode. `viz_scope.rs` computes the trace; its two
+channels' `[lo, hi]` columns go up as an RG32F data texture (`def.data` → `renderer.dataTexture`,
+sampler `uData`, uploaded straight from the core's memory) and are drawn as instanced capsule
+segments — one per column and one joining it to the next — blended by MAX, so a joint is not twice
+as bright as the stroke (`particles.blendMax`; and `exact`: every instance is a piece of one trace,
+so the tier's particle share does not apply). The phosphor is the feedback target decaying on a
+time constant, and the face — graticule, trigger marker, the G / D channel glyphs — is signed
+distance fields in the world's fragment. Measured under SwiftShader at the high tier it costs what
+its neighbours do (665 ms a picture against spectrum's 527 and aurora's 2 211 — software GL, so only
+the ratios mean anything).
 
 **PRECISION is the quality setting; the TIMEBASE is not.** Every tier shows the same ~42 ms slice,
 because eight times as much waveform at ultra would not be more precision, it would be an unreadable
@@ -1176,26 +1333,27 @@ each of which a world broke once:
   in fixed 1/60 s steps; at 250 BPM its period is 84 ms, past where semi-implicit Euler is stable,
   and the position ran to −Infinity in seven seconds — a black world for the rest of the night.
 - **Never name a variable after a GLSL built-in.** `float all = …` compiles, and the `all(…)` three
-  lines later does not; the world renders black. Tested.
+  lines later does not; the world renders black. Tested — and it has caught `round`, `step` and
+  `all` since.
 - **Nothing oscillates faster than a frame can show.** Rain's pane "shivered" on the kick at 80
   radians a beat — faster than any refresh rate — which aliased into jitter; it is one thump now.
   And nothing moves at a speed the thing it depicts never has: the record turns a revolution a
   bar (32 rpm at 128 BPM, a real 33), not every two beats (a blur at 180).
 
-**The catalogue: 49 worlds on eleven shelves** (`worlds/catalogue.js` — names and blurbs, no shader,
+**The catalogue: 50 worlds on eleven shelves** (`worlds/catalogue.js` — names and blurbs, no shader,
 so naming a world costs nothing; `worlds/index.js` — one LITERAL `import()` per world, so each is its
 own chunk: a session of techno never downloads the rawstyle forge).
 
 | shelf | worlds |
 |---|---|
-| Hard | `forge` (rawstyle's hammer — the pitched, overdriven kick rawpvc makes — and uptempo's: a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `piano` (frenchcore, the melodic side of hardcore: a keyboard of light with the tune rising above it as a piano roll READ FROM THE SPECTRUM — a key sounds when its band is a peak, the local maximum a semitone either side and clear of the bands two and a half out, so one note lights one key and a drum lights none — the chord's pitch classes as columns of light round the melody's register, the 200 BPM kick pounding the keyboard and sending pressure up the frame, a glissando on the drop), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong` (a neon rally: glass paddles that glide to meet the ball on the beat, one bounce on the far half), `soundsystem` (a speaker wall whose cones pump), `static` (the artwork's own signal torn apart: bands, pixel-sort streaks, chroma-error blocks), `microwave` (Deutscher Krach's buzzing kick as the oven it sounds like: the cavity seen through the door's perforated screen, the lamp surging on the kick, the standing wave's hot spots hopping on every main kick, arcs off the plate's gilt rim, a VFD timer counting the phrase down to "End"), `fireworks` (shells aimed at the NEXT beat, in a real show's colours turned to the palette, over a skyline and water that catch every burst) |
+| Hard | `forge` (rawstyle's hammer — the pitched, overdriven kick rawpvc makes: a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `cymatics` (frenchcore, melodic but hammering: a Chladni plate struck under the artwork — the lead's pitch picks the mode, a held note holds it and a change morphs the sand; main kicks send a shock front that throws the grains, a roll makes them chatter, the drop blows the sand off and lands it on a new figure; grains on brushed steel), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong` (a neon rally: glass paddles that glide to meet the ball on the beat, one bounce on the far half), `soundsystem` (a speaker wall whose cones pump), `static` (the artwork's own signal torn apart: bands, pixel-sort streaks, chroma-error blocks), `microwave` (the buzzing kick as the oven it sounds like: the cavity seen through the door's perforated screen, the lamp surging on the kick, the standing wave's hot spots hopping on every main kick, a VFD timer counting the phrase down to "End" — and a SHAPE switch, `dish`, for what is cooking: Deutscher Krach's gilt plate throwing arcs, zaag's circular saw biting on every main kick (drawn as its swept ring once it turns faster than a frame can show, instead of aliasing), uptempo's popcorn popping on the kicks and the rolls), `fireworks` (shells aimed at the NEXT beat, in a real show's colours turned to the palette, over a skyline and water that catch every burst) |
 | Techno & machines | `tunnel` (a panelled corridor lit only by its ring fixtures, a light running down it on every beat, a polished floor mirroring the ceiling), `warehouse` (concrete pillars, sodium lamps, moving heads sweeping the haze and pooling on a wet floor, strobes that are flashes), `ridges` (Unknown Pleasures), `lattice` (a cone-marched chrome space frame carrying a current), `circuit` |
 | Trance & psy | `hyperspace`, `kaleido` (line-art KIFS), `galaxy`, `flow` |
 | Bass & breaks | `wobble` (the LFO's own shape, with its wake and current crackling along it), `chrome` (liquid metal), `slices` |
 | Urbain | `vinyl`, `halo` (the spectrum as a breathing crown round the artwork, its echoes going out through smoke the 808 pushes aside), `nightdrive` (the wet motorway behind a car whose brake lights flare on the kick), `neon` (a wet street under ten real neon signs — a heart, a martini, a bolt, a moon, notes… — laid out on slots the artwork never hides) |
 | Pop & groove | `bokeh` (lens bokeh in a luminous room, with glitter the one thing in focus), `discoball`, `silk`, `artwork` (the cover's own colours), `plasma` |
 | Rock & metal | `stage` (the band backlit against an LED wall showing the artwork, beams on a lighting desk's cues, the crowd), `inferno`, `storm` (a cloud deck lit from below by the last light, over a lake that mirrors every strike) |
-| Calme | `nebula`, `aurora`, `ocean`, `cathedral` (a Gothic rose of pointed lancets and leaded glass, down a nave of fluted columns), `ink`, `rain` (every drop a lens refracting the city), `fireflies` (a meadow whose fireflies fall into step on the drop) |
+| Calme | `nebula`, `aurora`, `piano` (for piano music: a keyboard of light with the tune rising above it as a piano roll READ FROM THE SPECTRUM — a key sounds when its band is a peak, the local maximum a semitone either side and clear of the bands two and a half out, so one note lights one key and a drum lights none — the chord's pitch classes as columns of light round the melody's register), `ocean`, `cathedral` (a Gothic rose of pointed lancets and leaded glass, down a nave of fluted columns), `ink`, `rain` (every drop a lens refracting the city), `fireflies` (a meadow whose fireflies fall into step on the drop) |
 | Monde | `carnival` (polyrhythm as rings of beads, under festoons of bulbs chasing the beat), `tropics` |
 | Rétro | `horizon` (the banded sun over a true ground plane), `pixels` (a CRT raster, a runner on a real gait, a brick equaliser whose caps fall under gravity) |
 | Classiques | `pulse`, `spectrum` — also the fixed `pulse` and `bars` modes |
@@ -1223,7 +1381,7 @@ and a label the studio offers that the animation cannot resolve is a track someb
 and then watched get animated generically. The two lists are written in different languages; a test
 reads the Python one and requires every label to reach a row of its own, not the archetype floor.
 
-**Nothing hard-switches.** style.js refuses to rename the dominant family until a challenger has led
+**Nothing hard-switches.** style.rs refuses to rename the dominant family until a challenger has led
 by a clear margin for a second and a half, and a change of world is a **dissolve**: the new world is
 fetched and compiled while the old one keeps playing, and only once it is READY does a noise-edged
 burn carry the new picture through the old over one bar (`DISSOLVE_FS`) — so a first visit to a world
@@ -1279,7 +1437,8 @@ at a time. `webapp/test/post.test.mjs` pins it.
   minutes at 60 and at 250 BPM with quarter-second hitches (no NaN, no state past 1e4), and must
   stamp its events in beats near now. It found both faults above the day it was written: the
   diverging spring and the unbounded clocks. The oscilloscope's own tests (the trace against real
-  samples) are unchanged and live there too.
+  samples) are unchanged and live there too. Both load the animation core from the shipped binary
+  (`vizCoreFromBytes`): the reading every driver is handed is the Rust one.
 
 **No constant that should be musical** (`lib/viz/musical.js`) is still the layer every driver reads:
 `m.overBeats(n)` is a lifetime, `m.perBeat(n)` a rate, `m.ease(v, target, beats, dt)` a smoothing,
@@ -1477,9 +1636,13 @@ then simulate it the way it is actually made. This applies to everything in this
 every claim a test makes should be a MEASURED number written down next to the assertion.
 
 `webapp/npm test` (node --test, no dependency to install) is the SPA's suite. Its audio half drives
-the **whole analysis chain** — real audio through a real FFT into `features.js` into `tempo.js` into
-`pattern.js` — on sixteen records, because every fault listed above passed a suite that drove one
-module at a time with material chosen to suit it. Its animation half (see **How the animations are
+the **shipped binary** (`test/rhythm.test.mjs`) — real audio, pushed in the worklet's own 128-sample
+quanta, through the whole Rust chain — because every fault listed above passed a suite that drove one
+module at a time with material chosen to suit it. `test/eval/rhythm-eval.mjs` asks the broader
+question on 26 arranged records (`test/songs.mjs`: an intro with no kick, a build whose snares
+accelerate, the silence before a hardcore drop, a breakdown with no drums, a waltz, a live drummer
+drifting a percent either side of the click) in four scenarios, cold and seeded; `test/rhythm/run.mjs`
+asks it through the AudioWorklet and the engine's delivery in headless Chromium. Its animation half (see **How the animations are
 tested**) pins what can be decided without a GPU — the catalogue, the skins, the shader contracts,
 the drivers' musical time — and leaves the pixels to the render bench (`test/render/run.mjs
 --check`), which is not part of `npm test` because it needs a browser. Run it after touching a world.
@@ -1499,7 +1662,7 @@ Three rules hold it together, and each was bought:
 - **Keep it physical.** Every knob corresponds to something a producer does. A test that only passes
   because the generator is unrealistic is worse than no test — and when the instrument is wrong, fix
   the instrument FIRST: making the hi-hat a real hi-hat did not stop it being convicted, which is
-  what turned a mystery into a stated fault in `features.js`, where the fix belonged.
+  what turned a mystery into a stated fault in the feature extractor, where the fix belonged.
 - **Never move the material to make the code pass.** If the two are genuinely inseparable, say so in
   the test with the measured evidence and assert the layer that *does* resolve it.
 - **Score both ends on the same window.** A detection belongs to the kick it is nearest to and is

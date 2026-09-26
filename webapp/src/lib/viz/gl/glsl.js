@@ -131,12 +131,13 @@ uniform sampler2D uSpec;  // row 0 smoothed bands, row 1 fast bands (128 wide)
 uniform sampler2D uHist;  // spectrum history, one row per sixteenth note
 uniform sampler2D uNoise; // 256x256 value noise, G = R offset for 3D lookups
 uniform sampler2D uCover; // the artwork, when there is one
+uniform sampler2D uData;  // a world's own data from the CPU (the scope's trace), RG32F
 uniform float uHistHead;  // the newest history row, 0..1
 uniform float uCoverOK;   // 1 once the artwork has been uploaded
 uniform float uHeadroom;  // 1, or 1/4 on a device with no float targets
 `;
 
-export const SAMPLER_UNITS = { uPrev: 0, uSpec: 1, uHist: 2, uNoise: 3, uCover: 4 };
+export const SAMPLER_UNITS = { uPrev: 0, uSpec: 1, uHist: 2, uNoise: 3, uCover: 4, uData: 5 };
 
 // --- the library -------------------------------------------------------------
 //

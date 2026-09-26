@@ -82,6 +82,7 @@ export function createRenderer(canvas, { onLost, onRestored } = {}) {
   let res = null; // every GL object this renderer owns, rebuilt on restore
   const programs = new Map(); // key -> handle
   const targets = new Set(); // world targets, re-created on restore
+  const datas = new Set(); // world data textures, likewise
   let cw = 1;
   let ch = 1;
   let rw = 1;
@@ -317,6 +318,7 @@ export function createRenderer(canvas, { onLost, onRestored } = {}) {
     }
     histHead = 0;
     coverOK = 0;
+    for (const d of datas) d.rebuild();
     allocate();
   }
 
@@ -371,6 +373,38 @@ export function createRenderer(canvas, { onLost, onRestored } = {}) {
     return t;
   }
 
+  // --- world data ---------------------------------------------------------------
+  /**
+   * A float texture a world's driver fills on the CPU — the oscilloscope's
+   * trace, computed in Rust and uploaded straight from the WebAssembly
+   * module's memory. RG32F read with texelFetch: no filtering, so no
+   * extension, and exact values. Survives a context loss like a target does
+   * (rebuilt on restore; the next upload refills it).
+   */
+  function dataTexture(w, h) {
+    const d = {
+      w,
+      h,
+      tex: null,
+      rebuild() {
+        d.tex = texture(w, h, gl.RG32F, gl.RG, gl.FLOAT, { filter: gl.NEAREST });
+      },
+      upload(src) {
+        if (lost || !d.tex) return;
+        gl.bindTexture(gl.TEXTURE_2D, d.tex);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RG, gl.FLOAT, src);
+      },
+      dispose() {
+        if (d.tex && !lost) gl.deleteTexture(d.tex);
+        d.tex = null;
+        datas.delete(d);
+      },
+    };
+    datas.add(d);
+    if (!lost && res) d.rebuild();
+    return d;
+  }
+
   // --- per frame --------------------------------------------------------------
   let histHead = 0;
   let coverOK = 0;
@@ -422,7 +456,7 @@ export function createRenderer(canvas, { onLost, onRestored } = {}) {
     return true;
   }
 
-  function bindCommon(prevTex) {
+  function bindCommon(prevTex, dataTex = null) {
     gl.activeTexture(gl.TEXTURE0 + SAMPLER_UNITS.uPrev);
     gl.bindTexture(gl.TEXTURE_2D, prevTex || res.black);
     gl.activeTexture(gl.TEXTURE0 + SAMPLER_UNITS.uSpec);
@@ -433,6 +467,8 @@ export function createRenderer(canvas, { onLost, onRestored } = {}) {
     gl.bindTexture(gl.TEXTURE_2D, res.noise);
     gl.activeTexture(gl.TEXTURE0 + SAMPLER_UNITS.uCover);
     gl.bindTexture(gl.TEXTURE_2D, res.cover);
+    gl.activeTexture(gl.TEXTURE0 + SAMPLER_UNITS.uData);
+    gl.bindTexture(gl.TEXTURE_2D, dataTex || res.black);
     gl.activeTexture(gl.TEXTURE0);
   }
 
@@ -441,7 +477,7 @@ export function createRenderer(canvas, { onLost, onRestored } = {}) {
    * whichever program is bound (the main pass, then its particles). Returns
    * false when the program is not ready yet.
    */
-  function drawWorld(h, target, fill, particles = null) {
+  function drawWorld(h, target, fill, particles = null, data = null) {
     if (lost || !res || !h.ready || !target.a) return false;
     const src = target.feedback ? (target.fresh ? res.black : target.out) : null;
     const dst = target.feedback && target.out === target.a.tex ? target.b : target.a;
@@ -449,17 +485,22 @@ export function createRenderer(canvas, { onLost, onRestored } = {}) {
     gl.viewport(0, 0, rw, rh);
     gl.disable(gl.BLEND);
     h.use();
-    bindCommon(src);
+    bindCommon(src, data?.tex || null);
     prep(h);
     fill(h);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     if (particles && particles.count > 0 && particles.h.ready) {
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE);
+      // Sprites ADD, as light does — except where a world draws one continuous
+      // line out of many pieces (the scope's trace), which takes the MAX, so
+      // the joints between pieces are not twice as bright as the pieces.
+      if (particles.blendMax) gl.blendEquation(gl.MAX);
+      else gl.blendFunc(gl.ONE, gl.ONE);
       particles.h.use();
       prep(particles.h);
       fill(particles.h);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, particles.count);
+      if (particles.blendMax) gl.blendEquation(gl.FUNC_ADD);
       gl.disable(gl.BLEND);
     }
     target.out = dst.tex;
@@ -674,6 +715,7 @@ export function createRenderer(canvas, { onLost, onRestored } = {}) {
     },
     program,
     worldTarget,
+    dataTexture,
     setSize,
     beginFrame,
     drawWorld,

@@ -167,9 +167,10 @@
       if (built.kind === "gl") {
         const r = ensureRenderer(built);
         if (!r) {
-          // No WebGL2 here: the spectrum on a canvas, rather than nothing.
+          // No WebGL2 here: the mode's canvas version (the scope, or the
+          // spectrum bars for every other mode), rather than nothing.
           built.dispose?.();
-          const fb = await createFallback(sceneOpts()).catch(() => null);
+          const fb = await createFallback(mode, sceneOpts()).catch(() => null);
           if (token !== sceneToken) return;
           replaceScene(fb);
           return;

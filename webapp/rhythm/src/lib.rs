@@ -42,6 +42,8 @@ mod tempo;
 mod util;
 pub mod viz;
 pub mod viz_bars;
+pub mod viz_motion;
+pub mod viz_scene;
 pub mod viz_scope;
 
 use beat::{Grid, KIND_FULL, KIND_KICK, KIND_LOW, KIND_SNARE};

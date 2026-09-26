@@ -42,47 +42,49 @@
 // drifting away from it the way a free integral of dt/beat does. It never
 // jumps: a correction is spread over CORRECT_TAU and can slow the clock down
 // but never make it stand still or go back.
+//
+// THE READING IS RUST (webapp/rhythm/src/viz_motion.rs), ported rule for rule
+// from the JavaScript this file used to be — which is kept, unchanged, as the
+// oracle test/vizcore.test.mjs holds it to (test/reference/musical.js). What
+// is left here is the object the worlds read: the same `m`, the same `stamp`,
+// `count` and `genre` objects for its whole life, refreshed in place after
+// every analysis frame, and the helpers that turn beats into seconds.
 
-import { approach, clamp, envelope } from "./util.js";
+import { approach } from "./util.js";
+import { SceneCore, vizCore } from "./core.js";
 
-// Where a tempo-locked value goes when there is no tempo yet. Not a "default
-// speed": it is one guess, used in one place, and everything derived from it
-// re-times the instant the tracker locks.
-const FALLBACK_BPM = 124;
-const FALLBACK_BEAT = 60 / FALLBACK_BPM;
-// How fast the clock is pulled onto the tracker's grid, in seconds. Fast enough
-// that a re-lock is caught within a beat, slow enough that the correction is
-// never visible as a lurch.
-const CORRECT_TAU = 0.12;
-// The clock never runs slower than this share of its tempo while it is being
-// corrected — pulled back, never stopped.
-const MIN_ADVANCE = 0.3;
-
-// The secondary drum events. Each is a spike of its own band's flux against a
-// slow average of it, with a refractory period in BEATS so a roll of
-// sixteenths reads as sixteenths at any tempo.
-const SNARE = { rise: 1.8, floor: 0.004, avgBeats: 2, gapBeats: 0.42 };
-const HAT = { rise: 1.6, floor: 0.002, avgBeats: 1, gapBeats: 0.2 };
-const NOTE = { rise: 1.7, floor: 0.002, avgBeats: 2, gapBeats: 0.24 };
-const CHORD = { on: 0.3, gapBeats: 1 };
+// The orders viz_motion.rs keeps its look and genre channel in (as are the
+// stamps — kick, main, big, roll, snare, hat, note, chord, drop, bar, beat —
+// and the counts — kick, main, snare, drop, bar, beat — written out in `pull`).
+export const LOOK_ORDER = ["motion", "density", "punch", "smooth", "warm", "melodic", "chaos"];
+export const GENRE_ORDER = ["lead", "buzz", "screech", "sub", "offbeat", "density", "tail", "grit"];
+// Where a tempo-locked value goes when there is no tempo yet (the Rust holds
+// the same number): one guess, re-timed the instant the tracker locks.
+const FALLBACK_BEAT = 60 / 124;
 const NEVER = -1e9;
+const NONE = {};
 
-export function createMusical() {
-  let beats = 0;
-  let bars = 0;
-  let phrases = 0;
-  let drive = 0.3;
-  let weight = 0.4;
-  let air = 0.3;
-  let tension = 0;
-  let calm = 0.5;
-  let attack = 0;
-  let lastBeatIndex = -1;
-  let barsSinceKick = 0;
-  let midAvg = 0;
-  let highAvg = 0;
-  let noteAvg = 0;
-  let chordWas = 0;
+/**
+ * The reading bound to one scene core: `m` (what the worlds read), `write`
+ * (an analysis frame into the core's input) and `pull` (the core's output back
+ * into `m`, in place). scenes/gl.js drives the two halves itself, around the
+ * rest of the frame's arithmetic; everyone else calls `m.update`.
+ */
+export function bindMusical(sc) {
+  const I = sc.L.in;
+  const O = sc.L.out;
+  const iLocked = I.I_LOCKED, iPeriod = I.I_PERIOD, iBpb = I.I_BPB, iBpm = I.I_BPM, iPhase = I.I_PHASE;
+  const iBeatIndex = I.I_BEAT_INDEX, iBarPos = I.I_BAR_POS, iBeat = I.I_BEAT, iDownbeat = I.I_DOWNBEAT;
+  const iOnset = I.I_ONSET, iKick = I.I_KICK, iKickHit = I.I_KICK_HIT, iLevel = I.I_LEVEL;
+  const iDynamics = I.I_DYNAMICS, iPerc = I.I_PERCUSSIVITY, iCentroid = I.I_CENTROID_N;
+  const iMidFlux = I.I_MID_FLUX, iHighFlux = I.I_HIGH_FLUX, iMelodyFlux = I.I_MELODY_FLUX;
+  const iChord = I.I_CHORD_CHANGE, iHasPattern = I.I_HAS_PATTERN, iMainKick = I.I_MAIN_KICK;
+  const iMainPower = I.I_MAIN_POWER, iHasMainPower = I.I_HAS_MAIN_POWER, iBigKick = I.I_BIG_KICK;
+  const iRollKick = I.I_ROLL_KICK, iRoll = I.I_ROLL, iRollDiv = I.I_ROLL_DIV, iDrop = I.I_DROP;
+  const iDropped = I.I_DROPPED, iSinceDrop = I.I_SINCE_DROP, iBuild = I.I_BUILD, iBreakdown = I.I_BREAKDOWN;
+  const iHasEnergy = I.I_HAS_ENERGY, iEnergy = I.I_ENERGY, iHasLook = I.I_HAS_LOOK, iLook = I.I_LOOK;
+  const iHasGenre = I.I_HAS_GENRE, iGenre = I.I_GENRE;
+  const oStamp = O.O_STAMP, oCount = O.O_COUNT, oLook = O.O_LOOK, oGenre = O.O_GENRE;
 
   const m = {
     // --- time ---------------------------------------------------------------
@@ -175,15 +177,15 @@ export function createMusical() {
     },
     /** An ever-rising angle, `turns` full turns per bar. */
     sweep(turns = 1) {
-      return bars * turns * Math.PI * 2;
+      return m.bars * turns * Math.PI * 2;
     },
     /** The same, per phrase — for things that should move once a section. */
     slowSweep(turns = 1) {
-      return phrases * turns * Math.PI * 2;
+      return m.phrases * turns * Math.PI * 2;
     },
     /** The same, per beat — for things that should step with the kick. */
     fastSweep(turns = 1) {
-      return beats * turns * Math.PI * 2;
+      return m.beats * turns * Math.PI * 2;
     },
     /**
      * An exponential approach whose time constant is expressed in BEATS, so a
@@ -194,197 +196,211 @@ export function createMusical() {
     },
     /** Beats since a stamp, at the clock's current reading. */
     since(stamp) {
-      return beats - stamp;
+      return m.beats - stamp;
     },
-
+    /** One analysis frame, `dt` seconds after the last. */
     update(frame, dt) {
-      const f = frame.features || {};
-      const b = frame.beat || {};
-      const e = frame.energy;
-      const look = frame.style?.look;
-
-      // --- the grid ---------------------------------------------------------
-      // `period` is the tracker's, and it is trusted only while it is locked:
-      // an unlocked period is whatever the autocorrelation last guessed and
-      // re-timing the whole picture to it would be worse than the fallback.
-      const period = b.locked && b.period > 0.15 && b.period < 2 ? b.period : FALLBACK_BEAT;
-      const bpb = Math.max(2, b.beatsPerBar || 4);
-      m.beat = period;
-      m.bar = period * bpb;
-      m.phrase = m.bar * 4;
-      m.beatsPerBar = bpb;
-      m.bpm = b.bpm || 0;
-      m.locked = !!b.locked;
-
-      const prevPhrasePhase = m.phrasePhase;
-      m.beatPhase = clamp(b.phase ?? 0, 0, 1);
-      const idx = b.beatIndex || 0;
-      m.barPhase = (((b.barPos || 0) + m.beatPhase) / bpb) % 1;
-      m.phrasePhase = ((((idx % (bpb * 4)) + m.beatPhase) / (bpb * 4)) % 1 + 1) % 1;
-      m.onBeat = !!b.beat && idx !== lastBeatIndex;
-      if (m.onBeat) lastBeatIndex = idx;
-      m.onBar = m.onBeat && !!b.downbeat;
-      // A phrase turns over when its phase wraps, which is robust to a dropped
-      // frame in a way that counting downbeats is not.
-      m.onPhrase = m.phrasePhase < prevPhrasePhase;
-
-      // --- the clock ----------------------------------------------------------
-      const adv = dt / m.beat;
-      let next = beats + adv;
-      if (m.locked) {
-        // Pull onto the tracker's grid. The integer part is whichever beat is
-        // NEAREST, so a track change (the tracker's index resets) or a re-lock
-        // becomes a sub-beat phase correction rather than a jump of hundreds.
-        const tgt = idx + m.beatPhase;
-        const err = tgt + Math.round(next - tgt) - next;
-        next += err * (1 - Math.exp(-dt / CORRECT_TAU));
-      }
-      next = Math.max(beats + adv * MIN_ADVANCE, next);
-      const step = next - beats;
-      beats = next;
-      bars += step / bpb;
-      phrases += step / (bpb * 4);
-      m.beats = beats;
-      m.bars = bars;
-      m.phrases = phrases;
-      m.beatIndex = idx;
-      if (m.onBeat) {
-        m.stamp.beat = beats;
-        m.count.beat++;
-      }
-      if (m.onBar) {
-        m.stamp.bar = beats;
-        m.count.bar++;
-        m.barIndex++;
-      }
-
-      // --- events -----------------------------------------------------------
-      m.kick = f.kick || 0;
-      m.hit = !!f.kickHit;
-      // The musical layer is optional: the engine only runs it at rhythm level
-      // and above. Without it every accepted kick is treated as a main one,
-      // which is what a scene written before the pattern layer already assumed.
-      const pat = frame.pattern;
-      m.mainKick = pat ? !!pat.mainKick : m.hit;
-      m.mainPower = pat?.mainPower ?? (m.hit ? m.kick : m.mainPower);
-      m.bigKick = !!pat?.bigKick;
-      m.rollKick = !!pat?.rollKick;
-      m.roll = pat?.roll ?? 0;
-      m.rollDiv = pat?.rollDiv ?? 0;
-      m.drop = !!pat?.drop;
-      m.dropped = pat?.dropped ?? 0;
-      m.sinceDrop = pat?.sinceDrop ?? 999;
-      m.build = pat?.build ?? 0;
-      m.breakdown = pat?.breakdown ?? 0;
-      m.note = f.melodyFlux || 0;
-      m.chord = f.chordChange || 0;
-      m.onset = b.onset || 0;
-      if (m.hit) {
-        m.stamp.kick = beats;
-        m.count.kick++;
-      }
-      if (m.mainKick) {
-        m.stamp.main = beats;
-        m.count.main++;
-      }
-      if (m.bigKick) m.stamp.big = beats;
-      if (m.rollKick) m.stamp.roll = beats;
-      if (m.drop) {
-        m.stamp.drop = beats;
-        m.count.drop++;
-      }
-
-      // The snare, the hats, the notes: a spike of the band's own flux over a
-      // slow average of it. Each with a refractory period in beats, and the
-      // snare refuses a frame the kick detector already claimed — a kick moves
-      // the mids too, and "the snare fired on every kick" is the one failure
-      // that makes a backbeat animation pointless.
-      const mid = f.midFlux || 0;
-      const high = f.highFlux || 0;
-      const nt = f.melodyFlux || 0;
-      m.snareHit =
-        !m.hit &&
-        mid > SNARE.floor &&
-        mid > midAvg * SNARE.rise &&
-        beats - m.stamp.snare > SNARE.gapBeats;
-      m.hatHit = high > HAT.floor && high > highAvg * HAT.rise && beats - m.stamp.hat > HAT.gapBeats;
-      m.noteHit = nt > NOTE.floor && nt > noteAvg * NOTE.rise && beats - m.stamp.note > NOTE.gapBeats;
-      midAvg = m.ease(midAvg, mid, SNARE.avgBeats, dt);
-      highAvg = m.ease(highAvg, high, HAT.avgBeats, dt);
-      noteAvg = m.ease(noteAvg, nt, NOTE.avgBeats, dt);
-      if (m.snareHit) {
-        m.stamp.snare = beats;
-        m.count.snare++;
-      }
-      if (m.hatHit) m.stamp.hat = beats;
-      if (m.noteHit) m.stamp.note = beats;
-      if (m.chord > CHORD.on && chordWas <= CHORD.on && beats - m.stamp.chord > CHORD.gapBeats)
-        m.stamp.chord = beats;
-      chordWas = m.chord;
-
-      // A flash envelope: up in a fiftieth of a beat, down over a quarter of
-      // one. Both in beats, so a flash is a musical length and not 120 ms.
-      attack = envelope(
-        attack,
-        clamp(Math.max(m.kick, m.onset) * 1.1, 0, 1),
-        dt,
-        m.beat * 0.02,
-        m.beat * 0.25
-      );
-      m.attack = attack;
-
-      // --- shape ------------------------------------------------------------
-      const level = f.level || 0;
-      const dyn = f.dynamics ?? 1;
-      m.level = level;
-      m.dynamics = dyn;
-
-      // How hard it is pushing. Percussivity is in there because a wall of
-      // sustained noise at the same level is not the same thing as a beat.
-      const push = clamp(level * (0.45 + (f.percussivity || 0) * 0.9) * dyn * 1.25, 0, 1);
-      drive = m.ease(drive, push, 1.5, dt);
-      m.drive = drive;
-
-      if (e) {
-        const total = e.sub + e.bass + e.lowMid + e.mid + e.high + e.air + 1e-12;
-        weight = m.ease(weight, clamp(((e.sub + e.bass) / total) * 2.4, 0, 1), 2, dt);
-      }
-      m.weight = weight;
-      air = m.ease(air, clamp(f.centroidN || 0, 0, 1), 2, dt);
-      m.air = air;
-
-      // A BUILD is the one thing worth detecting that no single feature names:
-      // the level climbing and the spectrum opening while the drums thin out.
-      // Counted in bars, because a riser is a musical span — eight bars of it
-      // is a build, half a second of it is a fill.
-      if (m.onBar) barsSinceKick = m.kick > 0.25 ? 0 : barsSinceKick + 1;
-      const thinning = clamp(barsSinceKick / 3, 0, 1);
-      const rising = clamp((level - 0.25) * 1.6, 0, 1) * clamp(air * 1.4, 0, 1);
-      // the pattern layer has its own, better-informed reading of a build; take
-      // whichever is stronger so neither can hide the other.
-      tension = m.ease(tension, Math.max(thinning * rising, m.build), 2, dt);
-      m.tension = tension;
-
-      // ...and its opposite, deliberately asymmetric: calm arrives slowly and
-      // leaves instantly, because a drop should not have to wait for it.
-      const quiet = 1 - clamp(drive * 1.3, 0, 1);
-      calm = quiet > calm ? m.ease(calm, quiet, 6, dt) : m.ease(calm, quiet, 0.4, dt);
-      m.calm = calm;
-
-      // --- the look vector, blended so a scene never has to ------------------
-      if (look) {
-        m.motion = m.ease(m.motion, look.motion, 3, dt);
-        m.density = m.ease(m.density, look.density, 3, dt);
-        m.punch = m.ease(m.punch, look.punch, 3, dt);
-        m.smooth = m.ease(m.smooth, look.smooth, 3, dt);
-        m.warm = m.ease(m.warm, look.warm, 3, dt);
-        m.melodic = m.ease(m.melodic, look.melodic, 3, dt);
-        m.chaos = m.ease(m.chaos, look.chaos, 3, dt);
-      }
-      const gch = frame.genre;
-      if (gch) for (const k in m.genre) m.genre[k] = m.ease(m.genre[k], gch[k] || 0, 1, dt);
+      write(frame);
+      sc.update(dt, 0, 0, 0, 0, 0, 1);
+      pull();
       return m;
     },
   };
+
+  // The analysis frame, flattened the way the Rust reads it. Every default
+  // here is the one the JavaScript applied (`|| 0`, `?? 1`...), so a missing
+  // field means exactly what it meant before.
+  function write(frame) {
+    const i = sc.input();
+    const f = frame.features || NONE;
+    const b = frame.beat || NONE;
+    i[iLocked] = b.locked ? 1 : 0;
+    i[iPeriod] = +b.period || 0;
+    i[iBpb] = b.beatsPerBar || 0;
+    i[iBpm] = b.bpm || 0;
+    i[iPhase] = b.phase ?? 0;
+    i[iBeatIndex] = b.beatIndex || 0;
+    i[iBarPos] = b.barPos || 0;
+    i[iBeat] = b.beat ? 1 : 0;
+    i[iDownbeat] = b.downbeat ? 1 : 0;
+    i[iOnset] = b.onset || 0;
+    i[iKick] = f.kick || 0;
+    i[iKickHit] = f.kickHit ? 1 : 0;
+    i[iLevel] = f.level || 0;
+    i[iDynamics] = f.dynamics ?? 1;
+    i[iPerc] = f.percussivity || 0;
+    i[iCentroid] = f.centroidN || 0;
+    i[iMidFlux] = f.midFlux || 0;
+    i[iHighFlux] = f.highFlux || 0;
+    i[iMelodyFlux] = f.melodyFlux || 0;
+    i[iChord] = f.chordChange || 0;
+    const pat = frame.pattern;
+    if (pat) {
+      i[iHasPattern] = 1;
+      i[iMainKick] = pat.mainKick ? 1 : 0;
+      i[iHasMainPower] = pat.mainPower != null ? 1 : 0;
+      i[iMainPower] = pat.mainPower ?? 0;
+      i[iBigKick] = pat.bigKick ? 1 : 0;
+      i[iRollKick] = pat.rollKick ? 1 : 0;
+      i[iRoll] = pat.roll ?? 0;
+      i[iRollDiv] = pat.rollDiv ?? 0;
+      i[iDrop] = pat.drop ? 1 : 0;
+      i[iDropped] = pat.dropped ?? 0;
+      i[iSinceDrop] = pat.sinceDrop ?? 999;
+      i[iBuild] = pat.build ?? 0;
+      i[iBreakdown] = pat.breakdown ?? 0;
+    } else i[iHasPattern] = 0;
+    const e = frame.energy;
+    if (e) {
+      i[iHasEnergy] = 1;
+      i[iEnergy] = e.sub;
+      i[iEnergy + 1] = e.bass;
+      i[iEnergy + 2] = e.lowMid;
+      i[iEnergy + 3] = e.mid;
+      i[iEnergy + 4] = e.high;
+      i[iEnergy + 5] = e.air;
+    } else i[iHasEnergy] = 0;
+    // Named, not looped over a list of keys: a store through a computed key
+    // is V8's slow path, and this runs ninety times a second (measured, the
+    // looped version cost more than the whole reading in Rust).
+    const look = frame.style?.look;
+    if (look) {
+      i[iHasLook] = 1;
+      i[iLook] = look.motion;
+      i[iLook + 1] = look.density;
+      i[iLook + 2] = look.punch;
+      i[iLook + 3] = look.smooth;
+      i[iLook + 4] = look.warm;
+      i[iLook + 5] = look.melodic;
+      i[iLook + 6] = look.chaos;
+    } else i[iHasLook] = 0;
+    const g = frame.genre;
+    if (g) {
+      i[iHasGenre] = 1;
+      i[iGenre] = g.lead || 0;
+      i[iGenre + 1] = g.buzz || 0;
+      i[iGenre + 2] = g.screech || 0;
+      i[iGenre + 3] = g.sub || 0;
+      i[iGenre + 4] = g.offbeat || 0;
+      i[iGenre + 5] = g.density || 0;
+      i[iGenre + 6] = g.tail || 0;
+      i[iGenre + 7] = g.grit || 0;
+    } else i[iHasGenre] = 0;
+  }
+
+  // The core's output back into `m`, in place. Every store names its field
+  // (see `write`) and every index is a constant resolved once from the layout.
+  const oBeat = O.O_BEAT, oBar = O.O_BAR, oPhrase = O.O_PHRASE, oBpb = O.O_BPB;
+  const oBeatPhase = O.O_BEAT_PHASE, oBarPhase = O.O_BAR_PHASE, oPhrasePhase = O.O_PHRASE_PHASE;
+  const oBpm = O.O_BPM, oLocked = O.O_LOCKED, oBeats = O.O_BEATS, oBars = O.O_BARS, oPhrases = O.O_PHRASES;
+  const oOnBeat = O.O_ON_BEAT, oOnBar = O.O_ON_BAR, oOnPhrase = O.O_ON_PHRASE;
+  const oBeatIndex = O.O_BEAT_INDEX, oBarIndex = O.O_BAR_INDEX, oKick = O.O_KICK, oHit = O.O_HIT;
+  const oNote = O.O_NOTE, oChord = O.O_CHORD, oOnset = O.O_ONSET, oSnareHit = O.O_SNARE_HIT;
+  const oHatHit = O.O_HAT_HIT, oNoteHit = O.O_NOTE_HIT, oMainKick = O.O_MAIN_KICK;
+  const oMainPower = O.O_MAIN_POWER, oBigKick = O.O_BIG_KICK, oRollKick = O.O_ROLL_KICK;
+  const oRoll = O.O_ROLL, oRollDiv = O.O_ROLL_DIV, oDrop = O.O_DROP, oDropped = O.O_DROPPED;
+  const oSinceDrop = O.O_SINCE_DROP, oBuild = O.O_BUILD, oBreakdown = O.O_BREAKDOWN;
+  const oDrive = O.O_DRIVE, oWeight = O.O_WEIGHT, oAir = O.O_AIR, oTension = O.O_TENSION;
+  const oCalm = O.O_CALM, oAttack = O.O_ATTACK, oDynamics = O.O_DYNAMICS, oLevel = O.O_LEVEL;
+  function pull() {
+    const o = sc.output();
+    m.beat = o[oBeat];
+    m.bar = o[oBar];
+    m.phrase = o[oPhrase];
+    m.beatsPerBar = o[oBpb];
+    m.beatPhase = o[oBeatPhase];
+    m.barPhase = o[oBarPhase];
+    m.phrasePhase = o[oPhrasePhase];
+    m.bpm = o[oBpm];
+    m.locked = o[oLocked] !== 0;
+    m.beats = o[oBeats];
+    m.bars = o[oBars];
+    m.phrases = o[oPhrases];
+    m.onBeat = o[oOnBeat] !== 0;
+    m.onBar = o[oOnBar] !== 0;
+    m.onPhrase = o[oOnPhrase] !== 0;
+    m.beatIndex = o[oBeatIndex];
+    m.barIndex = o[oBarIndex];
+    m.kick = o[oKick];
+    m.hit = o[oHit] !== 0;
+    m.note = o[oNote];
+    m.chord = o[oChord];
+    m.onset = o[oOnset];
+    m.snareHit = o[oSnareHit] !== 0;
+    m.hatHit = o[oHatHit] !== 0;
+    m.noteHit = o[oNoteHit] !== 0;
+    const st = m.stamp;
+    st.kick = o[oStamp];
+    st.main = o[oStamp + 1];
+    st.big = o[oStamp + 2];
+    st.roll = o[oStamp + 3];
+    st.snare = o[oStamp + 4];
+    st.hat = o[oStamp + 5];
+    st.note = o[oStamp + 6];
+    st.chord = o[oStamp + 7];
+    st.drop = o[oStamp + 8];
+    st.bar = o[oStamp + 9];
+    st.beat = o[oStamp + 10];
+    const ct = m.count;
+    ct.kick = o[oCount];
+    ct.main = o[oCount + 1];
+    ct.snare = o[oCount + 2];
+    ct.drop = o[oCount + 3];
+    ct.bar = o[oCount + 4];
+    ct.beat = o[oCount + 5];
+    m.mainKick = o[oMainKick] !== 0;
+    m.mainPower = o[oMainPower];
+    m.bigKick = o[oBigKick] !== 0;
+    m.rollKick = o[oRollKick] !== 0;
+    m.roll = o[oRoll];
+    m.rollDiv = o[oRollDiv];
+    m.drop = o[oDrop] !== 0;
+    m.dropped = o[oDropped];
+    m.sinceDrop = o[oSinceDrop];
+    m.build = o[oBuild];
+    m.breakdown = o[oBreakdown];
+    m.drive = o[oDrive];
+    m.weight = o[oWeight];
+    m.air = o[oAir];
+    m.tension = o[oTension];
+    m.calm = o[oCalm];
+    m.attack = o[oAttack];
+    m.dynamics = o[oDynamics];
+    m.level = o[oLevel];
+    m.motion = o[oLook];
+    m.density = o[oLook + 1];
+    m.punch = o[oLook + 2];
+    m.smooth = o[oLook + 3];
+    m.warm = o[oLook + 4];
+    m.melodic = o[oLook + 5];
+    m.chaos = o[oLook + 6];
+    const gch = m.genre;
+    gch.lead = o[oGenre];
+    gch.buzz = o[oGenre + 1];
+    gch.screech = o[oGenre + 2];
+    gch.sub = o[oGenre + 3];
+    gch.offbeat = o[oGenre + 4];
+    gch.density = o[oGenre + 5];
+    gch.tail = o[oGenre + 6];
+    gch.grit = o[oGenre + 7];
+  }
+
+  return { m, write, pull };
+}
+
+/**
+ * A reading of its own — for a caller with no GL scene around it (the tests,
+ * a bench). Needs the animation core loaded (lib/viz/core.js#loadVizCore).
+ * `m.dispose()` gives its slot in the core back.
+ */
+export function createMusical(sc = null) {
+  let own = null;
+  if (!sc) {
+    const core = vizCore();
+    if (!core) throw new Error("musical: the animation core is not loaded");
+    own = sc = new SceneCore(core);
+  }
+  const { m } = bindMusical(sc);
+  m.dispose = () => own?.free();
   return m;
 }

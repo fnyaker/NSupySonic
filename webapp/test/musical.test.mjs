@@ -19,8 +19,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { createMusical } from "../src/lib/viz/musical.js";
+import { vizCoreFromBytes } from "../src/lib/viz/core.js";
 import { LOOK_KEYS } from "../src/lib/audio/style.js";
 import { worldIds, loadWorld } from "../src/lib/viz/worlds/index.js";
 
@@ -88,6 +90,10 @@ function frameAt(t, { bpm, dt = 1 / 60, steady = false }) {
   };
 }
 
+// The musical reading is Rust (rhythm/src/viz_motion.rs): the very binary the
+// app ships.
+vizCoreFromBytes(readFileSync(new URL("../src/lib/audio/rhythm.wasm", import.meta.url)));
+
 const WORLDS = [];
 for (const id of worldIds()) WORLDS.push([id, await loadWorld(id)]);
 
@@ -146,6 +152,7 @@ function drive(def, { bpm, seconds, dt = 1 / 60, hitchEvery = 0, steady = false 
     if (i > n / 2) for (let k = 0; k < 8; k++) moved += Math.abs(state[k] - prev[k]);
     prev.set(state);
   }
+  m.dispose();
   return { moved, peak, bad, flashes, births };
 }
 

@@ -67,6 +67,22 @@ macro_rules! int_minmax {
 }
 int_minmax!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 
+/// `f64::exp` and `f64::powf`, kept OUT OF LINE for the animation core. On
+/// wasm they are libm routines compiled into the module, and with LTO every
+/// call site got a copy of its own: the musical reading's exponentials and the
+/// palette's powers put two routines of several hundred bytes each in a
+/// couple of dozen places. A call costs a few nanoseconds; the copies cost a
+/// download.
+#[inline(never)]
+pub fn exp64(x: f64) -> f64 {
+    x.exp()
+}
+
+#[inline(never)]
+pub fn pow64(x: f64, y: f64) -> f64 {
+    x.powf(y)
+}
+
 /// log2(x) for x > 0, to about 1e-4 — plenty for an onset function or a
 /// flatness measure, and several times cheaper than the libm call it
 /// replaces in the per-bin loops. Uses the float's own exponent and a

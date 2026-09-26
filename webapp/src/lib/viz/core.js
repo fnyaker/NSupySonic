@@ -3,9 +3,10 @@
 // The same WebAssembly module as the rhythm analyser, instantiated a second
 // time on the page: the analyser's instance lives in the AudioWorklet and says
 // what the music is doing; this one turns that into what is drawn — the
-// oscilloscope's trigger and trace, the bars' levelling. The compiled module is
-// shared (lib/audio/rhythm-assets.js#rhythmBinary), so this costs no download
-// and no compile of its own.
+// musical reading every world is timed by, the spectrum and the uniform block
+// the shaders read, the oscilloscope's trigger and trace, the bars' levelling.
+// The compiled module is shared (lib/audio/rhythm-assets.js#rhythmBinary), so
+// this costs no download and no compile of its own.
 //
 // Everything is created through a HANDLE and allocates nothing once built, so
 // a view taken on the module's memory stays valid from frame to frame. The one
@@ -26,6 +27,7 @@ function wrap(instance) {
     f32(ptr, n) {
       return new Float32Array(memory.buffer, ptr, n);
     },
+    layouts: null,
   };
 }
 
@@ -57,17 +59,118 @@ export function vizCoreFromBytes(bytes) {
 
 // A view that follows the memory: re-made when the buffer it was taken on has
 // been replaced by a grow, otherwise the same object every frame.
-function viewer(c, ptrFn, n) {
+function viewer(c, ptrFn, n, Type = Float32Array) {
   let buf = null;
   let view = null;
   return () => {
     if (buf !== c.memory.buffer) {
       buf = c.memory.buffer;
-      view = c.f32(ptrFn(), n);
+      view = new Type(buf, ptrFn(), n);
     }
     return view;
   };
 }
+
+// "name:offset:length;..." into { name: offset }.
+function parseFields(text) {
+  const out = {};
+  for (const part of text.split(";")) {
+    if (!part) continue;
+    const [name, at] = part.split(":");
+    out[name] = +at;
+  }
+  return out;
+}
+
+function ascii(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return s;
+}
+
+/**
+ * The scene's layouts, read by name once per core: the musical reading's
+ * input (`in`) and output (`out`), what a picture's `pack` is told (`pack`),
+ * what its `prepare` returns (`prep`) and the block's slots (`slots`, name ->
+ * index). Neither side hard-codes a slot the other declares.
+ */
+export function sceneLayouts(c) {
+  if (!c.layouts) {
+    const read = (which) => {
+      const n = c.x.viz_scene_layout(which);
+      return parseFields(ascii(new Uint8Array(c.memory.buffer, c.x.viz_text(), n)));
+    };
+    c.layouts = { in: read(0), out: read(1), pack: read(2), prep: read(3), slots: read(4) };
+  }
+  return c.layouts;
+}
+
+// The scene's buffers, by `viz_scene_ptr` index.
+const BUF = { in: 0, out: 1, bands: 2, chroma: 3, pack: 4, prep: 5, block: 6, spec: 7, hist: 8, specSmooth: 9 };
+
+/**
+ * One GL scene's arithmetic (see viz_scene.rs): the musical reading, the
+ * spectrum and the uniform block. `offsets` is glsl.js#MUSIC_OFFSET and
+ * `blockLen` its MUSIC_FLOATS — the block is packed at the page's own
+ * offsets, by name, so the layout still lives in one place.
+ *
+ * Every accessor returns a view on the module's memory, the same object from
+ * frame to frame until a grow replaces the buffer.
+ */
+export class SceneCore {
+  constructor(c, offsets = null, blockLen = 0) {
+    this.c = c;
+    const x = c.x;
+    this.L = sceneLayouts(c);
+    this.h = x.viz_scene_new();
+    if (offsets) {
+      for (const [name, k] of Object.entries(this.L.slots)) {
+        if (!(name in offsets)) throw new Error(`viz core: the block has no slot "${name}"`);
+        x.viz_scene_slot(this.h, k, offsets[name]);
+      }
+      x.viz_scene_block_len(this.h, blockLen);
+    }
+    // A freed scene's views must never be written again — its memory goes back
+    // to the allocator — so after `free` every accessor hands out a scratch
+    // array instead.
+    const view = (which, n, Type) => {
+      const live = viewer(c, () => x.viz_scene_ptr(this.h, which), n, Type);
+      let scratch = null;
+      return () => (this.h ? live() : (scratch ??= new Type(n)));
+    };
+    this.input = view(BUF.in, x.viz_scene_len(BUF.in), Float64Array);
+    this.output = view(BUF.out, x.viz_scene_len(BUF.out), Float64Array);
+    this.bands = view(BUF.bands, x.viz_scene_len(BUF.bands), Float32Array);
+    this.chroma = view(BUF.chroma, 12, Float32Array);
+    this.packIn = view(BUF.pack, x.viz_scene_len(BUF.pack), Float64Array);
+    this.prep = view(BUF.prep, x.viz_scene_len(BUF.prep), Float64Array);
+    // Exactly the block's length: the renderer uploads the whole view.
+    this.block = view(BUF.block, blockLen || 1, Float32Array);
+    this.spec = view(BUF.spec, x.viz_scene_len(BUF.spec), Uint8Array);
+    this.hist = view(BUF.hist, x.viz_scene_len(BUF.hist), Uint8Array);
+    this.specSmooth = view(BUF.specSmooth, x.viz_scene_len(BUF.specSmooth), Float32Array);
+    this.maxBands = x.viz_scene_len(BUF.bands);
+  }
+  /** One analysis frame; the reading's input and the bands already written. */
+  update(dt, now, nbands, flags, pitch, melody, dynamics) {
+    this.c.x.viz_scene_update(this.h, dt, now, nbands, flags, pitch, melody, dynamics);
+  }
+  /** The first half of a picture; true when a history row is due. */
+  prepare(t, rdt) {
+    return this.c.x.viz_scene_prepare(this.h, t, rdt) !== 0;
+  }
+  /** The second half: the block, from `packIn()`. */
+  pack() {
+    this.c.x.viz_scene_pack(this.h);
+  }
+  free() {
+    if (this.h) this.c.x.viz_scene_free(this.h);
+    this.h = 0;
+  }
+}
+
+/** `update`'s flags (viz_scene.rs F_*). */
+export const SCENE_FLAGS = { chroma: 2, pitch: 4, melody: 8, dynamics: 16, features: 32 };
 
 /**
  * The oscilloscope (lib/viz/scenes/scope.js draws it; see viz_scope.rs for the
@@ -93,6 +196,7 @@ export class ScopeCore {
   }
   /** One analysis frame's window: `{ left, right, size, sampleRate }`. */
   update(wave, dt) {
+    if (!this.h) return;
     const { x } = this.c;
     const size = wave.size;
     const ptr = x.viz_scope_wave(this.h, size);
@@ -137,6 +241,7 @@ export class BarsCore {
     this.c.x.viz_bars_count(this.h, this.n);
   }
   update(bands, level, dt) {
+    if (!this.h) return;
     const n = Math.min(bands.length, 256);
     this._in().set(n === bands.length ? bands : bands.subarray(0, n));
     this.c.x.viz_bars_update(this.h, n, level, dt);

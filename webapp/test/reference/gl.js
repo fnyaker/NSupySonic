@@ -1,3 +1,11 @@
+// THE ORACLE. This is lib/viz/scenes/gl.js as it was in JavaScript, before
+// its arithmetic (the musical reading, the spectrum, the uniform block) moved
+// to Rust (webapp/rhythm/src/viz_scene.rs). It is kept, unchanged but for its
+// imports, for one job: test/vizcore.test.mjs runs it side by side with the
+// Rust-backed scene on the same analysis and holds the two to the same block,
+// the same spectrum texture and the same history, picture by picture. It is
+// not imported by the app.
+
 // The GL scene: the musical reading, turned into what the worlds draw with.
 //
 // Every full-screen mode is this one object with a different POLICY for which
@@ -43,17 +51,8 @@
 // continuous light and stop reading as flashes at all). prefers-reduced-motion
 // still wins: an operating-system setting is the stronger signal, and it may
 // well be the person the warning is about who set it.
-//
-// THE ARITHMETIC IS RUST (webapp/rhythm/src/viz_scene.rs, through
-// lib/viz/core.js#SceneCore): the musical reading every world is timed by, the
-// spectrum's max-hold and release, the band shares, the history row, the
-// clocks extrapolated to the instant of the picture and the uniform block,
-// packed at glsl.js's own offsets. This file keeps the POLICY — which world,
-// the dissolve, the flashes, the resolution — and the drivers and the WebGL
-// calls. The JavaScript the Rust replaced is kept as test/reference/gl.js, and
-// test/vizcore.test.mjs holds the two to the same block, picture by picture.
 
-import { bindMusical } from "../musical.js";
+import { createMusical } from "./musical.js";
 import {
   MUSIC_FLOATS,
   MUSIC_OFFSET as O,
@@ -61,12 +60,12 @@ import {
   particleVertex,
   particleFragment,
   FULLSCREEN_VS,
-} from "../gl/glsl.js";
-import { createRenderer } from "../gl/renderer.js";
-import { loadWorld, hasWorld } from "../worlds/index.js";
-import { skinFor, skinId } from "../skins.js";
-import { clamp } from "../util.js";
-import { SceneCore, SCENE_FLAGS, vizCore } from "../core.js";
+} from "../../src/lib/viz/gl/glsl.js";
+import { SPEC_W, createRenderer } from "../../src/lib/viz/gl/renderer.js";
+import { loadWorld, hasWorld } from "../../src/lib/viz/worlds/index.js";
+import { skinFor, skinId } from "../../src/lib/viz/skins.js";
+import { approach, clamp } from "../../src/lib/viz/util.js";
+import { vizCore } from "../../src/lib/viz/core.js";
 
 // The WCAG 2.x general flash threshold: no more than three flashes in any one
 // second. Enforced as a minimum interval between flash ONSETS.
@@ -82,7 +81,52 @@ const DISSOLVE_MIN = 0.9;
 const DISSOLVE_MAX = 3.2;
 // The first world fades up from black over this many beats.
 const FIRST_FADE_BEATS = 2;
-const TIERS = ["low", "medium", "high", "ultra"];
+// Spectrum history: one row per sixteenth note, so the history texture scrolls
+// with the music rather than with the frame rate.
+const HIST_PER_BEAT = 4;
+// How far past the last analysis frame the clocks may be extrapolated. Past
+// this, the analysis has stopped (a paused track, a closed projector link) and
+// the picture should settle rather than keep running on a guess.
+const EXTRAPOLATE_MAX = 0.25;
+
+const BANDS = ["sub", "bass", "lowMid", "mid", "high", "air"];
+
+// sRGB -> linear, and HSL -> linear RGB, allocation-free.
+function toLinear(c) {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+function hslLinear(hDeg, s, l, out, at) {
+  const h = ((((hDeg % 360) + 360) % 360) / 360) * 6;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h % 2) - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h < 1) [r, g] = [c, x];
+  else if (h < 2) [r, g] = [x, c];
+  else if (h < 3) [g, b] = [c, x];
+  else if (h < 4) [g, b] = [x, c];
+  else if (h < 5) [r, b] = [x, c];
+  else [r, b] = [c, x];
+  const m = l - c / 2;
+  r = toLinear(r + m);
+  g = toLinear(g + m);
+  b = toLinear(b + m);
+  out[at] = r;
+  out[at + 1] = g;
+  out[at + 2] = b;
+}
+// Scale a colour so its luminance lands in a band: a pale sleeve and a dark
+// one then expose the same, and a world's light constants mean one thing
+// whatever the artwork. Clamped, so a near-black colour is not boosted into
+// mush and a near-white one keeps some of its brightness.
+function normalise(out, at, target, lo = 0.5, hi = 3.5) {
+  const y = 0.2126 * out[at] + 0.7152 * out[at + 1] + 0.0722 * out[at + 2];
+  const k = clamp(target / Math.max(1e-4, y), lo, hi);
+  out[at] *= k;
+  out[at + 1] *= k;
+  out[at + 2] *= k;
+}
 
 function sameOrigin(u) {
   if (!u || u.startsWith("blob:") || u.startsWith("data:")) return true;
@@ -116,15 +160,19 @@ export function createGLScene(opts = {}) {
     (() => (typeof performance !== "undefined" ? performance.now() : Date.now()) / 1000);
 
   let renderer = null;
-  // The arithmetic's own state lives in the core; `m` is the reading every
-  // driver is handed, refreshed in place after each analysis frame.
-  const core = opts.core || vizCore();
-  if (!core) throw new Error("gl: the animation core is not loaded");
-  const sc = new SceneCore(core, O, MUSIC_FLOATS);
-  const { m, write: readFrame, pull } = bindMusical(sc);
-  const P = sc.L.pack;
-  const Q = sc.L.prep;
-  // What the last `prepare` said, for the grade and the drivers.
+  const m = createMusical();
+  const block = new Float32Array(MUSIC_FLOATS);
+  const spec = new Uint8Array(SPEC_W * 2);
+  const specSmooth = new Float32Array(SPEC_W);
+  const specFast = new Float32Array(SPEC_W);
+  const histRow = new Uint8Array(SPEC_W);
+  let histDue = 0;
+  const bandShare = new Float32Array(6);
+  const bandSmooth = new Float32Array(6);
+  let chroma = null;
+  let pitch = 0.5;
+  let melody = 0;
+  let dyn = 1;
   let dynSmooth = 1;
 
   // --- worlds -----------------------------------------------------------------
@@ -138,6 +186,7 @@ export function createGLScene(opts = {}) {
   let wantKey = "";
 
   // --- timing -------------------------------------------------------------------
+  let lastUpdateAt = 0;
   let lastDrawAt = 0;
   let clockSeconds = 0;
   // Extrapolated at draw time.
@@ -161,17 +210,12 @@ export function createGLScene(opts = {}) {
   let scaleAt = 0;
   let starved = false;
   const intervals = new Float32Array(32);
-  // The median is read from a sorted COPY, made in place: without a GPU timer
-  // (Firefox and Safari have none) this runs on every picture, and
-  // `Array.from(...).sort(cmp)` there was the most expensive line of the draw.
-  const sortedIntervals = new Float32Array(32);
   let intervalN = 0;
 
   // What a driver is handed each frame, allocated once. `spec` is the smoothed
-  // spectrum (128 bins, 0..1) for the worlds that do per-band work on the CPU —
-  // a view on the core's memory, re-read every picture.
+  // spectrum (128 bins, 0..1) for the worlds that do per-band work on the CPU.
   const clocks = {
-    beats: 0, bars: 0, phrases: 0, dt: 0, aspect: 16 / 9, spec: sc.specSmooth(), pitch: 0.5, melody: 0,
+    beats: 0, bars: 0, phrases: 0, dt: 0, aspect: 16 / 9, spec: specSmooth, pitch: 0.5, melody: 0,
     hole: [0, 0, 0, 0],
     // The frame in CSS pixels, for a driver that sizes something in pixels
     // (the scope puts one column of its trace on each).
@@ -238,31 +282,6 @@ export function createGLScene(opts = {}) {
       data: null,
       dead: false,
       failed: false,
-      // What this picture's uniform setter reads (see `drawStage`).
-      share: 0,
-      energy: 1,
-      speed: 1,
-      fill: null,
-    };
-    // The setter drawWorld is handed, and the views it uploads, built once:
-    // per picture there is nothing to allocate, only three numbers to set.
-    const p0 = st.packed.subarray(0, 4);
-    const p1 = st.packed.subarray(4, 8);
-    const p2 = st.packed.subarray(8, 12);
-    const p3 = st.packed.subarray(12, 16);
-    const s0 = st.state.subarray(0, 4);
-    const s1 = st.state.subarray(4, 8);
-    st.fill = (h) => {
-      h.f("uFade", st.share);
-      h.f("uEnergy", st.energy);
-      h.f("uSpeed", st.speed);
-      h.v4a("uP0", p0);
-      h.v4a("uP1", p1);
-      h.v4a("uP2", p2);
-      h.v4a("uP3", p3);
-      h.v4a("uS0", s0);
-      h.v4a("uS1", s1);
-      h.v4a("uEv", st.ev);
     };
     loadWorld(worldId)
       .then((def) => {
@@ -359,21 +378,7 @@ export function createGLScene(opts = {}) {
     return { key: id, world: skin.world, skin };
   }
 
-  // The last reading `want` resolved, so a frame that names the same genre as
-  // the one before — nearly all of them — costs four comparisons and no
-  // allocation.
-  let seenFixed = null;
-  let seenWorld = null;
-  let seenFamily = null;
-  let seenArche = null;
   function want(style) {
-    const family = style?.dominant || "";
-    const arche = style?.archetype || "";
-    if (wantKey && o.fixed === seenFixed && o.world === seenWorld && family === seenFamily && arche === seenArche) return;
-    seenFixed = o.fixed;
-    seenWorld = o.world;
-    seenFamily = family;
-    seenArche = arche;
     const r = resolve(style);
     if (r.key === wantKey) return;
     wantKey = r.key;
@@ -425,48 +430,37 @@ export function createGLScene(opts = {}) {
 
   // --- reading the analysis ---------------------------------------------------------
   function update(frame, dt) {
-    if (!sc.h) return;
-    // The frame into the core: the reading's input, the bands (resampled and
-    // MAX-HELD there until the next picture, so a transient that lives for
-    // one analysis frame between two pictures still reaches the screen), the
-    // chroma and the melody.
-    readFrame(frame);
+    m.update(frame, dt);
+    lastUpdateAt = now();
     const b = frame.bands;
-    let n = 0;
     if (b && b.length) {
-      n = Math.min(b.length, sc.maxBands);
-      const bands = sc.bands();
-      if (n === b.length) bands.set(b);
-      else for (let i = 0; i < n; i++) bands[i] = b[i];
+      // Resampled onto the texture's 128 texels, and MAX-HELD until the next
+      // draw: a transient that lives for one analysis frame between two
+      // pictures must still reach the screen.
+      const n = b.length;
+      for (let i = 0; i < SPEC_W; i++) {
+        const x = (i / (SPEC_W - 1)) * (n - 1);
+        const j = Math.floor(x);
+        const f = x - j;
+        const v = b[j] + ((b[Math.min(n - 1, j + 1)] || 0) - b[j]) * f;
+        if (v > specFast[i]) specFast[i] = v;
+      }
+    }
+    const e = frame.energy;
+    if (e) {
+      const total = e.sub + e.bass + e.lowMid + e.mid + e.high + e.air + 1e-12;
+      for (let i = 0; i < 6; i++) {
+        const share = clamp((e[BANDS[i]] / total) * 3, 0, 1);
+        if (share > bandShare[i]) bandShare[i] = share;
+      }
     }
     const f = frame.features;
-    let flags = 0;
-    let pitch = 0;
-    let melody = 0;
-    let dyn = 1;
     if (f) {
-      flags = SCENE_FLAGS.features;
-      const c = f.chroma;
-      if (c) {
-        flags |= SCENE_FLAGS.chroma;
-        const ch = sc.chroma();
-        for (let i = 0; i < 12; i++) ch[i] = c[i];
-      }
-      if (f.melodyPitch != null) {
-        flags |= SCENE_FLAGS.pitch;
-        pitch = f.melodyPitch;
-      }
-      if (f.melody != null) {
-        flags |= SCENE_FLAGS.melody;
-        melody = f.melody;
-      }
-      if (f.dynamics != null) {
-        flags |= SCENE_FLAGS.dynamics;
-        dyn = f.dynamics;
-      }
+      chroma = f.chroma || chroma;
+      pitch = f.melodyPitch ?? pitch;
+      melody = f.melody ?? melody;
+      dyn = f.dynamics ?? 1;
     }
-    sc.update(dt, now(), n, flags, pitch, melody, dyn);
-    pull();
     // A driver that reads the analysis itself, at its own rate — the scope,
     // whose trace is the samples of this frame.
     if (cur?.driver?.hear) cur.driver.hear(frame, dt);
@@ -475,55 +469,123 @@ export function createGLScene(opts = {}) {
   }
 
   // --- drawing ------------------------------------------------------------------------
+  function extrapolate(t) {
+    const ahead = clamp(t - lastUpdateAt, 0, EXTRAPOLATE_MAX);
+    beatsNow = m.beats + ahead / m.beat;
+    barsNow = m.bars + ahead / m.bar;
+    phrasesNow = m.phrases + ahead / m.phrase;
+    return ahead;
+  }
+
+  function put(slot, x, y, z, w, idx = 0) {
+    const at = O[slot] + idx * 4;
+    block[at] = x;
+    block[at + 1] = y;
+    block[at + 2] = z;
+    block[at + 3] = w;
+  }
+
   function env(stamp, decay) {
     const s = beatsNow - stamp;
     return s < 0 ? 0 : Math.exp(-s / decay);
   }
 
-  // The uniform block: what only the page knows goes into the core, which
-  // packs everything (viz_scene.rs#pack) at glsl.js's offsets.
-  function pack(pal, geom) {
-    const p = sc.packIn();
-    p[P.P_FLASH] = flash;
-    const pp = P.P_PAL;
-    p[pp] = pal.low ?? 280;
-    p[pp + 1] = pal.mid ?? 300;
-    p[pp + 2] = pal.high ?? 320;
-    p[pp + 3] = pal.hue ?? 280;
-    p[pp + 4] = pal.sat ?? 0.8;
-    p[pp + 5] = pal.light ?? 0.58;
-    p[pp + 6] = pal.spread ?? 70;
-    p[P.P_CSS_W] = cssW;
-    p[P.P_CSS_H] = cssH;
-    p[P.P_DPR] = dpr;
-    p[P.P_SCALE] = scale;
+  function pack(pal, geom, ahead) {
+    const bpb = m.beatsPerBar;
+    put("uClock", beatsNow, barsNow, phrasesNow, m.beat);
+    put(
+      "uPhase",
+      beatsNow - Math.floor(beatsNow),
+      (m.barPhase + ahead / m.bar) % 1,
+      (m.phrasePhase + ahead / m.phrase) % 1,
+      m.locked ? m.bpm / 100 : 0
+    );
+    const st = m.stamp;
+    put("uHit", env(st.kick, 0.35), env(st.main, 0.5), env(st.big, 1), env(st.snare, 0.4));
+    put("uHit2", env(st.hat, 0.2), env(st.note, 0.5), env(st.chord, 1.5), flash);
+    put("uFlow", m.drive, m.weight, m.air, m.tension);
+    put("uMood", m.calm, m.level, dynSmooth, m.attack);
+    put("uArc", m.dropped, m.build, m.breakdown, m.roll);
+    put("uLookA", m.motion, m.density, m.punch, m.smooth);
+    put("uLookB", m.warm, m.melodic, m.chaos, m.rollDiv / 16);
+    put("uBandA", bandSmooth[0], bandSmooth[1], bandSmooth[2], bandSmooth[3]);
+    put("uBandB", bandSmooth[4], bandSmooth[5], pitch, melody);
+    for (let i = 0; i < 3; i++) {
+      const c = chroma;
+      put("uChroma", c ? c[i * 4] : 0, c ? c[i * 4 + 1] : 0, c ? c[i * 4 + 2] : 0, c ? c[i * 4 + 3] : 0, i);
+    }
+    put("uCount", m.beatIndex, m.count.bar, m.count.kick, m.count.drop);
+    const gch = m.genre;
+    put("uGenre", gch.lead, gch.buzz, gch.screech, gch.sub, 0);
+    put("uGenre", gch.offbeat, gch.density, gch.tail, gch.grit, 1);
+    put(
+      "uSince",
+      Math.min(999, beatsNow - st.kick),
+      Math.min(999, beatsNow - st.main),
+      Math.min(999, beatsNow - st.snare),
+      Math.min(999, beatsNow - st.drop)
+    );
+    // The palette.
+    const sat = clamp(pal.sat ?? 0.8, 0, 1);
+    const light = clamp(pal.light ?? 0.58, 0.2, 0.8);
+    hslLinear(pal.low ?? 280, sat, light, block, O.uPalLow);
+    normalise(block, O.uPalLow, 0.2);
+    hslLinear(pal.mid ?? 300, sat, light, block, O.uPalMid);
+    normalise(block, O.uPalMid, 0.24);
+    hslLinear(pal.high ?? 320, sat, Math.min(0.85, light + 0.08), block, O.uPalHigh);
+    normalise(block, O.uPalHigh, 0.3);
+    hslLinear((pal.hue ?? 280) + 180, sat, light, block, O.uPalAcc);
+    normalise(block, O.uPalAcc, 0.24);
+    hslLinear((pal.hue ?? 280) - 14, sat * 0.55, 0.06, block, O.uPalBg);
+    block[O.uPalLow + 3] = sat;
+    block[O.uPalMid + 3] = light;
+    block[O.uPalHigh + 3] = ((((pal.hue ?? 280) % 360) + 360) % 360) / 360;
+    block[O.uPalAcc + 3] = (pal.spread ?? 70) / 360;
+    // The frame, in p-space (y up, one unit = half the height).
+    const w = cssW || 1;
+    const h = cssH || 1;
+    put("uFrame", w * dpr, h * dpr, w / h, 2 / (h * dpr * scale));
+    const hh = h / 2;
     // The artwork's OWN box (ahw/ahh around hx/hy), not the frame-centred one
     // geometry.js grows for the canvas scenes' polar primitives: the mobile
     // cover sits above the middle, and the grown box centred every world 7% of
     // the frame below it.
     const ahw = geom?.ahw ?? geom?.hw ?? 0;
     const ahh = geom?.ahh ?? geom?.hh ?? 0;
-    const ph = P.P_HOLE;
     if (geom && geom.hole > 0 && ahw > 0) {
-      p[ph] = 1;
-      p[ph + 1] = geom.hx ?? geom.cx;
-      p[ph + 2] = geom.hy ?? geom.cy;
-      p[ph + 3] = ahw;
-      p[ph + 4] = ahh;
-      p[ph + 5] = geom.afloorY ?? geom.floorY;
-      p[P.P_HOLE_RATIO] = geom.hole;
-    } else p[ph] = 0;
-    p[P.P_INTENSITY] = o.intensity;
-    p[P.P_REDUCED] = o.reducedMotion ? 1 : 0;
-    p[P.P_STRIP] = o.layout === "strip" ? 1 : 0;
-    const q = gq();
-    p[P.P_STEPS] = q.steps ?? 1;
-    p[P.P_PARTICLES] = q.particles ?? 1;
-    p[P.P_TIER] = Math.max(0, TIERS.indexOf(o.preset.tier));
-    sc.pack();
+      const hx = geom.hx ?? geom.cx;
+      const hy = geom.hy ?? geom.cy;
+      const fy = geom.afloorY ?? geom.floorY;
+      put("uHole", (hx - w / 2) / hh, -(hy - h / 2) / hh, ahw / hh, ahh / hh);
+      put("uHoleR", (Math.min(ahw, ahh) / hh) * 0.08, geom.hole, -(fy - h / 2) / hh, 0);
+    } else {
+      put("uHole", 0, 0, 0, 0);
+      put("uHoleR", 0, 0, -1 / 3, 0);
+    }
     // The same geometry for the drivers, which place things clear of it.
-    const block = sc.block();
     for (let i = 0; i < 4; i++) clocks.hole[i] = block[O.uHole + i];
+    put("uCtl", o.intensity, o.reducedMotion ? 1 : 0, o.layout === "strip" ? 1 : 0, 0);
+    const q = gq();
+    const tiers = ["low", "medium", "high", "ultra"];
+    put("uQual", q.steps ?? 1, q.particles ?? 1, Math.max(0, tiers.indexOf(o.preset.tier)), scale);
+  }
+
+  function fillFor(st, share) {
+    const gate = 0.35 + 0.65 * dynSmooth;
+    const energy = (st.skin?.energy ?? 1) * gate;
+    const speed = st.skin?.speed ?? 1;
+    return (h) => {
+      h.f("uFade", share);
+      h.f("uEnergy", energy);
+      h.f("uSpeed", speed);
+      h.v4a("uP0", st.packed.subarray(0, 4));
+      h.v4a("uP1", st.packed.subarray(4, 8));
+      h.v4a("uP2", st.packed.subarray(8, 12));
+      h.v4a("uP3", st.packed.subarray(12, 16));
+      h.v4a("uS0", st.state.subarray(0, 4));
+      h.v4a("uS1", st.state.subarray(4, 8));
+      h.v4a("uEv", st.ev);
+    };
   }
 
   // Resolution follows the GPU, within the tier's bounds. With a timer query
@@ -542,9 +604,8 @@ export function createGLScene(opts = {}) {
     const gpu = renderer.gpuMs;
     if (gpu > 0) load = gpu / 1000 / budget;
     else {
-      sortedIntervals.set(intervals);
-      sortedIntervals.sort();
-      load = sortedIntervals[sortedIntervals.length >> 1] / budget;
+      const sorted = Array.from(intervals).sort((a, b) => a - b);
+      load = sorted[sorted.length >> 1] / budget;
     }
     let next = scale;
     const over = load > (gpu > 0 ? 0.85 : 1.3);
@@ -566,14 +627,9 @@ export function createGLScene(opts = {}) {
     renderer.setSize(cssW * dpr, cssH * dpr, scale, gq().bloom ?? 6);
   }
 
-  const NO_LOOK = Object.freeze({});
   function lookOf(st) {
-    return st?.def?.look || NO_LOOK;
-  }
-  // One grade parameter, blended from the leaving world's to the arriving one's.
-  function mixLook(lp, lc, k, key, dflt) {
-    const a = lp[key] ?? dflt;
-    return a + ((lc[key] ?? dflt) - a) * k;
+    const l = st?.def?.look || {};
+    return l;
   }
 
   const look = {
@@ -600,6 +656,7 @@ export function createGLScene(opts = {}) {
     const rdt = lastDrawAt ? clamp(t - lastDrawAt, 0.001, 0.25) : 1 / 60;
     lastDrawAt = t;
     clockSeconds += rdt;
+    const ahead = extrapolate(t);
 
     promote();
     if (!cur) {
@@ -615,20 +672,29 @@ export function createGLScene(opts = {}) {
     }
     firstFade = Math.min(1, firstFade + rdt / (m.beat * FIRST_FADE_BEATS));
     flash *= Math.exp(-rdt / FLASH_DECAY);
+    dynSmooth = approach(dynSmooth, dyn, 0.15, rdt);
 
-    // The clocks extrapolated to the instant of this picture (never more than
-    // a quarter of a second past the last analysis frame: past that the
-    // analysis has stopped and the picture should settle rather than run on a
-    // guess), the dynamics gate, the spectrum — a fast attack and a release in
-    // beats, so the bars fall at a musical speed, beside the raw peak for
-    // worlds that want the transient itself — and the history row, one per
-    // sixteenth note: viz_scene.rs#prepare.
-    const row = sc.prepare(t, rdt) ? sc.hist() : null;
-    const q0 = sc.prep();
-    beatsNow = q0[Q.Q_BEATS];
-    barsNow = q0[Q.Q_BARS];
-    phrasesNow = q0[Q.Q_PHRASES];
-    dynSmooth = q0[Q.Q_DYN];
+    // The spectrum: a fast attack and a release in beats, so the bars fall at
+    // a musical speed; the fast row keeps the raw peak for worlds that want
+    // the transient itself.
+    const rel = Math.exp(-rdt / Math.max(0.05, m.beat * 0.35));
+    for (let i = 0; i < SPEC_W; i++) {
+      const v = specFast[i];
+      specSmooth[i] = v > specSmooth[i] ? specSmooth[i] + (v - specSmooth[i]) * 0.65 : v + (specSmooth[i] - v) * rel;
+      spec[i] = clamp(specSmooth[i], 0, 1) * 255;
+      spec[SPEC_W + i] = clamp(v, 0, 1) * 255;
+      specFast[i] = v * 0.4;
+    }
+    for (let i = 0; i < 6; i++) {
+      bandSmooth[i] = approach(bandSmooth[i], bandShare[i], m.beat * 0.2, rdt);
+      bandShare[i] *= 0.5;
+    }
+    let row = null;
+    if (beatsNow >= histDue) {
+      histDue = Math.max(histDue + 1 / HIST_PER_BEAT, beatsNow - 1);
+      for (let i = 0; i < SPEC_W; i++) histRow[i] = spec[i];
+      row = histRow;
+    }
 
     // The drivers advance on the RENDER clock.
     clocks.beats = beatsNow;
@@ -638,18 +704,17 @@ export function createGLScene(opts = {}) {
     clocks.aspect = cssH ? cssW / cssH : 16 / 9;
     clocks.width = cssW;
     clocks.height = cssH;
-    clocks.spec = sc.specSmooth();
     // The melody, for the worlds that draw the tune itself (a staircase that
     // climbs with the arpeggio): its pitch 0..1 and how present it is.
-    clocks.pitch = q0[Q.Q_PITCH];
-    clocks.melody = q0[Q.Q_MELODY];
+    clocks.pitch = pitch;
+    clocks.melody = melody;
     if (prev?.driver?.step) prev.driver.step(rdt, m, clocks);
     if (cur.driver?.step) cur.driver.step(rdt, m, clocks);
     strobe();
 
     govern(t, rdt);
-    pack(pal, geom || geomRef);
-    if (!renderer.beginFrame(sc.block(), sc.spec(), row)) return;
+    pack(pal, geom || geomRef, ahead);
+    if (!renderer.beginFrame(block, spec, row)) return;
 
     const q = gq();
     const arriving = prev ? dissolve : 1;
@@ -660,16 +725,17 @@ export function createGLScene(opts = {}) {
     const lc = lookOf(cur);
     const lp = prev ? lookOf(prev) : lc;
     const k = prev ? dissolve : 1;
-    look.exposure = mixLook(lp, lc, k, "exposure", 1) * (prev ? 1 : firstFade);
-    look.bloom = mixLook(lp, lc, k, "bloom", 1) * (q.bloomK ?? 1);
-    look.threshold = mixLook(lp, lc, k, "threshold", 0.9);
-    look.knee = mixLook(lp, lc, k, "knee", 0.6);
-    look.saturation = mixLook(lp, lc, k, "saturation", 1.15);
+    const mix = (key, dflt) => (lp[key] ?? dflt) + ((lc[key] ?? dflt) - (lp[key] ?? dflt)) * k;
+    look.exposure = mix("exposure", 1) * (prev ? 1 : firstFade);
+    look.bloom = mix("bloom", 1) * (q.bloomK ?? 1);
+    look.threshold = mix("threshold", 0.9);
+    look.knee = mix("knee", 0.6);
+    look.saturation = mix("saturation", 1.15);
     // The fringe breathes on an impact: a hair at rest, a visible split for an
     // instant on a big kick or a drop — the lens being hit.
     const hitCA = Math.max(env(m.stamp.big, 0.5), env(m.stamp.drop, 1.5));
-    look.ca = (q.ca ?? 0) * (mixLook(lp, lc, k, "ca", 1) * (0.0025 + 0.01 * hitCA * (o.reducedMotion ? 0 : 1)));
-    look.grain = (q.grain ?? 0) * mixLook(lp, lc, k, "grain", 1);
+    look.ca = (q.ca ?? 0) * (mix("ca", 1) * (0.0025 + 0.01 * hitCA * (o.reducedMotion ? 0 : 1)));
+    look.grain = (q.grain ?? 0) * mix("grain", 1);
     look.lift = flash * 0.35;
     look.transparent = o.layout === "strip";
     look.time = clockSeconds;
@@ -683,10 +749,7 @@ export function createGLScene(opts = {}) {
       st.data.tex.upload(st.data.src);
       st.data.dirty = false;
     }
-    st.share = share;
-    st.energy = (st.skin?.energy ?? 1) * (0.35 + 0.65 * dynSmooth);
-    st.speed = st.skin?.speed ?? 1;
-    renderer.drawWorld(st.prog, st.target, st.fill, st.parts, st.data?.tex);
+    renderer.drawWorld(st.prog, st.target, fillFor(st, share), st.parts, st.data?.tex);
   }
 
   // --- the host's API ---------------------------------------------------------------
@@ -745,7 +808,6 @@ export function createGLScene(opts = {}) {
     for (const st of [cur, prev, pending]) disposeStage(st);
     cur = prev = pending = null;
     renderer = null;
-    sc.free();
   }
 
   return {

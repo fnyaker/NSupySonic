@@ -24,12 +24,12 @@ import assert from "node:assert/strict";
 
 import { createGeometry } from "../src/lib/viz/geometry.js";
 import { vizCoreFromBytes } from "../src/lib/viz/core.js";
-import { createScene, MODES, effectiveMode, levelFor } from "../src/lib/viz/index.js";
+import { createScene, createFallback, MODES, effectiveMode, levelFor } from "../src/lib/viz/index.js";
 import { tierPreset, TIERS } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
 import { FAMILY_LIST } from "../src/lib/audio/style.js";
 import { WORLD_META, GROUPS, worldFor } from "../src/lib/viz/worlds/catalogue.js";
-import { worldIds, loadWorld, hasWorld } from "../src/lib/viz/worlds/index.js";
+import { worldIds, loadWorld, hasWorld, instrumentIds } from "../src/lib/viz/worlds/index.js";
 import { SKINS, ALIASES, skinId, skinFor, skinCount } from "../src/lib/viz/skins.js";
 import { worldFragment, particleVertex, particleFragment, WORLD_UNIFORMS } from "../src/lib/viz/gl/glsl.js";
 
@@ -710,12 +710,24 @@ test("the scene loader hands back the right KIND of scene, on demand", async () 
     const scene = await p;
     assert.equal(typeof scene?.update, "function", `${m.id} has no update()`);
     assert.equal(typeof scene?.draw, "function", `${m.id} has no draw()`);
-    // The canvas scenes predate the engine and carry no `kind`: the host reads
-    // anything that is not "gl" as a 2D scene.
-    assert.equal(scene.kind === "gl" ? "gl" : "2d", m.id === "scope" ? "2d" : "gl", `${m.id} is the wrong kind of scene`);
+    // Every mode is the GL engine now, the oscilloscope included (the scope
+    // instrument, worlds/scope.js). The canvas scenes carry no `kind`: the
+    // host reads anything that is not "gl" as a 2D scene.
+    assert.equal(scene.kind === "gl" ? "gl" : "2d", "gl", `${m.id} is the wrong kind of scene`);
+    scene.dispose?.();
   }
   const [a, b] = await Promise.all([createScene("smart", opts), createScene("smart", opts)]);
   assert.ok(a && b && a !== b, "each call must build its own scene");
+  // Without WebGL2, each mode's canvas version: the scope for the scope, the
+  // spectrum bars for everything else — both on the same Rust arithmetic.
+  const fbScope = await createFallback("scope", opts);
+  const fbBars = await createFallback("smart", opts);
+  assert.notEqual(fbScope.kind, "gl");
+  assert.notEqual(fbBars.kind, "gl");
+  assert.equal(typeof fbScope.setOptions, "function", "the scope fallback takes the scope's settings");
+  assert.ok("bars" in fbBars, "every other mode falls back to the bars");
+  fbScope.dispose();
+  fbBars.dispose();
 });
 
 test("every world in the loader is in the catalogue, and the reverse", async () => {
@@ -749,6 +761,10 @@ test("every world in the loader is in the catalogue, and the reverse", async () 
 
 const WORLDS = [];
 for (const id of worldIds()) WORLDS.push([id, await loadWorld(id)]);
+// The instruments (the scope) are GL scenes too, held to the same shader rules;
+// they are nobody's genre, so the catalogue's own checks leave them out.
+const INSTRUMENTS = [];
+for (const id of instrumentIds()) INSTRUMENTS.push([id, await loadWorld(id)]);
 const { paramDefines } = await import("../src/lib/viz/scenes/gl.js");
 
 // GLSL ES 3.00's reserved words and the built-in functions a world calls.
@@ -782,7 +798,8 @@ function glslBodies(def) {
 
 test("every world's shader asks only for what the engine declares", () => {
   const declared = new Set(WORLD_UNIFORMS.match(/\bu[A-Z]\w*/g));
-  for (const [id, def] of WORLDS) {
+  assert.ok(INSTRUMENTS.length > 0, "the scope instrument is checked too");
+  for (const [id, def] of [...WORLDS, ...INSTRUMENTS]) {
     const names = Object.keys(def.params || {});
     assert.ok(names.length <= 16, `${id}: ${names.length} params, the engine packs 16`);
     for (const [k, v] of Object.entries(def.params || {}))

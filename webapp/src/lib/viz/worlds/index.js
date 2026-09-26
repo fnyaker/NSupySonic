@@ -63,6 +63,14 @@ const LOADERS = {
   pixels: () => import("./pixels.js"),
 };
 
+// INSTRUMENTS: GL scenes the engine draws but the smart engine never picks —
+// they are nobody's genre, and a mode shows them by name. Loaded by
+// `loadWorld` like any world, left out of `worldIds` / `hasWorld`, which are
+// the catalogue.
+const INSTRUMENTS = {
+  scope: () => import("./scope.js"),
+};
+
 const cache = new Map();
 
 /** True when the world exists AND has code behind it. */
@@ -80,7 +88,7 @@ export function worldIds() {
  * failed fetch is forgotten, so going back online lets the next attempt work.
  */
 export function loadWorld(id) {
-  const load = LOADERS[id];
+  const load = LOADERS[id] || INSTRUMENTS[id];
   if (!load) return Promise.reject(new Error(`no world "${id}"`));
   let p = cache.get(id);
   if (p) return p;
@@ -92,6 +100,11 @@ export function loadWorld(id) {
   p.catch(() => cache.delete(id));
   cache.set(id, p);
   return p;
+}
+
+/** The instruments' ids (see INSTRUMENTS). */
+export function instrumentIds() {
+  return Object.keys(INSTRUMENTS);
 }
 
 export { WORLD_META, GROUPS, worldFor };
