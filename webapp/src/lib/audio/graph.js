@@ -45,6 +45,7 @@ import {
   normalization,
   crossfadeEnabled,
   vizLookahead,
+  vizLookaheadMode,
 } from "../stores.js";
 
 let ctx = null;
@@ -108,6 +109,7 @@ const fx = {
   norm: "off",
   crossfade: false,
   lookahead: 0,
+  lookaheadAuto: true,
 };
 
 // IMPORTANT: Deezer's GAIN is the track's *loudness*, NOT the gain to apply.
@@ -156,6 +158,37 @@ function effectsOn() {
 
 // The furthest the analysis can run ahead of the speakers (ms).
 export const LOOKAHEAD_MAX = 300;
+
+// THE AUTOMATIC LOOK-AHEAD (vizLookaheadMode "auto", the default). The
+// analysis needs ~45 ms of audio past an event before it is sure of it, and
+// what it has is the output latency: a frame reaches the page that much before
+// its audio reaches the listener. Bluetooth gives it hundreds of milliseconds;
+// a desktop's short output path can give it less than it needs, and then a
+// kick is drawn a picture or two after it is heard. The engine measures how
+// early its frames really arrive and asks for exactly the delay that makes up
+// the difference (engine.js#tuneLookahead) — using the latency the OS reports,
+// so nobody has to guess a number.
+//
+// Moving a DelayNode's delay resamples what is in it: a pitch glide. So an
+// automatic change is a slow linear ramp, AUTO_RATE seconds of delay per
+// second — 0.3% of speed, five cents, where a trained ear starts to hear a
+// pitch change at five to ten. A 30 ms correction takes ten seconds and is
+// heard as nothing. A change the listener makes by hand still takes a quarter
+// of a second: they asked for it. The last automatic value is remembered per
+// device, and a new graph starts on it before any audio flows through it.
+const AUTO_RATE = 0.003;
+export const AUTO_LOOKAHEAD_MAX = 150; // ms
+const LEARNED_KEY = "viz.lookahead.learned";
+let autoLead = (() => {
+  try {
+    const v = parseFloat(localStorage.getItem(LEARNED_KEY));
+    return Number.isFinite(v) ? Math.max(0, Math.min(AUTO_LOOKAHEAD_MAX, v)) / 1000 : 0;
+  } catch {
+    return 0;
+  }
+})();
+let scheduledLead = null; // seconds: what the delay is on its way to
+let leadSettlesAt = 0; // performance.now() when that ramp lands
 
 // The interval of the setValueCurveAtTime we last scheduled on a param.
 //
@@ -287,9 +320,15 @@ function ensureGraph() {
     analyserHi.maxDecibels = -10;
 
     // The look-ahead delay. maxDelayTime is fixed at construction, so reserve
-    // the whole adjustable range up front; the live value is set in applyEffects.
+    // the whole adjustable range up front. It starts where it should be, at
+    // once, when nothing is playing yet — nothing has flowed through it, so
+    // there is nothing to glide. Built under a track that is already playing
+    // (a visualizer opened mid-song), it starts at zero and ramps: a delay line
+    // switched in full would be that many milliseconds of silence.
     lookaheadNode = ctx.createDelay(LOOKAHEAD_MAX / 1000);
-    lookaheadNode.delayTime.value = 0;
+    scheduledLead = currentEl && !currentEl.paused ? 0 : wantedLead();
+    lookaheadNode.delayTime.value = scheduledLead;
+    leadSettlesAt = 0;
 
     // Wire the fixed chain (sources attach to inputNode in wireAudio).
     let node = inputNode;
@@ -342,12 +381,7 @@ function applyEffects() {
     bassComp.ratio.setTargetAtTime(1, t, 0.05);
   }
 
-  // Changing the delay time on a running DelayNode resamples its buffer, which
-  // is audible as a pitch slide — so ramp it over a long enough window that the
-  // slide reads as nothing at all, and only when it actually changed.
-  const want = Math.max(0, Math.min(LOOKAHEAD_MAX, +fx.lookahead || 0)) / 1000;
-  if (Math.abs(lookaheadNode.delayTime.value - want) > 0.0005)
-    lookaheadNode.delayTime.setTargetAtTime(want, t, 0.25);
+  applyLookahead();
 
   // Static normalization gain on every wired source. Ramp here: this path runs
   // on a LEVEL change (or an EQ/bass tweak) that happens mid-track, where an
@@ -786,6 +820,63 @@ export function lookaheadSeconds() {
   return lookaheadNode ? lookaheadNode.delayTime.value : 0;
 }
 
+function wantedLead() {
+  return fx.lookaheadAuto ? autoLead : Math.max(0, Math.min(LOOKAHEAD_MAX, +fx.lookahead || 0)) / 1000;
+}
+
+// Changing the delay time on a running DelayNode resamples its buffer, which is
+// audible as a pitch slide: see AUTO_RATE for how slowly an automatic change
+// moves. Only a real change is scheduled — applyEffects runs on every EQ tweak.
+function applyLookahead() {
+  if (!ctx || !lookaheadNode) return;
+  const want = wantedLead();
+  if (scheduledLead != null && Math.abs(want - scheduledLead) < 0.0005) return;
+  scheduledLead = want;
+  const p = lookaheadNode.delayTime;
+  const t = ctx.currentTime;
+  const from = p.value;
+  holdParam(p, t);
+  if (fx.lookaheadAuto) {
+    const seconds = Math.abs(want - from) / AUTO_RATE;
+    if (seconds < 0.02) p.setValueAtTime(want, t);
+    else p.linearRampToValueAtTime(want, t + seconds);
+    leadSettlesAt = performance.now() + seconds * 1000;
+  } else {
+    p.setTargetAtTime(want, t, 0.25);
+    leadSettlesAt = performance.now() + 1500;
+  }
+}
+
+/** Whether the look-ahead is the engine's to set (the "auto" mode). */
+export function lookaheadIsAuto() {
+  return fx.lookaheadAuto;
+}
+
+/** Where the look-ahead is heading (seconds), ramps included. */
+export function lookaheadTarget() {
+  return scheduledLead ?? wantedLead();
+}
+
+/** True once the last change of the look-ahead has fully landed. */
+export function lookaheadSettled() {
+  return performance.now() >= leadSettlesAt;
+}
+
+/**
+ * The engine's measured need, in seconds. Applied only in "auto" mode, as a
+ * slow ramp, and remembered for this device's next graph.
+ */
+export function setAutoLookahead(seconds) {
+  const v = Math.max(0, Math.min(AUTO_LOOKAHEAD_MAX / 1000, +seconds || 0));
+  autoLead = v;
+  try {
+    localStorage.setItem(LEARNED_KEY, String(Math.round(v * 10000) / 10));
+  } catch {
+    /* private mode */
+  }
+  if (fx.lookaheadAuto) applyLookahead();
+}
+
 // Drive the graph from the effect stores. Each subscribe fires immediately with
 // the current (persisted) value, so `fx` is seeded on load; later changes ramp
 // the live nodes and wire audio in if an effect was just switched on.
@@ -811,7 +902,11 @@ crossfadeEnabled.subscribe((v) => {
 });
 vizLookahead.subscribe((v) => {
   fx.lookahead = Math.max(0, Math.min(LOOKAHEAD_MAX, +v || 0));
-  applyEffects();
+  applyLookahead();
+});
+vizLookaheadMode.subscribe((v) => {
+  fx.lookaheadAuto = v !== "manual";
+  applyLookahead();
 });
 
 // Exposed for the settings UI: the fixed EQ centre frequencies, so the sliders

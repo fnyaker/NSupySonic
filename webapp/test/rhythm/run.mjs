@@ -95,6 +95,7 @@ function align(est, ref, tol) {
 const ids = String(arg("only", "hardstyle-150,techno-132,frenchcore-200")).split(",");
 const seconds = +arg("seconds", 20);
 const seed = !!arg("seed");
+const trim = +arg("trim", 0);
 
 const { createServer } = await import("vite");
 const server = await createServer({
@@ -132,7 +133,7 @@ try {
     await page.goto(`${url}/test/rhythm/bench.html`);
     await page.waitForFunction(() => window.bench?.ready, null, { timeout: 30000 });
     const file = "/" + songFile(def).slice(webapp.length + 1);
-    const rec = await page.evaluate((o) => window.bench.run(o), { file, seconds });
+    const rec = await page.evaluate((o) => window.bench.run(o), { file, seconds, trim });
     await page.close();
     const until = seconds - 0.5;
     const from = 5;
@@ -159,6 +160,12 @@ try {
     const beats = align(win(shift(rec.beats)), win(truth.beats), 0.07);
     const bpm = rec.bpm.length ? rec.bpm[rec.bpm.length - 1] : 0;
     const late = rec.late.slice().sort((a, b) => a - b);
+    const err = (rec.dlvErr || []).map((x) => x[1]).sort((a, b) => a - b);
+    // The last eight seconds alone: where an automatic look-ahead that had to
+    // move has landed.
+    const tEnd = rec.dlvErr?.length ? rec.dlvErr[rec.dlvErr.length - 1][0] : 0;
+    const tail = (rec.dlvErr || []).filter((x) => x[0] >= tEnd - 8).map((x) => x[1]).sort((a, b) => a - b);
+    const q = (xs, f) => xs[Math.min(xs.length - 1, Math.floor(xs.length * f))];
     const ok =
       rec.frames > seconds * 80 && kicks.r > 0.8 && beats.r > 0.8 && Math.abs(bpm - truth.bpm) < 1.5 && rollCover >= 0.8;
     if (!ok) failed++;
@@ -169,7 +176,12 @@ try {
         `  bpm ${bpm.toFixed(1)}/${truth.bpm}  kicks P ${pct(kicksAll.p)} R ${pct(kicks.r)} ±${ms(kicks.res50)} p95 ${ms(kicks.res95)}` +
         (buzz.length ? ` (every note ${pct(kicksAll.r)}; roll read on ${pct(rollCover)} of ${buzz.length} buzz notes)` : "") +
         `  beats P ${pct(beats.p)} R ${pct(beats.r)} ±${ms(beats.res50)}  late p50 ${ms(late[late.length >> 1])} p95 ${ms(late[Math.floor(late.length * 0.95)])}` +
-        `  readout ${rec.readout?.bpm} ${rec.readout?.style || ""}${rec.readout?.served ? ` (${rec.readout.served})` : ""}`
+        (err.length ? `  vs output clock p05 ${ms(q(err, 0.05))} p50 ${ms(q(err, 0.5))} p95 ${ms(q(err, 0.95))}` : "") +
+        (trim && tail.length ? ` (last 8 s: p50 ${ms(q(tail, 0.5))} p95 ${ms(q(tail, 0.95))})` : "") +
+        `  readout ${rec.readout?.bpm} ${rec.readout?.style || ""}${rec.readout?.served ? ` (${rec.readout.served})` : ""}` +
+        (rec.delivery?.measured
+          ? `  output ${rec.delivery.os} ms (reported ${rec.delivery.reported}) look-ahead ${rec.delivery.lead} ms${rec.delivery.auto ? " auto" : ""} on time ${pct(rec.delivery.onTime)}`
+          : "")
     );
     for (const l of logs.slice(0, 5)) console.log("     ", l);
   }

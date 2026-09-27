@@ -129,8 +129,37 @@ export const vizBeatDetect = persisted("viz.beat", true);
 // Show what the engine thinks it is listening to, in the player.
 export const vizShowStyle = persisted("viz.showStyle", true);
 // Milliseconds the analysis runs AHEAD of the speakers (see lib/audio/graph.js).
-// 0 = the audio path is untouched.
+// 0 = the audio path is untouched. Only read in "manual" mode: "auto" (the
+// default) lets the engine measure how much it needs on this device, from the
+// output latency the OS reports (engine.js#tuneLookahead). Somebody who had
+// set a value by hand before the automatic mode existed keeps it.
 export const vizLookahead = persisted("viz.lookahead", 0);
+export const vizLookaheadMode = persisted(
+  "viz.lookahead.mode",
+  (() => {
+    try {
+      return +JSON.parse(localStorage.getItem("viz.lookahead")) > 0 ? "manual" : "auto";
+    } catch {
+      return "auto";
+    }
+  })()
+);
+// Output latency that NO API reports, in ms, per device: a Bluetooth speaker
+// that does not tell the OS, a TV or an AV receiver doing its own processing
+// (lib/audio/latency.js). The animations, the lyric line and the listen party
+// all read it, so it is set once and every one of them agrees. It was the
+// party's own "Décalage" before, and that value is carried over.
+export const outputTrim = persisted(
+  "audio.outputTrim",
+  (() => {
+    try {
+      const v = parseFloat(localStorage.getItem("party.latency"));
+      return Number.isFinite(v) ? v : 0;
+    } catch {
+      return 0;
+    }
+  })()
+);
 // Frame-rate ceiling for the scenes. 0 = whatever the display does.
 export const vizFps = persisted("viz.fps", 60);
 // Let a scene paint the whole background of the full-screen player rather than
