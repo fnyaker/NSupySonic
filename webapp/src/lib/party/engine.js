@@ -31,6 +31,7 @@
 // injected, so the node test suite drives this whole file against a recording
 // AudioContext and checks where the sound actually lands.
 
+import { reportedLag } from "../audio/latency.js";
 import {
   KEEP_MS,
   WAIT_MAX_MS,
@@ -778,14 +779,29 @@ const median = (xs) => {
 const MAP_KEEP = 15;
 const MAP_READY = 3;
 const MAP_OUTLIER = 0.004; // s
-const MAP_RELEARN = 5;
+// A move is believed once two readings in a row agree on it. The readings
+// hold to ±0.1 ms, so two that land within a millisecond of each other and
+// four or more from the mapping are not noise — and every reading spent
+// doubting a real move is audio placed on the wrong mapping. Measured end to
+// end: the guest's context stepped by 20-30 ms mid-track, and waiting for five
+// readings plus the next tick left the next click 20-40 ms late.
+const MAP_AGREE = 0.001; // s
+
+const LAG_KEEP = 30;
 
 export function makeClockBridge(ctx, clockOffset, latencyMs, graphDelay = 0) {
   const ds = [];
+  const lags = [];
   let lastCtx = -1;
-  let rejected = 0;
+  let rejected = null; // the last reading refused, while it may be a move
+  // Readings needed before anything is placed: a few at the start (the first
+  // readings of a new context are garbage), two after a confirmed move — they
+  // agree to the millisecond, and with fewer than MAP_READY the re-place that
+  // move calls for would find no clock and do nothing at all.
+  let need = MAP_READY;
+  // True when this reading moved the mapping: the caller re-places at once.
   function sample() {
-    if (ctx.state !== "running") return;
+    if (ctx.state !== "running") return false;
     let d = null;
     const hasTs = typeof ctx.getOutputTimestamp === "function";
     try {
@@ -799,31 +815,55 @@ export function makeClockBridge(ctx, clockOffset, latencyMs, graphDelay = 0) {
     }
     if (d == null && !hasTs && ctx.currentTime > 0 && ctx.currentTime !== lastCtx) {
       lastCtx = ctx.currentTime;
-      d = ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0) - performance.now() / 1000;
+      // The context runs between outputLatency and outputLatency + baseLatency
+      // ahead of the listener (a render burst at a time): half a burst is the
+      // middle, measured (lib/audio/latency.js#reportedLag).
+      d = ctx.currentTime - reportedLag(ctx) - performance.now() / 1000;
     }
-    if (d == null) return;
-    if (ds.length >= MAP_READY && Math.abs(d - median(ds)) > MAP_OUTLIER) {
-      if (++rejected < MAP_RELEARN) return;
+    if (d == null) return false;
+    let moved = false;
+    // Checked against the mapping as soon as it is believed — right after a
+    // move that is two readings, and the next one must not get in unexamined.
+    if (ds.length >= need && Math.abs(d - median(ds)) > MAP_OUTLIER) {
+      if (rejected == null || Math.abs(d - rejected) > MAP_AGREE) {
+        rejected = d;
+        return false;
+      }
       ds.length = 0; // it really moved: learn it again
+      lags.length = 0;
+      ds.push(rejected); // ...from the two readings that showed it
+      need = 2;
+      moved = true;
     }
-    rejected = 0;
+    rejected = null;
     ds.push(d);
     if (ds.length > MAP_KEEP) ds.shift();
+    // How far this context runs ahead of the listener — the output latency the
+    // OS reports, for the listener to read. sample() runs on the guest's own
+    // timers, which the audio thread's rhythm has nothing to do with.
+    lags.push(ctx.currentTime - (performance.now() / 1000 + median(ds)));
+    if (lags.length > LAG_KEEP) lags.shift();
+    return moved;
   }
   return {
     sample,
     get ready() {
-      return ds.length >= MAP_READY;
+      return ds.length >= need;
     },
     // null until BOTH clocks are known: the scheduler places nothing before.
     serverNow() {
       const off = clockOffset();
-      return off == null || ds.length < MAP_READY ? null : performance.now() + off;
+      return off == null || ds.length < need ? null : performance.now() + off;
     },
     toCtx(serverMs) {
       const off = clockOffset();
       if (off == null || !ds.length) return ctx.currentTime;
       return median(ds) + (serverMs - off - latencyMs()) / 1000 - graphDelay;
+    },
+    // Seconds: how far the context runs ahead of the listener, the median of
+    // the recent readings. Null until there are enough of them.
+    outputLag() {
+      return lags.length >= MAP_READY * 3 ? Math.max(0, median(lags)) : null;
     },
   };
 }

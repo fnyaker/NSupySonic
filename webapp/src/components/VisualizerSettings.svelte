@@ -19,6 +19,8 @@
     vizBeatDetect,
     vizShowStyle,
     vizLookahead,
+    vizLookaheadMode,
+    outputTrim,
     vizFps,
     vizFullBleed,
     vizScopeOrientation,
@@ -39,8 +41,9 @@
   import { MODES, effectiveMode, needsWave } from "../lib/viz/modes.js";
   import { PALETTES } from "../lib/viz/palette.js";
   import { TIERS, autoTier } from "../lib/viz/quality.js";
-  import { LEVEL, subscribeFrames, readout } from "../lib/audio/engine.js";
-  import { LOOKAHEAD_MAX } from "../lib/audio/graph.js";
+  import { LEVEL, subscribeFrames, readout, delivery } from "../lib/audio/engine.js";
+  import { LOOKAHEAD_MAX, getContext } from "../lib/audio/graph.js";
+  import { reportedLag } from "../lib/audio/latency.js";
   import { openProjector } from "../lib/viz/host.js";
   import { FAMILY_LIST } from "../lib/audio/style.js";
   import Visualizer from "./Visualizer.svelte";
@@ -48,6 +51,7 @@
   import EcoToggle from "./EcoToggle.svelte";
   import WorldPicker from "./WorldPicker.svelte";
   import FlashWarning from "./FlashWarning.svelte";
+  import TrimControl from "./TrimControl.svelte";
 
   const FPS_CHOICES = [
     { v: 30, label: "30", hint: "Le plus économe" },
@@ -130,6 +134,16 @@
     if (!openProjector())
       toasts.push("Le navigateur a bloqué la nouvelle fenêtre", "error");
   }
+
+  // The output latency, as this device reports it: measured by the engine
+  // while the preview plays, the audio context's own figure otherwise, and
+  // nothing at all before anything has played (no context exists yet).
+  $: reportedMs = $delivery.measured
+    ? $delivery.os
+    : getContext()
+      ? Math.round(reportedLag(getContext()) * 1000)
+      : null;
+  $: autoLead = $vizLookaheadMode !== "manual";
 
   $: styleName =
     FAMILY_LIST.find((f) => f.id === $readout.style)?.label || $readout.styleLabel || "—";
@@ -418,26 +432,73 @@
     <div class="block-head">
       <span class="block-title">Compensation de latence</span>
       <span class="block-hint muted">
-        L'analyse écoute le son avant vos enceintes, du délai choisi. Les temps
-        prédits restent alignés quoi qu'il arrive ; une frappe imprévue demande
-        environ 45 ms d'écoute pour être sûre, donc à partir de 50 ms tout est
-        dessiné pile à l'heure.
+        Le système annonce combien de temps le son met à sortir de vos enceintes,
+        et chaque image attend son son. Une frappe demande environ 45 ms d'écoute
+        pour être sûre : si la sortie est plus courte, l'automatique retarde le son
+        de ce qui manque, trop lentement pour que ça s'entende.
       </span>
     </div>
-    <div class="slider-row">
-      <input
-        type="range"
-        min="0"
-        max={LOOKAHEAD_MAX}
-        step="10"
-        value={$vizLookahead}
-        disabled={!$vizBeatDetect}
-        on:input={(e) => vizLookahead.set(+e.target.value)}
-        style={`--p:${($vizLookahead / LOOKAHEAD_MAX) * 100}%`}
-        aria-label="Compensation de latence"
-      />
-      <span class="val">{$vizLookahead ? `${$vizLookahead} ms` : "aucune"}</span>
+    <div class="seg">
+      <button class="seg-btn" class:sel={autoLead} disabled={!$vizBeatDetect} on:click={() => vizLookaheadMode.set("auto")}>
+        Automatique
+      </button>
+      <button class="seg-btn" class:sel={!autoLead} disabled={!$vizBeatDetect} on:click={() => vizLookaheadMode.set("manual")}>
+        Manuelle
+      </button>
     </div>
+    {#if !autoLead}
+      <div class="slider-row mt">
+        <input
+          type="range"
+          min="0"
+          max={LOOKAHEAD_MAX}
+          step="10"
+          value={$vizLookahead}
+          disabled={!$vizBeatDetect}
+          on:input={(e) => vizLookahead.set(+e.target.value)}
+          style={`--p:${($vizLookahead / LOOKAHEAD_MAX) * 100}%`}
+          aria-label="Compensation de latence"
+        />
+        <span class="val">{$vizLookahead ? `${$vizLookahead} ms` : "aucune"}</span>
+      </div>
+    {/if}
+    <!-- What the device reports and what was done about it: the one way to
+         check the automatic mode instead of taking it on trust. -->
+    <div class="readout lat" class:live={$delivery.measured && previewLive}>
+      <div class="ro">
+        <span class="ro-k">Sortie</span>
+        <span class="ro-v">{reportedMs != null ? `${reportedMs} ms` : "—"}</span>
+        <span class="ro-s muted">annoncée par le système</span>
+      </div>
+      <div class="ro">
+        <span class="ro-k">Avance</span>
+        <span class="ro-v">{$delivery.measured ? ($delivery.lead ? `${$delivery.lead} ms` : "aucune") : "—"}</span>
+        <span class="ro-s muted">{autoLead ? "mesurée sur cet appareil" : "réglée à la main"}</span>
+      </div>
+      <div class="ro">
+        <span class="ro-k">À l'heure</span>
+        <span class="ro-v">{$delivery.measured ? `${Math.round($delivery.onTime * 100)} %` : "—"}</span>
+        <span class="ro-s muted">des images, avant leur son</span>
+      </div>
+    </div>
+    {#if !$delivery.measured}
+      <p class="block-hint muted mt">Les mesures s'affichent pendant la lecture.</p>
+    {/if}
+  </div>
+
+  <!-- Not greyed out with the analysis: the trim is also the lyric line's and
+       the listen party's. -->
+  <div class="block">
+    <div class="block-head">
+      <span class="block-title">Décalage de la sortie</span>
+      <span class="block-hint muted">
+        Pour ce que le système ne voit pas : une enceinte Bluetooth qui n'annonce
+        pas sa latence, une barre de son, un ampli. Les animations et les paroles
+        tombent avant le son ? Avancez. Après ? Retardez. Vaut pour cet appareil,
+        et pour la soirée d'écoute aussi.
+      </span>
+    </div>
+    <TrimControl value={$outputTrim} reported={reportedMs} on:change={(e) => outputTrim.set(e.detail)} />
   </div>
 
   <div class="block" class:off={!$vizBeatDetect}>
@@ -908,6 +969,24 @@
   }
   .readout.live {
     opacity: 1;
+  }
+  /* Three short readings that belong side by side, on a phone too: stacked,
+     they took a whole screen to say three numbers. */
+  .readout.lat {
+    margin-top: 12px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .ro-s {
+    font-size: 0.72rem;
+    line-height: 1.3;
+  }
+  .slider-row.mt,
+  .block-hint.mt {
+    margin-top: 10px;
+  }
+  .seg-btn:disabled {
+    cursor: default;
   }
   .ro {
     display: flex;

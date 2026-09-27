@@ -9,6 +9,7 @@
   import { cssUrl, duration as fmtDuration } from "../lib/format.js";
   import { joinParty, peekParty, rememberName, savedName } from "../lib/party/guest.js";
   import Icon from "../components/Icon.svelte";
+  import TrimControl from "../components/TrimControl.svelte";
 
   export let id;
 
@@ -120,9 +121,6 @@
       if (session) session.setLatency(latencyDraft);
     }, 350);
   }
-  function resetLatency() {
-    nudge(-latencyDraft);
-  }
 
   function onVolume(e) {
     if (session) session.setVolume(+e.target.value);
@@ -226,17 +224,11 @@
                 Cet appareil sonne en retard sur les autres (enceinte Bluetooth, barre de son) ? Avancez-le.
                 En avance ? Retardez-le. Réglez à l'oreille, pièce silencieuse, deux appareils côte à côte.
               </p>
-              <div class="steps">
-                <button on:click={() => nudge(-10)} aria-label="Retarder de 10 ms">−10</button>
-                <button on:click={() => nudge(-1)} aria-label="Retarder de 1 ms"><Icon name="minus" size={16} /></button>
-                <span class="val">{latencyDraft > 0 ? "+" : ""}{latencyDraft} ms</span>
-                <button on:click={() => nudge(1)} aria-label="Avancer de 1 ms"><Icon name="plus" size={16} /></button>
-                <button on:click={() => nudge(10)} aria-label="Avancer de 10 ms">+10</button>
-              </div>
-              <div class="presets">
-                <button on:click={resetLatency} disabled={!latencyDraft}>Remettre à zéro</button>
-                <button on:click={() => nudge(150 - latencyDraft)}>Bluetooth (~150 ms)</button>
-              </div>
+              <TrimControl
+                value={latencyDraft}
+                reported={$view ? $view.osLatency : null}
+                on:change={(e) => nudge(e.detail - latencyDraft)}
+              />
             </div>
           {/if}
         {/if}
@@ -622,49 +614,7 @@
     font-size: 0.82rem;
     line-height: 1.45;
   }
-  .steps {
-    display: grid;
-    grid-template-columns: 52px 44px 1fr 44px 52px;
-    align-items: center;
-    gap: 8px;
-  }
-  .steps button {
-    height: 44px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text);
-    font-weight: 700;
-    display: grid;
-    place-items: center;
-  }
-  .steps button:hover {
-    background: rgba(255, 255, 255, 0.14);
-  }
-  .val {
-    text-align: center;
-    font-weight: 800;
-    font-size: 1.05rem;
-    font-variant-numeric: tabular-nums;
-  }
-  .presets {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .presets button {
-    padding: 7px 12px;
-    border-radius: 999px;
-    font-size: 0.8rem;
-    color: var(--text-dim);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-  }
-  .presets button:hover:not(:disabled) {
-    color: var(--text);
-  }
-  .presets button:disabled {
-    opacity: 0.4;
-  }
-
+  
   .resume {
     position: fixed;
     inset: 0;

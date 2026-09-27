@@ -13,7 +13,8 @@
 //     (the first refusal decides, and is remembered);
 //   - the screen kept awake, because a phone that locks suspends Web Audio.
 
-import { writable } from "svelte/store";
+import { get, writable } from "svelte/store";
+import { outputTrim } from "../stores.js";
 import { startClock } from "./clock.js";
 import { PartyEngine, makeClockBridge } from "./engine.js";
 import { compressorDelay } from "./latency.js";
@@ -28,7 +29,6 @@ const MIN_PROBES = 4;
 const FETCH_TIMEOUT = 20_000;
 
 const FMT_KEY = "party.fmt";
-const LAT_KEY = "party.latency";
 const VOL_KEY = "party.volume";
 const NAME_KEY = "party.name";
 
@@ -75,7 +75,11 @@ export function joinParty(pid, name) {
     clock: null,
     offline: false,
     suspended: false,
-    latency: readNum(LAT_KEY, 0),
+    // This device's output trim (lib/audio/latency.js), the same number the
+    // animations and the lyric line use — it was the party's own setting.
+    latency: get(outputTrim),
+    // What the OS reports for this device's output, in ms, once measured.
+    osLatency: null,
     volume: readNum(VOL_KEY, 1),
   });
   const patch = (o) => view.update((v) => ({ ...v, ...o }));
@@ -99,7 +103,7 @@ export function joinParty(pid, name) {
   limiter.release.value = 0.06;
   limiter.connect(ctx.destination);
 
-  let latency = readNum(LAT_KEY, 0);
+  let latency = get(outputTrim);
   let clockEst = null;
   let probes = 0;
   let waiting = null; // the latest state, while the clocks are not known yet
@@ -182,19 +186,27 @@ export function joinParty(pid, name) {
       const S = bridge.serverNow();
       return { S, heard: engine.heardAt(S), sounding: engine.sounding(), status: engine.status, clock: clockEst, fmt, latency };
     };
-    // Learn the audio clock quickly at first (a reading every 50 ms for two
-    // seconds), then keep it fresh on the tick.
-    let quick = 40;
+    // Read the audio clock every 50 ms for as long as the party lasts, not only
+    // while it is first learnt: Chromium steps its output mapping by a whole
+    // render burst a few seconds after a context starts, and the bridge needs
+    // five readings to believe a move. Measured end to end, reading on the
+    // 200 ms tick left a guest ~20 ms off for the second that took; at 50 ms
+    // it is a quarter of one. One getOutputTimestamp call is all it costs.
     const learn = setInterval(() => {
-      bridge.sample();
+      if (stopped) {
+        clearInterval(learn);
+        return;
+      }
+      // A move is re-placed now rather than at the next tick, 200 ms away.
+      if (bridge.sample()) engine.checkMapping(ctx.currentTime);
       if (waiting && bridge.serverNow() != null) {
         const st = waiting;
         waiting = null;
         engine.apply(st);
       }
-      if (--quick <= 0 || stopped) clearInterval(learn);
     }, 50);
     let suspended = false;
+    let osShown = null;
     tickTimer = setInterval(() => {
       if (!engine) return;
       bridge.sample();
@@ -210,6 +222,11 @@ export function joinParty(pid, name) {
       if ((ctx.state !== "running") !== suspended) {
         suspended = !suspended;
         patch({ suspended });
+      }
+      const os = bridge.outputLag();
+      if (os != null && Math.round(os * 1000) !== osShown) {
+        osShown = Math.round(os * 1000);
+        patch({ osLatency: osShown });
       }
     }, TICK_MS);
     poll();
@@ -351,10 +368,11 @@ export function joinParty(pid, name) {
       patch({ volume: v });
     },
     // This device's own output delay (Bluetooth, a soundbar): positive plays
-    // earlier to make up for it.
+    // earlier to make up for it. Stored as the device's output trim, so the
+    // animations and the lyrics make the same correction.
     setLatency(ms) {
       latency = Math.max(-500, Math.min(1000, Math.round(ms)));
-      write(LAT_KEY, latency);
+      outputTrim.set(latency);
       if (engine) engine.realign();
       patch({ latency });
     },

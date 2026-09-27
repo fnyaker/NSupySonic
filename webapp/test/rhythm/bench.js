@@ -3,9 +3,10 @@
 // <audio> element playing a record from test/songs.mjs. Everything the
 // animations would receive is recorded, with the context time of its audio.
 
-import { registerSource, getContext } from "/src/lib/audio/graph.js";
-import { subscribeFrames, readout } from "/src/lib/audio/engine.js";
-import { player } from "/src/lib/stores.js";
+import { registerSource, getContext, lookaheadSeconds } from "/src/lib/audio/graph.js";
+import * as engine from "/src/lib/audio/engine.js";
+const { subscribeFrames, readout } = engine;
+import { player, outputTrim } from "/src/lib/stores.js";
 
 function wavBlob(pcm, sr) {
   const n = pcm.length;
@@ -31,7 +32,12 @@ function wavBlob(pcm, sr) {
 
 window.bench = {
   ready: true,
-  async run({ file, seconds = 20, level = 2, id = "900000001", sr = 48000 }) {
+  async run({ file, seconds = 20, level = 2, id = "900000001", sr = 48000, trim = 0 }) {
+    // A trim stands in for an output path of a different length: -60 is a
+    // device whose audio is heard 60 ms sooner than this one's, which is how
+    // the automatic look-ahead is exercised on a machine whose real latency is
+    // plenty.
+    outputTrim.set(trim);
     const raw = await (await fetch(file)).arrayBuffer();
     const pcm = new Float32Array(raw).subarray(0, Math.min(raw.byteLength / 4, Math.ceil((seconds + 2) * sr)));
     const audio = new Audio();
@@ -42,11 +48,30 @@ window.bench = {
     let playCtx = null;
     let lastT = 0;
     const gaps = [];
+    // The browser's own account of when a context time is heard: every
+    // distinct getOutputTimestamp reading, sampled on its own timer so the
+    // truth does not depend on the engine under test. `dlv` is each frame's
+    // [delivery time, its context time, the look-ahead then], scored against
+    // it once the run is over.
+    const stamps = [];
+    const dlv = [];
+    let lastStamp = -1;
+    const sampleTs = () => {
+      const ctx = getContext();
+      if (!ctx || ctx.state !== "running") return;
+      const ts = ctx.getOutputTimestamp();
+      if (ts.performanceTime > 0 && ts.contextTime !== lastStamp) {
+        lastStamp = ts.contextTime;
+        stamps.push([performance.now() / 1000, ts.contextTime - ts.performanceTime / 1000]);
+      }
+    };
+    const tsTimer = setInterval(sampleTs, 2);
     const unsub = subscribeFrames((f) => {
       rec.frames++;
       if (lastT) gaps.push(f.t - lastT);
       lastT = f.t;
       rec.late.push(f.lateBy);
+      dlv.push([performance.now() / 1000, f.ctxT, lookaheadSeconds()]);
       if (f.features?.kickHit) rec.kicks.push(f.ctxT);
       if (f.beat?.beat) rec.beats.push(f.ctxT + (f.lateBy || 0));
       if (f.beat?.downbeat) rec.downbeats.push(f.ctxT + (f.lateBy || 0));
@@ -63,8 +88,28 @@ window.bench = {
     await new Promise((r) => setTimeout(r, seconds * 1000));
     audio.pause();
     unsub();
+    clearInterval(tsTimer);
+    // Delivery error against the browser's clock: when the frame was handed
+    // out minus when its audio was heard (positive = late), the clock taken as
+    // it stood at that moment (the median of the readings within 150 ms of it:
+    // the mapping can step while a track plays). Only frames past the first two
+    // seconds, once the mapping has settled.
+    const med = (a) => a.slice().sort((x, y) => x - y)[a.length >> 1];
+    const t0 = dlv.length ? dlv[0][0] + 2 : 0;
+    rec.dlvErr = [];
+    let lo = 0;
+    for (const [t, c, la] of dlv) {
+      if (t < t0) continue;
+      while (lo < stamps.length && stamps[lo][0] < t - 0.15) lo++;
+      const near = [];
+      for (let i = lo; i < stamps.length && stamps[i][0] <= t + 0.15; i++) near.push(stamps[i][1]);
+      if (near.length) rec.dlvErr.push([t, t - (c + la + trim / 1000 - med(near))]);
+    }
     let ro;
     readout.subscribe((v) => (ro = v))();
+    let dl;
+    if (engine.delivery) engine.delivery.subscribe((v) => (dl = v))();
+    rec.delivery = dl;
     gaps.sort((a, b) => a - b);
     return {
       ...rec,

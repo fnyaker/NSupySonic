@@ -29,13 +29,24 @@ for f in aspectralstats ebur128 ametadata lowpass silencedetect aresample; do
     grep -qw "$f" <<<"$filters" || fail "ffmpeg lacks the $f filter"
 done
 encoders="$(inside ffmpeg -hide_banner -encoders)"
-# default.conf transcodes to Opus; FLAC for the party and exports; MP3 exports.
-for e in libopus flac libmp3lame; do
+# default.conf transcodes to Opus; FLAC for the party and exports; MP3 and AAC
+# for exports and the share sheet.
+for e in libopus flac libmp3lame aac; do
     grep -qw "$e" <<<"$encoders" || fail "ffmpeg lacks the $e encoder"
 done
-inside ffmpeg -v error -nostdin -f lavfi -i "sine=frequency=440:duration=1" \
-    -c:a libopus -b:a 64k -f ogg -y /dev/null \
-    || fail "ffmpeg cannot encode Opus"
+# Listing an encoder is not writing a file somebody can play back: every format
+# the app hands out, written with the app's own muxer options, then read again.
+inside sh -euc '
+    cd /tmp
+    make() { ffmpeg -v error -nostdin -f lavfi -i "sine=frequency=440:duration=1" "$@"; }
+    make -c:a libopus -b:a 64k -vbr on -f ogg -y t.opus
+    make -c:a flac -sample_fmt s16 -f flac -y t.flac
+    make -c:a libmp3lame -b:a 320k -f mp3 -y t.mp3
+    make -c:a aac -b:a 256k -movflags +frag_keyframe+empty_moov -f mp4 -y t.m4a
+    for f in t.opus t.flac t.mp3 t.m4a; do
+        ffmpeg -v error -nostdin -i "$f" -f null - || { echo "cannot read back $f" >&2; exit 1; }
+    done
+' || fail "ffmpeg cannot write and read back the formats the app serves"
 
 step "the Python side is complete, and the build tools are gone"
 docker run --rm -i --entrypoint python "$IMAGE" - <<'EOF' || fail "python checks"

@@ -52,6 +52,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict, deque
+from itertools import accumulate
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -64,7 +65,9 @@ logger = logging.getLogger(__name__)
 # skip it. Bump it whenever a stored verdict would come out differently today.
 #   2  the published tempo's octave is cross-checked against the file, and
 #      bpm_source records where the TEMPO came from rather than the style.
-ANALYSIS_VERSION = 2
+#   3  music with no attacks in it (a held note, a drone, a pad) measures no
+#      tempo instead of a confident phantom one — see _attack_rate.
+ANALYSIS_VERSION = 3
 
 # Never analyse more than this much of a file. Ten minutes is far more than any
 # verdict needs, and it is what stops a two-hour DJ set costing two hours of
@@ -361,11 +364,13 @@ _SR = 1000  # the decoded envelope's sample rate
 
 
 def _low_envelope(path):
-    """A 100 Hz onset function built from the low band, at C speed.
+    """``(odf, attacks_per_minute)`` for the low band, from one decode.
 
     ffmpeg low-passes and decimates to 1 kHz unsigned 8-bit; the per-frame peak
-    is then a ``max``/``min`` over a ten-byte slice, which is a C loop. No
-    Python-level sample processing happens at all.
+    is then a ``max``/``min`` over a ten-byte slice, which is a C loop, and its
+    positive steps are the 100 Hz onset function the tempo is read from. The
+    same bytes also say whether anything in the band ever STRIKES
+    (``_attack_rate``), which the onset function cannot: see there.
     """
     cmd = [
         # -v error, not -v 0: silencing ffmpeg entirely meant a failure here
@@ -398,7 +403,71 @@ def _low_envelope(path):
         d = env[i] - env[i - 1]
         if d > 0:
             odf[i] = float(d)
-    return odf
+    return odf, _attack_rate(raw)
+
+
+# What counts as something STRIKING in the low band: its power (smoothed over a
+# 60 ms triangle) rising by ATTACK_RISE_DB within 30 ms, no more than 40 dB
+# under the track's loudest moment, at most one per 100 ms.
+#
+# The rise is deliberately small, because the music this player is pointed at
+# is limitered flat: a hardstyle kick's distorted tail sits a few dB under its
+# own attack, so the low band barely steps when the next one lands. Measured on
+# kick trains at 150 BPM whose tail holds at a fraction of the attack: a 3 dB
+# rise finds them down to a tail of -6 dB and loses them from -4.2 dB, 1 dB
+# finds them down to -1.9 dB. Steady material stays at 0 either way: held tones
+# (40-220 Hz), a held three-note chord and a slow swell show no rise of 0.5 dB.
+ATTACK_RISE_DB = 1.0
+# Below this many a minute there is no beat to measure, only a phantom.
+# Measured: held tones, a chord and a whale song 0-1 a minute; the sparsest
+# eval record WITH a beat (drum & bass) 99.7; real music with drums above 100.
+# A pad of detuned saws is the one steady-looking sound that passes (84 a
+# minute): its voices really do cancel and come back, and what is left of it
+# is the old estimator's own confidence (0.23), not a phantom from a flat line.
+MIN_ATTACKS_PER_MINUTE = 40.0
+
+
+def _attack_rate(raw):
+    """How often the low band strikes, per minute, from the 1 kHz u8 stream.
+
+    The onset function above is the PEAK of each 10 ms block, and a steady note
+    whose period does not fit the block grid gives a peak that ripples with its
+    phase: positive steps, perfectly periodic, and an autocorrelation that
+    normalises by the window's own energy turns a ripple of any size into a
+    confident beat. Measured: 40 Hz -> 200 BPM at 0.48, 82 Hz -> 240 at 0.79, a
+    held three-note chord -> 231 at 0.50. Drum-less music was given a phantom
+    tempo, which the player then took as its anchor.
+
+    So this asks the question the peak cannot answer — does anything ever
+    ARRIVE? — on the POWER, smoothed below the band's lowest periods: squaring
+    has no harmonics to fold back under 20 Hz (rectifying does), and two 30 ms
+    boxcars take a note's own ripple 44 dB down and a chord's 27 Hz beating 27
+    dB. A held note then reads as flat, which is what it is.
+    """
+    sq = [(b - 128) * (b - 128) for b in raw]
+    w = 30
+    if len(sq) < 2 * w + 10:
+        return 0.0
+    acc = list(accumulate(sq, initial=0))
+    once = [(acc[i + w] - acc[i]) / w for i in range(len(sq) - w + 1)]
+    acc = list(accumulate(once, initial=0))
+    power = [(acc[i + w] - acc[i]) / w for i in range(0, len(once) - w + 1, _SR // ENV_HZ)]
+    top = max(power)
+    if top <= 0:
+        return 0.0
+    floor = top * 1e-5
+    db = [10 * math.log10(p + floor) for p in power]
+    live = 10 * math.log10(top) - 40.0
+    span = 3  # 30 ms at 100 Hz
+    count = 0
+    last = -(10**9)
+    for i in range(span, len(db)):
+        if db[i] < live or i - last < 10:
+            continue
+        if db[i] - min(db[i - span : i]) >= ATTACK_RISE_DB:
+            count += 1
+            last = i
+    return count / (len(db) / ENV_HZ / 60.0)
 
 
 MIN_BPM, MAX_BPM = 55, 300
@@ -518,8 +587,15 @@ def _grid_share(odf, period):
 
 
 def _measure_tempo(path):
-    """(bpm, confidence, grid_share) measured from the file itself."""
-    odf = _smooth(_low_envelope(path))
+    """(bpm, confidence, grid_share) measured from the file itself.
+
+    ``(None, 0.0, 0.0)`` when nothing in the low band strikes often enough to
+    carry a beat at all (``_attack_rate``): no tempo is better than a phantom.
+    """
+    odf, attacks = _low_envelope(path)
+    if attacks < MIN_ATTACKS_PER_MINUTE:
+        return None, 0.0, 0.0
+    odf = _smooth(odf)
     n = len(odf)
     win = 8 * ENV_HZ
     if n < win:

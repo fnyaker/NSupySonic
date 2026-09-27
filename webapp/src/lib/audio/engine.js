@@ -16,15 +16,17 @@
 // delivery and bookkeeping:
 //
 // 1. EACH FRAME IS DELIVERED WHEN ITS AUDIO IS HEARD. The worklet stamps every
-//    frame with the context time its audio passed the tap; the output
-//    timestamp (getOutputTimestamp, median of recent readings) says when that
-//    context time reaches the speakers, and the look-ahead delay — the tap is
-//    BEFORE it — is added on top. A frame that arrives early waits in a queue
-//    for its moment; one that arrives late (the analysis needs ~45 ms of audio
-//    past an event to be sure of it, more than a desktop's output latency) is
+//    frame with the context time its audio passed the tap; the output clock
+//    (lib/audio/latency.js: getOutputTimestamp, the latency the OS reports)
+//    says when that context time reaches the speakers, and the look-ahead
+//    delay — the tap is BEFORE it — and the listener's own trim are added on
+//    top. A frame that arrives early waits for its moment, released by a timer
+//    set for it; one that arrives late (the analysis needs ~45 ms of audio past
+//    an event to be sure of it, more than a short output path gives it) is
 //    delivered at once, and the beat grid is PROJECTED to the instant being
-//    heard, so predicted beats stay on time either way. With a look-ahead of
-//    50 ms or more every event lands exactly on time.
+//    heard, so predicted beats stay on time either way. The automatic
+//    look-ahead (tuneLookahead) measures how early frames arrive on THIS
+//    device and adds exactly the delay that puts every event on time.
 //
 // 2. ONE PASS, SHARED. The frame is decoded once and handed out by reference,
 //    so a second view on screen costs a function call.
@@ -53,11 +55,25 @@ import {
   readScope,
   resumeAudio,
   lookaheadSeconds,
+  lookaheadIsAuto,
+  lookaheadSettled,
+  lookaheadTarget,
+  setAutoLookahead,
   tapRhythm,
   untapRhythm,
   FFT_LO,
   FFT_HI,
 } from "./graph.js";
+import {
+  heardContextTime,
+  lookaheadStep,
+  noteContextLag,
+  outputClockReady,
+  outputLag,
+  reportedLag,
+  sampleOutputClock,
+  trimSeconds,
+} from "./latency.js";
 import { buildBandPlan, buildEnergyPlan, readBands, readEnergy, ENERGY_BANDS } from "./spectrum.js";
 import {
   familyAt,
@@ -517,7 +533,11 @@ function onRhythmMessage(r, m) {
     // of the quantum that produced it.
     const ctxT = m.end - (m.pushed - j * r.hop) / r.sampleRate;
     pending.push({ buf: m.buf, ctxT });
-    sampleClock();
+    sampleOutputClock(getContext());
+    if (outputClockReady()) {
+      const now = performance.now();
+      noteLead(ctxT - heardCtxNow(now), now);
+    }
     pump();
   } else if (m.t === "ready") {
     const layout = parseLayout(m.layout);
@@ -538,69 +558,118 @@ function onRhythmMessage(r, m) {
 
 // --- when is a frame heard? ---------------------------------------------------------
 //
-// getOutputTimestamp() says which context time is reaching the speakers at
-// which performance time, output latency included. A single reading is noisy
-// (the first ones after a start are ~140 ms off, lib/party measured it), so the
-// offset is the median of recent readings, outliers refused until they
-// persist.
-const offsets = [];
-let lastStampCtx = -1;
-let offsetMedian = null;
-let sinceMedian = 0;
+// The output clock lives in lib/audio/latency.js, shared with the lyric line and
+// the listen party. What it gives is the context time reaching the speakers;
+// the look-ahead delay and the listener's trim come on top of it.
 
-function sampleClock() {
-  const ctx = getContext();
-  if (!ctx || ctx.state !== "running") return;
-  let d = null;
-  try {
-    const ts = typeof ctx.getOutputTimestamp === "function" ? ctx.getOutputTimestamp() : null;
-    if (ts && ts.performanceTime > 0 && ts.contextTime > 0 && ts.contextTime !== lastStampCtx) {
-      lastStampCtx = ts.contextTime;
-      d = ts.contextTime - ts.performanceTime / 1000;
-    }
-  } catch {
-    /* not supported */
-  }
-  if (d == null) {
-    // No output timestamp: the context clock, less what the context says its
-    // own output latency is.
-    d = ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0) - performance.now() / 1000;
-  }
-  if (offsetMedian != null && Math.abs(d - offsetMedian) > 0.05 && offsets.length >= 9) {
-    // One wild reading is noise; a run of them means the mapping really moved.
-    if (++sinceMedian < 12) return;
-    offsets.length = 0;
-  }
-  sinceMedian = 0;
-  offsets.push(d);
-  if (offsets.length > 25) offsets.shift();
-  if (offsets.length % 3 === 0 || offsetMedian == null) {
-    const s = offsets.slice().sort((a, b) => a - b);
-    offsetMedian = s[s.length >> 1];
-  }
-}
+// Never hold a frame longer than this beyond the delays that are known: past
+// it the mapping is wrong (a context that just resumed, a timestamp not valid
+// yet), not the latency.
+const HOLD_SLACK = 0.8;
 
 // The analysis-side context time the listener is hearing right now.
 function heardCtxNow(nowMs) {
-  if (offsetMedian == null) return null;
-  return nowMs / 1000 + offsetMedian - lookaheadSeconds();
+  const t = heardContextTime(nowMs);
+  return t == null ? null : t - lookaheadSeconds() - trimSeconds();
+}
+
+// A frame that has to wait gets a timer for its own moment. Without one it
+// waited for the next worklet message or animation frame, and measured in
+// headless Chromium that made the frames' delivery p95 12.3 ms late against
+// the browser's own output clock — the gaps between those two wake-ups, not
+// the audio. The timer is re-armed only when the due time really moves.
+let pumpTimer = 0;
+let pumpDue = 0;
+function armPump(dueMs) {
+  if (pumpTimer && Math.abs(dueMs - pumpDue) < 0.5) return;
+  if (pumpTimer) clearTimeout(pumpTimer);
+  pumpDue = dueMs;
+  pumpTimer = setTimeout(onPumpTimer, Math.max(0, dueMs - performance.now()));
+}
+function onPumpTimer() {
+  pumpTimer = 0;
+  if (running && rh && rh.ready) pump();
 }
 
 // Release every frame whose audio has reached the listener. Driven by the
-// worklet's own messages (which a hidden tab does not throttle) and, while the
-// page is visible, by rAF — so a frame held for a long look-ahead is not up to
-// one message late.
+// worklet's own messages (which a hidden tab does not throttle), by rAF while
+// the page is visible, and by the timer above for the frame next due.
 function pump() {
   if (!pending.length) return;
   const nowMs = performance.now();
   const heard = heardCtxNow(nowMs);
+  const cap = HOLD_SLACK + lookaheadSeconds() + Math.max(0, trimSeconds());
   while (pending.length) {
     const q = pending[0];
-    // Never hold a frame more than 0.8 s: past that the mapping is wrong (a
-    // context that just resumed, a timestamp not valid yet), not the latency.
-    if (heard != null && q.ctxT > heard + 0.001 && q.ctxT - heard < 0.8) break;
+    if (heard != null && q.ctxT > heard + 0.001 && q.ctxT - heard < cap) {
+      armPump(nowMs + (q.ctxT - heard) * 1000);
+      break;
+    }
     pending.shift();
     deliver(q, nowMs, heard);
+  }
+}
+
+// --- the automatic look-ahead -----------------------------------------------------
+//
+// How early each frame reaches the page, against the instant its audio is heard
+// (negative: late). Every TUNE_MS, once the delay has settled, the 5th
+// percentile of the last few seconds goes through latency.js#lookaheadStep,
+// and graph.js moves the delay to what it says. A measurement taken while the
+// delay was moving is thrown away: it describes a delay that no longer exists.
+const LEAD_N = 512;
+const leads = new Float32Array(LEAD_N);
+let leadCount = 0;
+let leadPos = 0;
+let nextTune = 0;
+const TUNE_MS = 2000;
+const TUNE_MIN = 200; // frames, ~2 s
+
+// For the settings page: what the device reports and what the engine did
+// about it, written every TUNE_MS while frames flow. `os` is how far the
+// context runs ahead of the listener (output latency, as measured), `lead` the
+// look-ahead in force, `onTime` the share of recent frames that arrived before
+// their audio was heard.
+export const delivery = writable({ measured: false, os: 0, reported: 0, lead: 0, auto: true, onTime: 0, trim: 0 });
+
+function noteLead(lead, nowMs) {
+  leads[leadPos] = lead;
+  leadPos = (leadPos + 1) % LEAD_N;
+  if (leadCount < LEAD_N) leadCount++;
+  if (nowMs >= nextTune) tuneLookahead(nowMs);
+}
+
+function tuneLookahead(nowMs) {
+  nextTune = nowMs + TUNE_MS;
+  const ctx = getContext();
+  const auto = lookaheadIsAuto();
+  let early = 0;
+  for (let i = 0; i < leadCount; i++) if (leads[i] >= 0) early++;
+  const was = get(delivery);
+  delivery.set({
+    measured: true,
+    os: Math.round(outputLag(ctx) * 1000),
+    reported: Math.round(reportedLag(ctx) * 1000),
+    lead: Math.round(lookaheadTarget() * 1000),
+    auto,
+    // Kept from the last full window while the delay is moving.
+    onTime: leadCount >= TUNE_MIN ? early / leadCount : was.onTime,
+    trim: Math.round(trimSeconds() * 1000),
+  });
+  if (!lookaheadSettled()) {
+    leadCount = 0; // measured against a delay that is still moving
+    leadPos = 0;
+    return;
+  }
+  if (!auto || leadCount < TUNE_MIN) return;
+  const sorted = leads.slice(0, leadCount).sort();
+  const p05 = sorted[Math.floor(leadCount * 0.05)];
+  const cur = lookaheadTarget();
+  const next = lookaheadStep(cur, p05);
+  if (Math.abs(next - cur) >= 0.001) {
+    setAutoLookahead(next);
+    leadCount = 0;
+    leadPos = 0;
   }
 }
 
@@ -608,6 +677,9 @@ let rafId = 0;
 function rafPump() {
   rafId = 0;
   if (!running) return;
+  // An animation frame has nothing to do with the audio thread's rhythm, which
+  // is what a reading of the context's lag needs (latency.js#noteContextLag).
+  noteContextLag(getContext());
   if (rh && rh.ready) pump();
   else fallbackTick();
   if (typeof document === "undefined" || !document.hidden) rafId = requestAnimationFrame(rafPump);
@@ -1011,6 +1083,10 @@ function stop() {
   sleepRhythm(true);
   for (const q of pending) recycle(q.buf);
   pending.length = 0;
+  if (pumpTimer) clearTimeout(pumpTimer);
+  pumpTimer = 0;
+  leadCount = 0;
+  leadPos = 0;
   stopFallback();
   if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
   rafId = 0;

@@ -6,10 +6,11 @@ name: Tests
 # is the environment, so each job is a configuration someone really runs:
 #
 #   image    — the Python the Docker image ships (3.13) with everything the image
-#              has: ffmpeg and numpy. The tests that need them are REQUIRED here
-#              (NS_REQUIRE_FFMPEG), never skipped — a skip in CI is the suite
-#              quietly testing less than it claims, and it is how a failing
-#              numpy test and a trailing-silence bug both went unseen.
+#              has: its very ffmpeg binary, and numpy. The tests that need them
+#              are REQUIRED here (NS_REQUIRE_FFMPEG), never skipped — a skip in
+#              CI is the suite quietly testing less than it claims, and it is
+#              how a failing numpy test and a trailing-silence bug both went
+#              unseen.
 #   minimal  — the oldest Python setup.cfg accepts, on a bare install: no ffmpeg,
 #              no numpy. That is where "optional" has to stay optional.
 #
@@ -86,12 +87,20 @@ jobs:
             setup.cfg
             ci-requirements.txt
 
-      - name: Install ffmpeg
+      # The ffmpeg the image ships, not the one the runner's distribution
+      # packages: this job exists to test what the image runs, and the pinned
+      # FROM line in the Dockerfile is the one place its version is written.
+      - name: Install ffmpeg (the image's static build)
         if: matrix.full
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends ffmpeg
-          ffmpeg -hide_banner -version | head -n1
+          ref="$(sed -n 's/^FROM \(mwader\/static-ffmpeg:[^ ]*@sha256:[0-9a-f]\{64\}\) AS ffmpeg$/\1/p' Dockerfile)"
+          [ -n "$ref" ] || { echo "no pinned static ffmpeg in the Dockerfile" >&2; exit 1; }
+          id="$(docker create "$ref")"
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          docker cp "$id:/ffmpeg" "$RUNNER_TEMP/ffmpeg/ffmpeg"
+          docker rm "$id" > /dev/null
+          "$RUNNER_TEMP/ffmpeg/ffmpeg" -hide_banner -version | head -n1
+          echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: |
