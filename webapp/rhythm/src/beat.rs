@@ -43,8 +43,13 @@ pub const KIND_KICK: u8 = 0;
 pub const KIND_LOW: u8 = 1;
 pub const KIND_FULL: u8 = 2;
 pub const KIND_SNARE: u8 = 3;
+/// Evidence for the BAR only, never for the beat's phase: an attack in the
+/// mid band (a clap, a snare — including the ones hidden under a kick) and a
+/// kick-roll note. They carry no weight in the density or the fit.
+pub const KIND_MID: u8 = 4;
+pub const KIND_ROLL: u8 = 5;
 
-const EV_CAP: usize = 128;
+const EV_CAP: usize = 192;
 const BINS: usize = 96;
 /// How far back the evidence reaches, in beats (and at least in seconds).
 const MEMORY_BEATS: f64 = 8.0;
@@ -99,7 +104,53 @@ struct BeatFeat {
     low: f32,
     chord: f32,
     level: f32,
+    /// The mid band's attack on the beat, against the beats around it.
+    mid: f32,
+    /// A kick roll anywhere inside the beat.
+    roll: f32,
 }
+
+/// HOW A GENRE MARKS ITS BAR — the downbeat estimate's weights, per way of
+/// building a groove (style.js `GROOVES`). One set of weights for every genre
+/// was chance level on the eval (29% F-measure), because the cues are not
+/// the same cues:
+///
+///   a KICK ON EVERY BEAT (techno, house, trance, every hard family) says
+///     nothing about the bar — and the backbeat clap that does lands ON a
+///     kick, where the snare detector, which waits for a strike with no kick
+///     near it, never sees it. So the bar is read off the mid band's attack
+///     beat by beat: the clap beats stand out from the kick-only ones.
+///   HARD DANCE closes its bars and phrases with ROLLS — a triplet, a
+///     sixteenth run, a buzz, on the last beat — so the beat after a roll is a
+///     downbeat, and the roll's own beat is not.
+///   A BROKEN BEAT or a LIVE KIT puts the kick on one and the snare on two
+///     and four, where the snare detector does see it.
+#[derive(Clone, Copy)]
+pub struct DownModel {
+    pub chord: f32,
+    pub kick: f32,
+    pub low: f32,
+    pub nov: f32,
+    pub snare_down: f32,
+    pub snare_back: f32,
+    pub mid: f32,
+    pub roll: f32,
+}
+
+pub const DOWN_MODELS: [DownModel; 5] = [
+    // 0 unknown: what every genre used to get.
+    DownModel { chord: 1.4, kick: 0.35, low: 0.25, nov: 0.8, snare_down: 0.9, snare_back: 1.0, mid: 0.0, roll: 0.0 },
+    // 1 four on the floor.
+    DownModel { chord: 1.4, kick: 0.0, low: 0.1, nov: 0.8, snare_down: 0.9, snare_back: 1.0, mid: 1.0, roll: 0.8 },
+    // 2 hard dance. The mid band speaks less here: the lead's own note
+    // attacks land in it too (frenchcore's bar read 98% with the generic
+    // model, 87% with the clap cue at four-on-the-floor's weight).
+    DownModel { chord: 1.4, kick: 0.0, low: 0.1, nov: 0.8, snare_down: 0.9, snare_back: 1.0, mid: 0.3, roll: 1.5 },
+    // 3 broken beat.
+    DownModel { chord: 1.2, kick: 0.7, low: 0.3, nov: 0.6, snare_down: 1.2, snare_back: 1.2, mid: 0.4, roll: 0.0 },
+    // 4 a live kit.
+    DownModel { chord: 1.2, kick: 0.5, low: 0.25, nov: 0.6, snare_down: 1.1, snare_back: 1.1, mid: 0.4, roll: 0.0 },
+];
 
 pub struct Grid {
     hop_s: f64,
@@ -143,6 +194,8 @@ pub struct Grid {
     pending_chroma_change: f32,
     pending_level: f32,
     feats: [BeatFeat; 16],
+    model: DownModel,
+    mid_avg: f32,
     score4: [f32; 4],
     score3: [f32; 3],
     meter: u32,
@@ -200,6 +253,8 @@ impl Grid {
             pending_chroma_change: 0.0,
             pending_level: 0.0,
             feats: [BeatFeat::default(); 16],
+            model: DOWN_MODELS[0],
+            mid_avg: 0.0,
             score4: [0.0; 4],
             score3: [0.0; 3],
             meter: 4,
@@ -239,6 +294,7 @@ impl Grid {
         self.score3 = [0.0; 3];
         self.meter = 4;
         self.level_avg = 0.0;
+        self.mid_avg = 0.0;
         self.phrase_start = 0;
         self.confidence = 0.0;
         self.offbeat = 0.0;
@@ -262,8 +318,15 @@ impl Grid {
             KIND_KICK => 1.0,
             KIND_LOW => 0.45,
             KIND_SNARE => 0.4,
+            KIND_MID | KIND_ROLL => 0.0,
             _ => 0.22,
         }
+    }
+
+    /// The downbeat model (DOWN_MODELS) for the way this genre builds its
+    /// groove. The evidence already gathered stays: only what it weighs moves.
+    pub fn set_model(&mut self, k: usize) {
+        self.model = DOWN_MODELS[k.fmin(DOWN_MODELS.len() - 1)];
     }
 
     /// The phase density of the recent evidence on the current grid.
@@ -310,6 +373,9 @@ impl Grid {
             let e = self.ev[(self.ev_head + EV_CAP - 1 - i) % EV_CAP];
             let age = now - e.t;
             if age > mem || age < -0.05 {
+                continue;
+            }
+            if Self::kind_weight(e.kind) <= 0.0 {
                 continue;
             }
             let x = (e.t - self.t0) / self.p;
@@ -610,6 +676,13 @@ impl Grid {
         for i in 0..self.ev_len {
             let e = self.ev[(self.ev_head + EV_CAP - 1 - i) % EV_CAP];
             let d = (e.t - tb) / self.p;
+            // A roll counts anywhere inside the beat; everything else only on it.
+            if e.kind == KIND_ROLL {
+                if d > -0.05 && d < 0.95 {
+                    f.roll = f.roll.fmax(e.w);
+                }
+                continue;
+            }
             if d.abs() > 0.12 {
                 continue;
             }
@@ -617,16 +690,26 @@ impl Grid {
                 KIND_KICK => f.kick = f.kick.fmax(e.w),
                 KIND_SNARE => f.snare = f.snare.fmax(e.w),
                 KIND_LOW => f.low = f.low.fmax(e.w),
+                KIND_MID => f.mid = f.mid.fmax(e.w),
                 _ => {}
             }
         }
+        let prev_roll = self.feats[((b - 1).rem_euclid(16)) as usize].roll;
         self.feats[(b.rem_euclid(16)) as usize] = f;
         // Energy novelty: this beat against the running level.
         let nov = (f.level - self.level_avg).fmax(0.0) / (self.level_avg + 0.05);
         self.level_avg += (f.level - self.level_avg) * 0.15;
-        // How much this beat looks like the START of a bar, and like beat 2/4.
-        let down = f.chord * 1.4 + f.kick * 0.35 + f.low * 0.25 + nov.fmin(2.0) * 0.8 - f.snare * 0.9;
-        let back = f.snare * 1.0 - f.chord * 0.3;
+        // The mid band's attack against the beats around it: a kick puts some
+        // on every beat, a clap on top of it puts more on two of them.
+        let mid = f.mid - self.mid_avg;
+        self.mid_avg += (f.mid - self.mid_avg) * 0.1;
+        // How much this beat looks like the START of a bar, and like beat 2/4,
+        // by this genre's own cues (DownModel).
+        let m = self.model;
+        let down = f.chord * m.chord + f.kick * m.kick + f.low * m.low + nov.fmin(2.0) * m.nov - f.snare * m.snare_down
+            - mid * m.mid
+            + (prev_roll - f.roll * 0.5) * m.roll;
+        let back = f.snare * m.snare_back + mid * m.mid - f.chord * 0.3;
         for i in 0..4 {
             self.score4[i] *= 0.965;
         }

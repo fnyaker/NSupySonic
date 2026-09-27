@@ -79,6 +79,7 @@ import {
   familyAt,
   familyLook,
   familyTable,
+  grooveOf,
   tempoRangeFor,
   ARCHETYPES,
   KICK_TYPES,
@@ -412,6 +413,10 @@ function adoptVerdict(id, late = false) {
   const useRange = range && fits && (servedTrusted(v) || (v.styleConfidence ?? 0) >= HEURISTIC_RANGE_CONF);
   if (useRange) send({ t: "range", lo: range[0], hi: range[1] });
   send({ t: "liveRange", on: !useRange });
+  // ...and how its bar is marked (beat.rs DOWN_MODELS), on the same terms: a
+  // genre believed enough to set the range is believed about its groove; any
+  // other leaves the choice to the live reading.
+  send({ t: "groove", g: useRange ? grooveOf(v.style || v.styleLabel || "") : 0 });
   // ...and the figure itself, WHETHER OR NOT the grid has already locked: the
   // verdict comes over the network, behind the audio in the request ladder,
   // and a late seed moves the grid's LEVEL while keeping its phase, so it

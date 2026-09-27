@@ -5,7 +5,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Rhythm } from "../../src/lib/audio/rhythm-core.js";
-import { familyTable, tempoRangeFor } from "../../src/lib/audio/style.js";
+import { familyTable, grooveOf, tempoRangeFor } from "../../src/lib/audio/style.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // A fresh cargo build wins over the committed binary, so the eval always
@@ -44,6 +44,7 @@ export default {
         const range = genre ? tempoRangeFor(genre) : null;
         if (range) r.setRange(range[0], range[1]);
         r.setLiveRange(!genre);
+        if (genre) r.setGroove(grooveOf(genre));
         if (seed) r.seed(seed, genre ? 0.9 : 0.7);
       }
       const n = r.push(pcm.subarray(i, Math.min(pcm.length, i + chunk)));

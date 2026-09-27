@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Rhythm } from "../src/lib/audio/rhythm-core.js";
-import { familyAt, familyTable, tempoRangeFor, ARCHETYPES } from "../src/lib/audio/style.js";
+import { familyAt, familyTable, grooveOf, tempoRangeFor, ARCHETYPES } from "../src/lib/audio/style.js";
 import { renderTrack, KICKS, PATTERNS } from "./synth.mjs";
 import { SONG_BY_ID } from "./songs.mjs";
 import { loadSong, score } from "./eval/rhythm-eval.mjs";
@@ -781,6 +781,39 @@ test("on arranged hard-dance records, the beats, the tempo and the drops are rig
     assert.equal(found, of, `${id}: drops ${s.drops}`);
     assert.ok(s.falseDrops <= 1, `${id}: ${s.falseDrops} false drops`);
   }
+});
+
+test("a genre's bar is read its own way: hard dance closes its bars on a roll", () => {
+  // One set of downbeat cues for every genre read the bar at chance (29% on
+  // the eval), because the cues differ: a kick on every beat says nothing
+  // about the bar, hard dance closes its bars and phrases on a ROLL, a
+  // four-on-the-floor clap hides under the kick (beat.rs DOWN_MODELS, chosen
+  // by the genre's groove, style.js GROOVES). Measured on the uptempo record
+  // with its genre known: downbeat F-measure 0.59 with the generic cues,
+  // 0.99 reading the roll's next beat as the bar's first. The whole eval:
+  // 25% to 30% with the genre known, 31% to 33% cold.
+  const { pcm, truth } = loadSong(SONG_BY_ID.get("uptempo-220"));
+  const rec = { beats: [], downbeats: [], kicks: [], mains: [], drops: [], bpm: [], breakdown: [], build: [], dt: 0 };
+  const r = analyser({ genre: "uptempo" });
+  r.setGroove(grooveOf("uptempo"));
+  rec.dt = r.hop / SR;
+  drive(
+    r,
+    pcm,
+    (t, get) => {
+      if (get("beat")) {
+        rec.beats.push(t);
+        if (get("downbeat")) rec.downbeats.push(t);
+      }
+      if (get("locked")) rec.bpm.push([t, get("bpm")]);
+      rec.breakdown.push(get("breakdown"));
+      rec.build.push(get("build"));
+    },
+    { quantum: 4096 }
+  );
+  const s = score(rec, truth);
+  assert.ok(s.down > 0.9, `uptempo's downbeats F ${s.down.toFixed(2)}`);
+  assert.ok(s.F70 > 0.97, `uptempo's beats F70 ${s.F70.toFixed(2)}`);
 });
 
 test("with nothing served, the drums' own pulse settles the octave an offbeat bass would double", () => {

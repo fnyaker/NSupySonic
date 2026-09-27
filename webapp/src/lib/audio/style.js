@@ -1139,8 +1139,31 @@ export function ruleWeight(rule, s) {
 }
 
 /**
+ * HOW EACH GENRE BUILDS ITS GROOVE, which is how its bar has to be read
+ * (rhythm/src/beat.rs `DOWN_MODELS`): 1 a kick on every beat with the backbeat
+ * clap hidden under it, 2 hard dance (the same, and rolls closing the bars),
+ * 3 a broken beat, 4 a live kit; 0 unknown, the generic reading.
+ */
+export const GROOVES = { unknown: 0, four: 1, hard: 2, broken: 3, live: 4 };
+const GROOVE_OF = {
+  four: ["house", "techno", "trance", "dance", "disco", "psytrance", "afrohouse", "synthwave", "germanparty"],
+  broken: ["dnb", "dubstep", "breakbeat", "garage", "trap", "hiphop", "rap", "phonk", "amapiano", "reggaeton", "dancehall"],
+  live: ["rock", "metal", "punk", "indie", "hardrock", "brutal", "pop", "vocalPop", "funk", "soul", "blues", "country", "rnb", "reggae", "jazz"],
+};
+const GROOVE_BY_ID = new Map();
+for (const [g, ids] of Object.entries(GROOVE_OF)) for (const id of ids) GROOVE_BY_ID.set(id, GROOVES[g]);
+
+/** The groove class of a family id, or of a served genre NAME (0 unknown). */
+export function grooveOf(name) {
+  const id = FAMILY_BY_ID.has(name) ? name : FAMILY_LIST.find((f) => f.label === name)?.id || name;
+  if (GROOVE_BY_ID.has(id)) return GROOVE_BY_ID.get(id);
+  const fam = FAMILY_BY_ID.get(id);
+  return fam?.a === "hard" ? GROOVES.hard : GROOVES.unknown;
+}
+
+/**
  * The whole vocabulary, flattened for the analyser (style.rs#load_families):
- * [count, then per family: archetype, flag (1 tempo-free, 2 the fallback), look x7, rangeLo, rangeHi,
+ * [count, then per family: archetype, flag (1 tempo-free, 2 the fallback), look x7, rangeLo, rangeHi, groove,
  *  nTerms, then per term: op, a, b, p1, p2, p3].
  */
 export function familyTable() {
@@ -1150,7 +1173,7 @@ export function familyTable() {
     const look = FAMILY_LOOK.get(f.id);
     for (const k of LOOK_KEYS) out.push(look[k]);
     const range = TEMPO_BANDS[f.id] || [0, 0];
-    out.push(range[0], range[1], f.rule.length);
+    out.push(range[0], range[1], grooveOf(f.id), f.rule.length);
     for (const t of f.rule) {
       const op = OPS[t[0]];
       if (op == null) throw new Error(`unknown rule op ${t[0]} in ${f.id}`);

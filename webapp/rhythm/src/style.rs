@@ -96,6 +96,8 @@ struct Family {
     fallback: bool,
     look: [f32; LOOK_N],
     range: (f32, f32),
+    /// How it builds its groove: beat.rs DOWN_MODELS.
+    groove: u8,
     terms: Vec<Term>,
 }
 
@@ -363,8 +365,8 @@ impl Style {
     }
 
     /// The family table, flattened by style.js#familyTable:
-    ///   [count, then per family: arch, tempoFree, look x7, rangeLo, rangeHi,
-    ///    nTerms, then per term: op, a, b, p1, p2, p3]
+    ///   [count, then per family: arch, flag, look x7, rangeLo, rangeHi,
+    ///    groove, nTerms, then per term: op, a, b, p1, p2, p3]
     pub fn load_families(&mut self, t: &[f32]) -> bool {
         let mut fams = Vec::new();
         let mut i = 0;
@@ -388,6 +390,7 @@ impl Style {
             }
             let lo = next(&mut i).unwrap_or(0.0);
             let hi = next(&mut i).unwrap_or(0.0);
+            let groove = next(&mut i).unwrap_or(0.0).clamp(0.0, 15.0) as u8;
             let n = next(&mut i).unwrap_or(0.0) as usize;
             if n > 32 {
                 return false;
@@ -405,7 +408,7 @@ impl Style {
             if i > t.len() {
                 return false;
             }
-            fams.push(Family { arch: arch.fmin(ARCH_N - 1), tempo_free, fallback, look, range: (lo, hi), terms });
+            fams.push(Family { arch: arch.fmin(ARCH_N - 1), tempo_free, fallback, look, range: (lo, hi), groove, terms });
         }
         self.weights = vec![0.0; fams.len()];
         self.raw = vec![0.0; fams.len()];
@@ -425,6 +428,11 @@ impl Style {
         // The look and the archetypes are NOT reset: a new track eases the
         // picture from where the last one left it, rather than snapping it to
         // neutral for the length of a dissolve.
+    }
+
+    /// How family `id` builds its groove (beat.rs DOWN_MODELS), 0 unknown.
+    pub fn groove_of(&self, id: i32) -> u8 {
+        self.families.get(id as usize).map_or(0, |f| f.groove)
     }
 
     pub fn range_of(&self, id: i32) -> Option<(f32, f32)> {

@@ -1263,6 +1263,24 @@ could not even measure it). `test/songs.mjs` has both as records (`krach-205`, a
 tail plays the bassline; `pieep-170`), and the old "krach-210" — which was dark uptempo — is
 `uptempo-dark-210`.
 
+**EACH GENRE'S BAR IS READ ITS OWN WAY** (`beat.rs` `DOWN_MODELS`, chosen by the genre's groove,
+`style.js` `GROOVES` / `grooveOf`). Where the bar starts drives every bar- and phrase-level motion,
+and one set of cues for every genre read it at chance — 29% F-measure on the eval — because the cues
+are not the same cues. A kick on every beat (techno, house, every hard family) says nothing about
+the bar; the backbeat clap that does lands ON a kick, where the snare detector (which waits for a
+strike with no kick near it) never sees it, so four-on-the-floor reads the mid band's attack beat by
+beat against its neighbours (`KIND_MID`, bar evidence only — it never weighs on the beat's phase).
+Hard dance closes its bars and phrases on a ROLL, so the beat after one is a downbeat
+(`KIND_ROLL`); a broken beat and a live kit keep the kick on one and the snare on two and four. The
+model is the served genre's when that genre is believed (the same test as its tempo range), else the
+live one's once it sets the range, else the generic one. Measured: uptempo 59% to 99%, Krach 24%
+to 69% cold, dark uptempo 8% to 37%, techno 31% to 43% (seeded 45% to 57%), house with its genre
+known 6% to 38%; the whole eval 31% to 33% cold, 29% to 31% seeded, 25% to 30% with the genre known.
+The clap cue speaks less in hard dance, where the lead's note attacks land in the mid band too
+(frenchcore 98% generic, 87% at four-on-the-floor's weight, 93% at its own). What it cannot do yet:
+an offbeat bass (pieep's tekk bass, techno's rumble) moves the harmonic change half a beat after the
+downbeat, and pieep's bar still reads 5-11%.
+
 **THE PIEP** (`features.rs#piep`, `style.rs` `KickShape::piep`, `kickPiep` in the frame): a pitched
 squeak layered on the kick's attack. Four things together, each of which something else in a mix has
 on its own: a line in 1.4-5 kHz standing above everything in the half octave beneath it (a distorted

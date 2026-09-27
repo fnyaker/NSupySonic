@@ -46,7 +46,7 @@ pub mod viz_motion;
 pub mod viz_scene;
 pub mod viz_scope;
 
-use beat::{Grid, KIND_FULL, KIND_KICK, KIND_LOW, KIND_SNARE};
+use beat::{Grid, KIND_FULL, KIND_KICK, KIND_LOW, KIND_MID, KIND_ROLL, KIND_SNARE};
 use features::{FeatureExtractor, Features};
 use fft::RealFft;
 use genre::Genre;
@@ -280,6 +280,14 @@ pub struct Analyzer {
     low_mean: f32,
     low_var: f32,
     low_last: f64,
+    // ...and the mid band's, for the bar (beat.rs KIND_MID).
+    mid_mean: f32,
+    mid_var: f32,
+    mid_last: f64,
+    // The downbeat model in use (beat.rs DOWN_MODELS) and whether it was
+    // SERVED, which a live reading never overrides.
+    groove: u8,
+    groove_served: bool,
     level: u32,
     live_range: bool,
     range_from: i32,
@@ -355,6 +363,11 @@ impl Analyzer {
             low_mean: 0.0,
             low_var: 0.0,
             low_last: -1.0,
+            mid_mean: 0.0,
+            mid_var: 0.0,
+            mid_last: -1.0,
+            groove: 0,
+            groove_served: false,
             level: LEVEL_SMART,
             live_range: true,
             range_from: -1,
@@ -405,7 +418,15 @@ impl Analyzer {
         self.low_mean = 0.0;
         self.low_var = 0.0;
         self.low_last = -1.0;
+        self.mid_mean = 0.0;
+        self.mid_var = 0.0;
+        self.mid_last = -1.0;
         self.range_from = -1;
+        // A new track's genre is not known yet: back to the generic model
+        // (reset() rebuilt the grid with it), unless one is served again.
+        self.groove = 0;
+        self.groove_served = false;
+        self.grid.set_model(0);
         self.in_build = false;
         self.groove_s = 0.0;
         self.tempo.hold = false;
@@ -573,6 +594,20 @@ impl Analyzer {
                 let v = ((odf_low - thr) / (sd * 3.0 + 1e-9)).clamp(0.05, 1.0);
                 self.grid.add_event(t - kick::DETECT_LATENCY, v, KIND_LOW);
             }
+            // The mid band's attacks, for the BAR only (beat.rs KIND_MID): a
+            // backbeat clap lands ON a four-on-the-floor kick, where the snare
+            // detector never sees it, but it still adds a mid-band attack of
+            // its own.
+            let d = f.mid_odf - self.mid_mean;
+            self.mid_mean += d * 0.02;
+            self.mid_var += (d * d - self.mid_var) * 0.02;
+            let sd = self.mid_var.fmax(1e-12).sqrt();
+            let thr = self.mid_mean + sd * 1.2;
+            if f.mid_odf > thr && t - self.mid_last > 0.06 {
+                self.mid_last = t;
+                let v = ((f.mid_odf - thr) / (sd * 3.0 + 1e-9)).clamp(0.05, 1.0);
+                self.grid.add_event(t - kick::DETECT_LATENCY, v, KIND_MID);
+            }
             let tempo = &self.tempo.out;
             self.grid.update(t, self.hop_s, tempo, &f.chroma, f.level);
             if self.grid.initialised() {
@@ -688,6 +723,12 @@ impl Analyzer {
         if anchor && rhythm {
             if let Some((kt, _)) = kick {
                 self.grid.anchor_phrase(kt);
+            }
+        }
+        // A roll note, for the bar: hard dance closes its bars on a roll.
+        if p.roll_kick && rhythm {
+            if let Some((kt, _)) = kick {
+                self.grid.add_event(kt, 1.0, KIND_ROLL);
             }
         }
 
@@ -813,6 +854,10 @@ impl Analyzer {
                     if b.bpm >= lo * 0.97 && b.bpm <= hi * 1.03 {
                         self.range_from = self.style.dominant;
                         self.tempo.set_range(lo, hi);
+                        // The genre is believed: read its bar its own way.
+                        if !self.groove_served {
+                            self.set_groove_now(self.style.groove_of(self.style.dominant));
+                        }
                     }
                 }
             }
@@ -956,6 +1001,20 @@ impl Analyzer {
         self.tempo.set_range(lo, hi);
     }
 
+    fn set_groove_now(&mut self, g: u8) {
+        if g != self.groove {
+            self.groove = g;
+            self.grid.set_model(g as usize);
+        }
+    }
+
+    /// A SERVED genre's way of building its groove (beat.rs DOWN_MODELS);
+    /// 0 hands the choice back to the live reading.
+    pub fn set_groove(&mut self, g: u32) {
+        self.groove_served = g != 0;
+        self.set_groove_now(g.min(15) as u8);
+    }
+
     pub fn set_live_range(&mut self, on: bool) {
         self.live_range = on;
         if on {
@@ -1071,6 +1130,13 @@ pub extern "C" fn rhythm_seed(bpm: f32, conf: f32) -> u32 {
 pub extern "C" fn rhythm_set_range(lo: f32, hi: f32) {
     if let Some(a) = g().a.as_mut() {
         a.set_range(lo, hi);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rhythm_set_groove(gr: u32) {
+    if let Some(a) = g().a.as_mut() {
+        a.set_groove(gr);
     }
 }
 
