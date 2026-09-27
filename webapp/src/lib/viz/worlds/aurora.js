@@ -37,16 +37,19 @@ export default {
   uses: ["noise"],
   feedback: true,
   params: { slices: 22, height: 1, rays: 1, water: 1, stars: 1, spread: 1 },
-  look: { exposure: 1.1, bloom: 1.2, threshold: 0.6, saturation: 1.2 },
+  look: { exposure: 1.1, bloom: 0.85, threshold: 0.72, saturation: 1.18, ca: 0 },
 
   // The only thing the driver does: turn the frame's dt into the temporal
-  // average's blend, so the denoise is the same 60 ms at any frame rate. In
+  // average's blend, so the denoise is the same 160 ms at any frame rate. In
   // seconds on purpose — how long an average takes to hide noise is about the
-  // eye, not the music.
+  // eye, not the music. It was 60 ms: two frames at 30 fps, three at 60, which
+  // left the jittered slices showing as a speckle over the whole sky — the
+  // grainy, dated look — while the curtains, which move on the bar clock,
+  // gain nothing visible from being any quicker than this.
   create({ state }) {
     return {
       step(dt) {
-        state[0] = 1 - Math.exp(-Math.min(dt, 0.25) / 0.06);
+        state[0] = 1 - Math.exp(-Math.min(dt, 0.25) / 0.16);
       },
     };
   },

@@ -2,19 +2,24 @@
 //
 // Hardtekk, tekk, jumpstyle, hard bass, bouncy: the genres that do not hammer
 // so much as BOUNCE, where the kick is round and elastic and the whole track
-// leaps from one beat to the next. So the hero is a single glossy orb that
-// jumps on every beat and lands on every kick: an arc through the air in the
-// beat's own time (it is always exactly on the floor when the kick lands,
-// because its height is a function of the beat phase, not a simulation that
-// could drift), a squash on impact that springs back through an overshoot, a
-// stretch on the way up.
+// leaps from one beat to the next. So the hero is a single orb that jumps on
+// every beat and lands on every kick: an arc through the air in the beat's own
+// time (it is always exactly on the floor when the kick lands, because its
+// height is a function of the beat phase, not a simulation that could drift),
+// a squash on impact that springs back through an overshoot, a stretch on the
+// way up.
 //
-// It is lit like an object, not drawn like an icon: a sphere normal from its
-// outline, a key light and a soft rim, the room reflected in it (the palette as
-// a studio of neon strips), a specular window, a hot core that pulses with the
-// bass. Around it, a crown of spikes — the spectrum, one spike per band — and
-// under it a black mirror floor with its reflection and a contact shadow that
-// tightens as it lands, plus a shock ring on every landing.
+// It is lit the way a product is shot today, not the way an icon was drawn in
+// 2006. The old orb was chrome: a studio of neon strips reflected in it, a
+// pin-point specular, a black mirror floor under it and a sunburst of hairline
+// spikes around it — every one of them the vocabulary of a glossy desktop
+// theme. Now it is SOFT 3D: a matte sphere under one big soft key light,
+// coloured through the palette from its shadow to its lit side, a broad
+// highlight and a thin rim from behind, sitting on a seamless studio cove with
+// a soft contact shadow that tightens as it lands and its own colour bleeding
+// onto the floor. The spectrum around it is a ring of rounded capsules — the
+// same vocabulary as the bars — and every landing sends a soft wave across
+// the floor.
 //
 // On a wide frame two smaller orbs bounce on the OFF-beats either side — the
 // alternation these genres are made of — and with the artwork in front, the
@@ -22,8 +27,8 @@
 //
 // Parameters:
 //   height  jump height        squash  how hard it squashes
-//   spikes  spectrum crown     twins   the off-beat pair (0 or 1)
-//   gloss   reflection strength
+//   spikes  the spectrum ring  twins   the off-beat pair (0 or 1)
+//   gloss   highlight and rim strength
 
 import { onStamp } from "./kit.js";
 
@@ -31,13 +36,12 @@ export default {
   id: "bounce",
   uses: ["noise"],
   params: { height: 1, squash: 1, spikes: 1, twins: 1, gloss: 1 },
-  look: { exposure: 1.0, bloom: 1.1, threshold: 0.8, saturation: 1.18 },
+  look: { exposure: 1.0, bloom: 0.7, threshold: 0.85, saturation: 1.12, ca: 0 },
 
   fragment: `
 // With the artwork in front, the stage is the band under it: the floor low in
-// that band (room for the reflection below it) and the orb sized to jump
-// inside it. The floor used to sit right under the cover, and the orb spent
-// every jump behind it.
+// that band and the orb sized to jump inside it. The floor used to sit right
+// under the cover, and the orb spent every jump behind it.
 float floorLine() {
   return uHole.z > 0.0 ? clamp(-1.0 + (uHoleR.z + 1.0) * 0.3, -0.95, -0.35) : -0.55;
 }
@@ -46,25 +50,16 @@ float orbSize(float k) {
   float r = clamp(room * (uHole.z > 0.0 ? 0.2 : 0.28), 0.07, 0.3);
   return r * (k > 0.5 ? 0.55 : 1.0);
 }
-
-// The room the orb reflects: a dark studio with a few neon strips, in the
-// palette's colours. \`d\` is a reflected direction.
-vec3 studio(vec3 d) {
-  float y = d.y;
-  vec3 c = uPalBg.rgb * 0.4 + mix(uPalLow.rgb, uPalMid.rgb, 0.5 + 0.5 * d.x) * 0.08 * (0.6 + 0.4 * y);
-  // A softbox overhead and two strips either side.
-  c += vec3(1.0) * smoothstep(0.75, 0.95, y) * 1.3;
-  c += uPalHigh.rgb * 2.2 * smoothstep(0.08, 0.0, abs(d.x - 0.7)) * smoothstep(-0.2, 0.3, y);
-  c += uPalAcc.rgb * 1.6 * smoothstep(0.06, 0.0, abs(d.x + 0.65)) * smoothstep(-0.1, 0.5, y);
-  // The floor, dark, in the lower hemisphere.
-  c *= mix(0.25, 1.0, smoothstep(-0.2, 0.05, y));
-  return c;
+// Where an orb's centre is, and its squash-and-stretch scale.
+vec2 orbCentre(vec2 base, float R, float lift, float sq) {
+  return base + vec2(0.0, R * (1.0 - 0.35 * max(sq, 0.0)) + lift);
 }
 
 // One orb: returns its colour and coverage at p. \`lift\` is its height above
-// the floor, \`sq\` its squash (>0 flattened), \`R\` its radius.
-vec4 orb(vec2 p, vec2 base, float R, float lift, float sq, float core) {
-  vec2 C = base + vec2(0.0, R * (1.0 - 0.35 * max(sq, 0.0)) + lift);
+// the floor, \`sq\` its squash (>0 flattened), \`R\` its radius, \`tint\` 0..1
+// where it sits in the palette.
+vec4 orb(vec2 p, vec2 base, float R, float lift, float sq, float core, float tint) {
+  vec2 C = orbCentre(base, R, lift, sq);
   vec2 s = vec2(1.0 + 0.45 * sq, 1.0 - 0.38 * sq);
   vec2 q = (p - C) / (R * s);
   float r2 = dot(q, q);
@@ -72,30 +67,38 @@ vec4 orb(vec2 p, vec2 base, float R, float lift, float sq, float core) {
   float cover = smoothstep(1.0 + aa, 1.0 - aa, r2);
   if (cover <= 0.0) return vec4(0.0);
   vec3 n = vec3(q, sqrt(max(0.0, 1.0 - r2)));
-  vec3 V = vec3(0.0, 0.0, 1.0);
-  vec3 L = normalize(vec3(-0.4, 0.7, 0.6));
-  float diff = max(dot(n, L), 0.0);
-  vec3 refl = reflect(-V, n);
-  float fres = pow(1.0 - n.z, 3.0);
-  vec3 base0 = mix(uPalMid.rgb, uPalHigh.rgb, 0.3);
-  vec3 col = base0 * (0.08 + 0.35 * diff);
-  col += studio(refl) * (0.25 + 0.75 * fres) * P_GLOSS;
-  col += vec3(1.0) * pow(max(dot(refl, L), 0.0), 60.0) * 2.5;
-  // The hot core, glowing through the glass with the bass.
-  col += mix(uPalLow.rgb, uPalHigh.rgb, 0.4) * core * pow(n.z, 2.0) * 1.4;
+  vec3 L = normalize(vec3(-0.5, 0.8, 0.6));
+  // A wrapped diffuse: the terminator is soft, as under a big softbox.
+  float wrap = clamp((dot(n, L) + 0.4) / 1.4, 0.0, 1.0);
+  vec3 lit = pal(0.35 + 0.5 * tint) * 1.15;
+  vec3 shadow = mix(uPalBg.rgb, pal(tint * 0.5), 0.35) * 0.3;
+  vec3 col = mix(shadow, lit, smoothstep(0.0, 1.0, wrap));
+  // The colour turns a little through the palette toward the edge, the way a
+  // soft-touch finish does.
+  col = mix(col, pal(1.0 - tint) * 0.8, pow(1.0 - n.z, 3.0) * 0.35);
+  // A broad highlight, not a pin-point: the softbox itself, blurred.
+  vec3 refl = reflect(vec3(0.0, 0.0, -1.0), n);
+  col += mix(lit, vec3(1.0), 0.65) * pow(max(dot(refl, L), 0.0), 7.0) * 0.45 * P_GLOSS;
+  // A thin rim from behind and to the right.
+  float rim = pow(1.0 - n.z, 2.6) * smoothstep(-0.3, 0.7, dot(normalize(n.xy + 1e-4), normalize(vec2(0.85, -0.2))));
+  col += mix(uPalAcc.rgb, vec3(1.0), 0.3) * rim * 0.7 * P_GLOSS;
+  // The bass, glowing through it.
+  col += lit * core * pow(n.z, 1.6) * 0.35;
   return vec4(col, cover);
 }
 
 void main() {
   vec2 p = fragP();
-  float beats = uClock.x * uSpeed;
   float amp = 0.55 + 0.45 * uCtl.x;
   float fy = floorLine();
   float drive = uFlow.x;
 
-  vec3 col = uPalBg.rgb * 0.55;
-  // A soft glow behind the stage, lit by the whole mix.
-  col += mix(uPalLow.rgb, uPalMid.rgb, 0.5) * glow(length((p - vec2(0.0, fy + 0.35)) * vec2(0.5, 1.0)), 0.6) * (0.08 + 0.18 * uMood.y);
+  // --- the cove: floor and wall in one seamless sweep -------------------------
+  float h = p.y - fy;
+  vec3 col = uPalBg.rgb * (0.5 + 0.5 * exp(-abs(h) * 2.2));
+  col += pal(0.5 + 0.25 * p.x / uFrame.z) * exp(-abs(h) * 3.0) * (0.05 + 0.1 * uMood.y);
+  // A key light's pool on the wall behind the stage.
+  col += mix(uPalLow.rgb, uPalMid.rgb, 0.5) * glow(length((p - vec2(0.0, fy + 0.45)) * vec2(0.45, 1.0)), 0.55) * (0.06 + 0.16 * uMood.y);
 
   // The jump: a parabola across each beat, on the floor at the beat itself.
   float ph = uPhase.x;
@@ -105,45 +108,51 @@ void main() {
   // The squash is the driver's spring (uS0.x), overshoot and all.
   float sq = uS0.x * P_SQUASH;
   float core = uBandA.x + uBandA.y;
-
   float R = orbSize(0.0);
   vec2 base = vec2(0.0, fy);
+  vec2 C = orbCentre(base, R, lift, sq);
+  vec3 hero = pal(0.6);
 
-  // --- the crown of spikes: the spectrum around the orb ---
-  vec2 C = base + vec2(0.0, R + lift);
-  vec2 d = p - C;
-  float rr = length(d);
-  float a = atan(d.x, d.y); // 0 straight up, mirrored left/right
-  float f = abs(a) / PI;
-  float spec = texture(uSpec, vec2(0.04 + f * 0.9, 0.25)).r;
-  float n = 48.0;
-  float cellA = (floor(abs(a) / PI * n) + 0.5) / n * PI;
-  float dAng = abs(abs(a) - cellA) * rr;
-  float len = R * (0.25 + 1.6 * spec * spec) * P_SPIKES * (0.7 + 0.5 * drive);
-  float along = rr - R * 1.12;
-  float spike = smoothstep(0.004 + 0.006 * spec, 0.0, dAng) * step(0.0, along) * smoothstep(len, len * 0.3, along);
-  col += pal(f) * spike * (0.6 + 1.4 * spec) * (0.6 + 0.8 * uHit.x) * uEnergy;
-
-  // --- the floor: a black mirror, the reflection, the contact shadow ---
-  if (p.y < fy) {
-    vec2 m = vec2(p.x, 2.0 * fy - p.y);
-    vec4 ro = orb(m, base, R, lift, sq, core);
-    float fade = exp(-(fy - p.y) * 5.0) * 0.35;
-    col += ro.rgb * ro.a * fade;
-    float sh = glow(length((p - vec2(0.0, fy)) * vec2(1.0, 6.0)), R * (0.8 + lift * 2.0));
-    col += uPalMid.rgb * sh * 0.05 * (1.0 - lift / max(H, 0.01));
+  // --- the floor: contact shadow, colour bleed, the landing wave --------------
+  if (h < 0.0) {
+    float air = clamp(lift / max(H, 0.01), 0.0, 1.0);
+    vec2 sd = (p - vec2(C.x, fy)) / vec2(R * (1.1 + 0.8 * air), R * (0.22 + 0.2 * air));
+    float shadow = exp(-dot(sd, sd));
+    col *= 1.0 - 0.7 * shadow * (1.0 - 0.6 * air);
+    vec2 bl = (p - vec2(C.x, fy)) / vec2(R * 2.2, R * 0.6);
+    col += hero * exp(-dot(bl, bl)) * 0.12 * (1.0 - 0.5 * air);
   }
-  // The floor line, and a shock ring on every landing.
-  col += mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * glow(abs(p.y - fy), 0.002) * 0.25;
   float land = uSince.y;
   if (land < 2.0) {
     vec2 q = (p - base) * vec2(1.0, 5.0);
-    float Rr = land * 0.7;
-    col += mix(uPalHigh.rgb, vec3(1.0), 0.3) * exp(-pow((length(q) - Rr) / (0.02 + land * 0.04), 2.0)) * (1.0 - land / 2.0) * 0.9 * uEnergy;
+    float Rr = land * 0.75;
+    float wave = exp(-pow((length(q) - Rr) / (0.035 + land * 0.05), 2.0)) * (1.0 - land / 2.0);
+    col += mix(hero, vec3(1.0), 0.25) * wave * 0.35 * uEnergy * step(h, 0.02);
+  }
+
+  // --- the spectrum: a ring of rounded capsules around the orb -----------------
+  {
+    vec2 d = p - C;
+    float rr = length(d);
+    float a = atan(d.x, d.y); // 0 straight up, mirrored left/right
+    float n = 22.0;
+    float cell = clamp(floor(abs(a) / PI * n), 0.0, n - 1.0);
+    float ac = (cell + 0.5) / n * PI * sign(a + 1e-6);
+    vec2 axis = vec2(sin(ac), cos(ac));
+    float f = (cell + 0.5) / n;
+    float spec = texture(uSpec, vec2(0.04 + f * 0.9, 0.25)).r;
+    float len = R * 0.8 * pow(spec, 1.6) * P_SPIKES * (0.7 + 0.5 * drive);
+    float r0 = R * 1.24;
+    float along = dot(d, axis) - r0;
+    float across = dot(d, vec2(axis.y, -axis.x));
+    float w = R * 0.05;
+    float sdc = length(vec2(across, along - clamp(along, 0.0, len))) - w;
+    float cap = clamp(0.5 - sdc / uFrame.w, 0.0, 1.0);
+    col = mix(col, pal(f) * (0.55 + 1.1 * spec) * (0.7 + 0.5 * uHit.x), cap * uEnergy);
   }
 
   // --- the orbs ---
-  vec4 o = orb(p, base, R, lift, sq, core);
+  vec4 o = orb(p, base, R, lift, sq, core, 0.6);
   // The off-beat pair, either side, on wide frames only.
   if (P_TWINS > 0.5 && uFrame.z > 1.25) {
     float Rt = orbSize(1.0);
@@ -153,12 +162,13 @@ void main() {
     for (int k = 0; k < 2; k++) {
       float sx = k == 0 ? -1.0 : 1.0;
       vec2 b2 = vec2(sx * uFrame.z * 0.55, fy);
-      vec4 t = orb(p, b2, Rt, lift2, sq2, uBandA.z);
-      o = mix(o, t, t.a * (1.0 - o.a));
-      if (p.y < fy) {
-        vec4 tr = orb(vec2(p.x, 2.0 * fy - p.y), b2, Rt, lift2, sq2, 0.0);
-        col += tr.rgb * tr.a * exp(-(fy - p.y) * 5.0) * 0.3;
+      if (h < 0.0) {
+        float air2 = clamp(lift2 / max(H * 0.8, 0.01), 0.0, 1.0);
+        vec2 s2 = (p - b2) / vec2(Rt * (1.1 + 0.8 * air2), Rt * (0.22 + 0.2 * air2));
+        col *= 1.0 - 0.6 * exp(-dot(s2, s2)) * (1.0 - 0.6 * air2);
       }
+      vec4 t = orb(p, b2, Rt, lift2, sq2, uBandA.z, k == 0 ? 0.2 : 0.95);
+      o = mix(o, t, t.a * (1.0 - o.a));
     }
   }
   col = mix(col, o.rgb, o.a);

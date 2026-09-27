@@ -156,7 +156,21 @@ export function createGLScene(opts = {}) {
   let geomRef = null;
 
   // --- dynamic resolution ---------------------------------------------------------
-  const gq = () => o.preset.gl || {};
+  // The strip is a 40 px band under the player's controls. At full resolution
+  // it costs less than a full-screen world at its floor, and its capsules are
+  // a few pixels wide: at a governed scale the upscale smears every edge into
+  // the next, which is exactly the soft, dated look it must not have.
+  let gqFor = null;
+  let gqStrip = null;
+  const gq = () => {
+    const g = o.preset.gl || {};
+    if (o.layout !== "strip") return g;
+    if (gqFor !== g) {
+      gqFor = g;
+      gqStrip = { ...g, scale: 1, min: 1, max: 1 };
+    }
+    return gqStrip;
+  };
   let scale = 1;
   let scaleAt = 0;
   let starved = false;
@@ -665,10 +679,12 @@ export function createGLScene(opts = {}) {
     look.threshold = mixLook(lp, lc, k, "threshold", 0.9);
     look.knee = mixLook(lp, lc, k, "knee", 0.6);
     look.saturation = mixLook(lp, lc, k, "saturation", 1.15);
-    // The fringe breathes on an impact: a hair at rest, a visible split for an
-    // instant on a big kick or a drop — the lens being hit.
+    // The fringe is an IMPACT, not a finish: nothing at rest, a split for an
+    // instant on a big kick or a drop — the lens being hit. It used to sit at
+    // a hair all the time, and a permanent red/cyan edge on every thin line
+    // is the single cheapest-looking thing a render can do.
     const hitCA = Math.max(env(m.stamp.big, 0.5), env(m.stamp.drop, 1.5));
-    look.ca = (q.ca ?? 0) * (mixLook(lp, lc, k, "ca", 1) * (0.0025 + 0.01 * hitCA * (o.reducedMotion ? 0 : 1)));
+    look.ca = (q.ca ?? 0) * (mixLook(lp, lc, k, "ca", 1) * (0.007 * hitCA * (o.reducedMotion ? 0 : 1)));
     look.grain = (q.grain ?? 0) * mixLook(lp, lc, k, "grain", 1);
     look.lift = flash * 0.35;
     look.transparent = o.layout === "strip";

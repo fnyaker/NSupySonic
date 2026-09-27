@@ -205,7 +205,19 @@ export function createGLScene(opts = {}) {
   let geomRef = null;
 
   // --- dynamic resolution ---------------------------------------------------------
-  const gq = () => o.preset.gl || {};
+  // The strip renders at full resolution (lib/viz/scenes/gl.js#gq): policy,
+  // mirrored here so the block comparison stays about the arithmetic.
+  let gqFor = null;
+  let gqStrip = null;
+  const gq = () => {
+    const g = o.preset.gl || {};
+    if (o.layout !== "strip") return g;
+    if (gqFor !== g) {
+      gqFor = g;
+      gqStrip = { ...g, scale: 1, min: 1, max: 1 };
+    }
+    return gqStrip;
+  };
   let scale = 1;
   let scaleAt = 0;
   let starved = false;

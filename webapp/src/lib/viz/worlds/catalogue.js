@@ -35,7 +35,7 @@ export const WORLD_META = {
   cymatics: { group: "hard", label: "Cymatique", blurb: "La mélodie dessinée dans le sable d'une plaque qui vibre : chaque note son motif, et le kick qui fait sauter le sable." },
   shatter: { group: "hard", label: "Éclats", blurb: "Le cadre vole en éclats de verre qui réfractent la lumière, relancés à chaque kick." },
   lasers: { group: "hard", label: "Lasers", blurb: "La mainstage vue de la foule : lasers dans la fumée, flammes sur les gros kicks, les mains qui se lèvent sur le drop." },
-  bounce: { group: "hard", label: "Rebond", blurb: "Une bille de gelée lumineuse qui s'écrase sur le kick et rebondit sur le temps." },
+  bounce: { group: "hard", label: "Rebond", blurb: "Une sphère douce qui s'écrase sur le kick et rebondit sur le temps, le spectre en couronne." },
   saw: { group: "hard", label: "Scie", blurb: "Une lame d'acier qui tourne et crache ses étincelles, des dents de scie laser derrière — l'industriel à vif." },
   stairs: { group: "hard", label: "Arpège", blurb: "Un escalier de lumière dont chaque marche s'allume sur une note de l'arpège." },
   pingpong: { group: "hard", label: "Ping-pong", blurb: "Un échange au néon : deux raquettes de verre qui renvoient une balle de lumière sur chaque temps." },
@@ -99,8 +99,8 @@ export const WORLD_META = {
   pixels: { group: "retro", label: "Pixels", blurb: "Un écran cathodique, des pixels qui sautent et un sprite qui court." },
 
   // --- classiques (also the fixed modes) --------------------------------------
-  pulse: { group: "modes", label: "Pulsations", blurb: "Un bassin de lumière : une onde par temps, un lobe par bande." },
-  spectrum: { group: "modes", label: "Spectre", blurb: "Le spectre en barres de verre lumineux, avec une vraie résolution dans les graves." },
+  pulse: { group: "modes", label: "Pulsations", blurb: "Des champs de couleur, un par bande, sous un verre liquide que chaque temps fait onduler." },
+  spectrum: { group: "modes", label: "Spectre", blurb: "Le spectre en capsules de lumière qui respirent avec la dynamique du morceau." },
 };
 
 /** When nothing names a genre at all, the archetype is still a better guess

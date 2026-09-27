@@ -1,6 +1,9 @@
 // THE ORACLE. lib/viz/scenes/bars.js as it was in JavaScript, before its
 // levelling moved to Rust (webapp/rhythm/src/viz_bars.rs); test/vizcore.test.mjs
 // holds the Rust core to the same heights and caps. Not imported by the app.
+// What it pins is the LEVELLING: `draw` follows the app's drawing (the row of
+// capsules that replaced the glass bars), so the comparison stays about the
+// arithmetic and not about a picture the app no longer draws.
 
 // The spectrum bars, rebuilt on the precise band data.
 //
@@ -96,47 +99,35 @@ export function createBarsScene(opts = {}) {
     // this one has nothing to wash WITH, and every frame it drew would
     // otherwise still be on screen.
     g.clearRect(0, 0, w, h);
+    // The same row of light the GL world draws (worlds/spectrum.js): one fully
+    // rounded capsule per band, mirrored about its axis as ONE shape, a dot at
+    // rest, and a faint afterglow where the band was a moment ago instead of a
+    // hairline cap hanging over it.
     const bw = w / bars;
-    const body = bw * 0.66;
+    const body = Math.max(1.5, bw * 0.5);
     const pad = (bw - body) / 2;
-    const radius = Math.min(body / 2, 3);
+    const r = body / 2;
     const full = layout === "full";
-    const maxH = full ? h * 0.92 : h;
+    const axis = h / 2;
+    const reach = full ? h * 0.36 : h / 2 - 1;
 
     for (let i = 0; i < bars; i++) {
       const t = i / (bars - 1 || 1);
       const v = smooth[i];
-      const bh = Math.max(2, v * maxH);
+      const half = Math.max(r, v * reach);
       const x = i * bw + pad;
-      const y = full ? h - bh : (h - bh) / 2;
-      // Hue walks the palette's spread across the strip, so the low end and the
+      // Hue walks the palette's spread across the row, so the low end and the
       // top end are visibly different registers rather than one flat colour.
       const hue = pal.low + (pal.high - pal.low) * t;
-      const a = 0.22 + 0.72 * v;
-      if (full && bh > 6) {
-        const grad = g.createLinearGradient(0, h, 0, h - bh);
-        grad.addColorStop(0, hsl(hue, pal.sat, pal.light * 0.55, a * 0.85));
-        grad.addColorStop(1, hsl(hue + 14, pal.sat, Math.min(0.82, pal.light + 0.18), a));
-        g.fillStyle = grad;
-      } else {
-        g.fillStyle = hsl(hue, pal.sat * 0.35 + 0.2, Math.min(0.95, pal.light + 0.3), a);
-      }
-      roundRect(g, x, y, body, bh, radius);
-      g.fill();
-
-      // Peak cap — only once it has separated from the bar, otherwise it just
-      // thickens the top and reads as noise.
-      const ph = peaks[i] * maxH;
-      if (ph > bh + 3) {
-        const py = full ? h - ph : (h - ph) / 2;
-        g.fillStyle = hsl(hue + 20, 0.2, 0.96, 0.35 + 0.35 * peaks[i]);
-        roundRect(g, x, py, body, 2, 1);
+      const ph = Math.max(r, peaks[i] * reach);
+      if (ph > half + 2) {
+        g.fillStyle = hsl(hue, pal.sat, pal.light, 0.16);
+        roundRect(g, x, axis - ph, body, ph * 2, r);
         g.fill();
-        if (!full) {
-          roundRect(g, x, h - py - 2, body, 2, 1);
-          g.fill();
-        }
       }
+      g.fillStyle = hsl(hue, pal.sat * 0.8, Math.min(0.9, pal.light + 0.08 + 0.2 * v), 0.62 + 0.38 * Math.min(1, v / 0.6));
+      roundRect(g, x, axis - half, body, half * 2, r);
+      g.fill();
     }
   }
 

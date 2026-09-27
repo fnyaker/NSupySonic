@@ -1409,8 +1409,8 @@ each of which a world broke once:
   primitives: the mobile cover sits above the middle, and the grown box centred every world 7% of
   the frame below the cover it was framing. A world puts its motif in the band the artwork leaves
   free (the pixel runner stands on a ground line under the cover; horizon's floor and storm's lake
-  start there and the synthwave sun rises from behind it; the spectrum frames it with a bank below
-  and a mirrored bank above) and fills a 16:9 beamer to all four edges. A world CENTRED on the
+  start there and the synthwave sun rises from behind it; the spectrum runs one row of capsules in
+  the band below it and one in the band above) and fills a 16:9 beamer to all four edges. A world CENTRED on the
   artwork (galaxy, kaleido) dims under it harder than the house third and lifts what is outside: the
   core is hidden by definition, so the light goes to the arms that are seen. On a PHONE the cover
   spans nearly the width, so "beside the artwork" is off the screen: a world whose subject would sit
@@ -1440,7 +1440,7 @@ own chunk: a session of techno never downloads the rawstyle forge).
 
 | shelf | worlds |
 |---|---|
-| Hard | `forge` (rawstyle's hammer — the pitched, overdriven kick rawpvc makes: a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `cymatics` (frenchcore, melodic but hammering: a Chladni plate struck under the artwork — the lead's pitch picks the mode, a held note holds it and a change morphs the sand; main kicks send a shock front that throws the grains, a roll makes them chatter, the drop blows the sand off and lands it on a new figure; grains on brushed steel), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a jelly core squashed on the kick), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong` (a neon rally: glass paddles that glide to meet the ball on the beat, one bounce on the far half), `soundsystem` (a speaker wall whose cones pump), `static` (the artwork's own signal torn apart: bands, pixel-sort streaks, chroma-error blocks), `microwave` (the buzzing kick as the oven it sounds like: the cavity seen through the door's perforated screen, the lamp surging on the kick, the standing wave's hot spots hopping on every main kick, a VFD timer counting the phrase down to "End" — and a SHAPE switch, `dish`, for what is cooking: Deutscher Krach's gilt plate throwing arcs, zaag's circular saw biting on every main kick (drawn as its swept ring once it turns faster than a frame can show, instead of aliasing), uptempo's popcorn popping on the kicks and the rolls), `fireworks` (shells aimed at the NEXT beat, in a real show's colours turned to the palette, over a skyline and water that catch every burst) |
+| Hard | `forge` (rawstyle's hammer — the pitched, overdriven kick rawpvc makes: a shaded anvil struck on the kick, spark fountains skittering across a lit floor, the anthem as gold satin), `cymatics` (frenchcore, melodic but hammering: a Chladni plate struck under the artwork — the lead's pitch picks the mode, a held note holds it and a change morphs the sand; main kicks send a shock front that throws the grains, a roll makes them chatter, the drop blows the sand off and lands it on a new figure; grains on brushed steel), `shatter` (the frame in refracting glass shards), `lasers` (laser fans in smoke over a crowd whose hands go up on the drop, flame columns on big kicks, a liquid sky in the breakdown), `bounce` (a soft matte orb squashed on the kick, a ring of spectrum capsules round it, on a seamless studio cove), `saw` (a spinning blade and sawtooth lasers — zaag, literally), `stairs` (a raymarched helix whose steps light with the arpeggio), `pingpong` (a neon rally: glass paddles that glide to meet the ball on the beat, one bounce on the far half), `soundsystem` (a speaker wall whose cones pump), `static` (the artwork's own signal torn apart: bands, pixel-sort streaks, chroma-error blocks), `microwave` (the buzzing kick as the oven it sounds like: the cavity seen through the door's perforated screen, the lamp surging on the kick, the standing wave's hot spots hopping on every main kick, a VFD timer counting the phrase down to "End" — and a SHAPE switch, `dish`, for what is cooking: Deutscher Krach's gilt plate throwing arcs, zaag's circular saw biting on every main kick (drawn as its swept ring once it turns faster than a frame can show, instead of aliasing), uptempo's popcorn popping on the kicks and the rolls), `fireworks` (shells aimed at the NEXT beat, in a real show's colours turned to the palette, over a skyline and water that catch every burst) |
 | Techno & machines | `tunnel` (a panelled corridor lit only by its ring fixtures, a light running down it on every beat, a polished floor mirroring the ceiling), `warehouse` (concrete pillars, sodium lamps, moving heads sweeping the haze and pooling on a wet floor, strobes that are flashes), `ridges` (Unknown Pleasures), `lattice` (a cone-marched chrome space frame carrying a current), `circuit` |
 | Trance & psy | `hyperspace`, `kaleido` (line-art KIFS), `galaxy`, `flow` |
 | Bass & breaks | `wobble` (the LFO's own shape, with its wake and current crackling along it), `chrome` (liquid metal), `slices` |
@@ -1451,6 +1451,33 @@ own chunk: a session of techno never downloads the rawstyle forge).
 | Monde | `carnival` (polyrhythm as rings of beads, under festoons of bulbs chasing the beat), `tropics` |
 | Rétro | `horizon` (the banded sun over a true ground plane), `pixels` (a CRT raster, a runner on a real gait, a brick equaliser whose caps fall under gravity) |
 | Classiques | `pulse`, `spectrum` — also the fixed `pulse` and `bars` modes |
+
+**THE HOUSE STYLE IS TODAY'S, NOT 2005's.** Premium twenty years ago is dated now, and the user said
+so about the default mode in so many words: the bars "look like Windows XP". They were glass tubes —
+a rim light down each edge, a specular stripe, a hot top, hairline peak caps hanging above, a
+mirror-polished floor — and every one of those is a desktop-theme idea from that era. The rules that
+replaced them, for any world:
+
+- **Shape over sheen.** A bar is a fully rounded capsule, mirrored about its axis as ONE shape (two
+  rounded bars meeting in the middle drew a dark pinch along the axis) and a DOT at rest; a sphere is
+  matte under one big soft key light with a broad highlight and a thin rim, never a pin-point
+  specular over a reflected studio. No glass rims, no specular stripes, no mirror floors: a soft
+  contact shadow and colour bleeding onto a seamless cove say "object on a floor" better.
+- **Colour as fields, not lines.** `pulse` was caustic folds lit by lobes and read as a purple web;
+  it is now a mesh gradient (six band fields that BLEND by weight rather than add up) under liquid
+  glass — a beat is a ripple that refracts the colour, shades like a lens and catches one highlight.
+- **No resting chromatic fringe.** The lens split is an impact (a big kick, a drop) and nothing at
+  rest (`scenes/gl.js`): a permanent red/cyan edge on every thin line was the cheapest-looking thing
+  in the catalogue. Worlds built of thin light (`spectrum`, `pulse`, `bounce`, `aurora`) set `ca: 0`.
+- **Level is information here too.** The spectrum's zone gains keep every register alive, but its
+  heights are also scaled by the track's dynamics, so a breakdown is a row of small capsules instead
+  of the drop renormalised to the same height.
+- **The strip renders at full resolution** (`scenes/gl.js#gq`): it is 40 px tall, cheaper than any
+  full-screen world at its floor, and its capsules are a few pixels wide — a governed scale smeared
+  every edge into the next. The canvas twin (`scenes/bars.js`) draws the same capsules.
+- **Accents stay in the family.** The palette's complement (`uPalAcc`) at full strength on a grid
+  (soundsystem's cabinet seams on every kick) drew a green wireframe over a purple scene; an accent
+  is mixed toward the lamps' own colour and kept to a hairline.
 
 **A world is machinery; a SKIN is what one genre does with it** (`lib/viz/skins.js`). 226 rows, one
 per genre, each naming its world, how its palette leans (`hue` / `sat` / `light`, applied by
@@ -1518,7 +1545,10 @@ at a time. `webapp/test/post.test.mjs` pins it.
   runs on its OWN defaults (`fixed`), which is what the contracts are about; `--skin` pins it the
   way the smart engine does, so it wears `--genre`'s skin — the only way to see a shape switch
   (`tunnel` as ebm's helix, as peaktime's dashes) before a user does. `--pscale 2` renders the phone
-  layout at twice the size, to read detail.
+  layout at twice the size, to read detail. `--strip` photographs the players' 40 px bar strip
+  instead (390×40 CSS px at `--pscale` density, default 3, over the blurred cover under its scrim —
+  a transparent layout can only be judged on what it sits on), and `--nograin` turns the post pass's
+  film grain off, to tell a world's own noise from the grain laid over every world.
 - **`webapp/test/viz.test.mjs` and `musical.test.mjs`** (node, in `npm test`) pin everything that can
   be decided without a GPU and that a GPU would only ever report as a black screen: the loader, the
   catalogue and the skins agree; every classifier family resolves by id AND by French label, and

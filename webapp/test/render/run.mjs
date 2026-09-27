@@ -108,6 +108,13 @@ async function main() {
   // this world, its shape parameters). Without it the world runs on its own
   // defaults, which is what the contracts are about.
   const skin = !!arg("skin");
+  // --nograin: without the post pass's film grain, to tell a world's own noise
+  // from the grain laid over every world.
+  const grain = !arg("nograin");
+  // --strip: the player's strip instead — the spectrum world in its
+  // transparent layout, 390x40 CSS px (times --pscale, default 3), over the
+  // blurred cover, one shot per section stacked in a column.
+  const strip = !!arg("strip");
 
   const { createServer } = await import("vite");
   const server = await createServer({
@@ -143,11 +150,26 @@ async function main() {
   const save = (name, dataUrl) =>
     writeFileSync(join(out, name), Buffer.from(dataUrl.split(",")[1], "base64"));
 
+  if (strip) {
+    const S = Math.max(1, +arg("pscale", 3) || 3);
+    const res = await run({
+      world: "spectrum", genre, bpm, w: 390, h: 40, dpr: S, tier, palette, skin: false,
+      shots: ["breakdown", "build", "impact", "drop", "dropOff"], cols: 1,
+      layout: "strip", backdrop: true, grain: true,
+    });
+    save("strip.png", res.sheet);
+    if (res.errors?.length) console.log(res.errors.join("\n"));
+    console.log(`strip: ${join(out, "strip.png")}`);
+    await browser.close();
+    await server.close();
+    return;
+  }
+
   for (const world of want) {
     const t0 = Date.now();
     const r = { world };
     try {
-      const wide = await run({ world, genre, bpm, w, h, tier, palette, shots, skin });
+      const wide = await run({ world, genre, bpm, w, h, tier, palette, shots, skin, grain });
       save(`${world}.png`, wide.sheet);
       r.wide = wide.frames;
       r.cost = wide.costMs;

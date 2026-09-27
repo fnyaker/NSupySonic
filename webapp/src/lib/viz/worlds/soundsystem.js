@@ -186,7 +186,10 @@ void main() {
   float bevel = smoothstep(0.012, 0.004, edge) - smoothstep(0.004, 0.0, edge);
   col += (c1 + c2) * bevel * 0.04;
   float seam = exp(-pow(edge / (px * 1.2), 2.0));
-  col += uPalAcc.rgb * seam * (0.04 + 0.35 * uHit.y * amp) * P_UV;
+  // The seam is a hairline of light that the kick brightens, in the lamps'
+  // own colours: the complementary accent at full strength drew every
+  // cabinet as a green wireframe box on each kick.
+  col += mix(uPalHigh.rgb, uPalAcc.rgb, 0.3) * seam * (0.025 + 0.12 * uHit.y * amp) * P_UV;
 
   float cov = 0.0;
   if (kind < 0.5) {
