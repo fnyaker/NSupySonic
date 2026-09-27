@@ -193,7 +193,7 @@ export const SKINS = {
 
   // === pop, voice, soul ======================================================
   pop: { world: "bokeh" },
-  vocalPop: { world: "bokeh", hue: 10, p: { blades: 0 } },
+  vocalPop: { world: "bokeh", hue: 10, p: { count: 0.75, drift: 0.8 } },
   kpop: { world: "bokeh", hue: -20, sat: 1.25, p: { count: 1.3, blades: 5 } },
   jpop: { world: "bokeh", hue: 20, sat: 1.15, p: { count: 1.2, blades: 7 } },
   smoothjazz: { world: "bokeh", hue: 25, sat: 0.85, speed: 0.7, p: { count: 0.7, blades: 0, drift: 0.6 } },

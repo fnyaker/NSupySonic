@@ -1517,6 +1517,10 @@ replaced them, for any world:
 - **Accents stay in the family.** The palette's complement (`uPalAcc`) at full strength on a grid
   (soundsystem's cabinet seams on every kick) drew a green wireframe over a purple scene; an accent
   is mixed toward the lamps' own colour and kept to a hairline.
+- **A lens is round, and what is in focus is a point.** `bokeh` drew hexagonal apertures with a hard
+  rim, a red/blue fringe and four-point star glints on the glitter — a 2000s lens flare. Its discs
+  are round by default (`blades` is a skin's choice), softer the further out of focus the layer is,
+  with a gentle rim and no fringe; the glitter is a pixel-sized point with a faint halo.
 
 **A world is machinery; a SKIN is what one genre does with it** (`lib/viz/skins.js`). 226 rows, one
 per genre, each naming its world, how its palette leans (`hue` / `sat` / `light`, applied by
