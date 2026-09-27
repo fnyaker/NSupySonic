@@ -1509,6 +1509,11 @@ replaced them, for any world:
 - **The strip renders at full resolution** (`scenes/gl.js#gq`): it is 40 px tall, cheaper than any
   full-screen world at its floor, and its capsules are a few pixels wide — a governed scale smeared
   every edge into the next. The canvas twin (`scenes/bars.js`) draws the same capsules.
+- **Light things; don't outline them.** `stairs` was neon wireframe slabs round a black void,
+  every edge flashed on the kick — a 2000s screensaver. Its slabs are matte stone now, LIT by the
+  column they turn round (diffuse falling off with distance, a hemisphere ambient, a soft sheen), the
+  sounding step glowing from its tread, the kick pulsing the column and so the light on every slab;
+  the edge is a hairline bevel.
 - **Accents stay in the family.** The palette's complement (`uPalAcc`) at full strength on a grid
   (soundsystem's cabinet seams on every kick) drew a green wireframe over a purple scene; an accent
   is mixed toward the lamps' own colour and kept to a hairline.

@@ -13,6 +13,12 @@
 
 let core = null;
 let loading = null;
+// A load that failed is not retried for a while: the output clock asks on every
+// analysis frame, and a page offline before the service worker cached the
+// binary would otherwise refetch it ninety times a second.
+const RETRY_MS = 15_000;
+let failedAt = -Infinity;
+let failure = null;
 
 function wrap(instance) {
   const x = instance.exports;
@@ -61,6 +67,7 @@ export function requireCore() {
  */
 export function loadAppCore() {
   if (core) return Promise.resolve(core);
+  if (!loading && failure && Date.now() - failedAt < RETRY_MS) return Promise.reject(failure);
   if (!loading) {
     loading = import("./assets.js")
       .then(({ url }) => fetch(url))
@@ -70,7 +77,11 @@ export function loadAppCore() {
       })
       .then((bytes) => WebAssembly.instantiate(bytes, {}))
       .then(({ instance }) => (core = wrap(instance)));
-    loading.catch(() => (loading = null));
+    loading.catch((e) => {
+      loading = null;
+      failure = e;
+      failedAt = Date.now();
+    });
   }
   return loading;
 }

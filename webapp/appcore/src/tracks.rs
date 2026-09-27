@@ -119,7 +119,12 @@ impl TrackIndex {
         while self.rows.len() < count {
             self.push_row(&[]);
         }
-        self.input = src;
+        // The input was sized for the worst case (three bytes per UTF-16 unit)
+        // and is read exactly once: let it go rather than hold a megabyte per
+        // list on screen. The next build asks for room again anyway.
+        drop(src);
+        self.nums.shrink_to_fit();
+        self.text.shrink_to_fit();
         self.out.clear();
         self.out.reserve(count);
     }

@@ -74,7 +74,8 @@ function sourceHash() {
 }
 
 test("the shipped app core is built from the Rust next to it", () => {
-  assert.equal(core.x.appcore_src_hash(), sourceHash(), "appcore.wasm is stale: run `npm run wasm`");
+  // `>>> 0`: a wasm u32 reaches JavaScript as a signed i32.
+  assert.equal(core.x.appcore_src_hash() >>> 0, sourceHash(), "appcore.wasm is stale: run `npm run wasm`");
 });
 
 // --- the party clock -------------------------------------------------------------------------
