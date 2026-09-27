@@ -229,14 +229,39 @@ def create_application(config=None):
     # highly repetitive — this cuts the bytes on the wire ~5-10x, so big lists
     # load much faster). Streamed audio/cover responses (direct_passthrough) and
     # small/already-encoded ones are left untouched.
+    #
+    # And give every JSON GET a VALIDATOR first. The web app paints a list from
+    # its offline copy and then asks the server again, on every visit — and the
+    # answer is usually identical: 200 KB of gzip (2 MB of JSON, 30 ms of
+    # compression) for a 4000-track favourites page, measured, to say nothing
+    # changed. With a weak ETag and `private, no-cache` the browser revalidates
+    # on its own and an unchanged list comes back as an empty 304: no gzip, no
+    # transfer. Weak, because the tag names the content whatever its encoding;
+    # private, because these answers are one account's.
     import gzip as _gzip
+    import hashlib as _hashlib
+
+    def _validate(response):
+        if (
+            request.method != "GET"
+            or response.status_code != 200
+            or response.headers.get("ETag")
+            or (response.content_type or "").split(";", 1)[0].strip() != "application/json"
+        ):
+            return response
+        body = response.get_data()
+        response.set_etag(_hashlib.blake2b(body, digest_size=16).hexdigest(), weak=True)
+        response.headers.setdefault("Cache-Control", "private, no-cache")
+        return response.make_conditional(request)
 
     @app.after_request
     def compress_response(response):
         try:
+            if response.direct_passthrough:
+                return response
+            response = _validate(response)
             if (
-                response.direct_passthrough
-                or response.status_code < 200
+                response.status_code < 200
                 or response.status_code >= 300
                 or response.headers.get("Content-Encoding")
             ):

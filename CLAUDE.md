@@ -98,6 +98,8 @@ supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics f
 supysonic-cli deezer analyze [--force] [--limit N] [--workers N]  # measure tempo + style for archived tracks
 supysonic-cli deezer bpm-audit [--limit N]             # Deezer's published BPM against the files' measured tempo, per style
 python tools/tempo_eval.py --render /tmp/tempo          # the server's file tempo on the 26 arranged records + beatless tones
+python tools/perf_api.py [--tracks 20000] [--serve]     # every screen's /api route timed on a big synthetic library (Deezer off):
+                                                     # median ms, SQL statement count, bytes and gzip bytes per route
 supysonic-cli deezer embed [--force] [--limit N]       # extract genre embeddings (needs onnxruntime)
 supysonic-cli deezer embed --self-test                 # check the mel front-end without a reference
 
@@ -430,6 +432,34 @@ and every play. `archive_library` stays the master switch above all of them. The
 `on_play` switch — playing a Deezer track *must* archive it, since the Opus transcode reads the
 archived FLAC; what is optional is `on_play_context` (playing one track pulls its whole album or
 playlist, opt-in, deduplicated per container per hour by `backfill._first_time_seen`).
+
+**Response time is measured, on a library the size real ones reach** (`tools/perf_api.py`: 8 000
+tracks, a 4 000-track playlist, 4 000 favourites, sixty playlists, Deezer off so the answer is this
+server's own work). Four rules came out of it, each with its number:
+
+- **A big list is read as TUPLES** (`webui._db_track_rows`, reached through `_db_tracks` whenever it
+  is handed a query). Three quarters of a 4 000-track list's time was Peewee building a Track, an
+  Album and an Artist per row — three UUIDs and a datetime parsed, a setattr per column — for
+  `_db_track` to flatten straight back into a dict. Selecting exactly the columns the JSON carries,
+  with the UUIDs read as text (`_raw`: a CAST, spelled CHAR on MySQL) and the credits read through a
+  subquery on the list's own selection instead of ten 400-parameter IN lists: favourites **405 → 99
+  ms**, a 4 000-track playlist **447 → ~110 ms**, byte for byte the same answer
+  (`tests/test_webui_lists.py` compares the two paths on every shape a row takes). A query with a
+  LIMIT keeps the id lists — MySQL refuses LIMIT inside IN.
+- **Nothing is counted per row.** `/me/playlists` asked two statements per playlist (122 for sixty,
+  90 ms) and is four in all (24 ms); `/me/favorite-ids` hydrated every starred row twice to read one
+  id (314 ms) and is one two-column query (19 ms); an artist's album grid and the podcast list counted
+  per album / per show and are one grouped query each; the mix fallback no longer lazy-loads each
+  row's album and artist (`pl.get_tracks()`). The tests pin statement counts, not times.
+- **Every JSON GET carries a validator** (`web.py#_validate`: a weak ETag over the body and
+  `private, no-cache`). The web app repaints a list from its offline copy and asks again on every
+  visit, and the answer is usually identical — 2 MB of JSON and 30 ms of gzip to say nothing changed.
+  Now the browser revalidates on its own and an unchanged list is an empty 304.
+- **The SPA's own files go out precompressed.** They are sent as files (passthrough), which the
+  on-the-fly gzip never touched: the main bundle went out as 460 kB. The build writes a brotli and a
+  gzip copy of every text and wasm file that compresses (`vite.config.js#precompress`) and `spa.py`
+  serves the smallest one the client accepts (`Vary: Accept-Encoding`, the type still the file's):
+  main bundle **460 → 132 kB**, the analyser **219 → 71 kB**, the app core **63 → 19 kB**.
 
 **Local play counts.** `/api/listen` writes `Track.play_count` / `last_play` (≥20 s counts, a skip
 doesn't). Before that only Subsonic's `scrobble` did, so a library played entirely through the web

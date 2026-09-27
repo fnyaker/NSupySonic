@@ -25,6 +25,7 @@ from functools import wraps
 from urllib.parse import urlsplit
 
 from flask import Blueprint, current_app, jsonify, request, send_file, session
+import peewee
 from peewee import fn
 
 from ..db import (
@@ -770,11 +771,12 @@ def _local_starred() -> list:
     )
 
 
-def _user_starred() -> list:
+def _user_starred_query():
     """Every track the current user has starred (local *and* Deezer), newest
-    first. Used for guests, whose favorites are private/local-only — there's no
-    Deezer-account favorites list to read from."""
-    return list(
+    first, as a query (``_db_tracks`` reads a query as tuples). Used for guests,
+    whose favorites are private/local-only — there's no Deezer-account
+    favorites list to read from — and for the admin's offline fallback."""
+    return (
         Track.select(Track, Album, Artist)
         .join(Album)
         .switch(Track)
@@ -784,6 +786,11 @@ def _user_starred() -> list:
         .where(StarredTrack.user == request.webuser)
         .order_by(StarredTrack.date.desc())
     )
+
+
+def _user_starred() -> list:
+    """``_user_starred_query`` as model rows."""
+    return list(_user_starred_query())
 
 
 def _primary_credit(t: Track) -> list[dict]:
@@ -851,13 +858,163 @@ def _credits_by_track(tracks: list) -> dict:
 
 
 def _db_tracks(rows) -> list:
-    """Serialize a list of DB tracks, resolving every credit in one query."""
+    """Serialize a list of DB tracks, resolving every credit in one query.
+
+    A QUERY (Track joined to Album and Artist, as every list here is built) is
+    read as plain tuples by ``_db_track_rows``: the same dicts, without three
+    model objects hydrated per row. Model rows already in hand go through
+    ``_db_track`` one by one."""
+    if isinstance(rows, peewee.ModelSelect):
+        return _db_track_rows(rows)
     rows = list(rows)
     by_track = _credits_by_track(rows)
     # `.get(id, [])`, not `.get(id)`: an empty list says "already resolved, this
     # one simply has no credit rows". None would send it back to the per-row
     # query and undo the batching for every plain single-artist track.
     return [_db_track(t, by_track.get(t.id, [])) for t in rows]
+
+
+# -- big lists, read as tuples --------------------------------------------------
+# A 4000-track favourites page or playlist spent three quarters of its time in
+# Peewee building a Track, an Album and an Artist object per row — parsing three
+# UUIDs and a datetime, a setattr per column — only for ``_db_track`` to flatten
+# them straight back into a dict. Measured on 8000 tracks: 405 ms for the
+# favourites, 447 for a 4000-track playlist. Read as tuples of exactly the
+# columns the JSON carries, the same answer takes a fraction of that; the
+# output is byte-for-byte ``_db_track``'s (tests/test_webui.py compares them).
+
+
+def _raw(field):
+    """``field`` read without Peewee's per-row conversion: a UUID comes back as
+    text (32 hex digits on SQLite and MySQL, dashed on Postgres) instead of
+    being parsed into a ``uuid.UUID`` on every row. MySQL spells the cast
+    CHAR."""
+    target = getattr(db, "obj", db)
+    return field.cast("CHAR" if isinstance(target, peewee.MySQLDatabase) else "TEXT")
+
+
+def _uuid_text(v) -> str:
+    """A raw UUID column as ``str(uuid.UUID(...))`` would print it."""
+    if isinstance(v, uuid.UUID):
+        return str(v)
+    s = str(v)
+    if len(s) == 32:
+        return f"{s[:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:]}"
+    return s
+
+
+_ROW_COLUMNS = None
+
+
+def _row_columns():
+    global _ROW_COLUMNS
+    if _ROW_COLUMNS is None:
+        _ROW_COLUMNS = (
+            _raw(Track.id),
+            Track.deezer_id,
+            Track.title,
+            Track.duration,
+            Track.unavailable.is_null(False),
+            Track.gain,
+            _raw(Artist.id),
+            Artist.deezer_id,
+            Artist.name,
+            _raw(Album.id),
+            Album.deezer_id,
+            Album.name,
+            Album.cover_md5,
+        )
+    return _ROW_COLUMNS
+
+
+def _credits_by_raw_id(tids: list, within=None) -> dict:
+    """``_credits_by_track`` keyed by the raw track id, read as tuples.
+
+    `within` is the list's own query when it can stand in for the id list: one
+    statement with a subquery instead of ten with four hundred parameters each
+    (building those parameter lists was a third of what was left of a big
+    list's time)."""
+    out: dict = {}
+
+    def read(cond):
+        rows = (
+            TrackArtist.select(
+                _raw(TrackArtist.track), Artist.deezer_id, _raw(Artist.id), Artist.name, TrackArtist.role
+            )
+            .join(Artist)
+            .where(cond)
+            .order_by(TrackArtist.track, TrackArtist.position)
+            .tuples()
+        )
+        for tid, adz, aid, name, role in rows:
+            out.setdefault(tid, []).append(
+                {"deezer_id": str(adz or _uuid_text(aid)), "name": name, "role": role}
+            )
+
+    if within is not None:
+        read(TrackArtist.track.in_(within))
+        return out
+    for i in range(0, len(tids), _IN_CHUNK):
+        read(TrackArtist.track << tids[i : i + _IN_CHUNK])
+    return out
+
+
+def _db_track_rows(query) -> list:
+    """``_db_tracks`` for a query: the same dicts, from tuples."""
+    rows = list(query.select(*_row_columns()).tuples())
+    # The list's own selection as the credits' subquery — unordered, and only
+    # without a LIMIT, which MySQL refuses inside IN (...).
+    within = None
+    if getattr(query, "_limit", None) is None and getattr(query, "_offset", None) is None:
+        within = query.select(Track.id).order_by().where(Track.deezer_id.is_null(False))
+    credits = _credits_by_raw_id([r[0] for r in rows if r[1] is not None], within)
+    out = []
+    for tid, dz, title, duration, gone, gain, aid, adz, aname, alid, aldz, alname, md5 in rows:
+        if dz is None:
+            uid = _uuid_text(tid)
+            artist_id = _uuid_text(aid)
+            out.append(
+                {
+                    "deezer_id": uid,
+                    "local": True,
+                    "title": title,
+                    "duration": duration or 0,
+                    "explicit": False,
+                    "unavailable": bool(gone),
+                    "gain": gain,
+                    "artist": {"deezer_id": artist_id, "name": aname},
+                    "artists": [{"deezer_id": artist_id, "name": aname, "role": "Main"}],
+                    "display_artist": aname,
+                    "album": {
+                        "deezer_id": _uuid_text(alid),
+                        "title": alname,
+                        "cover": "/api/localcover/" + uid,
+                    },
+                }
+            )
+            continue
+        artists = credits.get(tid) or [
+            {"deezer_id": str(adz or _uuid_text(aid)), "name": aname, "role": "Main"}
+        ]
+        out.append(
+            {
+                "deezer_id": str(dz),
+                "title": title,
+                "duration": duration or 0,
+                "explicit": False,
+                "unavailable": bool(gone),
+                "gain": gain,
+                "artist": {"deezer_id": str(adz or ""), "name": aname},
+                "artists": artists,
+                "display_artist": _display_artist(artists, aname),
+                "album": {
+                    "deezer_id": str(aldz or ""),
+                    "title": alname,
+                    "cover": _image("cover", md5),
+                },
+            }
+        )
+    return out
 
 
 def _db_track(t: Track, credits: list | None = None) -> dict:
@@ -895,16 +1052,37 @@ def _db_track(t: Track, credits: list | None = None) -> dict:
 # can be rebuilt straight from the DB — no Deezer call — for offline browsing.
 
 
-def _db_album_card(alb: Album) -> dict:
-    """A compact album entry (grid card), matching ``_album_api``'s shape."""
+def _db_album_card(alb: Album, stats: tuple | None = None) -> dict:
+    """A compact album entry (grid card), matching ``_album_api``'s shape.
+    `stats` is (track count, first year) from ``_db_album_cards``; without it
+    this album is counted on its own (two queries)."""
+    if stats is None:
+        stats = (alb.tracks.count(), alb.tracks.select(fn.min(Track.year)).scalar())
     return {
         "deezer_id": str(alb.deezer_id or ""),
         "title": alb.name,
         "cover": _image("cover", alb.cover_md5),
         "artist": {"deezer_id": str(alb.artist.deezer_id or ""), "name": alb.artist.name},
-        "nb_tracks": alb.tracks.count(),
-        "year": alb.tracks.select(fn.min(Track.year)).scalar() or None,
+        "nb_tracks": stats[0] or 0,
+        "year": stats[1] or None,
     }
+
+
+def _db_album_cards(albums) -> list:
+    """``_db_album_card`` for a whole grid, counted in one grouped query
+    instead of two per album."""
+    albums = list(albums)
+    stats = {}
+    ids = [a.id for a in albums]
+    for i in range(0, len(ids), _IN_CHUNK):
+        for aid, nb, year in (
+            Track.select(Track.album, fn.COUNT(Track.id), fn.MIN(Track.year))
+            .where(Track.album << ids[i : i + _IN_CHUNK])
+            .group_by(Track.album)
+            .tuples()
+        ):
+            stats[aid] = (nb, year)
+    return [_db_album_card(a, stats.get(a.id, (0, None))) for a in albums]
 
 
 def _db_album_tracks(alb: Album) -> list:
@@ -944,7 +1122,7 @@ def _db_artist_response(ar: Artist) -> dict:
         .where(Album.artist == ar)
         .order_by(Album.name)
     )
-    cards = [_db_album_card(a) for a in albums]
+    cards = _db_album_cards(albums)
     # A few of the artist's tracks as a stand-in "top" shelf (DB order).
     top_q = (
         Track.select(Track, Album, Artist)
@@ -1364,7 +1542,9 @@ def smarttracklist(sid):
     # Deezer down/disabled: serve the last synced copy of this mix from the DB.
     pl = _db_mix_for(sid)
     if pl is not None:
-        tracks = _db_tracks(pl.get_tracks())
+        # Not pl.get_tracks(): it lazy-loads each row's album and artist, two
+        # queries per track.
+        tracks = _db_tracks(_db_playlist_track_rows(pl))
         title = pl.name[len("Deezer · "):] if pl.name.startswith("Deezer · ") else pl.name
         return jsonify(
             {
@@ -1660,7 +1840,7 @@ def discography(artist_id):
         ar = Artist.select().where(Artist.deezer_id == str(artist_id)).first()
         if ar is not None:
             albums = Album.select(Album, Artist).join(Artist).where(Album.artist == ar)
-            cards = [_db_album_card(a) for a in albums]
+            cards = _db_album_cards(albums)
             cards.sort(key=lambda x: str(x.get("year") or ""), reverse=True)
             # Keys the Artist page reads: `album` (grid) and `all` (latest shelf).
             return jsonify({"discography": {"album": cards, "all": cards} if cards else {}})
@@ -1987,31 +2167,66 @@ def my_playlists():
     # The playlists belong to the account owner (admin); guests don't see them.
     if not _is_admin():
         return jsonify({"playlists": []})
-    out = []
     query = (
-        Playlist.select()
+        Playlist.select(_raw(Playlist.id), Playlist.deezer_id, Playlist.name)
         .where(
             (Playlist.user == request.webuser) | (Playlist.deezer_id.is_null(False))
         )
         .order_by(Playlist.created.desc())
+        .tuples()
     )
-    for pl in query:
-        # Count + first-track cover only — loading every track of every
-        # playlist just for this made the list (refetched after each playlist
-        # edit) scale with the whole library.
-        nb = PlaylistTrack.select().where(PlaylistTrack.playlist == pl).count()
-        first = _db_playlist_track_rows(pl).limit(1).first()
-        out.append(
-            {
-                "id": str(pl.id),
-                "deezer_id": pl.deezer_id,
-                "title": pl.name,
-                # credits=[]: only the cover is read (see above).
-                "cover": _db_playlist_cover([_db_track(first, credits=[])]) if first else None,
-                "nb_tracks": nb,
-                "editable": True,
-            }
+    lists = list(query)
+    # Count + first-track cover only — loading every track of every playlist
+    # just for this made the list (refetched after each playlist edit) scale
+    # with the whole library. And both in ONE query each for all the
+    # playlists: asked per playlist, it was two statements a playlist (122 for
+    # sixty, measured, 90 ms).
+    counts = {}
+    covers = {}
+    pids = [p[0] for p in lists]
+    for i in range(0, len(pids), _IN_CHUNK):
+        chunk = pids[i : i + _IN_CHUNK]
+        for pid, nb in (
+            PlaylistTrack.select(_raw(PlaylistTrack.playlist), fn.COUNT(PlaylistTrack.id))
+            .where(PlaylistTrack.playlist << chunk)
+            .group_by(PlaylistTrack.playlist)
+            .tuples()
+        ):
+            counts[pid] = nb
+        first = (
+            PlaylistTrack.select(
+                PlaylistTrack.playlist.alias("pl"), fn.MIN(PlaylistTrack.index).alias("ix")
+            )
+            .join(Track)
+            .join(Album)
+            .switch(Track)
+            .join(Artist)
+            .where(PlaylistTrack.playlist << chunk)
+            .group_by(PlaylistTrack.playlist)
+            .alias("first")
         )
+        for pid, tid, dz, md5 in (
+            PlaylistTrack.select(_raw(PlaylistTrack.playlist), _raw(Track.id), Track.deezer_id, Album.cover_md5)
+            .join(first, on=((PlaylistTrack.playlist == first.c.pl) & (PlaylistTrack.index == first.c.ix)))
+            .switch(PlaylistTrack)
+            .join(Track)
+            .join(Album)
+            .tuples()
+        ):
+            if pid in covers:
+                continue
+            covers[pid] = "/api/localcover/" + _uuid_text(tid) if dz is None else _image("cover", md5)
+    out = [
+        {
+            "id": _uuid_text(pid),
+            "deezer_id": dz,
+            "title": name,
+            "cover": covers.get(pid),
+            "nb_tracks": counts.get(pid, 0),
+            "editable": True,
+        }
+        for pid, dz, name in lists
+    ]
     return jsonify({"playlists": out})
 
 
@@ -2019,17 +2234,29 @@ def my_playlists():
 @login_required
 def my_favorite_ids():
     """Just the favorite track ids (cheap) — for accurate heart state in the UI."""
+    # Two columns, as text: this used to hydrate a Track, an Album and an
+    # Artist per star (twice, local then Deezer) to read one id from each —
+    # 314 ms for 4000 stars, measured, for a 40 KB answer.
+    rows = (
+        Track.select(_raw(Track.id), Track.deezer_id)
+        .join(Album)
+        .switch(Track)
+        .join(Artist)
+        .switch(Track)
+        .join(StarredTrack, on=(StarredTrack.starred == Track.id))
+        .where(StarredTrack.user == request.webuser)
+        .order_by(StarredTrack.date.desc())
+        .tuples()
+    )
     # Guests: their own private stars only (Deezer id when known, else UUID).
     if not _is_admin():
-        ids = [str(t.deezer_id) if t.deezer_id else str(t.id) for t in _user_starred()]
-        return jsonify({"ids": ids})
+        return jsonify({"ids": [str(dz) if dz else _uuid_text(tid) for tid, dz in rows]})
     # Always seed from the DB stars (local UUIDs + the admin's Deezer stars),
     # THEN union the live Deezer favorites. Reading only the live list dropped a
     # star whose push was disabled (push_to_deezer off) or failed, leaving its
     # heart empty; the union keeps every star the user actually made. A set
     # de-dupes the overlap between the DB mirror and the live list.
-    ids = {str(t.id) for t in _local_starred()}
-    ids |= {str(t.deezer_id) for t in _deezer_starred() if t.deezer_id}
+    ids = {str(dz) if dz is not None else _uuid_text(tid) for tid, dz in rows}
     provider = _provider()
     if provider is not None:
         try:
@@ -2060,7 +2287,7 @@ def my_local():
 def my_favorites():
     # Guests: their own private stars only (no Deezer-account favorites).
     if not _is_admin():
-        return jsonify({"tracks": _db_tracks(_user_starred())})
+        return jsonify({"tracks": _db_tracks(_user_starred_query())})
     # Prefer the live Deezer favorites (they carry the "added" date and any
     # brand-new stars not yet synced), but never let a Deezer outage 500 the
     # route — fall back to the favorites already mirrored into the DB. While an
@@ -2089,7 +2316,7 @@ def my_favorites():
         except Exception:
             _log_deezer_failure("Deezer favorites fetch failed; serving from DB")
     # Deezer disabled or unreachable: every star from the DB (local + synced).
-    return jsonify({"tracks": _db_tracks(_user_starred())})
+    return jsonify({"tracks": _db_tracks(_user_starred_query())})
 
 
 # -- podcasts ---------------------------------------------------------------
@@ -2107,7 +2334,29 @@ def _podcast_owner():
     return request.webuser
 
 
-def _channel(c, with_episodes=False):
+def _channel_counts(ids: list) -> dict:
+    """{channel id: (episodes, archived episodes)} in one grouped query."""
+    out = {}
+    archived = fn.SUM(peewee.Case(None, [(PodcastEpisode.path.is_null(False), 1)], 0))
+    for i in range(0, len(ids), _IN_CHUNK):
+        for cid, nb, arch in (
+            PodcastEpisode.select(PodcastEpisode.channel, fn.COUNT(PodcastEpisode.id), archived)
+            .where(PodcastEpisode.channel << ids[i : i + _IN_CHUNK])
+            .group_by(PodcastEpisode.channel)
+            .tuples()
+        ):
+            out[cid] = (nb, int(arch or 0))
+    return out
+
+
+def _channel(c, with_episodes=False, counts=None):
+    """A podcast channel for the SPA. `counts` is (episodes, archived) from
+    ``_channel_counts``; without it this channel is counted on its own."""
+    if counts is None:
+        counts = (
+            c.episodes.count(),
+            c.episodes.where(PodcastEpisode.path.is_null(False)).count(),
+        )
     info = {
         "id": str(c.id),
         "deezer_id": c.deezer_id,
@@ -2120,7 +2369,7 @@ def _channel(c, with_episodes=False):
             if c.gone is not None
             else _image("talk", c.cover_art_md5)
         ),
-        "episode_count": c.episodes.count(),
+        "episode_count": counts[0],
         "status": "error" if c.error_message else "ok",
         # False for a show you unsubscribed from but whose episodes are
         # archived: it no longer syncs, and everything downloaded stays yours.
@@ -2129,7 +2378,7 @@ def _channel(c, with_episodes=False):
         # podcast: everything archived stays listed and playable, served from
         # disk, cover included. Nothing about it depends on Deezer any more.
         "local": c.gone is not None,
-        "archived_count": c.episodes.where(PodcastEpisode.path.is_null(False)).count(),
+        "archived_count": counts[1],
     }
     if with_episodes:
         info["episodes"] = [
@@ -2186,8 +2435,9 @@ def podcasts():
     # Unsubscribed-but-archived shows are still listed (flagged `subscribed:
     # false`): the audio is on the server and must stay reachable — the whole
     # point of archiving is that leaving Deezer's catalogue changes nothing.
-    channels = PodcastChannel.select().order_by(fn.lower(PodcastChannel.title))
-    return jsonify({"podcasts": [_channel(c) for c in channels]})
+    channels = list(PodcastChannel.select().order_by(fn.lower(PodcastChannel.title)))
+    counts = _channel_counts([c.id for c in channels])
+    return jsonify({"podcasts": [_channel(c, counts=counts.get(c.id, (0, 0))) for c in channels]})
 
 
 @webapi.route("/podcast/<pid>")
