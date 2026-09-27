@@ -76,6 +76,7 @@ const LAYOUT: &[(&str, usize)] = &[
     ("bands", BAND_COUNT),
     ("energyDb", 6),
     ("energy", 6),
+    ("ways", 3),
     ("level", 1),
     ("levelDb", 1),
     ("peak", 1),
@@ -219,6 +220,8 @@ struct Snap {
     bands: [f32; BAND_COUNT],
     energy_db: [f32; 6],
     energy_lin: [f32; 6],
+    /// The crossover's three ways (see `ways`).
+    ways: [f32; 3],
     f: Features,
     c_flux: f32,
     onset: f32,
@@ -375,6 +378,7 @@ impl Analyzer {
             bands: [0.0; BAND_COUNT],
             energy_db: [FLOOR_DB; 6],
             energy_lin: [0.0; 6],
+            ways: [0.0; 3],
             f: Features::default(),
             c_flux: 0.0,
             onset: 0.0,
@@ -497,6 +501,23 @@ impl Analyzer {
             let snap = &mut self.snaps[slot];
             self.bands.read(&self.lo_db, &self.hi_db, &mut bands_db, &mut snap.bands);
             self.energy.read(&self.lo_mag, &self.hi_mag, &mut snap.energy_db, &mut snap.energy_lin);
+            // THE CROSSOVER'S THREE WAYS — 20-160 Hz, 160 Hz-2 kHz, 2-16 kHz —
+            // as summed power off the FAST spectrum (a 43 ms window). The six
+            // energy bands read their low end off the fine one, whose window
+            // is 170 ms long: a sub way built on them peaked a quarter of a
+            // beat after the kick at 128 BPM, where the horns, read fast,
+            // landed on their hats.
+            let hz = self.sr / FFT_HI as f32;
+            let bin = |f: f32| ((f / hz).round() as usize).clamp(1, FFT_HI / 2 - 1);
+            let edges = [bin(20.0), bin(160.0), bin(2000.0), bin(16000.0)];
+            for k in 0..3 {
+                let mut p = 0f32;
+                for i in edges[k]..edges[k + 1] {
+                    let m = self.hi_mag[i];
+                    p += m * m;
+                }
+                snap.ways[k] = p;
+            }
             snap.frame = n;
             snap.t = t;
         }
@@ -819,6 +840,7 @@ impl Analyzer {
         o[at!("bands")..at!("bands") + BAND_COUNT].copy_from_slice(&snap.bands);
         o[at!("energyDb")..at!("energyDb") + 6].copy_from_slice(&snap.energy_db);
         o[at!("energy")..at!("energy") + 6].copy_from_slice(&snap.energy_lin);
+        o[at!("ways")..at!("ways") + 3].copy_from_slice(&snap.ways);
         o[at!("level")] = f.level;
         o[at!("levelDb")] = f.level_db;
         o[at!("peak")] = f.peak;

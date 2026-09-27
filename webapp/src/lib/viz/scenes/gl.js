@@ -479,6 +479,16 @@ export function createGLScene(opts = {}) {
         dyn = f.dynamics;
       }
     }
+    // The crossover's three ways (viz_scene.rs `uPump`), when the analyser
+    // (or the tab publishing it) sent them.
+    const w = frame.ways;
+    if (w) {
+      flags |= SCENE_FLAGS.ways;
+      const wi = sc.ways();
+      wi[0] = w[0];
+      wi[1] = w[1];
+      wi[2] = w[2];
+    }
     sc.update(dt, now(), n, flags, pitch, melody, dyn);
     pull();
     // A driver that reads the analysis itself, at its own rate — the scope,

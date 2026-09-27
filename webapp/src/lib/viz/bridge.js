@@ -123,6 +123,11 @@ export function createPublisher({ onViewers, channel } = {}) {
   let hadBeat = false;
   let hadDown = false;
   let hadKick = false;
+  // The crossover's ways, max-held over the frames the throttle drops: a
+  // cone's attack lives for a frame or two, and sampling it at 45 Hz would
+  // miss half the kicks the way the events once did.
+  const waysHeld = new Float32Array(3);
+  let hasWays = false;
   let hadStyleHit = false;
   let peakOnset = 0;
   // The musical layer's events, latched for exactly the same reason.
@@ -248,6 +253,11 @@ export function createPublisher({ onViewers, channel } = {}) {
       if (fb.beat) hadBeat = true;
       if (fb.downbeat) hadDown = true;
       if (ff?.kickHit) hadKick = true;
+      const fw = frame.ways;
+      if (fw) {
+        hasWays = true;
+        for (let k = 0; k < 3; k++) if (fw[k] > waysHeld[k]) waysHeld[k] = fw[k];
+      }
       if (frame.style?.kick?.hit) hadStyleHit = true;
       if (fb.onset > peakOnset) peakOnset = fb.onset;
       const fp = frame.pattern;
@@ -278,6 +288,8 @@ export function createPublisher({ onViewers, channel } = {}) {
           frame.energy.high,
           frame.energy.air,
         ],
+        // The crossover (lib/audio/engine.js `ways`), held since the last send.
+        w3: hasWays ? [waysHeld[0], waysHeld[1], waysHeld[2]] : null,
         // Only the descriptors the scenes actually read — but ALL of them. The
         // melodic channel and the dynamics gate were missing, so the projector
         // ran the same scenes with `dynamics` undefined (no quiet passages) and
@@ -327,6 +339,7 @@ export function createPublisher({ onViewers, channel } = {}) {
           : null,
       });
       hadBeat = hadDown = hadKick = hadStyleHit = false;
+      waysHeld.fill(0);
       hadMain = hadBig = hadRollKick = hadDrop = false;
       peakOnset = 0;
     },
@@ -366,6 +379,7 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2, ini
   const ch = open();
   const id = Math.random().toString(36).slice(2);
   const energy = { sub: 0, bass: 0, lowMid: 0, mid: 0, high: 0, air: 0 };
+  const ways = new Float32Array(3);
   const features = {
     level: 0, flux: 0, lowFlux: 0, midFlux: 0, highFlux: 0, centroidN: 0,
     flatness: 0, percussivity: 0, vocalMod: 0, crest: 0, silent: true, kick: 0,
@@ -399,7 +413,7 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2, ini
     t: 0, dt: 1 / 60,
     bands: new Float32Array(BAND_COUNT),
     energy, features, beat, pattern: null, style: null, genre: null, silent: true,
-    wave: null,
+    wave: null, ways: null,
   };
   let lastAt = 0;
   let lastBeat = 0;
@@ -466,6 +480,9 @@ export function createSubscriber(onFrame, onMeta, onState, initialLevel = 2, ini
       const e2 = m.e;
       energy.sub = e2[0]; energy.bass = e2[1]; energy.lowMid = e2[2];
       energy.mid = e2[3]; energy.high = e2[4]; energy.air = e2[5];
+      // An older publisher sends no crossover: the scene falls back to the
+      // energy bands (viz_scene.rs).
+      frame.ways = m.w3 ? (ways.set(m.w3), ways) : null;
       if (m.f) {
         const a = m.f;
         features.level = a[0]; features.flux = a[1]; features.lowFlux = a[2];

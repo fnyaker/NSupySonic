@@ -106,7 +106,7 @@ export function sceneLayouts(c) {
 }
 
 // The scene's buffers, by `viz_scene_ptr` index.
-const BUF = { in: 0, out: 1, bands: 2, chroma: 3, pack: 4, prep: 5, block: 6, spec: 7, hist: 8, specSmooth: 9 };
+const BUF = { in: 0, out: 1, bands: 2, chroma: 3, pack: 4, prep: 5, block: 6, spec: 7, hist: 8, specSmooth: 9, ways: 10 };
 
 /**
  * One GL scene's arithmetic (see viz_scene.rs): the musical reading, the
@@ -142,6 +142,7 @@ export class SceneCore {
     this.output = view(BUF.out, x.viz_scene_len(BUF.out), Float64Array);
     this.bands = view(BUF.bands, x.viz_scene_len(BUF.bands), Float32Array);
     this.chroma = view(BUF.chroma, 12, Float32Array);
+    this.ways = view(BUF.ways, 3, Float32Array);
     this.packIn = view(BUF.pack, x.viz_scene_len(BUF.pack), Float64Array);
     this.prep = view(BUF.prep, x.viz_scene_len(BUF.prep), Float64Array);
     // Exactly the block's length: the renderer uploads the whole view.
@@ -170,7 +171,7 @@ export class SceneCore {
 }
 
 /** `update`'s flags (viz_scene.rs F_*). */
-export const SCENE_FLAGS = { chroma: 2, pitch: 4, melody: 8, dynamics: 16, features: 32 };
+export const SCENE_FLAGS = { chroma: 2, pitch: 4, melody: 8, dynamics: 16, features: 32, ways: 64 };
 
 /**
  * The oscilloscope (lib/viz/scenes/scope.js draws it; see viz_scope.rs for the

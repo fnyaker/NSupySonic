@@ -254,6 +254,7 @@ import { Rhythm } from "../src/lib/audio/rhythm-core.js";
 import { familyTable, familyAt, ARCHETYPES, LOOK_KEYS } from "../src/lib/audio/style.js";
 import { ENERGY_BANDS } from "../src/lib/audio/spectrum.js";
 import { SONG_BY_ID, SR as SONG_SR } from "./songs.mjs";
+import { renderTrack, KICKS } from "./synth.mjs";
 import { loadSong } from "./eval/rhythm-eval.mjs";
 import { createMusical, LOOK_ORDER, GENRE_ORDER } from "../src/lib/viz/musical.js";
 import { createMusical as refMusical } from "./reference/musical.js";
@@ -267,9 +268,9 @@ const GENRE_KEYS = ["lead", "buzz", "screech", "sub", "offbeat", "density", "tai
 const analysed = new Map();
 /** A record's analysis, one frame object per hop: `{ frames, hop }`. */
 function analyse(id, seconds = 0) {
-  const key = `${id}:${seconds}`;
+  const key = typeof id === "string" ? `${id}:${seconds}` : id;
   if (analysed.has(key)) return analysed.get(key);
-  const { pcm } = loadSong(SONG_BY_ID.get(id));
+  const { pcm } = typeof id === "string" ? loadSong(SONG_BY_ID.get(id)) : id;
   const src = seconds ? pcm.subarray(0, Math.min(pcm.length, seconds * SONG_SR)) : pcm;
   const r = Rhythm.fromModule(RHYTHM, SONG_SR);
   r.loadFamilies(familyTable());
@@ -301,6 +302,7 @@ function decode(b, F) {
   return {
     bands: vec("bands"),
     energy,
+    ways: vec("ways"),
     features: {
       level: v("level"), dynamics: v("dynamics"), kick: v("kick"), kickHit: v("kickHit") > 0,
       midFlux: v("midFlux"), highFlux: v("highFlux"), centroidN: v("centroidN"),
@@ -601,4 +603,41 @@ test("the Rust reading and scene cost less than the JavaScript they replaced", a
   );
   assert.ok(rustReading < jsReading * 0.85, `the reading: Rust ${rustReading.toFixed(2)} us against ${jsReading.toFixed(2)} us`);
   assert.ok(perSecond(rust) < perSecond(js) * 0.85, `the scene: ${perSecond(rust).toFixed(0)} us a second against ${perSecond(js).toFixed(0)}`);
+});
+
+test("the rig's crossover: the subs pump on the kick, the horns on the offbeat hat", async () => {
+  // THE CROSSOVER (uPump, viz_scene.rs): the soundsystem's cones used to
+  // follow the mix's balance, one slow swell every cone shared, with the
+  // kick's envelope added to the mids so that they moved at all. Each way now
+  // moves with its own part of the music. On a kick on every beat and a
+  // closed hat on every offbeat and nothing else, the subs and the horns must
+  // peak HALF A BEAT apart, and each must actually move. Measured, over the
+  // beat in eighths: the subs 0.61 in the kick's first eighth and 1.00 in
+  // the second (they stay out while the kick's body sounds), falling to 0.10
+  // by the next kick; the horns 0.62 on the hat and 0.02 just before it. The
+  // ways are read off the FAST spectrum (lib.rs \`ways\`): read off the energy
+  // bands, whose low end comes from a 170 ms window, the subs peaked a
+  // quarter of a beat after the kick.
+  const { MUSIC_OFFSET } = await import("../src/lib/viz/gl/glsl.js");
+  const pcm = renderTrack({ bpm: 128, seconds: 24, kickOpt: KICKS.techno, hats: 1.2 }).pcm;
+  const { b } = await sideBySide({ pcm }, { world: "soundsystem" });
+  const bins = 8;
+  const prof = [0, 1, 2].map(() => new Float64Array(bins));
+  const cnt = new Float64Array(bins);
+  b.forEach((pic, k) => {
+    if (k / 60 < 8) return;
+    const bi = Math.floor(pic.block[MUSIC_OFFSET.uPhase] * bins) % bins;
+    for (let w = 0; w < 3; w++) prof[w][bi] += pic.block[MUSIC_OFFSET.uPump + w];
+    cnt[bi]++;
+  });
+  for (let w = 0; w < 3; w++) for (let i = 0; i < bins; i++) prof[w][i] /= Math.max(1, cnt[i]);
+  const peak = (a) => a.indexOf(Math.max(...a));
+  const [sub, , high] = prof.map((a) => Array.from(a));
+  const apart = Math.abs(peak(sub) - peak(high));
+  const circ = Math.min(apart, bins - apart) / bins;
+  console.log(`# subs  ${sub.map((v) => v.toFixed(2)).join(" ")}`);
+  console.log(`# horns ${high.map((v) => v.toFixed(2)).join(" ")}`);
+  assert.ok(circ >= 0.375, `the subs peak at ${peak(sub) / bins}, the horns at ${peak(high) / bins}: ${circ} of a beat apart`);
+  assert.ok(Math.max(...sub) - Math.min(...sub) > 0.3, "the subs do not pump");
+  assert.ok(Math.max(...high) - Math.min(...high) > 0.5, "the horns do not move");
 });

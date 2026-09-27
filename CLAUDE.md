@@ -1312,7 +1312,15 @@ empty.
   texture's 128 texels and max-held between pictures, its release in beats, the band shares, the
   history row per sixteenth, the clocks extrapolated to the instant of the picture, and the whole
   uniform block — packed at `glsl.js#MUSIC_OFFSET`, handed over BY NAME once (`SceneCore`), so the
-  layout still lives in one place. A picture is asked for in two halves, `prepare` (the clocks and
+  layout still lives in one place. It also holds the rig's CROSSOVER (`uPump`): three ways —
+  20-160 Hz, 160 Hz-2 kHz, 2-16 kHz, the power the analyser reads off the FAST spectrum (`ways` in
+  the frame, carried to the projector held over the frames its throttle drops) — each against its
+  own recent loud level, thrown out at once and falling back with a cone's mass. The `soundsystem`
+  world's subs, mids and horns each move on their own part of the music: they used to share one
+  slow swell (the mix's balance), with the kick added to the mids to make them move at all, and
+  read off the energy bands (whose low end is a 170 ms window) the subs peaked a quarter of a beat
+  after the kick. Pinned in `vizcore.test.mjs` on a kick and an offbeat hat: the subs and the horns
+  peak half a beat apart. A picture is asked for in two halves, `prepare` (the clocks and
   the spectrum, which the drivers read) and `pack` (the block, once they have run). `viz_scope.rs`
   is the oscilloscope's trigger, per-column min/max and auto-range; `viz_bars.rs` the canvas bars'
   levelling.

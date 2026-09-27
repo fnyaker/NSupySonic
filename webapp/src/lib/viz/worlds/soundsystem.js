@@ -12,9 +12,14 @@
 //   the dust cap catching a highlight. Every one of those surfaces has a
 //   normal, and the light that sweeps across the wall slides over them, so
 //   the rig reads as hardware under a lamp.
-//   THE EXCURSION is each band's own level: the subs pump with the sub, the
-//   mids with the mids, the horns with the top end. A cone pushed out swells a
-//   little, catches more light, and its surround stretches flat.
+//   THE EXCURSION is each way of the rig's crossover (uPump): the subs are
+//   thrown out by the kick and the sub bass, the mid cones by the snare, the
+//   chords and the voice, the horns by the hats and the top of the leads — each
+//   on ITS OWN rhythm, against its own loud level, and falling back with its
+//   own mass (the subs slowest). They used to follow the mix's balance, a slow
+//   swell every cone shared, with the kick added to the mids to make them move
+//   at all. A cone pushed out swells, catches more light, and its surround
+//   stretches flat.
 //   THE PRESSURE. Every main kick sends a ring of displaced air out of each
 //   sub, bending the picture as it passes; a big kick shakes the whole stack.
 //   THE LIGHTS: two coloured lamps sweep the wall on the bar, a UV line
@@ -40,8 +45,8 @@ export default {
 vec3 cone(vec2 p, vec2 c, float R, float e, vec3 L1, vec3 L2, vec3 c1, vec3 c2, float px, out float cov) {
   vec2 d = p - c;
   float rr = length(d) / R;
-  // A cone pushed out swells a little.
-  rr /= 1.0 + 0.045 * e;
+  // A cone pushed out swells toward the viewer.
+  rr /= 1.0 + 0.07 * e;
   vec2 dir = d / max(length(d), 1e-5);
   cov = smoothstep(1.02, 1.02 - px / R * 1.5, rr);
   vec3 n = vec3(0.0, 0.0, 1.0);
@@ -194,11 +199,11 @@ void main() {
   float cov = 0.0;
   if (kind < 0.5) {
     float R = min(cw, hRow) * 0.44;
-    float e = clamp(uBandA.x * 1.1 + 0.5 * uHit.x, 0.0, 1.0) * amp;
+    float e = uPump.x * amp;
     col = mix(col, cone(p, cc, R, e, L1, L2, c1, c2, px, cov), cov);
   } else if (kind < 1.5) {
     float R = min(cw * 0.5, hRow) * 0.42;
-    float e = clamp(uBandA.z * 1.2 + 0.3 * uHit.x, 0.0, 1.0) * amp;
+    float e = uPump.y * amp;
     float side = f.x < 0.5 ? -1.0 : 1.0;
     vec2 c = cc + vec2(side * cw * 0.25, 0.0);
     col = mix(col, cone(p, c, R, e, L1, L2, c1, c2, px, cov), cov);
@@ -206,7 +211,7 @@ void main() {
     // A horn: a flared mouth with a compression driver at its throat.
     vec2 q = (p - cc) / vec2(cw * 0.44, hRow * 0.4);
     float mouth = sdBox2(q, vec2(1.0, 1.0));
-    float e = clamp(uBandB.x * 1.4, 0.0, 1.0) * amp;
+    float e = uPump.z * amp;
     if (mouth < 0.0) {
       float depth = max(abs(q.x), abs(q.y));
       vec2 dir = abs(q.x) > abs(q.y) ? vec2(sign(q.x), 0.0) : vec2(0.0, sign(q.y));

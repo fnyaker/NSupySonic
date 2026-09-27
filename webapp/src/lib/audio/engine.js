@@ -259,9 +259,15 @@ export const GENRE_KEYS = ["lead", "buzz", "screech", "sub", "offbeat", "density
 const genreOut = {};
 for (const k of GENRE_KEYS) genreOut[k] = 0;
 
+// THE CROSSOVER's three ways — 20-160 Hz, 160 Hz-2 kHz, 2-16 kHz — as power off
+// the fast spectrum (rhythm/src/lib.rs `ways`): what a rig's subs, mids and
+// horns each move with. Null until something has measured them.
+const waysOut = new Float32Array(3);
+
 export const frame = {
   t: 0,
   dt: 1 / 94,
+  ways: null,
   bands: new Float32Array(BAND_COUNT),
   bandsDb: new Float32Array(BAND_COUNT).fill(FLOOR_DB),
   centers: new Float32Array(BAND_COUNT),
@@ -722,6 +728,12 @@ function deliver(q, nowMs, heard) {
     energyDb[i] = buf[I.energyDb + i];
     energyLin[ENERGY_BANDS[i][0]] = buf[I.energy + i];
   }
+  if (I.ways != null) {
+    waysOut[0] = buf[I.ways];
+    waysOut[1] = buf[I.ways + 1];
+    waysOut[2] = buf[I.ways + 2];
+    frame.ways = waysOut;
+  }
 
   const f = features;
   f.level = buf[I.level];
@@ -1054,6 +1066,19 @@ function fallbackTick() {
   readEnergy(fb.plans.energy, fb.lo, fb.hi, energyDb, FLOOR_DB);
   for (let i = 0; i < ENERGY_BANDS.length; i++)
     energyLin[ENERGY_BANDS[i][0]] = Math.pow(10, energyDb[i] / 10);
+  // The crossover, off the fast analyser, as the Rust reads it.
+  {
+    const hz = fb.plans.sampleRate / FFT_HI;
+    const hi = fb.hi;
+    const edge = (f) => Math.min(hi.length - 1, Math.max(1, Math.round(f / hz)));
+    const e = [edge(20), edge(160), edge(2000), edge(16000)];
+    for (let k = 0; k < 3; k++) {
+      let p = 0;
+      for (let i = e[k]; i < e[k + 1]; i++) p += Math.pow(10, hi[i] / 10);
+      waysOut[k] = p;
+    }
+    frame.ways = waysOut;
+  }
   let peak = FLOOR_DB;
   for (let i = 0; i < BAND_COUNT; i++) if (frame.bandsDb[i] > peak) peak = frame.bandsDb[i];
   frame.silent = peak < FLOOR_DB + 12;
