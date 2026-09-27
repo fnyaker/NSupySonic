@@ -635,6 +635,114 @@ test("clock bridge: startup readings never place audio, and a real move is re-le
   }
 });
 
+test("clock bridge: a move is believed on the second reading that agrees, and reported", () => {
+  const saved = globalThis.performance.now;
+  let perf = 1000;
+  globalThis.performance.now = () => perf;
+  try {
+    let TRUE = 3; // a context time is never negative: the reading would be refused
+    let jitter = 0;
+    const ctx = {
+      state: "running",
+      get currentTime() {
+        return perf / 1000 + TRUE + 0.03;
+      },
+      getOutputTimestamp() {
+        return { contextTime: perf / 1000 + TRUE + 0.03, performanceTime: perf + 30 + jitter };
+      },
+    };
+    const b = makeClockBridge(ctx, () => 0, () => 0, 0);
+    const read = () => {
+      perf += 50;
+      return b.sample();
+    };
+    for (let i = 0; i < 8; i++) assert.equal(read(), false);
+    const at = (S) => b.toCtx(S) - S / 1000;
+    assert.ok(Math.abs(at(5000) - TRUE) < 1e-9);
+    // One reading 25 ms off, then back: refused, nothing moves.
+    jitter = -25;
+    assert.equal(read(), false);
+    jitter = 0;
+    assert.equal(read(), false);
+    assert.ok(Math.abs(at(5000) - TRUE) < 1e-9, "a lone reading moved the mapping");
+    // The context's mapping steps by a render burst (Chromium does, mid-track):
+    // the second reading that agrees is the move, and sample() says so, so the
+    // guest re-places its audio at once instead of at the next tick.
+    TRUE += 0.0213;
+    assert.equal(read(), false);
+    assert.equal(read(), true);
+    assert.ok(Math.abs(at(5000) - TRUE) < 1e-9, `mapping ${at(5000)} against ${TRUE}`);
+    // ...and usable AT ONCE: the re-place that move calls for needs a server
+    // clock, and a bridge that went back to "not ready" gave it none.
+    assert.ok(b.ready);
+    assert.notEqual(b.serverNow(), null);
+    // Two readings that disagree with the mapping and with each other: no move.
+    // (Not symmetric about it: a median of +20 and -20 would land back on the
+    // mapping by accident and prove nothing.)
+    jitter = 20;
+    assert.equal(read(), false);
+    jitter = 10;
+    assert.equal(read(), false);
+    jitter = 0;
+    assert.equal(read(), false);
+    assert.ok(Math.abs(at(5000) - TRUE) < 1e-9);
+  } finally {
+    globalThis.performance.now = saved;
+  }
+});
+
+test("clock bridge: what the listener is told the device reports, and the no-timestamp case", () => {
+  const saved = globalThis.performance.now;
+  let perf = 2000;
+  globalThis.performance.now = () => perf;
+  try {
+    // The context runs 80 ms ahead of what is heard: that is the output latency
+    // the party page shows ("déjà compensée"), once there are readings enough
+    // to believe — never a first guess.
+    const TRUE = 0.5;
+    const ctx = {
+      state: "running",
+      get currentTime() {
+        return perf / 1000 + TRUE + 0.08;
+      },
+      getOutputTimestamp() {
+        return { contextTime: perf / 1000 + TRUE, performanceTime: perf };
+      },
+    };
+    const b = makeClockBridge(ctx, () => 0, () => 0, 0);
+    for (let i = 0; i < 4; i++) {
+      perf += 50;
+      b.sample();
+    }
+    assert.equal(b.outputLag(), null);
+    for (let i = 0; i < 20; i++) {
+      perf += 50;
+      b.sample();
+    }
+    assert.ok(Math.abs(b.outputLag() - 0.08) < 1e-9);
+
+    // No getOutputTimestamp at all: the context is half a render burst past its
+    // output latency (measured in Chromium; `outputLatency || baseLatency` is
+    // half a burst off), so a context sitting there maps exactly.
+    const bare = {
+      state: "running",
+      outputLatency: 0.072,
+      baseLatency: 0.0232,
+      get currentTime() {
+        return perf / 1000 + TRUE + 0.072 + 0.0116;
+      },
+    };
+    const c = makeClockBridge(bare, () => 0, () => 0, 0);
+    for (let i = 0; i < 8; i++) {
+      perf += 50;
+      c.sample();
+    }
+    assert.ok(Math.abs(c.toCtx(perf) - (TRUE + perf / 1000)) < 1e-9, `off by ${c.toCtx(perf) - (TRUE + perf / 1000)}`);
+  } finally {
+    globalThis.performance.now = saved;
+  }
+});
+
 // -- the host moves on ----------------------------------------------------------------
 //
 // What a listener reported: skipping to the next track on the host, the guest

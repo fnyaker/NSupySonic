@@ -19,6 +19,7 @@ import { get } from "svelte/store";
 import { api } from "../api.js";
 import { current, normalization, player } from "../stores.js";
 import { getContext, isWired, lookaheadSeconds } from "../audio/graph.js";
+import { elementLag, outputClockGeneration, sampleOutputClock } from "../audio/latency.js";
 import { gainFor } from "../gaincache.js";
 import { artistLine } from "../format.js";
 import { startClock } from "./clock.js";
@@ -145,6 +146,13 @@ async function begin(view) {
     measure();
   });
   s.timer = setInterval(measure, MEASURE_MS);
+  // The output clock, read ten times a second whatever else is going on: it is
+  // one call, and a step in it has to be SEEN within half a second, not within
+  // the few seconds four measurements a second would take to notice it.
+  s.clockTimer = setInterval(() => {
+    const el = partySource()?.element?.();
+    if (el && isWired(el)) sampleOutputClock(getContext());
+  }, 100);
   s.hb = setInterval(heartbeat, HEARTBEAT_MS);
   window.addEventListener("pagehide", onPageHide);
   // Where this player is on the shared clock: the fitted line it publishes,
@@ -174,6 +182,7 @@ function stop() {
   session = null;
   if (s.clock) s.clock.stop();
   clearInterval(s.timer);
+  clearInterval(s.clockTimer);
   clearInterval(s.hb);
   clearTimeout(s.quick);
   window.removeEventListener("pagehide", onPageHide);
@@ -216,16 +225,33 @@ function clearSaved() {
 
 // -- measuring -----------------------------------------------------------------
 
-// How far behind its own currentTime this element is HEARD. An element played
-// directly carries its output latency in currentTime already; one routed
-// through the Web Audio graph (effects, crossfade, visualizer) is heard after
-// the graph: the analysis lookahead, the two compressors' lookahead and the
-// context's own output latency.
-function latencyOf(el) {
-  if (!isWired(el)) return 0;
+// How far behind its own currentTime this element is HEARD (lib/audio/latency.js
+// holds the model). An element played directly carries its output latency in
+// currentTime already; one routed through the Web Audio graph (effects,
+// crossfade, visualizer) is heard after the graph: the context's lag behind
+// the listener at that very instant (the OS-reported output latency, a render
+// burst at a time), the analysis look-ahead and the two compressors. The
+// device's own trim comes on top either way.
+//
+// This used to be baseLatency + outputLatency, a constant. The context runs
+// between outputLatency and outputLatency + baseLatency ahead of the listener,
+// so that sum is the far end of the swing: measured end to end (host and guest
+// in headless Chromium, clicks detected on what each really plays), every
+// guest was heard ~14 ms after the host, and each reading the fit was given
+// scattered by a whole render burst. Read against the context at the same
+// instant, the scatter is ±1.5 ms and the guests land within 0.5 ms.
+function latencyOf(el, nowMs = performance.now(), ctxTime) {
   const ctx = getContext();
-  const out = ctx ? (ctx.baseLatency || 0) + (ctx.outputLatency || 0) : 0;
-  return lookaheadSeconds() + 2 * (session ? session.comp : 0) + out;
+  const wired = isWired(el);
+  if (wired) sampleOutputClock(ctx);
+  return elementLag(el, {
+    wired,
+    ctx,
+    lookahead: lookaheadSeconds(),
+    graphDelay: 2 * (session ? session.comp : 0),
+    nowMs,
+    ctxTime,
+  });
 }
 
 function trackInfo(t) {
@@ -253,16 +279,28 @@ function measure() {
     if (!s.retry && s.pub && s.pub.id === null) return;
     return send(s, { id: null });
   }
+  const ctx = getContext();
   const a = performance.now();
   const raw = el.currentTime;
+  const ct = ctx ? ctx.currentTime : 0;
   const b = performance.now();
   const at = (a + b) / 2;
-  const heard = Math.max(0, raw - latencyOf(el));
+  const heard = Math.max(0, raw - latencyOf(el, at, ct));
   const id = String(track.deezer_id);
   if (id !== s.fitId) {
     s.fit.reset();
     s.fitId = id;
     s.stallSince = 0;
+  }
+  // The output clock moved under the line (Chromium steps its mapping by a
+  // render burst a few seconds into a context's life): every reading the fit
+  // holds is off by that step. Start the line again, as after a seek — the
+  // median fit would otherwise take seconds to walk across it, and measured
+  // end to end the guests followed a line 21.6 ms off for 4.5 s.
+  const gen = outputClockGeneration();
+  if (gen !== s.clockGen) {
+    s.clockGen = gen;
+    s.fit.reset();
   }
   // The crossfade that brought this track in, if one did — read at the change,
   // while it is still in progress.
