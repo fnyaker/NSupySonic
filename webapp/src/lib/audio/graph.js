@@ -576,6 +576,12 @@ export function registerSource(el) {
   if (el && (analyserWanted || effectsOn())) wireAudio(el);
 }
 
+// The element the player last registered: the one the listener is hearing.
+// Read by what has to follow the sound itself (the lyric line), not the store.
+export function activeSource() {
+  return currentEl;
+}
+
 // Called by a visualizer view when it mounts: from now on we need the analysers,
 // so wire the current element (and future ones) and make sure the context runs.
 export function requestAnalyser() {

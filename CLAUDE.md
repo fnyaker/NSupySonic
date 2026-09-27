@@ -825,6 +825,12 @@ headless Chromium, and three of its rules replaced something measurably wrong:
   audio placed on the wrong mapping. `outputClockGeneration()` tells anything fitted against the old
   mapping (the party host's line) to start again.
 
+**The lyric line changes when it is heard** (`lib/lyrics.js#activeLyricIndex`): it followed the player
+store, written on `timeupdate` four times a second, so every line changed 0-250 ms late — and a fifth
+of a second EARLY with a Bluetooth headset once the graph was wired. It now reads the playing element
+itself, subtracts what the element is heard behind (the trim; the whole graph when wired) and sets one
+timer for the next line: nothing ticks in between, so eco mode has nothing to stop.
+
 **Delivery is on a timer and the look-ahead is automatic.** A held frame used to wait for the next
 worklet message or animation frame: delivery was p95 **12.3 ms late** against the browser's own output
 clock, and is now **−0.8..+0.2 ms** (p05..p95). The look-ahead (`vizLookaheadMode`, "auto" by default;
