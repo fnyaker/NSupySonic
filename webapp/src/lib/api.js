@@ -41,8 +41,8 @@ function refreshInBackground(path) {
     .then(async (res) => {
       reportOnline(); // any response at all proves the server is reachable
       if (!res.ok) return;
-      const data = await res.json();
-      cachePut(path, data).catch(() => {});
+      const text = await res.text();
+      cachePut(path, null, text).catch(() => {});
     })
     .catch(() => {});
 }
@@ -123,9 +123,20 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
     throw { status: res.status, message };
   }
   if (res.status === 204) return null;
+  // The offline cache stores the response's TEXT (apicache.js#cachePut): a
+  // string copy where the parsed object cost a deep clone. Read from a clone
+  // of the response, and after the caller has had its data — the parsed copy
+  // comes from res.json(), which parses straight from the bytes (measured,
+  // text() + JSON.parse on the critical path cost more than it saved).
+  const copy = cacheable ? res.clone() : null;
   const data = await res.json();
-  // Refresh the offline cache with the fresh copy (fire-and-forget).
-  if (cacheable) cachePut(path, data).catch(() => {});
+  if (copy)
+    setTimeout(() => {
+      copy
+        .text()
+        .then((text) => cachePut(path, null, text))
+        .catch(() => {});
+    }, 0);
   return data;
 }
 

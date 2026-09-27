@@ -76,6 +76,15 @@
 
   $: committed = dx >= COMMIT;
 
+  // A recycled row (TrackList keys rows by position): a gesture begun on the
+  // previous track must never commit on this one.
+  let swipeFor = null;
+  $: if (track !== swipeFor) {
+    swipeFor = track;
+    resetSwipe();
+    swiped = false;
+  }
+
   function resetSwipe() {
     armed = false;
     axis = null;

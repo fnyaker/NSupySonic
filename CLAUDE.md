@@ -89,6 +89,9 @@ cd webapp && node test/party/run.mjs [--fmt flac]    # listen party end to end: 
                                                      # each one PLAYS, scored on the shared wall clock (seek, pause, skip)
 cd webapp && node test/render/run.mjs --world piano --genre frenchcore --bpm 200   # render bench: contact sheet in test/render/out/
 cd webapp && node test/render/run.mjs --check        # every world, held to the picture contracts (headless Chromium, no GPU needed)
+cd webapp && node test/render/run.mjs --strip        # the players' 40 px bar strip, photographed over the blurred cover
+cd webapp && node test/ui/run.mjs                    # the lists' main-thread cost in Chromium on a 8000-track library (needs npm run build):
+                                                     # open the favourites, type into them, sort, open a 4000-track playlist
 
 # Deezer CLI
 supysonic-cli deezer login-test                      # check the ARL works
@@ -1730,6 +1733,23 @@ marks stripped) on every sort, direction and query, and both to being faster. `p
 `latency.test.mjs` run on the Rust; `test/party/run.mjs` and `test/rhythm/run.mjs` were re-run on it
 (guest heard −1.1 / +0.1 / +0.1 / −0.3 ms from the host steady / after a seek / a pause / a skip;
 frames −0.7..+0.6 ms against the output clock, 100% on time).
+
+**What a big list costs the main thread is measured in a browser too** (`webapp/test/ui/run.mjs`,
+long-task time under a 4x CPU throttle, median of five rounds). Two causes came out of it that no
+language change would have touched:
+
+- **The window's rows are keyed by POSITION** (`TrackList.svelte`), not by track. Every keystroke of a
+  search (and every sort) handed the window a different track at each position, so all ~30 visible
+  rows were destroyed and rebuilt — DOM, five store subscriptions, a cover and an artist line each —
+  and that, not the filtering, was the keystroke. Recycled, a row just gets a new `track`: `Cover`
+  already resets on a new source, and `TrackRow` drops a gesture begun on the previous track so a
+  swipe can never commit on the wrong one. Ten letters typed into 4 000 favourites: **470 → 55 ms**.
+- **The offline cache stores the response's TEXT** (`apicache.js`). IndexedDB structured-clones what
+  it is given, synchronously, and a 4 000-track list is 4 000 nested objects — cloned on every visit.
+  The text comes from a `clone()` of the response, read after the caller has its data: `res.json()`
+  parses straight from the bytes, and putting `text()` + `JSON.parse` on the critical path measured
+  WORSE than the clone it replaced. Records an older build wrote as objects still read. Opening the
+  favourites: **315 → 154 ms**; the playlist 304 → 216; a sort 97 → 52.
 
 **Why the DOM stays Svelte.** "As much Rust as possible" stops at the DOM, deliberately: a Rust UI
 framework reaches the DOM through JavaScript glue on every node it touches, so it cannot render a list

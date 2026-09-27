@@ -129,7 +129,14 @@
 
 <div class="list" bind:this={listEl} style="height:{total * rowH}px">
   <div class="win" style="transform:translateY({topPad}px)">
-    {#each visible as track, i (track.deezer_id + ":" + (start + i))}
+    <!-- Keyed by POSITION, not by track: a search, a sort or a new window
+         hands the same ~30 row components new tracks instead of destroying
+         and rebuilding them — measured, that churn (DOM built and torn down,
+         a store subscription set per row, a cover per row) was most of what a
+         keystroke cost on a 4000-track list. Rows and covers are written for
+         it: Cover.svelte resets on a new source, TrackRow drops a gesture in
+         progress when its track changes. -->
+    {#each visible as track, i (start + i)}
       <div class="vrow">
         <TrackRow
           {track}
