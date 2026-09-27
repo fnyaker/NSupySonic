@@ -392,9 +392,20 @@ function adoptVerdict(id, late = false) {
   // that settles the octave question, which no amount of signal processing can:
   // 250 BPM uptempo and 125 BPM house produce the same autocorrelation. A
   // served genre also retires the live classifier's say in it.
+  //
+  // ...when the genre can be believed. A TAG or the trained model's verdict
+  // always can. The server's HEURISTIC reads whole-file averages that cannot
+  // hear how a genre is built (the kick's shape, a piep, a roll), and a wrong
+  // family here does real damage: served "jazz" for a 205 BPM Krach record set
+  // an 80-165 plateau against a 205 seed. So a heuristic genre sets the range
+  // only when it is confident AND its own figure lies inside that range, and
+  // otherwise the live classifier keeps its say (liveRange).
   const range = tempoRangeFor(v.style || v.styleLabel || "");
-  if (range) send({ t: "range", lo: range[0], hi: range[1] });
-  send({ t: "liveRange", on: !range });
+  const bpm = +v.bpm || 0;
+  const fits = range && (!bpm || (bpm >= range[0] * 0.97 && bpm <= range[1] * 1.03));
+  const useRange = range && fits && (servedTrusted(v) || (v.styleConfidence ?? 0) >= HEURISTIC_RANGE_CONF);
+  if (useRange) send({ t: "range", lo: range[0], hi: range[1] });
+  send({ t: "liveRange", on: !useRange });
   // ...and the figure itself, WHETHER OR NOT the grid has already locked: the
   // verdict comes over the network, behind the audio in the request ladder,
   // and a late seed moves the grid's LEVEL while keeping its phase, so it
@@ -913,7 +924,24 @@ const mergedStyle = {
   served: true,
 };
 
+// A served genre somebody CHOSE — a tag, or the head trained on the admin's
+// tags — against one the server's heuristic GUESSED.
+function servedTrusted(v) {
+  return v?.styleSource === "tag" || v?.styleSource === "model";
+}
+// The heuristic's confidence needed before its genre sets the tempo range, and
+// the live classifier's needed before it overrides a heuristic genre. The live
+// one reads how the track is BUILT, kick by kick (rhythm/src/style.rs), and its
+// confidence is backed by how much its rules actually found; the server's
+// heuristic reads whole-file averages. So when the live reading is sure of a
+// different family, it is the better witness — and it is what names the
+// genre, picks the look and the world. A tag or a trained model still wins.
+const HEURISTIC_RANGE_CONF = 0.5;
+const LIVE_OVERRIDE_CONF = 0.5;
+
 function merged(live, v) {
+  if (!servedTrusted(v) && live.dominant && live.dominant !== v.style && (live.confidence || 0) > LIVE_OVERRIDE_CONF)
+    return live;
   mergedStyle.kick = live.kick;
   mergedStyle.families = live.families;
   // The served verdict names a family; the renderer needs the seven numbers

@@ -199,6 +199,8 @@ pub struct Tempo {
     kernel: Vec<f32>,
     list: Vec<usize>,
     shortlist: Vec<usize>,
+    /// A BUILD is running (pattern.rs, set by lib.rs): hold the tempo.
+    pub hold: bool,
     pub out: TempoOut,
 }
 
@@ -278,6 +280,7 @@ impl Tempo {
             kernel,
             list: Vec::with_capacity(lag_max),
             shortlist: Vec::with_capacity(SHORTLIST),
+            hold: false,
             out: TempoOut {
                 bpm: 0.0,
                 period: 0.5,
@@ -731,6 +734,16 @@ impl Tempo {
         self.activity += (overall - self.activity) * a;
         if self.locked && (recent < overall * 0.35 || quiet_window) {
             self.confidence *= 0.97;
+            return;
+        }
+        // AND A BUILD IS NOT A TEMPO CHANGE EITHER. Its snare roll goes
+        // quarters, eighths, sixteenths, thirty-seconds against a grid that
+        // does not move, and the window reading it finds a new period every
+        // bar of it: measured on the arranged techno record, the grid left 132
+        // for 170-172 in the second build and stayed there for seven seconds.
+        // So a locked grid coasts through a build — without losing confidence,
+        // since nothing about the beat is in doubt — and the drop lands on it.
+        if self.locked && self.hold {
             return;
         }
         let mut mean = 0.0;

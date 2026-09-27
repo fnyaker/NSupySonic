@@ -64,6 +64,9 @@ const FFT_LO: usize = 512;
 const RING: usize = 4096;
 const IN_CAP: usize = 16384;
 const MAX_OUT: usize = 64;
+/// Kicks whose shape must have been measured before a genre recognised live
+/// may set the tempo's range (see `emit`).
+const LIVE_RANGE_KICKS: u32 = 6;
 
 /// The output frame, self-describing: `name:length` pairs, in order. The page
 /// parses this string instead of hard-coding offsets, so the two sides cannot
@@ -148,7 +151,9 @@ const LAYOUT: &[(&str, usize)] = &[
     ("kickSoft", 1),
     ("kickHard", 1),
     ("kickIndus", 1),
+    ("kickPiep", 1),
     ("genre", genre::N),
+    ("styleFeat", style::N_FEAT),
     ("debug", 8),
     ("diag", 8),
 ];
@@ -275,6 +280,17 @@ pub struct Analyzer {
     level: u32,
     live_range: bool,
     range_from: i32,
+    // The event-like descriptors the classifier reads as RATES.
+    in_build: bool,
+    groove_s: f64,
+    screech_avg: f32,
+    roll_avg: f32,
+    four_avg: f32,
+    main_in_beat: bool,
+    drums_in_beat: bool,
+    st_pow: f32,
+    lvl_mean: f32,
+    lvl_dev: f32,
     out: Vec<f32>,
     out_n: usize,
     frame_len: usize,
@@ -339,6 +355,16 @@ impl Analyzer {
             level: LEVEL_SMART,
             live_range: true,
             range_from: -1,
+            in_build: false,
+            groove_s: 0.0,
+            screech_avg: 0.0,
+            roll_avg: 0.0,
+            four_avg: 0.0,
+            main_in_beat: false,
+            drums_in_beat: false,
+            st_pow: 0.0,
+            lvl_mean: FLOOR_DB,
+            lvl_dev: 0.0,
             out: vec![0.0; frame_len * MAX_OUT],
             out_n: 0,
             frame_len,
@@ -376,6 +402,17 @@ impl Analyzer {
         self.low_var = 0.0;
         self.low_last = -1.0;
         self.range_from = -1;
+        self.in_build = false;
+        self.groove_s = 0.0;
+        self.tempo.hold = false;
+        self.screech_avg = 0.0;
+        self.roll_avg = 0.0;
+        self.four_avg = 0.0;
+        self.main_in_beat = false;
+        self.drums_in_beat = false;
+        self.st_pow = 0.0;
+        self.lvl_mean = FLOOR_DB;
+        self.lvl_dev = 0.0;
     }
 
     pub fn set_level(&mut self, level: u32) {
@@ -486,6 +523,7 @@ impl Analyzer {
         let mut c_flux = 0.0;
         let mut onset_now = 0f32;
         if self.level >= LEVEL_RHYTHM {
+            self.tempo.hold = self.in_build;
             let tempo = self.tempo.process(t, f.flux, f.low_flux, f.mid_odf, kick_now, dt);
             let (odf_full, odf_low) = (tempo.odf_full, tempo.odf_low);
             c_flux = odf_full;
@@ -616,6 +654,16 @@ impl Analyzer {
             let (p, a) = self.pattern.update(&fin);
             (p.clone(), a)
         };
+        // The tempo HOLDS through a breakdown and a build that follow the
+        // groove (tempo.rs `hold`): with the kick out, what is left to read is
+        // the melody, and a build's roll accelerates against a grid that does
+        // not. Only after the groove has been heard: an intro with the kick
+        // out reads as either, and holding there held whatever octave the
+        // grid had opened on.
+        if p.section == pattern::SEC_FULL {
+            self.groove_s += dt;
+        }
+        self.in_build = matches!(p.section, pattern::SEC_BUILD | pattern::SEC_BREAKDOWN) && self.groove_s >= 4.0;
         if anchor && rhythm {
             if let Some((kt, _)) = kick {
                 self.grid.anchor_phrase(kt);
@@ -634,15 +682,83 @@ impl Analyzer {
             s[style::F_CENTROID] = f.centroid_n;
             s[style::F_PERC] = f.percussivity;
             s[style::F_VOCAL] = f.vocal_mod;
-            s[style::F_CREST] = f.crest;
+            // How far the SHORT-TERM loudness wanders, the way EBU R128's
+            // loudness range reads it: power averaged over ~3 s (a beat's own
+            // envelope is gone at any tempo), then its spread around a ~15 s
+            // mean. The frame level itself swings 10-15 dB within every beat
+            // of a record with a short kick, which says nothing about how the
+            // record was mastered.
+            if !f.silent {
+                let p = 10f32.powf(f.level_db / 10.0);
+                self.st_pow += (p - self.st_pow) * (1.0 - (-(dt as f32) / 3.0).exp());
+                let st_db = 10.0 * fast_log10(self.st_pow.fmax(1e-12));
+                let a15 = 1.0 - (-(dt as f32) / 15.0).exp();
+                if self.lvl_mean <= FLOOR_DB + 1.0 {
+                    self.lvl_mean = st_db;
+                }
+                self.lvl_mean += (st_db - self.lvl_mean) * a15;
+                self.lvl_dev += ((st_db - self.lvl_mean).abs() - self.lvl_dev) * a15;
+            }
+            s[style::F_RANGE] = self.lvl_dev * 2.0;
             s[style::F_LEVEL] = f.level;
-            s[style::F_SUB] = (e[0] + e[1]) / total;
-            s[style::F_MID] = (e[2] + e[3]) / total;
-            s[style::F_AIR] = (e[4] + e[5]) / total;
+            // The bands' shares of the POWER: the six energies are per-bin
+            // means over bands 40 Hz to 10 kHz wide, and summed as they are
+            // the bottom read 0.9 of every record and the air 0.00 — so no
+            // rule written on either ever meant anything (genre.rs learnt the
+            // same thing).
+            const WIDTH: [f32; 6] = [40.0, 100.0, 340.0, 1500.0, 4000.0, 10000.0];
+            let mut pw = [0f32; 6];
+            let mut ptot = 1e-12f32;
+            for k in 0..6 {
+                pw[k] = e[k] * WIDTH[k];
+                ptot += pw[k];
+            }
+            let _ = total;
+            s[style::F_SUB] = (pw[0] + pw[1]) / ptot;
+            s[style::F_MID] = (pw[2] + pw[3]) / ptot;
+            s[style::F_AIR] = (pw[4] + pw[5]) / ptot;
             s[style::F_MELODY] = f.melody;
             s[style::F_TONAL] = f.tonal;
             s[style::F_CHORD] = f.chord_change;
             s[style::F_DYN] = f.dynamics;
+            // What the music is built from (style.rs): the genre channel as
+            // it stood last frame, the grid's offbeat share, and two rates.
+            let g = &self.genre.out;
+            let slow = 1.0 - (-(dt as f32) / 2.0).exp();
+            self.screech_avg += (g[2] - self.screech_avg) * slow;
+            let roll_on = if p.roll > 0.5 { 1.0 } else { 0.0 };
+            self.roll_avg += (roll_on - self.roll_avg) * (1.0 - (-(dt as f32) / 8.0).exp());
+            s[style::F_TAIL] = g[6];
+            s[style::F_LEAD] = g[0];
+            s[style::F_BUZZ] = g[1];
+            s[style::F_SCREECH] = self.screech_avg;
+            s[style::F_OFFBEAT] = b.offbeat;
+            s[style::F_DENSITY] = g[5];
+            s[style::F_ROLL] = self.roll_avg;
+            // A beat closes on the frame the next one starts: did it carry a
+            // main kick (on the grid, near its start)? Only a beat with DRUMS
+            // in it counts: a breakdown with the kick and the snare out says
+            // nothing about the groove, and counting its beats as "no kick"
+            // made every four-on-the-floor record read as a broken beat for
+            // the length of each breakdown.
+            if p.main_kick {
+                self.main_in_beat = true;
+            }
+            if p.kick_hit || p.snare_hit {
+                self.drums_in_beat = true;
+            }
+            if b.beat && b.locked {
+                // ...and only while the groove is IN: a build's snare roll is
+                // drums with no kick under them, and it is not a broken beat.
+                let groove = !matches!(p.section, pattern::SEC_BUILD | pattern::SEC_BREAKDOWN | pattern::SEC_PAUSE);
+                if self.drums_in_beat && groove {
+                    let v = if self.main_in_beat { 1.0 } else { 0.0 };
+                    self.four_avg += (v - self.four_avg) * 0.12;
+                }
+                self.main_in_beat = p.main_kick;
+                self.drums_in_beat = p.kick_hit || p.snare_hit;
+            }
+            s[style::F_FOUR] = self.four_avg;
             let seen = kick.map(|(kt, strength)| style::KickSeen {
                 t: kt,
                 strength,
@@ -651,14 +767,27 @@ impl Analyzer {
                 path: kick_detail[2],
                 click: kick_detail[3],
             });
-            self.style.kick_frame(seen, e[0] + e[1], f.flatness, t);
+            self.style.kick_frame(seen, e[0] + e[1], f.flatness, f.piep_late, t);
             self.style.process(b.locked, b.confidence, f.dynamics, t, dt as f32);
             // A genre recognised LIVE may only confirm the octave the grid is
             // on, never move it: the classifier's own tempo term reads the
             // tracker's BPM, so a family chosen from a wrong octave would
             // "confirm" that octave and lock it in — measured, uptempo read as
             // generic electronic (100-150) and was halved to 110 for good.
-            if self.live_range && self.style.confidence > 0.5 && self.style.dominant >= 0 && self.style.dominant != self.range_from && b.locked {
+            //
+            // And only once its KICKS have been measured. Until then the
+            // kick-shape weights are neutral thirds, every hard family reads
+            // a third of a hard kick, and whichever of them fits the octave
+            // the tracker happens to be on wins: measured, speedcore named on
+            // the kick-only intro of a 132 BPM techno record while the grid
+            // sat at 264, and its 200-300 range held it there for a minute.
+            if self.live_range
+                && self.style.kick.measured >= LIVE_RANGE_KICKS
+                && self.style.confidence > 0.5
+                && self.style.dominant >= 0
+                && self.style.dominant != self.range_from
+                && b.locked
+            {
                 if let Some((lo, hi)) = self.style.range_of(self.style.dominant) {
                     if b.bpm >= lo * 0.97 && b.bpm <= hi * 1.03 {
                         self.range_from = self.style.dominant;
@@ -771,6 +900,8 @@ impl Analyzer {
         o[at!("kickSoft")] = ks.soft;
         o[at!("kickHard")] = ks.hard;
         o[at!("kickIndus")] = ks.indus;
+        o[at!("kickPiep")] = ks.piep;
+        o[at!("styleFeat")..at!("styleFeat") + style::N_FEAT].copy_from_slice(&st.s);
         o[at!("genre")..at!("genre") + genre::N].copy_from_slice(&self.genre.out);
         // The accepted kick's evidence when this frame carries one (onset,
         // f0, f1, path, click dB, level against the track's kicks, score),

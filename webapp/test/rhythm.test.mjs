@@ -392,6 +392,91 @@ test("a hard kick reads hard, an industrial one industrial, a techno one soft", 
   assert.ok(up.soft < 0.3, `uptempo read soft ${up.soft.toFixed(2)}`);
 });
 
+test("the piep is heard on a piep kick and on nothing else", () => {
+  // THE PIEP (features.rs `piep`): a pitched squeak layered on the kick's
+  // attack. A line standing above the kick's own harmonics beneath it, loud
+  // enough to hear next to the body, born with the kick and gone 64 ms later
+  // — each half of that is true of something else in a mix (a lead note that
+  // starts on the kick, an upward-bending screech's last partials, a
+  // distorted kick's harmonics), all four together only of a squeak.
+  // Measured, the share of kicks read as carrying one: the piep kick 1.00 at
+  // any pitch from 1.5 to 3.6 kHz, falling or not, 0.46 with the squeak at
+  // half level; hardtekk, frenchcore, uptempo, techno under a pad and
+  // frenchcore with a screech ON the kick 0.00-0.02.
+  const piepOf = (opts) => {
+    let v = 0;
+    drive(analyser(), renderTrack({ seconds: 20, hats: 1, ...opts }).pcm, (t, get) => (v = get("kickPiep")), { quantum: 4096 });
+    return v;
+  };
+  const P = KICKS.pieep;
+  for (const [name, opts] of [
+    ["the piep kick", { bpm: 170, kickOpt: P }],
+    ["a piep at 1.5 kHz", { bpm: 170, kickOpt: { ...P, piepHz: 1500, piepTo: 1100 } }],
+    ["a piep that does not fall", { bpm: 170, kickOpt: { ...P, piepTo: P.piepHz } }],
+    ["a piep under a pad", { bpm: 170, kickOpt: P, padGain: 0.12 }],
+  ])
+    assert.ok(piepOf(opts) > 0.8, `${name}: ${piepOf(opts).toFixed(2)}`);
+  for (const [name, opts] of [
+    ["hardtekk", { bpm: 165, kickOpt: KICKS.hardtekk }],
+    ["uptempo", { bpm: 220, kickOpt: KICKS.uptempo, kickAt: PATTERNS.uptempo }],
+    ["techno under a pad", { bpm: 132, kickOpt: KICKS.techno, padGain: 0.12 }],
+    ["frenchcore with a screech on the kick", { bpm: 200, kickOpt: KICKS.frenchcore, screechAt: () => [0, 0.5], screechOpt: { f: 700, hpHz: 250 } }],
+  ])
+    assert.ok(piepOf(opts) < 0.1, `${name}: ${piepOf(opts).toFixed(2)}`);
+});
+
+test("the hard records are named by how they are built", () => {
+  // The classifier used to read timbre averages only, on scales its rules had
+  // never been measured against (a spectral crest of 12-18 asked for "below
+  // 3.2"; band shares that read 0.9 and 0.00 on everything), and named about
+  // six of the 26 records right: uptempo and speedcore as "electronic",
+  // Krach as frenchcore, the piep record as hardcore. It now also reads what
+  // the music is MADE of — the kick's shape, the piep, the rolls, a kick on
+  // every beat, the saw buzz, the lead — and the eval names 19 of 28 (node
+  // test/eval/family-eval.mjs). Measured here, cold, the dominant family's
+  // share of each record after ten seconds: hardstyle 83%, rawstyle 81%,
+  // frenchcore 89%, uptempo 100%, zaag 100%, dark uptempo 100%, Krach 84%,
+  // pieep 92%, speedcore 100%, techno 67%.
+  for (const [id, want] of [
+    ["hardstyle-150", "hardstyle"], ["rawstyle-155", "rawstyle"], ["frenchcore-200", "frenchcore"],
+    ["uptempo-220", "uptempo"], ["zaag-190", "zaag"], ["uptempo-dark-210", "uptempo"],
+    ["krach-205", "krach"], ["pieep-170", "pieep"], ["speedcore-280", "speedcore"], ["techno-132", "techno"],
+  ]) {
+    const { pcm } = loadSong(SONG_BY_ID.get(id));
+    const count = new Map();
+    let n = 0;
+    drive(analyser(), pcm, (t, get) => {
+      if (t < 10) return;
+      const f = familyAt(Math.round(get("styleDominant")))?.id || "-";
+      count.set(f, (count.get(f) || 0) + 1);
+      n++;
+    }, { quantum: 4096 });
+    const share = (count.get(want) || 0) / n;
+    const top = [...count.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k, v]) => `${k} ${Math.round((100 * v) / n)}%`);
+    assert.ok(share > 0.6, `${id}: ${want} ${Math.round(share * 100)}% (${top.join(", ")})`);
+  }
+});
+
+test("a genre named live cannot lock the grid on the wrong octave", () => {
+  // A live family narrows the tracker's range, and its rule reads the
+  // tracker's own BPM: a family named while the grid sits on the wrong octave
+  // confirms that octave for good. Measured on techno's kick-only intro with
+  // the grid at 264: speedcore, whose rule read next to nothing (0.03), took
+  // the whole normalised share, read as confident, and held the record at
+  // 264 for a minute — right 41% of the time where the tracker alone is right
+  // 100%. The confidence is now backed by how much the rules actually found,
+  // and a range waits for six measured kicks. Measured: 100%.
+  const { pcm } = loadSong(SONG_BY_ID.get("techno-132"));
+  let good = 0;
+  let n = 0;
+  drive(analyser(), pcm, (t, get) => {
+    if (t < 8 || !get("locked")) return;
+    n++;
+    if (Math.abs(get("bpm") / 132 - 1) < 0.04) good++;
+  }, { quantum: 4096 });
+  assert.ok(good / n > 0.9, `techno read at 132 ${Math.round((100 * good) / n)}% of the time`);
+});
+
 test("a hard record reads as a hard family, techno as techno, a pad as ambient", () => {
   // Measured: frenchcore -> hardcore at 1.00 with the hard archetype 0.83;
   // techno 128 -> techno at 1.00; the pad -> ambient, sustain 1.00.
@@ -667,7 +752,7 @@ test("on arranged hard-dance records, the beats, the tempo and the drops are rig
   // 1.00 on all six, tempo right 100% of the time, every drop found with no
   // false one (frenchcore and uptempo also flag the start of a build whose
   // first kick lands loud after the breakdown: one each).
-  for (const id of ["rawstyle-155", "frenchcore-200", "uptempo-220", "zaag-190", "krach-210", "techno-132"]) {
+  for (const id of ["rawstyle-155", "frenchcore-200", "uptempo-220", "zaag-190", "uptempo-dark-210", "pieep-170", "techno-132"]) {
     const { pcm, truth } = loadSong(SONG_BY_ID.get(id));
     const rec = { beats: [], downbeats: [], kicks: [], mains: [], drops: [], bpm: [], breakdown: [], build: [], dt: 0 };
     const r = analyser({ genre: truth.genre });

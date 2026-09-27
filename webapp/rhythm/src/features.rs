@@ -42,6 +42,13 @@ const SCALE_TAU: f32 = 9.0;
 const SCALE_UP: f32 = 0.4;
 const CM_HZ: [f32; 9] = [30.0, 80.0, 160.0, 320.0, 700.0, 1500.0, 3500.0, 8000.0, 16000.0];
 const CM_N: usize = 8;
+/// How long after a frame its piep line is checked for having died away, in
+/// frames (~64 ms at 48 kHz): a squeak with an 11 ms decay is 17 dB down by
+/// then, a lead note that started with the kick is still sounding.
+pub const PIEP_LATE: usize = 6;
+const PIEP_RING: usize = 8;
+/// ...and how long BEFORE it the line must not have been there yet.
+const PIEP_BORN: usize = 3;
 
 #[derive(Default, Clone)]
 pub struct Features {
@@ -93,6 +100,14 @@ pub struct Features {
     /// the raw material of the genre channel (see genre.rs).
     pub harm_mid: f32,
     pub harm_flat: f32,
+    /// THE PIEP (see `piep`): how far the loudest partial between 1.4 and
+    /// 5 kHz stands above everything in the half octave beneath it (dB), and
+    /// that partial against the kick's body (dB).
+    pub piep_stand: f32,
+    pub piep_rel: f32,
+    /// The piep verdict (0..1) for the frame PIEP_LATE frames back, now that
+    /// we know whether its line died away like a squeak or held like a note.
+    pub piep_late: f32,
 }
 
 pub struct FeatureExtractor {
@@ -131,6 +146,18 @@ pub struct FeatureExtractor {
     log2hz: Vec<f32>,
     reg_wt: Vec<f32>,
     reg_wt_sum: f32,
+    piep0: usize,
+    piep1: usize,
+    pbody0: usize,
+    pbody1: usize,
+    /// Each recent frame's candidate: its reading, its line's bin and that
+    /// bin's raw level.
+    piep_ring: [(f32, usize, f32); PIEP_RING],
+    piep_head: usize,
+    /// The last PIEP_BORN+1 frames' raw levels (dB) over the piep band, to
+    /// ask whether a line was already there before.
+    piep_raw: Vec<Vec<f32>>,
+    piep_raw_head: usize,
     // state
     mid_fast: f32,
     mid_slow: f32,
@@ -255,6 +282,14 @@ impl FeatureExtractor {
             log2hz,
             reg_wt,
             reg_wt_sum,
+            piep0: b(1400.0),
+            piep1: b(5000.0),
+            pbody0: b(40.0),
+            pbody1: b(400.0),
+            piep_ring: [(0.0, 0, 0.0); PIEP_RING],
+            piep_head: 0,
+            piep_raw: (0..=PIEP_BORN).map(|_| vec![-180.0; n_hi]).collect(),
+            piep_raw_head: 0,
             mid_fast: 0.0,
             mid_slow: 0.0,
             mod_avg: 0.0,
@@ -326,6 +361,12 @@ impl FeatureExtractor {
         self.s_melody = 0.0;
         self.s_chord = 0.0;
         self.mel_pitch = 0.0;
+        self.piep_ring = [(0.0, 0, 0.0); PIEP_RING];
+        self.piep_head = 0;
+        for h in self.piep_raw.iter_mut() {
+            h.iter_mut().for_each(|v| *v = -180.0);
+        }
+        self.piep_raw_head = 0;
         let o = &mut self.out;
         *o = Features::default();
         o.level_db = self.floor_db;
@@ -352,6 +393,84 @@ impl FeatureExtractor {
             }
         }
         best
+    }
+
+    /// THE PIEP: a pitched squeak layered on a kick's attack — tekk's and
+    /// uptempo's "piep kick". Four things together, each of which something
+    /// else in a mix has on its own:
+    ///
+    ///   it STANDS. A distorted kick is a harmonic series and its harmonics
+    ///     FALL with frequency, so its loudest partial between 1.4 and 5 kHz
+    ///     sits at the bottom of that band with louder ones beneath it; a
+    ///     squeak is one line standing above the whole half octave under it.
+    ///   it is LOUD enough to hear next to the kick's body (40-400 Hz).
+    ///   it is BORN with the kick: not there three frames before. A lead note
+    ///     that merely changed pitch, or a partial the sidechain let back in,
+    ///     was.
+    ///   it DIES at once: fallen by PIEP_LATE frames later, where a lead note
+    ///     that started on the kick is still sounding. On a dense mix
+    ///     (frenchcore's lead on every eighth) the first two alone were true
+    ///     of 863 frames of the drops, against 70 kicks.
+    ///
+    /// Measured on test/synth.mjs's kicks with hats and a sustained supersaw
+    /// over them, the squeak stands +5.6 dB (tenth percentile) over what lies
+    /// beneath it and every other kick +0.8 at most (median), at -20 dB or
+    /// louder against the body where every other kick's top line sits at -25
+    /// or quieter. On the eval's 28 arranged records, as a share of each
+    /// record's kicks (style.rs `F_PIEP`): the piep record 0.97, every other
+    /// record 0.17 at most and most under 0.05.
+    fn piep(&mut self) {
+        let top = self.top;
+        let end = (self.piep1 + 2).fmin(top);
+        let slot = self.piep_raw_head;
+        {
+            let db = &mut self.piep_raw[slot];
+            for i in 0..=end {
+                db[i] = 20.0 * fast_log10(self.mag[i].fmax(1e-9));
+            }
+        }
+        self.piep_raw_head = (slot + 1) % (PIEP_BORN + 1);
+        let now = &self.piep_raw[slot];
+        let then = &self.piep_raw[(slot + 1) % (PIEP_BORN + 1)];
+        // A line under a Hann window spans three bins.
+        let sm = |k: usize| (now[k - 1] + now[k] + now[k + 1]) * (1.0 / 3.0);
+        let near = |h: &[f32], k: usize| h[k - 1].fmax(h[k]).fmax(h[k + 1]);
+        let mut line = f32::NEG_INFINITY;
+        let mut at = self.piep0;
+        for k in self.piep0..=self.piep1 {
+            let v = sm(k);
+            if v > line {
+                line = v;
+                at = k;
+            }
+        }
+        let lo = ((at as f32 / 1.6) as usize).fmax(1);
+        let hi = (at as f32 / 1.12) as usize;
+        let mut beneath = f32::NEG_INFINITY;
+        for j in lo..=hi {
+            beneath = beneath.fmax(sm(j));
+        }
+        let mut body = f32::NEG_INFINITY;
+        for k in self.pbody0..=self.pbody1 {
+            body = body.fmax(now[k]);
+        }
+        let stand = line - beneath;
+        let rel = line - body;
+        let born = near(now, at) - near(then, at);
+        self.out.piep_stand = stand;
+        self.out.piep_rel = rel;
+        let score = crate::style::piep_frame(stand, rel) * ((born - 6.0) / 6.0).clamp(0.0, 1.0);
+        // A frame's reading becomes a verdict PIEP_LATE frames on, once it is
+        // known whether its line died away.
+        let old = self.piep_ring[(self.piep_head + PIEP_RING - PIEP_LATE) % PIEP_RING];
+        self.out.piep_late = if old.0 > 0.0 {
+            let fell = old.2 - near(now, old.1);
+            old.0 * ((fell - 6.0) / 8.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.piep_ring[self.piep_head] = (score, at, near(now, at));
+        self.piep_head = (self.piep_head + 1) % PIEP_RING;
     }
 
     /// One frame of the fast spectrum, as LINEAR magnitudes (|X|/N).
@@ -612,6 +731,7 @@ impl FeatureExtractor {
             tonal_sum += h;
             total_sum += m;
         }
+        self.piep();
         let tonal_share = if total_sum > 1e-9 { tonal_sum / total_sum } else { 0.0 };
         self.s_tonal += (tonal_share - self.s_tonal) * 0.05;
         let o = &mut self.out;

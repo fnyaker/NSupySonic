@@ -67,7 +67,11 @@ logger = logging.getLogger(__name__)
 #      bpm_source records where the TEMPO came from rather than the style.
 #   3  music with no attacks in it (a held note, a drone, a pad) measures no
 #      tempo instead of a confident phantom one — see _attack_rate.
-ANALYSIS_VERSION = 3
+#   4  the beat folds are taken by exact phase (a four-on-the-floor kick read
+#      a grid share of 0.06 and trance was doubled to 280), the hard families
+#      are written on the scales these measures have, and a verdict's
+#      confidence is backed by how much its rules actually found.
+ANALYSIS_VERSION = 4
 
 # Never analyse more than this much of a file. Ten minutes is far more than any
 # verdict needs, and it is what stops a two-hour DJ set costing two hours of
@@ -551,39 +555,72 @@ def _prior(bpm):
     return math.exp(-(d * d) / (2 * PRIOR_SIGMA * PRIOR_SIGMA))
 
 
+# FOLDING A TRACK ONTO ITS BEAT. Both statistics below fold the onset function
+# at the beat period, and both used to fold the WHOLE track modulo the period
+# rounded to a whole number of 10 ms frames. A beat is almost never a whole
+# number of frames — 132 BPM is 45.45 — so the fold slid half a frame per beat
+# and, a few hundred beats in, every beat had landed in every bin: measured on
+# the arranged records, a four-on-the-floor techno kick scored a grid share of
+# 0.06, and the octave check read the smeared fold as "full between the beats"
+# and doubled trance and psytrance to 280 and 292. So the fold is by exact
+# PHASE (fractional period), and it is taken over windows of a few seconds
+# and averaged, which also forgives a period good to a whole BPM but not to
+# the thousandth — the tempo votes are bucketed to whole BPMs.
+FOLD_WINDOW = 8 * ENV_HZ
+
+
+def _fold_windows(odf):
+    n = len(odf)
+    if n <= FOLD_WINDOW:
+        return [(0, n)]
+    count = max(1, min(12, n // FOLD_WINDOW))
+    return [(int(i * (n - FOLD_WINDOW) / max(1, count - 1)), FOLD_WINDOW) for i in range(count)]
+
+
+def _phase_fold(odf, start, length, period, bins):
+    fold = [0.0] * bins
+    total = 0.0
+    inv = 1.0 / period
+    for i in range(start, start + length):
+        v = odf[i]
+        fold[int(((i * inv) % 1.0) * bins) % bins] += v
+        total += v
+    return fold, total
+
+
 def _fold_half_ratio(odf, period):
     """How strong the half-period position is, relative to the strongest one."""
-    p = max(2, int(round(period)))
-    fold = [0.0] * p
-    total = 0.0
-    for i, v in enumerate(odf):
-        fold[i % p] += v
-        total += v
-    if total < 1e-6:
-        return -1.0
-    w = max(1, int(round(0.03 * ENV_HZ)))
-    around = lambda c: sum(fold[(c + j) % p] for j in range(-w, w + 1))  # noqa: E731
-    p0 = max(range(p), key=lambda k: fold[k])
-    a = around(p0)
-    return (around(p0 + p // 2) / a) if a > 1e-9 else 0.0
+    bins = max(4, int(round(period)))
+    w = max(1, int(round(0.03 * ENV_HZ * bins / period)))
+    num = den = 0.0
+    for start, length in _fold_windows(odf):
+        fold, total = _phase_fold(odf, start, length, period, bins)
+        if total < 1e-6:
+            continue
+        around = lambda c: sum(fold[(c + j) % bins] for j in range(-w, w + 1))  # noqa: E731
+        p0 = max(range(bins), key=lambda k: fold[k])
+        a = around(p0)
+        if a > 1e-9:
+            num += around(p0 + bins // 2) / a * total
+            den += total
+    return num / den if den > 1e-9 else -1.0
 
 
 def _grid_share(odf, period):
     """How concentrated the bass onsets are on the beat grid, 0..1."""
-    p = max(2, int(round(period)))
-    fold = [0.0] * p
-    total = 0.0
-    for i, v in enumerate(odf):
-        fold[i % p] += v
-        total += v
-    if total < 1e-6:
-        return 0.0
-    w = max(2, int(round(p * 0.05)))
-    best = max(
-        sum(fold[(k + j) % p] for j in range(-w, w + 1)) for k in range(p)
-    )
-    baseline = min(1.0, (2 * w + 1) / p)
-    return max(0.0, min(1.0, ((best / total) - baseline) / max(1e-6, 1 - baseline) * 1.25))
+    bins = max(4, int(round(period)))
+    w = max(2, int(round(bins * 0.05)))
+    baseline = min(1.0, (2 * w + 1) / bins)
+    num = den = 0.0
+    for start, length in _fold_windows(odf):
+        fold, total = _phase_fold(odf, start, length, period, bins)
+        if total < 1e-6:
+            continue
+        best = max(sum(fold[(k + j) % bins] for j in range(-w, w + 1)) for k in range(bins))
+        share = ((best / total) - baseline) / max(1e-6, 1 - baseline) * 1.25
+        num += max(0.0, min(1.0, share)) * total
+        den += total
+    return num / den if den > 1e-9 else 0.0
 
 
 def _measure_tempo(path):
@@ -626,15 +663,17 @@ def _measure_tempo(path):
     bpm = max(votes.items(), key=lambda kv: kv[1][0])[0]
     period = 60 * ENV_HZ / bpm
 
-    # The octave, arbitrated by the bass: does it fill the gap between beats
-    # (then the period is half of this) or skip every other one (then double)?
-    dbl = _fold_half_ratio(odf, period * 2)
-    if 0 <= dbl < 0.35 and 60 / (period * 2 / ENV_HZ) >= MIN_BPM:
-        period *= 2
-    else:
-        half = _fold_half_ratio(odf, period)
-        if half >= 0.72 and 60 / (period / 2 / ENV_HZ) <= MAX_BPM:
-            period /= 2
+    # The octave, arbitrated by the bass: when it fills the gap between beats
+    # as strongly as the beats, the period is half of this. The converse — the
+    # bass skipping every other beat, so the period is double — is NOT asked:
+    # a rock, pop or boom-bap kick on one and three does exactly that at the
+    # right tempo, with the snare on two and four where a bass-only envelope
+    # cannot see it (measured, both arranged rock records halved the moment
+    # the fold below stopped smearing — a smeared fold had kept that branch
+    # from ever firing).
+    half = _fold_half_ratio(odf, period)
+    if half >= 0.72 and 60 / (period / 2 / ENV_HZ) <= MAX_BPM:
+        period /= 2
     bpm = 60 * ENV_HZ / period
     agree = votes[max(votes, key=lambda k: votes[k][0])][1] / max(1, len(starts))
     conf = min(1.0, (conf_sum / max(1, len(starts))) * agree * 1.4)
@@ -688,44 +727,54 @@ FAMILIES = [
     ("psytrance", "Psytrance", "groove", lambda f: (
         _in_range(f["bpm"], 138, 152, 10) * _above(f["pulse"], 0.55, 0.3)
         * _in_range(f["flatness"], 0.25, 0.55, 0.2) * _above(f["rolloff"], 6500, 3000))),
+    # --- the hard end ------------------------------------------------------
+    # Written against what this side's measures actually read on the arranged
+    # records (tools/tempo_eval.py renders them): whole-file flatness sits at
+    # 0.01-0.34 and the old rules asked for 0.4-0.75, so every hard family was
+    # unreachable and a 205 BPM Krach record came out as jazz. What separates
+    # these genres is how their KICK is built — the live analyser measures that
+    # on every kick (webapp/rhythm/src/style.rs); a whole-file average cannot,
+    # so these rules only say what a file can: the tempo band, and whether the
+    # kick is CLEAN (a pitched, tonal kick: spectral entropy 0.32-0.45) or
+    # NOISY (distorted until it is noise: 0.59-0.78). The subgenre past that is
+    # the live reading's to settle, and the client lets a confident one
+    # override a heuristic verdict from here.
     ("hardstyle", "Hardstyle", "hard", lambda f: (
-        _in_range(f["bpm"], 145, 162, 12) * _above(f["pulse"], 0.45, 0.3)
-        * _below(f["lra"], 6.5, 3.5))),
+        _in_range(f["bpm"], 145, 162, 12) * _below(f["entropy"], 0.5, 0.15))),
     ("hardtekk", "Hardtekk", "hard", lambda f: (
-        _in_range(f["bpm"], 138, 165, 14) * _above(f["pulse"], 0.45, 0.3)
-        * _above(f["flatness"], 0.3, 0.22) * _below(f["lra"], 7.5, 4))),
+        0.6 * _in_range(f["bpm"], 138, 172, 14) * _below(f["entropy"], 0.55, 0.15))),
     ("zaag", "Zaag", "hard", lambda f: (
-        _in_range(f["bpm"], 150, 210, 28) * _in_range(f["flatness"], 0.32, 0.6, 0.2)
-        * _above(f["centroid"], 2200, 1500) * _below(f["lra"], 7, 3.5))),
+        _in_range(f["bpm"], 150, 200, 20) * _above(f["entropy"], 0.55, 0.1)
+        * _above(f["flatness"], 0.2, 0.08))),
     ("frenchcore", "Frenchcore", "hard", lambda f: (
-        _in_range(f["bpm"], 185, 230, 25) * _above(f["pulse"], 0.4, 0.3)
-        * _above(f["flatness"], 0.38, 0.25) * _below(f["lra"], 6, 3))),
+        _in_range(f["bpm"], 190, 230, 15) * _below(f["entropy"], 0.5, 0.15))),
     ("uptempo", "Uptempo", "hard", lambda f: (
-        _in_range(f["bpm"], 220, 300, 35) * _above(f["flatness"], 0.45, 0.25)
-        * _below(f["lra"], 5.5, 3))),
+        _in_range(f["bpm"], 195, 290, 25) * _above(f["entropy"], 0.6, 0.1)
+        * _above(f["flatness"], 0.2, 0.08))),
+    # DEUTSCHER KRACH is uptempo's kick under a euphoric, sung party track: the
+    # kick's noise with a tonal lead over it, so between frenchcore's clean mix
+    # and uptempo's noise wall. It used to be written as a noise wall
+    # (flatness over 0.55, entropy over 0.75) — the opposite of the genre.
     ("krach", "Deutscher Krach", "hard", lambda f: (
-        _in_range(f["bpm"], 190, 300, 45) * _above(f["flatness"], 0.55, 0.2)
-        * _below(f["lra"], 4, 2.5) * _above(f["entropy"], 0.75, 0.2))),
+        _in_range(f["bpm"], 195, 235, 15) * _in_range(f["entropy"], 0.48, 0.62, 0.08))),
+    # PIEEP is tekk built on the piep kick — a squeak on the kick's attack,
+    # which only the live analyser can hear. From a whole file it is hardtekk's
+    # tempo and nothing more, so it never claims more than a guess here.
     ("pieep", "Pieep", "hard", lambda f: (
-        _in_range(f["bpm"], 170, 260, 40) * _above(f["centroid"], 3600, 1600)
-        * _above(f["rolloff"], 8000, 2500) * _below(f["flatness"], 0.55, 0.25))),
+        0.4 * _in_range(f["bpm"], 150, 195, 20) * _below(f["entropy"], 0.5, 0.15))),
     ("hardcore", "Hardcore", "hard", lambda f: (
-        _in_range(f["bpm"], 148, 195, 18) * _above(f["pulse"], 0.45, 0.3)
-        * _in_range(f["flatness"], 0.4, 0.75, 0.2) * _below(f["lra"], 6.5, 3))),
+        _in_range(f["bpm"], 163, 195, 10) * _in_range(f["entropy"], 0.35, 0.6, 0.1)
+        * _above(f["pulse"], 0.15, 0.2))),
     ("tribecore", "Tribe", "hard", lambda f: (
-        _in_range(f["bpm"], 150, 190, 20) * _above(f["pulse"], 0.45, 0.3)
-        * _in_range(f["flatness"], 0.32, 0.62, 0.2) * _above(f["entropy"], 0.55, 0.2)
+        0.5 * _in_range(f["bpm"], 150, 190, 20) * _above(f["entropy"], 0.55, 0.2)
         * _above(f["flux_peak"], 1.4, 0.8))),
     ("speedcore", "Speedcore", "hard", lambda f: (
-        _in_range(f["bpm"], 245, 300, 22) * _above(f["flatness"], 0.5, 0.22)
-        * _below(f["lra"], 5, 2.5) * _above(f["entropy"], 0.65, 0.25))),
+        _in_range(f["bpm"], 240, 300, 22) * _above(f["entropy"], 0.5, 0.15))),
     ("industrial", "Indus", "hard", lambda f: (
-        _in_range(f["bpm"], 140, 185, 22) * _above(f["pulse"], 0.4, 0.3)
-        * _above(f["flatness_hi"], 0.5, 0.25) * _above(f["entropy"], 0.6, 0.25)
-        * _below(f["lra"], 6, 3))),
+        0.5 * _in_range(f["bpm"], 140, 185, 22) * _above(f["flatness"], 0.22, 0.08)
+        * _above(f["entropy"], 0.6, 0.15))),
     ("rawstyle", "Rawstyle", "hard", lambda f: (
-        _in_range(f["bpm"], 148, 163, 10) * _above(f["pulse"], 0.45, 0.3)
-        * _in_range(f["flatness"], 0.45, 0.72, 0.18) * _below(f["lra"], 5.5, 2.5))),
+        _in_range(f["bpm"], 148, 163, 10) * _above(f["entropy"], 0.5, 0.15))),
     ("hardtechno", "Hard techno", "hard", lambda f: (
         _in_range(f["bpm"], 138, 162, 12) * _above(f["pulse"], 0.55, 0.3)
         * _in_range(f["flatness"], 0.3, 0.6, 0.2) * _below(f["lra"], 6, 3))),
@@ -945,6 +994,12 @@ def known_genres():
     return out
 
 
+#: The catch-all family, and the specific rules' summed weight that counts as
+#: full evidence (the live classifier's EVIDENCE_FULL, style.rs).
+FALLBACK = "electronic"
+EVIDENCE_FULL = 0.25
+
+
 def classify(features):
     """(style, confidence, archetype, weights) from whole-file measures."""
     f = dict(features)
@@ -954,6 +1009,7 @@ def classify(features):
     tempo_trust = 0.0 if not f.get("bpm") else max(0.25, min(1.0, f.get("bpm_confidence", 0.5) * 1.6))
     raw = {}
     total = 0.0
+    specific = 0.0
     for fid, _label, _arch, fn in FAMILIES:
         try:
             w = max(0.0, float(fn(f)))
@@ -963,6 +1019,8 @@ def classify(features):
             w *= tempo_trust
         raw[fid] = w
         total += w
+        if fid != FALLBACK:
+            specific += w
     if total < 1e-6:
         return None, 0.0, None, {}
     for k in raw:
@@ -976,6 +1034,13 @@ def classify(features):
     top_id, top = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
     conf = max(0.0, min(1.0, top * 2.4 * (0.45 + 0.55 * ((top - second) / top if top else 0))))
+    # A share is only as good as what it is a share OF: where no rule really
+    # fits, every family reads next to nothing and normalising hands all of it
+    # to whichever reads least nothing — "jazz (1.00)" on a hardcore record. So
+    # the confidence is capped by how much the specific rules found at all (the
+    # catch-all is no evidence of anything), as the live classifier's is.
+    backed = max(0.0, min(1.0, (specific - 0.05) / (EVIDENCE_FULL - 0.05)))
+    conf *= backed
     arch = next(a for fid, _l, a, _w in FAMILIES if fid == top_id)
     return top_id, round(conf, 3), arch, {k: round(v, 4) for k, v in arche.items()}
 

@@ -123,8 +123,11 @@ const LOOK_OVERRIDES = {
   tribecore: { motion: 0.88, density: 0.84, warm: 0.6, chaos: 0.6, melodic: 0.2 },
   speedcore: { motion: 1, density: 0.95, punch: 1, warm: 0.8, chaos: 0.88, melodic: 0.08, smooth: 0.1 },
   industrial: { motion: 0.76, density: 0.7, warm: 0.2, chaos: 0.8, melodic: 0.12, smooth: 0.16 },
-  krach: { motion: 0.95, density: 0.9, warm: 0.4, chaos: 0.95, melodic: 0.06, smooth: 0.08 },
-  pieep: { motion: 0.88, density: 0.62, warm: 0.36, chaos: 0.42, melodic: 0.62 },
+  // Krach is a PARTY: uptempo's kick under a euphoric lead and a sung hook —
+  // hot, dense and melodic, not the noise wall it was once written as.
+  krach: { motion: 0.95, density: 0.88, punch: 1, warm: 0.84, chaos: 0.48, melodic: 0.66, smooth: 0.18 },
+  // Pieep is tekk: a short stomp with a squeak on it and very little melody.
+  pieep: { motion: 0.84, density: 0.6, punch: 0.94, warm: 0.5, chaos: 0.34, melodic: 0.24, smooth: 0.16 },
   hardpingpong: { motion: 0.9, density: 0.7, warm: 0.44, chaos: 0.5, melodic: 0.4 },
   rock: { motion: 0.6, warm: 0.72, melodic: 0.55, chaos: 0.26 },
   hardrock: { motion: 0.7, punch: 0.8, warm: 0.76, chaos: 0.36 },
@@ -167,8 +170,7 @@ const FAMILIES = [
     rule: [
       ["below", "flat", 0.3, 0.25],
       ["below", "perc", 0.35, 0.3],
-      ["below", "kickPulse", 0.35, 0.35],
-      ["above", "crest", 3.2, 4],
+      ["below", "four", 0.7, 0.25],
       ["in", "centroid", 0.2, 0.55],
     ],
   },
@@ -178,9 +180,8 @@ const FAMILIES = [
     a: "voice",
     rule: [
       ["in", "bpm", 80, 165, 45],
-      ["below", "flat", 0.5, 0.3],
-      ["below", "kickPulse", 0.55, 0.3],
-      ["above", "crest", 2.6, 3],
+      ["below", "flat", 0.35, 0.15],
+      ["above", "kSoft", 0.4, 0.3],
       ["in", "centroid", 0.25, 0.6],
     ],
   },
@@ -203,7 +204,7 @@ const FAMILIES = [
     rule: [
       ["above", "vocal", 0.3, 0.35],
       ["in", "bpm", 60, 100, 25],
-      ["above", "subRatio", 0.16, 0.2],
+      ["above", "subRatio", 0.5, 0.25],
       ["below", "flat", 0.5, 0.3],
     ],
   },
@@ -213,9 +214,9 @@ const FAMILIES = [
     a: "groove",
     rule: [
       ["in", "bpm", 70, 105, 22],
-      ["above", "subRatio", 0.2, 0.2],
+      ["above", "subRatio", 0.5, 0.25],
       ["above", "vocal", 0.2, 0.4],
-      ["below", "kickPulse", 0.8, 0.4],
+      ["below", "four", 0.7, 0.25],
     ],
   },
   {
@@ -224,7 +225,7 @@ const FAMILIES = [
     a: "groove",
     rule: [
       ["in", "bpm", 116, 128, 12],
-      ["above", "kickPulse", 0.45, 0.35],
+      ["above", "four", 0.7, 0.2],
       ["raw", "kSoft"],
       ["below", "flat", 0.55, 0.3],
     ],
@@ -235,9 +236,11 @@ const FAMILIES = [
     a: "groove",
     rule: [
       ["in", "bpm", 125, 150, 16],
-      ["above", "kickPulse", 0.5, 0.3],
+      ["above", "four", 0.7, 0.2],
       ["below", "vocal", 0.45, 0.4],
       ["max", "kSoft", 1, "kHard", 0.8],
+      ["below", "density", 0.85, 0.2],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
@@ -245,10 +248,11 @@ const FAMILIES = [
     label: "Trance",
     a: "groove",
     rule: [
-      ["in", "bpm", 132, 145, 12],
-      ["above", "kickPulse", 0.45, 0.35],
-      ["below", "flat", 0.5, 0.3],
-      ["above", "airRatio", 0.1, 0.18],
+      ["in", "bpm", 128, 142, 8],
+      ["above", "four", 0.55, 0.25],
+      ["above", "kSoft", 0.5, 0.3],
+      ["above", "density", 0.7, 0.2],
+      ["below", "flat", 0.62, 0.3],
     ],
   },
   {
@@ -258,8 +262,7 @@ const FAMILIES = [
     // Mainstage: a clean four-on-the-floor kick under bright leads and hats.
     rule: [
       ["in", "bpm", 118, 136, 10],
-      ["above", "kickPulse", 0.5, 0.3],
-      ["above", "airRatio", 0.1, 0.18],
+      ["above", "four", 0.7, 0.2],
       ["below", "flat", 0.55, 0.3],
       ["raw", "kSoft"],
     ],
@@ -271,9 +274,10 @@ const FAMILIES = [
     // Breakbeats: a steady tempo but a syncopated kick, and a lot of sub.
     rule: [
       ["in", "bpm", 160, 182, 10],
-      ["in", "kickPulse", 0.2, 0.65, 0.25],
-      ["above", "subRatio", 0.2, 0.2],
+      ["below", "four", 0.7, 0.25],
+      ["above", "subRatio", 0.5, 0.25],
       ["above", "perc", 0.5, 0.3],
+      ["above", "offbeat", 0.2, 0.15],
     ],
   },
   {
@@ -283,8 +287,8 @@ const FAMILIES = [
     // Half-time and sparse: the kick is rare and the sub carries the drop.
     rule: [
       ["in", "bpm", 136, 148, 8],
-      ["below", "kickPulse", 0.55, 0.3],
-      ["above", "subRatio", 0.28, 0.2],
+      ["below", "four", 0.7, 0.25],
+      ["above", "subRatio", 0.5, 0.25],
       ["below", "centroid", 0.55, 0.25],
     ],
   },
@@ -295,9 +299,8 @@ const FAMILIES = [
     // Played, not programmed: four-on-the-floor with real dynamics left in it.
     rule: [
       ["in", "bpm", 106, 124, 10],
-      ["above", "kickPulse", 0.45, 0.3],
+      ["above", "four", 0.55, 0.25],
       ["below", "flat", 0.45, 0.25],
-      ["above", "crest", 2.6, 2.5],
       ["in", "centroid", 0.25, 0.6],
     ],
   },
@@ -307,135 +310,160 @@ const FAMILIES = [
     a: "groove",
     // A rolling bassline on a fast grid, bright and clean.
     rule: [
-      ["in", "bpm", 138, 152, 10],
-      ["above", "kickPulse", 0.55, 0.3],
-      ["in", "flat", 0.25, 0.55, 0.2],
-      ["above", "airRatio", 0.12, 0.18],
+      ["in", "bpm", 140, 152, 6],
+      ["above", "four", 0.7, 0.2],
+      ["above", "kSoft", 0.6, 0.3],
+      ["above", "density", 0.85, 0.15],
+      ["below", "tail", 0.3, 0.15],
+      ["in", "flat", 0.25, 0.65, 0.2],
     ],
   },
   {
     id: "hardstyle",
     label: "Hardstyle",
     a: "hard",
+    // The pitched kick with a long, clean tail (and the reverse bass that swells
+    // back into it): hard, ringing, not yet the rawstyle's distorted buzz.
     rule: [
       ["in", "bpm", 145, 162, 12],
-      ["above", "kickPulse", 0.45, 0.3],
-      ["raw", "kHard"],
+      ["above", "four", 0.55, 0.25],
+      ["max", "kHard", 1, "kIndus", 0.8],
+      ["above", "tail", 0.35, 0.25],
+      ["below", "buzz", 0.55, 0.2],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "hardtekk",
     label: "Hardtekk",
     a: "hard",
-    // German hardtekk: hard kick, offbeat bass, a shade under hardstyle tempo
-    // and considerably more raw in the mids.
+    // German hardtekk: a SHORT, saturated stomp on every beat (hardstyle's tail
+    // rings on), offbeat bass, raw in the mids — and no piep on the kick, or
+    // it is pieep.
     rule: [
-      ["in", "bpm", 138, 165, 14],
-      ["above", "kickPulse", 0.45, 0.3],
-      ["raw", "kHard"],
+      ["in", "bpm", 138, 172, 14],
+      ["above", "four", 0.55, 0.25],
+      ["max", "kHard", 1, "kIndus", 0.8],
       ["above", "flat", 0.3, 0.3],
+      ["below", "tail", 0.45, 0.25],
+      ["below", "piep", 0.4, 0.3],
+      ["below", "roll", 0.1, 0.1],
     ],
   },
   {
     id: "zaag",
     label: "Zaag",
     a: "hard",
-    // "Saw": a harmonically dense, gliding lead carrying the tune rather than a
-    // pad — lots of mid/high content that is rich but not pure noise.
+    // "Saw": a detuned, driven saw stack carrying the tune — a sustained buzz
+    // (genre.rs) over a kick that is hard but not uptempo's industrial one.
     rule: [
       ["in", "bpm", 150, 210, 28],
-      ["in", "flat", 0.34, 0.62, 0.22],
-      ["above", "midRatio", 0.3, 0.25],
-      ["max", "kHard", 1, "kIndus", 0.7],
+      ["above", "buzz", 0.6, 0.15],
+      ["in", "flat", 0.4, 0.65, 0.2],
+      ["below", "kSoft", 0.75, 0.3],
+      ["below", "kIndus", 0.8, 0.25],
+      ["below", "airRatio", 0.09, 0.04],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "frenchcore",
     label: "Frenchcore",
     a: "hard",
+    // A HARD pitched kick on every beat around 200 BPM — hard rather than
+    // uptempo's industrial grit — under the melodic lead the crowd sings.
     rule: [
-      ["in", "bpm", 185, 230, 25],
-      ["above", "kickPulse", 0.4, 0.3],
-      ["above", "flat", 0.4, 0.3],
-      ["max", "kHard", 0.8, "kIndus", 1],
+      ["in", "bpm", 190, 230, 15],
+      ["above", "four", 0.55, 0.25],
+      ["above", "kHard", 0.55, 0.3],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "uptempo",
     label: "Uptempo",
     a: "hard",
-    // A lower bar on kickPulse than the other gridded families, deliberately:
-    // at 280 BPM a beat is 210 ms and the onset grid only has twenty slots to
-    // describe it, so the grid measurement is at the limit of its own
-    // resolution up here. The tempo itself is already most of the evidence.
+    // The industrial kick — distorted until it is noise — past 200 BPM, rolls all
+    // over, screeches rather than a melody: the noisiest mix of the hard end.
     rule: [
-      ["in", "bpm", 220, 300, 35],
-      ["above", "kickPulse", 0.22, 0.3],
-      ["above", "flat", 0.45, 0.3],
-      ["raw", "kIndus"],
+      ["in", "bpm", 195, 290, 25],
+      ["above", "kIndus", 0.45, 0.35],
+      ["above", "flat", 0.45, 0.2],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "krach",
     label: "Deutscher Krach",
     a: "hard",
-    // Extreme, loud, and deliberately ugly: barely any crest left, the spectrum
-    // nearly flat, and a kick that is mostly distortion.
+    // DEUTSCHER KRACH (2023, Noiseflow): uptempo's kick past 200 BPM, but a
+    // PARTY — a euphoric, hardstyle-leaning lead and sung German hooks over it,
+    // so a pitched lead (genre.rs `lead`) and a less noisy mix than dark
+    // uptempo. It used to be written as the opposite — a noise wall with no
+    // melody — which is what the genre is NOT.
     rule: [
-      ["in", "bpm", 190, 300, 45],
-      ["above", "flat", 0.55, 0.25],
-      ["below", "crest", 3.2, 2],
-      ["raw", "kIndus"],
+      ["in", "bpm", 195, 235, 15],
+      ["max", "kIndus", 1, "kHard", 0.85],
+      ["above", "lead", 0.6, 0.2],
+      ["below", "flat", 0.6, 0.15],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "pieep",
     label: "Pieep",
     a: "hard",
-    // Squeaky, very high-register tonal leads over a fast kick.
+    // Tekk built on the PIEP KICK: a pitched squeak on the attack of every kick.
+    // It used to be read as a squeaky high LEAD (the air and the centroid) — which
+    // is not what a piep is, and which the air share could not even measure: the
+    // squeak is read on the kick itself (features.rs `piep`, 0.97 of the piep
+    // record's kicks against 0.17 at most anywhere else).
     rule: [
-      ["in", "bpm", 170, 260, 40],
-      ["above", "airRatio", 0.2, 0.18],
-      ["above", "centroid", 0.62, 0.2],
-      ["below", "flat", 0.55, 0.3],
+      ["in", "bpm", 150, 195, 20],
+      ["above", "four", 0.55, 0.25],
+      ["above", "piep", 0.45, 0.35],
     ],
   },
   {
     id: "hardcore",
     label: "Hardcore",
     a: "hard",
-    // Mainstream hardcore: a distorted kick on every beat, squashed flat.
+    // Mainstream hardcore / gabber: a hard distorted kick on every beat, under
+    // frenchcore's tempo.
     rule: [
-      ["in", "bpm", 148, 195, 18],
-      ["above", "kickPulse", 0.45, 0.3],
-      ["in", "flat", 0.4, 0.75, 0.2],
-      ["max", "kHard", 1, "kIndus", 0.8],
+      ["in", "bpm", 163, 195, 10],
+      ["above", "four", 0.55, 0.25],
+      ["above", "kHard", 0.5, 0.3],
+      ["in", "flat", 0.35, 0.7, 0.2],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "tribecore",
     label: "Tribe",
     a: "hard",
-    // Tribe: percussive and mid-heavy rather than one wall of noise.
+    // Tribe: the kick under busy tribal percussion — many onsets a beat, a lot of
+    // them between the beats.
     rule: [
       ["in", "bpm", 150, 190, 20],
-      ["above", "kickPulse", 0.45, 0.3],
+      ["above", "four", 0.55, 0.25],
       ["in", "flat", 0.32, 0.62, 0.2],
       ["above", "perc", 0.5, 0.3],
-      ["above", "midRatio", 0.3, 0.25],
+      ["above", "density", 0.8, 0.2],
+      ["above", "offbeat", 0.15, 0.15],
       ["max", "kHard", 1, "kIndus", 0.7],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "speedcore",
     label: "Speedcore",
     a: "hard",
-    // Past 250 BPM the grid is at its limit; only the noise is left.
+    // Past 250 BPM the grid is at its limit; only the noise and the kick are left.
     rule: [
-      ["in", "bpm", 245, 300, 22],
-      ["above", "flat", 0.5, 0.22],
-      ["above", "kIndus", 0.4, 0.3],
-      ["below", "crest", 3.5, 2.5],
+      ["in", "bpm", 240, 300, 22],
+      ["above", "flat", 0.4, 0.2],
+      ["max", "kHard", 0.8, "kIndus", 1],
     ],
   },
   {
@@ -445,36 +473,39 @@ const FAMILIES = [
     // A metallic, noisy kick is the whole tell.
     rule: [
       ["in", "bpm", 140, 185, 22],
-      ["above", "kickPulse", 0.4, 0.3],
-      ["above", "flat", 0.45, 0.25],
-      ["above", "kIndus", 0.45, 0.3],
-      ["below", "crest", 3.6, 2.6],
+      ["above", "four", 0.55, 0.25],
+      ["above", "flat", 0.5, 0.2],
+      ["above", "kIndus", 0.5, 0.3],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "rawstyle",
     label: "Rawstyle",
     a: "hard",
-    // Hardstyle's harder cousin: same grid, a rougher, more distorted kick.
+    // Hardstyle's harder cousin: the same grid, the kick's tail driven into a
+    // distorted buzz (genre.rs `buzz`).
     rule: [
       ["in", "bpm", 148, 163, 10],
-      ["above", "kickPulse", 0.45, 0.3],
-      ["in", "flat", 0.45, 0.72, 0.18],
+      ["above", "four", 0.55, 0.25],
       ["above", "kHard", 0.5, 0.3],
-      ["below", "crest", 3.2, 2.4],
+      ["above", "buzz", 0.45, 0.2],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
     id: "hardtechno",
     label: "Hard techno",
     a: "hard",
-    // Looped, driving and harder than techno proper, without the hardstyle kick.
+    // Looped, driving and harder than techno proper, without the hardstyle
+    // kick's ringing tail.
     rule: [
       ["in", "bpm", 138, 162, 12],
-      ["above", "kickPulse", 0.55, 0.3],
+      ["above", "four", 0.55, 0.25],
       ["in", "flat", 0.3, 0.6, 0.2],
       ["max", "kHard", 1, "kIndus", 0.6],
-      ["below", "crest", 4, 2.8],
+      ["below", "tail", 0.5, 0.2],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
@@ -484,22 +515,24 @@ const FAMILIES = [
     // Guitars: a continuously loud, fairly noisy mid band, with a kick that is
     // played rather than gridded.
     rule: [
-      ["in", "bpm", 95, 170, 35],
-      ["above", "midRatio", 0.32, 0.25],
+      ["in", "bpm", 95, 165, 20],
+      ["above", "airRatio", 0.08, 0.06],
       ["in", "flat", 0.35, 0.68, 0.22],
-      ["below", "kickPulse", 0.62, 0.3],
+      ["below", "four", 0.75, 0.25],
     ],
   },
   {
     id: "metal",
     label: "Metal",
     a: "rock",
+    // Distorted guitars (a bright, noisy top end) over an acoustic kit, whose
+    // double kick still leaves some beats without one.
     rule: [
       ["in", "bpm", 130, 220, 45],
-      ["above", "midRatio", 0.34, 0.22],
+      ["above", "airRatio", 0.08, 0.06],
       ["above", "flat", 0.5, 0.25],
-      ["below", "crest", 4, 2.5],
-      ["below", "kickPulse", 0.7, 0.3],
+      ["above", "kSoft", 0.3, 0.3],
+      ["below", "four", 0.85, 0.2],
     ],
   },
   {
@@ -510,8 +543,7 @@ const FAMILIES = [
     rule: [
       ["in", "bpm", 200, 300, 40],
       ["above", "flat", 0.58, 0.22],
-      ["below", "crest", 3, 1.8],
-      ["above", "midRatio", 0.3, 0.25],
+      ["above", "airRatio", 0.08, 0.06],
     ],
   },
   // --- urbain / global ------------------------------------------------------
@@ -533,9 +565,9 @@ const FAMILIES = [
     a: "groove",
     // Half-time 808: sparse kicks, a lot of sub, hats doing the motion.
     rule: [
-      ["in", "bpm", 128, 152, 12],
-      ["above", "subRatio", 0.3, 0.2],
-      ["below", "kickPulse", 0.62, 0.3],
+      ["in", "bpm", 124, 152, 12],
+      ["above", "subRatio", 0.5, 0.25],
+      ["below", "four", 0.65, 0.25],
       ["above", "perc", 0.4, 0.3],
     ],
   },
@@ -546,8 +578,8 @@ const FAMILIES = [
     // Dembow: a steady mid-tempo grid with a heavy, round low end.
     rule: [
       ["in", "bpm", 86, 104, 10],
-      ["above", "kickPulse", 0.45, 0.3],
-      ["above", "subRatio", 0.22, 0.2],
+      ["above", "four", 0.55, 0.25],
+      ["above", "subRatio", 0.5, 0.25],
       ["below", "flat", 0.5, 0.25],
     ],
   },
@@ -558,7 +590,7 @@ const FAMILIES = [
     // Percussive and organic: busy transients over a four-on-the-floor.
     rule: [
       ["in", "bpm", 116, 126, 8],
-      ["above", "kickPulse", 0.5, 0.3],
+      ["above", "four", 0.55, 0.25],
       ["above", "perc", 0.5, 0.3],
       ["below", "flat", 0.45, 0.25],
     ],
@@ -570,8 +602,8 @@ const FAMILIES = [
     // The log drum: sub-heavy, sparse and slow for a house grid.
     rule: [
       ["in", "bpm", 106, 120, 8],
-      ["above", "subRatio", 0.28, 0.2],
-      ["below", "kickPulse", 0.62, 0.3],
+      ["above", "subRatio", 0.5, 0.25],
+      ["below", "four", 0.7, 0.25],
       ["below", "centroid", 0.55, 0.25],
     ],
   },
@@ -582,8 +614,8 @@ const FAMILIES = [
     // Shuffled two-step: sub bass, busy percussion, off-grid hits.
     rule: [
       ["in", "bpm", 126, 140, 8],
-      ["in", "kickPulse", 0.25, 0.65, 0.25],
-      ["above", "subRatio", 0.24, 0.2],
+      ["below", "four", 0.7, 0.25],
+      ["above", "subRatio", 0.5, 0.25],
       ["above", "perc", 0.5, 0.3],
     ],
   },
@@ -594,8 +626,9 @@ const FAMILIES = [
     // A broken beat under a steady tempo — the kick is not on every beat.
     rule: [
       ["in", "bpm", 125, 152, 10],
-      ["in", "kickPulse", 0.25, 0.65, 0.25],
+      ["below", "four", 0.7, 0.25],
       ["above", "perc", 0.55, 0.3],
+      ["above", "offbeat", 0.1, 0.1],
     ],
   },
   {
@@ -605,8 +638,8 @@ const FAMILIES = [
     // Riddim: mid-tempo, sub-heavy, less strictly gridded than house.
     rule: [
       ["in", "bpm", 88, 112, 10],
-      ["above", "kickPulse", 0.45, 0.3],
-      ["above", "subRatio", 0.22, 0.2],
+      ["above", "four", 0.55, 0.25],
+      ["above", "subRatio", 0.5, 0.25],
       ["below", "flat", 0.45, 0.25],
     ],
   },
@@ -617,7 +650,7 @@ const FAMILIES = [
     // The offbeat skank over a slow, deep one-drop.
     rule: [
       ["in", "bpm", 58, 92, 12],
-      ["above", "subRatio", 0.24, 0.2],
+      ["above", "subRatio", 0.5, 0.25],
       ["below", "flat", 0.45, 0.25],
       ["above", "perc", 0.4, 0.3],
     ],
@@ -630,7 +663,7 @@ const FAMILIES = [
     // Retro: a clean grid under warm, sustained analogue pads.
     rule: [
       ["in", "bpm", 98, 122, 10],
-      ["above", "kickPulse", 0.4, 0.3],
+      ["above", "four", 0.55, 0.25],
       ["below", "flat", 0.42, 0.22],
       ["in", "centroid", 0.3, 0.65],
     ],
@@ -642,7 +675,7 @@ const FAMILIES = [
     // Played and syncopated, bright and dry rather than distorted.
     rule: [
       ["in", "bpm", 95, 125, 12],
-      ["above", "kickPulse", 0.4, 0.3],
+      ["above", "four", 0.55, 0.25],
       ["above", "perc", 0.55, 0.3],
       ["below", "flat", 0.45, 0.25],
     ],
@@ -654,7 +687,7 @@ const FAMILIES = [
     // Slow, soft and warm, with the top end rolled off.
     rule: [
       ["in", "bpm", 68, 98, 12],
-      ["below", "kickPulse", 0.5, 0.3],
+      ["below", "four", 0.7, 0.25],
       ["below", "centroid", 0.5, 0.22],
       ["below", "perc", 0.5, 0.3],
     ],
@@ -667,7 +700,7 @@ const FAMILIES = [
     // A sung hook, clean and bright, on a light grid.
     rule: [
       ["in", "bpm", 88, 132, 14],
-      ["above", "vocal", 0.3, 0.3],
+      ["above", "vocal", 0.12, 0.2],
       ["below", "flat", 0.45, 0.25],
       ["in", "centroid", 0.3, 0.68],
     ],
@@ -692,7 +725,7 @@ const FAMILIES = [
     rule: [
       ["in", "bpm", 58, 122, 18],
       ["below", "flat", 0.45, 0.25],
-      ["above", "crest", 2.8, 2.5],
+      ["above", "vocal", 0.25, 0.3],
       ["in", "centroid", 0.25, 0.6],
     ],
   },
@@ -705,7 +738,6 @@ const FAMILIES = [
       ["in", "bpm", 78, 142, 20],
       ["above", "vocal", 0.25, 0.3],
       ["below", "flat", 0.45, 0.25],
-      ["above", "crest", 2.8, 2.5],
     ],
   },
   {
@@ -717,7 +749,6 @@ const FAMILIES = [
       ["in", "bpm", 78, 132, 18],
       ["below", "flat", 0.4, 0.22],
       ["below", "perc", 0.45, 0.3],
-      ["above", "crest", 3, 2.5],
     ],
   },
   // --- rock ----------------------------------------------------------------
@@ -729,8 +760,8 @@ const FAMILIES = [
     rule: [
       ["in", "bpm", 140, 205, 20],
       ["above", "flat", 0.42, 0.22],
-      ["above", "midRatio", 0.3, 0.25],
-      ["below", "kickPulse", 0.65, 0.3],
+      ["above", "airRatio", 0.08, 0.06],
+      ["below", "four", 0.7, 0.25],
     ],
   },
   {
@@ -741,8 +772,8 @@ const FAMILIES = [
     rule: [
       ["in", "bpm", 98, 152, 18],
       ["in", "flat", 0.32, 0.62, 0.2],
-      ["above", "midRatio", 0.28, 0.25],
-      ["below", "kickPulse", 0.6, 0.3],
+      ["above", "airRatio", 0.08, 0.06],
+      ["below", "four", 0.7, 0.25],
     ],
   },
   {
@@ -753,8 +784,8 @@ const FAMILIES = [
     rule: [
       ["in", "bpm", 98, 152, 18],
       ["above", "flat", 0.42, 0.22],
-      ["above", "midRatio", 0.32, 0.25],
-      ["below", "kickPulse", 0.62, 0.3],
+      ["above", "airRatio", 0.08, 0.06],
+      ["below", "four", 0.7, 0.25],
     ],
   },
   // --- scène / party --------------------------------------------------------
@@ -764,10 +795,9 @@ const FAMILIES = [
     a: "groove",
     // Memphis 808: a cowbell hook over a distorted, sub-heavy half-time beat.
     rule: [
-      ["in", "bpm", 128, 168, 14],
-      ["below", "kickPulse", 0.72, 0.3],
-      ["above", "subRatio", 0.3, 0.2],
-      ["below", "crest", 3.6, 2.5],
+      ["in", "bpm", 125, 165, 8],
+      ["below", "four", 0.7, 0.25],
+      ["above", "subRatio", 0.5, 0.25],
       ["above", "perc", 0.4, 0.3],
     ],
   },
@@ -778,10 +808,12 @@ const FAMILIES = [
     // Hardtek ping-pong: a kick on the beat, a saw bass between them, busy.
     rule: [
       ["in", "bpm", 155, 200, 18],
-      ["above", "kickPulse", 0.5, 0.3],
+      ["above", "four", 0.55, 0.25],
       ["above", "flat", 0.4, 0.22],
       ["above", "perc", 0.55, 0.3],
       ["max", "kHard", 1, "kIndus", 0.7],
+      ["below", "airRatio", 0.09, 0.04],
+      ["below", "piep", 0.5, 0.3],
     ],
   },
   {
@@ -791,7 +823,7 @@ const FAMILIES = [
     // Party hardtekk with chanted German vocals over a hard kick.
     rule: [
       ["in", "bpm", 148, 185, 16],
-      ["above", "kickPulse", 0.45, 0.3],
+      ["above", "four", 0.55, 0.25],
       ["in", "flat", 0.38, 0.68, 0.2],
       ["above", "vocal", 0.28, 0.3],
       ["max", "kHard", 1, "kIndus", 0.7],
@@ -802,9 +834,11 @@ const FAMILIES = [
     label: "Électronique",
     a: "groove",
     // The catch-all for "clearly machine-made, clearly rhythmic, nothing more
-    // specific fits". Weak on purpose: it should only ever win by default.
+    // specific fits". Weak on purpose: it should only ever win by default. At
+    // 0.28 it won by default on uptempo, speedcore, trap, pop and hip-hop — the
+    // specific rules multiply four or five soft terms and rarely clear that.
     rule: [
-      ["k", 0.28],
+      ["k", 0.12],
       ["above", "pulse", 0.3, 0.4],
       ["above", "perc", 0.25, 0.3],
     ],
@@ -889,7 +923,8 @@ const TEMPO_BANDS = {
   garage: [125, 140],
   dubstep: [135, 150],
   synthwave: [95, 125],
-  electronic: [100, 150],
+  // No row for the catch-all "electronic": it knows nothing, and a range set
+  // from it only ever confirmed whatever octave the grid was on.
   hiphop: [80, 105],
   rap: [80, 105],
   trap: [130, 160],
@@ -1055,15 +1090,20 @@ const TEMPO_ALIASES = {
 //
 // The descriptor names, in the order the analyser stores them.
 export const RULE_FEATURES = [
-  "bpm", "pulse", "kickPulse", "flat", "centroid", "perc", "vocal", "crest", "level",
+  "bpm", "pulse", "kickPulse", "flat", "centroid", "perc", "vocal", "range", "level",
   "subRatio", "midRatio", "airRatio", "kSoft", "kHard", "kIndus", "melody", "tonalness",
   "chord", "dyn",
+  // What the music is built from (rhythm/src/style.rs F_KF0..F_ROLL).
+  "kickF0", "piep", "tail", "lead", "buzz", "screech", "offbeat", "density", "roll", "four",
 ];
 const FEATURE_INDEX = new Map(RULE_FEATURES.map((k, i) => [k, i]));
 const OPS = { k: 0, in: 1, above: 2, below: 3, raw: 4, max: 5 };
 // The two families that do not need a tempo to be judged: everything else is
 // damped while the beat grid is not locked.
 const TEMPO_FREE = new Set(["ambient", "strings"]);
+// The catch-all, which wins by default and is evidence of nothing: the
+// classifier's confidence is only backed by what the OTHER rules found.
+export const FALLBACK = "electronic";
 
 /** One family's raw weight for a descriptor object — the reference the
  * analyser's evaluator is tested against. */
@@ -1100,13 +1140,13 @@ export function ruleWeight(rule, s) {
 
 /**
  * The whole vocabulary, flattened for the analyser (style.rs#load_families):
- * [count, then per family: archetype, tempoFree, look x7, rangeLo, rangeHi,
+ * [count, then per family: archetype, flag (1 tempo-free, 2 the fallback), look x7, rangeLo, rangeHi,
  *  nTerms, then per term: op, a, b, p1, p2, p3].
  */
 export function familyTable() {
   const out = [FAMILIES.length];
   for (const f of FAMILIES) {
-    out.push(Math.max(0, ARCHETYPES.indexOf(f.a)), TEMPO_FREE.has(f.id) ? 1 : 0);
+    out.push(Math.max(0, ARCHETYPES.indexOf(f.a)), TEMPO_FREE.has(f.id) ? 1 : f.id === FALLBACK ? 2 : 0);
     const look = FAMILY_LOOK.get(f.id);
     for (const k of LOOK_KEYS) out.push(look[k]);
     const range = TEMPO_BANDS[f.id] || [0, 0];
@@ -1137,6 +1177,11 @@ export function familyTable() {
 }
 
 /** The family behind an index the analyser reports, or null. */
+/** The families' ids and rules, in table order — for the tests. */
+export function familyRules() {
+  return FAMILIES.map(({ id, rule }) => ({ id, rule }));
+}
+
 export function familyAt(index) {
   return index >= 0 && index < FAMILIES.length ? FAMILY_LIST[index] : null;
 }

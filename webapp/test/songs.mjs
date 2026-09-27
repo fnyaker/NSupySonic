@@ -520,6 +520,9 @@ export function renderSong(def) {
     const lenMs = Math.min(kickOpt.lenMs ?? 300, room * 1000 * 0.92);
     renderKick(drums, tt, {
       ...kickOpt,
+      // A TUNED kick: the tail's pitch follows the chord, so the kick is the
+      // bassline — uptempo and Krach write their bass this way.
+      ...(o.f1 ? { f1: o.f1 } : {}),
       lenMs,
       sweepMs: Math.min(kickOpt.sweepMs ?? 90, lenMs * 0.4),
       gain: (kickOpt.gain ?? 0.7) * (o.vel ?? 1) * (1 - (def.velJitter || 0) * r()),
@@ -796,14 +799,110 @@ export const SONGS = [
     },
   },
   {
-    id: "krach-210",
-    genre: "krach",
+    // Dark uptempo — terror-leaning: the industrial kick with a saw layer
+    // driven to the edge, screeches, a sixteenth-note roll closing every
+    // phrase. (This record was "krach-210" until the genre it was named after
+    // turned out to be built another way: see krach-205.)
+    id: "uptempo-dark-210",
+    genre: "uptempo",
     bpm: 210,
     kick: "krach",
     kickOpt: { f0: 240, f1: 48, sweepMs: 40, lenMs: 320, drive: 34, click: 0.7, gain: 0.85, saw: 0.8, sawDrive: 22 },
     sections: edm({ gap: 1 }),
     groove: (c) => hardGroove(c, { rolls: (beat) => (beat % 16 === 15 ? [0, 0.25, 0.5, 0.75] : [0]) }),
     leadLine: hardLead({ screech: { hpHz: 300, drive: 14, bend: 2.4 } }),
+  },
+  {
+    // DEUTSCHER KRACH, as the scene makes it (named in 2023 by Noiseflow): the
+    // uptempo kick past 200 BPM, but TUNED — its tail plays the bassline, so
+    // the "huge bass" is the kick itself — under a euphoric, hardstyle-leaning
+    // supersaw lead that carries the drop, and a sung German hook in the
+    // breakdown AND the drop. Party, not darkness: vi-IV-I-V, a major-key lead,
+    // the kick rolls filling the ends of the phrases, the beat of silence
+    // before each drop, and in the breakdown a big sustained bass under the
+    // chords, where the kick is out.
+    id: "krach-205",
+    genre: "krach",
+    bpm: 205,
+    kick: "uptempo",
+    kickOpt: { f0: 235, f1: 50, sweepMs: 55, lenMs: 270, drive: 22, click: 0.5, gain: 0.8, saw: 0.45 },
+    velJitter: 0.15,
+    sections: edm({ intro: 4, build: 4, drop: 16, breakdown: 8, gap: 1 }).map((s) =>
+      s.type === "build"
+        ? { ...s, kickRoll: true, vocal: 0.8 }
+        : s.type === "breakdown"
+          ? { ...s, bass: true, vocal: 1 }
+          : s.type === "drop"
+            ? { ...s, vocal: 0.8 }
+            : s
+    ),
+    groove: (c) => {
+      const { sec, beat, br } = c;
+      if (sec.roll) return buildRoll(c, { useKick: true });
+      if (sec.kick) {
+        const p = beat % 16;
+        const offs = p === 15 ? [0, 0.25, 0.5, 0.75] : p === 7 ? [0, 0.5] : [0];
+        const f1 = midi(c.chord - 24);
+        for (const o of offs) c.kick(beat + o, { room: offs.length > 1 ? offs[1] - offs[0] : 1, f1 });
+      }
+      if (sec.crash && br === 0 && c.bi === 0) c.crash(beat);
+      if (sec.hats) c.hat(beat + 0.5, { vel: 0.7 });
+      if (sec.snare && c.bi % 2 === 1) c.clap(beat, { gain: 0.3 });
+    },
+    bassLine: (c) => {
+      // The kick is the bass in the drops; in the breakdown, where it is out,
+      // a detuned saw bass holds each chord's root, big and low.
+      const { bar, chord, meter, sec } = c;
+      if (sec.type !== "breakdown") return;
+      c.renderBass(c.bassBus, c.at(bar * meter), c.P * meter * 0.98, midi(chord - 24), { wave: "saw", detune: 0.008, cutoff: 320, env: 0.4, gain: 0.3, sub: 0.5 });
+    },
+    leadLine: (c) => {
+      // The euphoric lead: a seven-voice supersaw on the eighths, chord tones
+      // stepping up — the hardstyle-leaning melody the scene is known for.
+      const { bar, chord, meter, sec } = c;
+      const mel = [12, 16, 19, 24, 19, 16, 14, 16];
+      for (let k = 0; k < meter * 2; k++) {
+        const n = chord + mel[(bar * 8 + k) % mel.length];
+        if (sec.lead === "filtered")
+          c.renderLead(c.bus, c.at(bar * meter + k / 2), c.P * 0.45, midi(n), { voices: 7, spread: 0.02, cutoff: 700 + 3500 * (c.br / sec.bars), gain: 0.08 });
+        else
+          c.renderLead(c.bus, c.at(bar * meter + k / 2), c.P * 0.47, midi(n), { voices: 7, spread: 0.022, cutoff: sec.lead === "soft" ? 2600 : 6500, gain: sec.lead === "soft" ? 0.08 : 0.11, drive: 1.5 });
+      }
+    },
+  },
+  {
+    // PIEEP: tekk built around the PIEP KICK — hardtekk's short, saturated
+    // stomp with a pitched squeak layered on its attack. Everything else is
+    // the tekk recipe: "a kick that is short, loud and distorted to the edge of
+    // breaking, a shuffled hi-hat, maybe a pitched-up vocal chop, and that is
+    // the record" — with the offbeat bass of the harder German tekk, claps on
+    // two and four, and a snare-roll build.
+    id: "pieep-170",
+    genre: "pieep",
+    bpm: 170,
+    kick: "pieep",
+    velJitter: 0.1,
+    sections: edm({ intro: 4, build: 4, drop: 16, breakdown: 4 }).map((s) => ({ ...s, vocal: s.type === "breakdown" ? 0.6 : 0 })),
+    groove: (c) => {
+      const { sec, beat, bi, br } = c;
+      if (sec.roll) return buildRoll(c);
+      if (sec.kick) c.kick(beat);
+      if (sec.hats) {
+        // The shuffle: the off-sixteenths pushed late.
+        c.hat(beat + 0.5, { vel: 0.8 });
+        c.hat(beat + 0.25 + 0.07, { vel: 0.4 });
+        c.hat(beat + 0.75 + 0.07, { vel: 0.45 });
+      }
+      if (sec.snare && bi % 2 === 1) c.clap(beat, { gain: 0.32 });
+      if (sec.crash && br === 0 && bi === 0) c.crash(beat);
+    },
+    bassLine: offbeatBass({ wave: "saw", cutoff: 520 }),
+    leadLine: (c) => {
+      // Short stabs, not a melody: one chord hit on the "and" of two and four.
+      const { bar, chord, meter, sec } = c;
+      if (sec.lead === "soft") return hardLead({})(c);
+      for (const k of [1.5, 3.5]) c.renderLead(c.bus, c.at(bar * meter + k), c.P * 0.18, midi(chord + 12), { voices: 3, cutoff: 2400, gain: 0.08, drive: 2 });
+    },
   },
   {
     id: "gabber-185",

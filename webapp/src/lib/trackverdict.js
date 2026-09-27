@@ -47,3 +47,12 @@ export const servedStyleLabel = derived(verdict, ($v) =>
 
 /** True when that name came from somebody tagging the track by hand. */
 export const styleIsTagged = derived(verdict, ($v) => $v?.styleSource === "tag");
+
+/**
+ * True when the served name was CHOSEN rather than guessed: a tag, or the head
+ * trained on the admin's tags. A name the server's heuristic guessed from
+ * whole-file averages yields to a confident live reading (audio/engine.js
+ * `merged`), which hears how the track is built — the kick's shape, a piep, the
+ * rolls — and that is what the chip should then say too.
+ */
+export const styleIsTrusted = derived(verdict, ($v) => $v?.styleSource === "tag" || $v?.styleSource === "model");

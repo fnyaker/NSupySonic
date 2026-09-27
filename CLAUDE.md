@@ -82,7 +82,9 @@ cd webapp && npm run wasm                            # rebuild rhythm.wasm + rhy
                                                      # webapp/appcore (Rust, target wasm32-unknown-unknown). All three binaries are
                                                      # COMMITTED; npm test fails if they were not built from the sources next to them.
 cd webapp/appcore && cargo test --release            # the app core's own unit tests (folding, the estimators' edge cases)
-cd webapp && node test/eval/rhythm-eval.mjs          # the analyser on 26 arranged records with ground truth (beats, kicks, tempo, drops)
+cd webapp && node test/eval/rhythm-eval.mjs          # the analyser on 28 arranged records with ground truth (beats, kicks, tempo, drops)
+cd webapp && node test/eval/family-eval.mjs          # ...which genre the live classifier names on each ([--explain <id>] rule by rule,
+                                                     # [--features] the descriptors): analysed once, cached, the rules replayed in JS
 cd webapp && node test/rhythm/run.mjs                # ...and end to end in headless Chromium: AudioWorklet, delivery, timing
 cd webapp && node test/rhythm/run.mjs --trim -60     # ...on a (simulated) short output path: the automatic look-ahead at work
 cd webapp && node test/party/run.mjs [--fmt flac]    # listen party end to end: real server, host + guest, clicks detected on what
@@ -100,7 +102,7 @@ supysonic-cli deezer sync                            # import playlists/favorite
 supysonic-cli deezer lyrics [--overwrite] [--limit N]  # archive synced lyrics for archived tracks
 supysonic-cli deezer analyze [--force] [--limit N] [--workers N]  # measure tempo + style for archived tracks
 supysonic-cli deezer bpm-audit [--limit N]             # Deezer's published BPM against the files' measured tempo, per style
-python tools/tempo_eval.py --render /tmp/tempo          # the server's file tempo on the 26 arranged records + beatless tones
+python tools/tempo_eval.py --render /tmp/tempo          # the server's file tempo on the 28 arranged records + beatless tones
 python tools/perf_api.py [--tracks 20000] [--serve]     # every screen's /api route timed on a big synthetic library (Deezer off):
                                                      # median ms, SQL statement count, bytes and gzip bytes per route
 supysonic-cli deezer embed [--force] [--limit N]       # extract genre embeddings (needs onnxruntime)
@@ -620,8 +622,26 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   nothing to install on a server that already has ffmpeg.
 - Everything it classifies on is **physical or scale-free** (BPM, hertz, decibels, 0..1 ratios), on
   purpose: the client's live classifier works on its own normalized feature scales and the two must
-  not be expected to share a threshold. They are independent readings — where the served one exists
-  it is the authority, and the live one covers what has not been measured yet.
+  not be expected to share a threshold. They are independent readings, and **neither is simply the
+  authority**: a served genre that somebody CHOSE (a tag, the trained head) leads; one the heuristic
+  GUESSED from whole-file averages yields to a confident live reading of how the track is built (see
+  *The classifier reads how the music is BUILT* below). Its BPM — Deezer's own figure — stays the
+  tempo's anchor either way.
+- **Its rules were never measured against its own measures, and on the arranged records it named 0
+  of 28** — every hard record jazz, strings or dnb. Two faults, both fixed and pinned by
+  `tests/base/test_analysis.py` on MEASURED features (the drawn ones it had were on the imagined
+  scale): the beat folds (`_grid_share`, `_fold_half_ratio`) folded the whole track modulo a period
+  ROUNDED to a whole 10 ms frame, which slides half a frame a beat at 132 BPM, so after a few
+  hundred beats the fold was flat — a four-on-the-floor kick read a grid share of 0.06, and the
+  octave check took the flat fold for "bass between the beats" and doubled trance and psytrance.
+  They now fold by exact phase, per 8-second window. And the rules asked for flatness 0.4-0.75 where
+  a file reads 0.01-0.34: the hard families are rewritten on what this side can actually hear —
+  the tempo band, and a CLEAN kick (spectral entropy 0.32-0.45) against a NOISY one (0.59-0.78) —
+  which names hardstyle, frenchcore, uptempo, Krach and speedcore right; the subgenre past that is
+  the live reading's. The confidence is backed by how much the specific rules found at all (a share
+  of next to nothing used to read 1.00). The converse octave branch — the bass skipping every other
+  beat, so halve — is gone on purpose: a kick on one and three does exactly that at the right tempo.
+  `ANALYSIS_VERSION` 4.
 - Event-driven like the rest: `archive._finalize_archive` queues it on a daemon thread behind a
   one-at-a-time semaphore, so it is never why an archive, a stream or a shutdown waits.
   `deezer analyze` is the catch-up and the way to re-measure after `ANALYSIS_VERSION` moves. The
@@ -798,9 +818,13 @@ genres". The heuristic above knows the styles it was written with; this teaches 
 - **The genre chip reads the SERVED verdict first** (`webapp/src/lib/trackverdict.js`). It used to
   read the live classifier only, so it needed the analysis engine running, the `smart` scene
   selected AND the classifier past its confidence floor — miss any one and there was no label at
-  all, which is why it showed up about half the time. The server measured the track once and a
-  hand-applied tag is not a guess at all, so that leads; the live reading covers what nobody has
-  measured yet.
+  all, which is why it showed up about half the time. A hand-applied tag or the trained head is not
+  a guess at all, so that leads (`styleIsTrusted`); otherwise the chip shows the engine's reading
+  once it is sure — which is the served guess until the live classifier is confident of ANOTHER
+  family (`audio/engine.js#merged`, `LIVE_OVERRIDE_CONF`) — and the served guess when the engine is
+  not reading at all. A heuristic genre also only sets the tempo range when it is confident and its
+  own BPM lies inside that range (`adoptVerdict`): served "jazz" on a 205 BPM Krach record once set an
+  80-165 plateau against a 205 seed.
 
 **Audio analysis is RUST, ON THE AUDIO THREAD** (`webapp/rhythm/`, compiled to
 `src/lib/audio/rhythm.wasm`; `webapp/src/lib/audio/` is the delivery). The JavaScript engine read
@@ -827,7 +851,7 @@ name:length pairs — neither side hard-codes a slot), and re-expresses the beat
 (`projectBeat`). It is still ONE engine, shared and refcounted: every view
 reads the same frame object by reference, and it runs at the shallowest level any live subscriber
 needs (spectrum / rhythm / smart). Nothing allocates after `rhythm_init`. Measured against the
-JavaScript chain it replaced, on 26 arranged records with ground truth (`test/eval/`): beats
+JavaScript chain it replaced, on 28 arranged records with ground truth (`test/eval/`): beats
 F-measure at 35 ms **79 → 93** cold, kick precision **46% → 82%**, drops found on every EDM record
 but trap (mostly 0 of 2 before), a half-tempo seed turned into the right tempo **17% → 88%** of the
 time; end to end in headless Chromium (`test/rhythm/run.mjs`) kicks land within 5 ms, beats within
@@ -1139,7 +1163,16 @@ code an operator might reasonably want to extend.
 **And a breakdown is not a tempo change.** With no drums in it the last seconds carry no onsets and
 the autocorrelation is reading a pad; the estimate is skipped entirely (both going into the quiet
 part and coming out of it, which is the window that is three-quarters empty) and the grid coasts on
-what the music had before. That alone is where "128 BPM, then 64, then 255" came from.
+what the music had before. That alone is where "128 BPM, then 64, then 255" came from. And the
+breakdown is not always QUIET: pads, a lead and a vocal at full level carry onsets, so the pattern
+layer's own reading — a breakdown (the kick out for a bar) or a build following the groove — HOLDS
+the locked tempo too (`tempo.rs#hold`, from `lib.rs`), without losing confidence. Measured on the
+arranged techno record, the grid left 132 for 170 at the end of the breakdown and rode the build's
+roll there for seven seconds; seeded and genre-known techno went from 97/96% right to 100%. Only
+after 4 s of groove has been heard: an intro with the kick out reads as either, and holding there
+held whatever octave the grid had opened on. The cost is stated: dubstep's half-time drop halves the
+grid (a pre-existing error), and a breakdown's melody no longer undoes it by chance — cold dubstep
+50% right to 22% (seeded, 100%).
 
 Two older details are still there for the same reasons they always were: the ODF is smoothed
 (~20 ms) before the autocorrelation, or a period that is not a whole number of grid slots (174 BPM
@@ -1190,6 +1223,57 @@ every measurement says "ambient" and the whole look of a hardcore track would ch
 through and change back at the drop. The classifier's adaptation rate is therefore scaled by
 `dynamics²`: at half level it only slows a little, at a twentieth it all but freezes and holds what
 it knows until there is something to form an opinion from.
+
+**THE CLASSIFIER READS HOW THE MUSIC IS BUILT, NOT ONLY WHAT IT AVERAGES TO** (`style.rs` F_KF0..F_FOUR,
+`style.js` `RULE_FEATURES`). It named about six of the eval's 26 records right: uptempo and speedcore
+were "electronic", Krach frenchcore, the piep record hardcore. Two causes. Its rules had never been
+measured against the descriptors they read: the spectral crest reads 12-18 on every record there is
+and five families asked for "below 3.2" (so krach, rawstyle, speedcore, industrial and metal could
+NEVER be named); the band shares were per-bin means summed, 0.9 of sub and 0.00 of air on everything
+(now power shares, as genre.rs learnt). And timbre averages cannot tell apart genres that are made
+differently and mastered alike — a limitered uptempo drop and a limitered Krach drop are equally flat.
+So it also reads what the music is MADE of: where the kick's pitch starts, the PIEP (below), how long
+the kick rings, the lead, the saw buzz, screeches, the offbeat share, onsets per beat, how much of the
+time a roll runs, and FOUR ON THE FLOOR — the share of beats with a main kick while the groove is in
+(the grid's `kickPulse` read 0.64 on techno's rumble, inside the window written for broken beats; a
+breakdown or a build's snare roll is not a broken beat, so those beats do not count). The crest's
+slot is a loudness-range proxy now, used by no rule: on material all mastered alike it measures the
+arrangement. Measured with `test/eval/family-eval.mjs`: **19 of 28**, every hard-dance record named by
+its own family (hardstyle, rawstyle, frenchcore, uptempo, zaag, Krach, pieep, speedcore; gabber as
+hardcore), techno, house, trance, psytrance, dnb. What it still misses is mostly a record whose tempo
+the tracker reads an octave off (dubstep, trap, reggae) — no tempo-banded rule can name that — and
+rock, metal and the solo pianos. Two rules protect the tempo from it, since a live family narrows the
+tracker's range and its own rule reads the tracker's BPM:
+
+- **A share is only as good as what it is a share of.** Where nothing fits (the grid on the wrong
+  octave), every family reads next to nothing and normalising hands the whole of it to whichever
+  reads least nothing: speedcore at 0.03 on techno's kick-only intro, grid at 264, confident, range
+  set, techno held at 264 for a minute. The weights now move only as fast as there is evidence
+  (the specific families' summed rule weight, `EVIDENCE_FULL`; the catch-all is none) and the
+  confidence is capped by it.
+- **A live range waits for the kicks to have been measured** (`LIVE_RANGE_KICKS`): until then the
+  kick-shape weights are neutral thirds and every hard family reads a third of a hard kick. The
+  catch-all has no tempo row at all.
+
+Krach and pieep were written on false premises and are rewritten from how they are made. **Deutscher
+Krach** (named 2023 by Noiseflow) is uptempo's kick past 200 BPM under a euphoric, hardstyle-leaning
+lead and sung German hooks — a party; it was written as a melody-less noise wall, look included.
+**Pieep** is tekk built on the PIEP KICK (it was "squeaky high leads", read on the air share that
+could not even measure it). `test/songs.mjs` has both as records (`krach-205`, a tuned kick whose
+tail plays the bassline; `pieep-170`), and the old "krach-210" — which was dark uptempo — is
+`uptempo-dark-210`.
+
+**THE PIEP** (`features.rs#piep`, `style.rs` `KickShape::piep`, `kickPiep` in the frame): a pitched
+squeak layered on the kick's attack. Four things together, each of which something else in a mix has
+on its own: a line in 1.4-5 kHz standing above everything in the half octave beneath it (a distorted
+kick's harmonics FALL with frequency, so on a plain kick nothing does), loud enough to hear next to
+the body, BORN with the kick (not there three frames before — a lead note that merely changed was)
+and GONE 64 ms later (a lead note that started on the kick is still sounding: on frenchcore's dense
+lead the first two alone were true of 863 frames against 70 kicks). Read only on the frames just
+after the onset — the kick's own window is the previous beat, where an upward-bending screech's last
+partials die exactly like a squeak. Measured as a share of kicks: the piep kick 1.00 at 1.5-3.6 kHz,
+falling or not, 0.46 at half level; every other kick 0.00-0.02, and every other arranged record 0.17
+at most.
 
 **THE GENRE CHANNEL** (`genre.rs`) is what the look vector cannot say: what only SOME genres are made
 of, eight numbers 0..1 — the sung `lead`, the `buzz` (a saw stack, a kick distorted until it is a
@@ -1907,7 +1991,7 @@ every claim a test makes should be a MEASURED number written down next to the as
 the **shipped binary** (`test/rhythm.test.mjs`) — real audio, pushed in the worklet's own 128-sample
 quanta, through the whole Rust chain — because every fault listed above passed a suite that drove one
 module at a time with material chosen to suit it. `test/eval/rhythm-eval.mjs` asks the broader
-question on 26 arranged records (`test/songs.mjs`: an intro with no kick, a build whose snares
+question on 28 arranged records (`test/songs.mjs`: an intro with no kick, a build whose snares
 accelerate, the silence before a hardcore drop, a breakdown with no drums, a waltz, a live drummer
 drifting a percent either side of the click) in four scenarios, cold and seeded; `test/rhythm/run.mjs`
 asks it through the AudioWorklet and the engine's delivery in headless Chromium. Its animation half (see **How the animations are
