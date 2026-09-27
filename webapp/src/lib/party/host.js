@@ -24,6 +24,7 @@ import { gainFor } from "../gaincache.js";
 import { artistLine } from "../format.js";
 import { startClock } from "./clock.js";
 import { AnchorFit } from "./anchor.js";
+import { loadAppCore } from "../appcore/core.js";
 import { positionAt, serverTimeAt } from "./timeline.js";
 import { compressorDelay } from "./latency.js";
 import { HOLD, elementState, hostState } from "./hostrules.js";
@@ -61,6 +62,9 @@ onPartyPoke(() => {
 
 export async function startParty() {
   if (session) return get(partyHost);
+  // Before the server opens anything: a page that cannot run the clock must
+  // not leave a party open with nobody publishing to it.
+  await loadAppCore();
   const view = await api.partyStart();
   await begin(view);
   return get(partyHost);
@@ -107,6 +111,9 @@ export function partyLink(id) {
 }
 
 async function begin(view) {
+  // The line and the clock are the app core's (Rust); it is loaded once per
+  // page and is usually there long before anyone hosts a party.
+  await loadAppCore();
   const comp = await compressorDelay();
   const s = {
     id: view.id,
@@ -181,6 +188,7 @@ function stop() {
   if (!s) return;
   session = null;
   if (s.clock) s.clock.stop();
+  s.fit.free();
   clearInterval(s.timer);
   clearInterval(s.clockTimer);
   clearInterval(s.hb);

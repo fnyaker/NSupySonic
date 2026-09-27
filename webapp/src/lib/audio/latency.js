@@ -34,6 +34,7 @@
 //    (what the party host assumed) 14.4 ms off the other way.
 
 import { outputTrim } from "../stores.js";
+import { appCore, loadAppCore } from "../appcore/core.js";
 
 // The range a person may set, in ms. Negative is allowed: a device can
 // over-report its latency as well as under-report it.
@@ -77,44 +78,56 @@ export function reportedLag(ctx) {
 // next chunk seam. The readings themselves hold to ±0.1 ms, so anything past
 // 4 ms is a move, not noise; the party's guest bridge uses the same rule.
 
-const KEEP = 25;
-const OUTLIER_S = 0.004;
-const AGREE_S = 0.001; // two refused readings this close to each other are a move
+//
+// THE ARITHMETIC IS RUST (webapp/appcore/src/sync.rs#OutputClock): the median,
+// the refusals, the moves and the lag record, in fixed rings. What stays here
+// is the reading itself — only the browser can take it — and a mirror of the
+// three outputs, refreshed after each reading, so the dozens of reads a second
+// (every animation frame asks when its audio is heard) never cross into the
+// module. The JavaScript it replaced is the oracle in test/reference/sync.js.
+// Until the core has loaded (lib/appcore/core.js, a few milliseconds after the
+// app paints) a reading is simply not taken — which is exactly what "no
+// mapping yet" already meant to every caller.
 
 let clockCtx = null;
-const ds = [];
-const lags = [];
 let lastStamp = -1;
+let tsBroken = false;
+let core = null;
+let h = 0;
+// The outputs, mirrored after every call that can change them.
 let dMedian = null;
 let lagMedian = null;
-let refused = null; // the last reading refused, while it may be a move
-let sinceSort = 0;
-let lagSinceSort = 0;
-let tsBroken = false;
-let generation = 0; // moves whenever the mapping is learnt afresh
-// Readings needed to believe the clock: nine for a context just seen (its
-// first readings can be ~140 ms off), two after a confirmed move — they agree
-// to the millisecond, and every reading spent doubting them is a position
-// modelled on the attributes' estimate instead, ±10 ms from one to the next.
-let need = 9;
+let lagCount = 0;
+let ready = false;
+let generation = 0;
 
-function median(xs) {
-  const s = xs.slice().sort((a, b) => a - b);
-  return s[s.length >> 1];
+function mirror() {
+  const x = core.x;
+  const d = x.out_d_median(h);
+  dMedian = Number.isNaN(d) ? null : d;
+  const l = x.out_lag_median(h);
+  lagMedian = Number.isNaN(l) ? null : l;
+  lagCount = x.out_lag_count(h);
+  ready = x.out_ready(h) === 1;
+  generation = x.out_generation(h);
+}
+
+function attach() {
+  if (h) return true;
+  core = appCore();
+  if (!core) {
+    loadAppCore().catch(() => {});
+    return false;
+  }
+  h = core.x.out_new();
+  return true;
 }
 
 function forget(ctx) {
-  generation++;
-  need = 9;
+  core.x.out_forget(h);
   clockCtx = ctx;
-  ds.length = 0;
-  lags.length = 0;
   lastStamp = -1;
-  dMedian = null;
-  lagMedian = null;
-  refused = null;
-  sinceSort = 0;
-  lagSinceSort = 0;
+  mirror();
 }
 
 /**
@@ -123,6 +136,7 @@ function forget(ctx) {
  */
 export function sampleOutputClock(ctx) {
   if (!ctx || ctx.state !== "running") return;
+  if (!attach()) return;
   if (ctx !== clockCtx) forget(ctx);
   const now = performance.now();
   let d = null;
@@ -143,35 +157,8 @@ export function sampleOutputClock(ctx) {
     lastStamp = ctx.currentTime;
     d = ctx.currentTime - reportedLag(ctx) - now / 1000;
   }
-  // Checked against the mapping from three readings at first, and from the
-  // two that showed a move right after one: the next must not get in unexamined.
-  if (dMedian != null && Math.abs(d - dMedian) > OUTLIER_S && ds.length >= Math.min(3, need)) {
-    // One reading far off is refused; a second that agrees with it is a move,
-    // learnt from the two of them at once.
-    if (refused == null || Math.abs(d - refused) > AGREE_S) {
-      refused = d;
-      return;
-    }
-    ds.length = 0;
-    lags.length = 0;
-    ds.push(refused);
-    dMedian = null;
-    need = 2;
-    generation++;
-  }
-  refused = null;
-  ds.push(d);
-  if (ds.length > KEEP) ds.shift();
-  // Every third reading, counted — NOT `ds.length % 3`: the buffer stops
-  // growing at KEEP (25), and the engine's copy of this code, keyed on the
-  // length, froze its median for good the moment the buffer filled. A mapping
-  // that then stepped by one render burst (23 ms, seen in headless Chromium a
-  // few seconds into a track) was never followed: every frame after it was
-  // handed out 23 ms early, for the rest of the session.
-  if (++sinceSort >= 3 || dMedian == null) {
-    sinceSort = 0;
-    dMedian = median(ds);
-  }
+  core.x.out_offer(h, d);
+  mirror();
 }
 
 /**
@@ -196,14 +183,9 @@ export function contextLagNow(ctx, nowMs, ctxTime = ctx ? ctx.currentTime : 0) {
 export function noteContextLag(ctx) {
   const lag = contextLagNow(ctx, performance.now());
   if (lag == null) return;
-  lags.push(lag);
-  if (lags.length > LAG_KEEP) lags.shift();
-  if (++lagSinceSort >= 4 || lagMedian == null) {
-    lagSinceSort = 0;
-    lagMedian = median(lags);
-  }
+  core.x.out_note_lag(h, lag);
+  mirror();
 }
-const LAG_KEEP = 60;
 
 /**
  * A number that changes whenever the mapping had to be learnt afresh (a new
@@ -216,7 +198,7 @@ export function outputClockGeneration() {
 
 /** Whether the output clock has enough readings to be believed. */
 export function outputClockReady() {
-  return dMedian != null && ds.length >= need;
+  return ready;
 }
 
 /**
@@ -234,7 +216,7 @@ export function heardContextTime(nowMs) {
  * attributes' estimate until there are readings.
  */
 export function outputLag(ctx) {
-  if (ctx && ctx === clockCtx && lagMedian != null && lags.length >= 8) return Math.max(0, lagMedian);
+  if (ctx && ctx === clockCtx && lagMedian != null && lagCount >= 8) return Math.max(0, lagMedian);
   return reportedLag(ctx);
 }
 

@@ -24,80 +24,48 @@ export function probeSample(t0, t1, t2, t3) {
   };
 }
 
-const median = (xs) => {
-  if (!xs.length) return 0;
-  const s = [...xs].sort((a, b) => a - b);
-  const m = s.length >> 1;
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-};
+// THE ESTIMATOR IS RUST (webapp/appcore/src/sync.rs#ClockEstimator): the
+// same rules, in fixed buffers. The JavaScript it replaced built and threw
+// away four arrays per estimate — a copy to sort for every median, a filter
+// per pass — and the host asks for an estimate several times a second; it is
+// kept as the oracle in test/reference/sync.js. The core must be loaded
+// (loadAppCore) before one is built: joining and hosting a party await it.
 
-// Skew beyond this is not a clock, it is a bug (or a device that slept).
-const MAX_SKEW = 200e-6;
-const RECENT_MS = 45_000;
+import { adopt, release, requireCore } from "../appcore/core.js";
 
 export class ClockEstimator {
   constructor({ max = 64, windowMs = 180_000, fitSpanMs = 20_000 } = {}) {
-    this.max = max;
-    this.windowMs = windowMs;
-    this.fitSpanMs = fitSpanMs;
-    this.samples = [];
+    this.c = requireCore();
+    this.h = this.c.x.clock_new(max, windowMs, fitSpanMs);
+    adopt(this, this.c, "clock_free", this.h);
   }
 
   reset() {
-    this.samples = [];
+    if (this.h) this.c.x.clock_reset(this.h);
+  }
+
+  /** How many probes are held. */
+  get size() {
+    return this.h ? this.c.x.clock_len(this.h) : 0;
   }
 
   add(s) {
-    if (!s || !Number.isFinite(s.rtt) || !Number.isFinite(s.offset) || s.rtt < 0) return;
-    // A device that slept (or had its clock stepped) makes every older sample
-    // wrong at once. One fast probe that disagrees with the estimate by far
-    // more than any network could explain is that, not noise.
-    const est = this.estimate(s.at);
-    if (est && s.rtt <= est.rtt * 2 + 2 && Math.abs(s.offset - est.offset) > 50 + s.rtt) {
-      this.samples = [];
-    }
-    this.samples.push(s);
-    if (this.samples.length > this.max) this.samples.shift();
-  }
-
-  // The probes worth believing: within the window, and close to the fastest.
-  good(now) {
-    const recent = this.samples.filter((s) => now - s.at <= this.windowMs);
-    if (!recent.length) return [];
-    const best = Math.min(...recent.map((s) => s.rtt));
-    const cut = best * 1.5 + 1;
-    return recent.filter((s) => s.rtt <= cut);
+    if (!s || !this.h) return;
+    this.c.x.clock_add(this.h, s.at, s.rtt, s.offset);
   }
 
   // { offset (server - local, ms), rtt (best, ms), spread (ms), n } or null.
   estimate(now) {
-    const g = this.good(now);
-    if (!g.length) return null;
-    const rtt = Math.min(...g.map((s) => s.rtt));
-    // Without a line, only RECENT probes: under skew an old one is stale by
-    // its age times the drift, however fast its round trip was.
-    const recent = g.filter((s) => now - s.at <= RECENT_MS);
-    let offsetAt = () => median((recent.length ? recent : g).map((s) => s.offset));
-    const span = g.length > 1 ? Math.max(...g.map((s) => s.at)) - Math.min(...g.map((s) => s.at)) : 0;
-    if (g.length >= 6 && span >= this.fitSpanMs) {
-      // Least squares of offset against time, centred for precision.
-      const mx = g.reduce((a, s) => a + s.at, 0) / g.length;
-      const my = g.reduce((a, s) => a + s.offset, 0) / g.length;
-      let sxx = 0;
-      let sxy = 0;
-      for (const s of g) {
-        sxx += (s.at - mx) ** 2;
-        sxy += (s.at - mx) * (s.offset - my);
-      }
-      const slope = Math.max(-MAX_SKEW, Math.min(MAX_SKEW, sxx ? sxy / sxx : 0));
-      // Anchor the line on the MEDIAN residual, not the mean: one probe that
-      // got lucky in only one direction must not drag it.
-      const base = median(g.map((s) => s.offset - slope * (s.at - mx)));
-      offsetAt = (t) => base + slope * (t - mx);
-    }
-    const offset = offsetAt(now);
-    const spread = median(g.map((s) => Math.abs(s.offset - offsetAt(s.at))));
-    return { offset, rtt, spread, n: g.length };
+    if (!this.h) return null;
+    const n = this.c.x.clock_estimate(this.h, now);
+    if (!n) return null;
+    const o = this.c.out();
+    return { offset: o[0], rtt: o[1], spread: o[2], n };
+  }
+
+  free() {
+    release(this, this.c, "clock_free", this.h);
+    this.h = 0;
   }
 }
 
@@ -109,7 +77,7 @@ const STEADY = 2000; // ms between probes afterwards
 const HIDDEN = 5000; // ...and while the page is hidden
 
 // Probe `url` for as long as the returned stop() is not called. `onUpdate`
-// receives every new estimate. The estimator is returned too, for callers that
+// receives every new estimate. The app core must be loaded. The estimator is returned too, for callers that
 // need to read it synchronously (the scheduler does, many times a second).
 export function startClock(url, onUpdate = () => {}) {
   const est = new ClockEstimator();
@@ -161,6 +129,7 @@ export function startClock(url, onUpdate = () => {}) {
       stopped = true;
       clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVis);
+      est.free();
     },
   };
 }

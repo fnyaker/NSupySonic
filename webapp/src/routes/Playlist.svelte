@@ -10,7 +10,8 @@
     removePlaylistLocal,
     downloadTracks,
   } from "../lib/actions.js";
-  import { duration as fmtDuration, isLocalId, artistSearch } from "../lib/format.js";
+  import { duration as fmtDuration, isLocalId } from "../lib/format.js";
+  import { SORTS, createProjector } from "../lib/tracklist.js";
   import { reconcilePayload } from "../lib/reconcile.js";
   import Cover from "../components/Cover.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
@@ -40,41 +41,12 @@
   let plSort = "default";
   let plQuery = "";
   let plDir = 1;
-  const PL_SORTS = [
-    { key: "default", label: "Ordre d'origine" },
-    { key: "title", label: "Titre" },
-    { key: "artist", label: "Artiste" },
-    { key: "album", label: "Album" },
-    { key: "duration", label: "Durée" },
-    { key: "added", label: "Date d'ajout" },
-  ];
-  const _lc = (s) => (s || "").toLowerCase();
+  const PL_SORTS = SORTS;
   $: manualView = plSort === "default" && !plQuery.trim();
+  // The same index as every other list (lib/tracklist.js).
+  const projectTracks = createProjector();
+  onDestroy(() => projectTracks.free());
   $: sortedTracks = projectTracks(data?.tracks || [], plSort, plDir, plQuery);
-  function projectTracks(list, sort, dir, query) {
-    const q = _lc(query.trim());
-    if (q)
-      list = list.filter(
-        // artistSearch, not the artist name: a featured artist is findable too.
-        (t) => _lc(t.title).includes(q) || artistSearch(t).includes(q) || _lc(t.album?.title).includes(q)
-      );
-    if (sort !== "default") {
-      const key = {
-        title: (t) => _lc(t.title),
-        artist: (t) => _lc(t.artist?.name),
-        album: (t) => _lc(t.album?.title),
-        duration: (t) => t.duration || 0,
-        added: (t) => t.added || 0,
-      }[sort];
-      list = [...list].sort((a, b) => {
-        const ka = key(a), kb = key(b);
-        return ka < kb ? -dir : ka > kb ? dir : 0;
-      });
-    } else if (dir === -1) {
-      list = [...list].reverse();
-    }
-    return list;
-  }
 
   $: if (params.id && params.id !== id) {
     id = params.id;

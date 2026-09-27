@@ -78,9 +78,10 @@ cd webapp && npm test                                # node --test: the shipped 
                                                      # its JavaScript oracles, the catalogue/skins/drivers, the genre trainers, the cover loader.
                                                      # No test framework — but run the npm install above first: the modules under
                                                      # test reach svelte/store via stores.js, and a pretest guard says so in one line.
-cd webapp && npm run wasm                            # rebuild rhythm.wasm + rhythm-simd.wasm from webapp/rhythm (Rust, target
-                                                     # wasm32-unknown-unknown). Both binaries are COMMITTED; npm test fails if they
-                                                     # were not built from the sources next to them.
+cd webapp && npm run wasm                            # rebuild rhythm.wasm + rhythm-simd.wasm from webapp/rhythm and appcore.wasm from
+                                                     # webapp/appcore (Rust, target wasm32-unknown-unknown). All three binaries are
+                                                     # COMMITTED; npm test fails if they were not built from the sources next to them.
+cd webapp/appcore && cargo test --release            # the app core's own unit tests (folding, the estimators' edge cases)
 cd webapp && node test/eval/rhythm-eval.mjs          # the analyser on 26 arranged records with ground truth (beats, kicks, tempo, drops)
 cd webapp && node test/rhythm/run.mjs                # ...and end to end in headless Chromium: AudioWorklet, delivery, timing
 cd webapp && node test/rhythm/run.mjs --trim -60     # ...on a (simulated) short output path: the automatic look-ahead at work
@@ -1652,6 +1653,60 @@ track you are beginning to hear. A manual skip is not an overlap — it gets a 6
 to kill the click of a cut mid-waveform and short enough to be inaudible as a delay. Crossfading
 needs the Web Audio graph, so like the effects it is off by default (see the note in `graph.js`
 about a suspended AudioContext silencing a backgrounded tab).
+
+**THE APP CORE IS RUST TOO** (`webapp/appcore`, compiled to `src/lib/appcore/appcore.wasm`, reached
+through `lib/appcore/core.js`). The interface's own logic — not the DOM, the logic — where the
+JavaScript allocated as it went, on the main thread, in the paths that must not stutter:
+
+- **`sync.rs`: every time-sync estimator the app has.** The listen party's NTP clock
+  (`party/clock.js#ClockEstimator`), the host's line (`party/anchor.js#AnchorFit`), the guest's
+  audio-clock bridge (`party/engine.js#makeClockBridge`) and the output clock the animations, the
+  lyric line and the party host share (`audio/latency.js`). Each did its robust statistics the
+  obvious way — a median was `[...xs].sort()`, an estimate built and dropped four to six arrays — many
+  times a second, in the one subsystem where a collection pause is a late chunk. Now fixed rings,
+  nothing allocated once built: an estimate 16.3 → 1.4 µs, the host's add-and-read 1.13 → 0.19 µs.
+  What stays in JavaScript is the READING (only the browser can call `getOutputTimestamp()`) and, for
+  the output clock, a mirror of its outputs refreshed after each reading, so the dozens of reads a
+  second never cross into the module. The timeline's one-line arithmetic (`party/timeline.js`) and the
+  engine's Web Audio orchestration stay JavaScript on purpose: a call into wasm costs more than
+  `t.p + (S - t.t) / 1000` does, and nodes can only be scheduled from JavaScript.
+- **`tracks.rs` + `fold.rs`: the track lists' search and sort** (`lib/tracklist.js`, used by
+  `TrackBrowser.svelte` and `Playlist.svelte`). The lists lowercased every title, credit and album of
+  every row on EVERY keystroke (12 000+ strings on a 4 000-track favourites page) and again inside the
+  sort comparator — and the answer was wrong for a French library: a code-unit comparison put "Éric"
+  after "Zazie", and "beyonce" did not find "Beyoncé". Now a list is indexed once when it changes
+  (reconcile.js keeps its identity when it did not): every field FOLDED — case and accents dropped,
+  ligatures spelled out, typographic quotes made plain — into one buffer, each sort order computed on
+  first use and kept, a keystroke one pass over folded bytes. Measured on 4 000 tracks: a keystroke
+  0.46 → 0.11 ms, a keystroke under a sort 0.62 → 0.20 ms, for a 2.3 ms build paid once. The
+  unfiltered, unsorted view never touches the core — it is the list itself, the same array — and a
+  page without WebAssembly still filters and sorts the old way (`tracklist.js#fallback`).
+
+How it is loaded and shipped: **a separate module from the analyser**, on purpose — that one is
+200 KB and loads when an animation needs it, this one is 63 KB (23 KB gzipped) and a party guest with
+every animation off, or anybody searching their favourites, needs it at once. `main.js` fetches it
+once the first screen has painted; hosting and joining a party await it (`routes/Party.svelte` loads
+it on the landing screen, since the tap that joins must create the AudioContext synchronously, and a
+session started without it starts its clocks a moment later); the output clock simply takes no
+reading until it is in, which is what "no mapping yet" always meant. Every object is a HANDLE freed
+by `free()`, with a FinalizationRegistry behind it for a handle whose owner was collected unfreed.
+No dependencies, `build.rs` stamps a hash of `src/*.rs`, the binary is committed and
+`test/appcore.test.mjs` fails when it is stale — the rhythm crate's rules exactly. That test holds
+each estimator to its JavaScript ORACLE (`test/reference/sync.js`) number for number on the traces
+it exists for (heavy-tailed asymmetric queueing between clocks 60 ppm apart, a device that slept, an
+element read from a jittery timer through seeks and stalls, a context rendering in bursts whose
+mapping steps and drifts), the index to a model of what folding means (Unicode's own decomposition,
+marks stripped) on every sort, direction and query, and both to being faster. `party.test.mjs` and
+`latency.test.mjs` run on the Rust; `test/party/run.mjs` and `test/rhythm/run.mjs` were re-run on it
+(guest heard −1.1 / +0.1 / +0.1 / −0.3 ms from the host steady / after a seek / a pause / a skip;
+frames −0.7..+0.6 ms against the output clock, 100% on time).
+
+**Why the DOM stays Svelte.** "As much Rust as possible" stops at the DOM, deliberately: a Rust UI
+framework reaches the DOM through JavaScript glue on every node it touches, so it cannot render a list
+or a player faster than Svelte's compiled DOM calls — measured frameworks land level with it at best —
+and it would put a few hundred kilobytes of wasm in front of the first paint that the code-splitting
+work above took out. Rust goes where it wins: arithmetic over many values, state that must not
+allocate, work that must be identical everywhere.
 
 **Listen party** (`supysonic/webui/party.py`, `webapp/src/lib/party/`, `routes/Party.svelte`,
 `components/PartySheet.svelte`). The host shares a link (`/party/<id>`, with a QR code in the sheet);
