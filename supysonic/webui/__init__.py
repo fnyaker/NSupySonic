@@ -1424,6 +1424,13 @@ def login():
 
 @webapi.route("/logout", methods=["POST"])
 def logout():
+    # A remote-control session is somebody else's account lent to this browser:
+    # logging out of it ends the loan and hands the browser back its own, rather
+    # than logging its owner out of an account they never lent.
+    if session.get("rc"):
+        from .remote import _end_remote_session
+
+        return jsonify({"ok": True, "restored": _end_remote_session()})
     session.clear()
     return jsonify({"ok": True})
 
@@ -1432,7 +1439,15 @@ def logout():
 @login_required
 def me():
     u = request.webuser
-    return jsonify({"user": {"name": u.name, "admin": u.admin}})
+    out = {"user": {"name": u.name, "admin": u.admin}}
+    # A remote-control session is logged in as the owner, with a narrower
+    # grant; the web app needs both to know whose player it is driving.
+    link = getattr(request, "rc", None)
+    if link is not None:
+        from .remote import describe
+
+        out["remote"] = describe(link)
+    return jsonify(out)
 
 
 # -- discovery --------------------------------------------------------------
@@ -3928,3 +3943,4 @@ from . import analysis  # noqa: E402,F401  isort:skip
 from . import genre  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip
 from . import party  # noqa: E402,F401  isort:skip
+from . import remote  # noqa: E402,F401  isort:skip

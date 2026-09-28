@@ -11,6 +11,7 @@
   // tempo it locked, the style it settled on and what it made of the kick is
   // how that claim becomes checkable instead of a promise.
   import { onDestroy, onMount } from "svelte";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import {
     vizMode,
     vizQuality,
@@ -535,7 +536,7 @@
     </div>
   </div>
 
-  {#if $isAdmin}
+  {#if $isAdmin && CAN_ADMIN}
     <!-- The escape hatch from a fixed vocabulary. The classifier above knows the
          genres it was written with; the studio is where you teach it yours. -->
     <div class="studio">

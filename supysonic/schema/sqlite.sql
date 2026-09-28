@@ -285,3 +285,17 @@ CREATE TABLE IF NOT EXISTS track_artist (
     PRIMARY KEY (track_id, artist_id)
 );
 CREATE INDEX IF NOT EXISTS index_track_artist_artist_id_fk ON track_artist(artist_id);
+
+CREATE TABLE IF NOT EXISTS remote_link (
+    id VARCHAR(24) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL REFERENCES user ON DELETE CASCADE,
+    level VARCHAR(8) NOT NULL,
+    device VARCHAR(40) NOT NULL,
+    device_name VARCHAR(64),
+    label VARCHAR(64),
+    created DATETIME NOT NULL,
+    expires DATETIME,
+    revoked DATETIME,
+    last_used DATETIME
+);
+CREATE INDEX IF NOT EXISTS index_remote_link_user_id_fk ON remote_link(user_id);

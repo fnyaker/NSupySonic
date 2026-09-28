@@ -5,6 +5,8 @@
 // (and whatever was downloaded from it plays). Stored in IndexedDB (larger,
 // quota-safe) rather than localStorage — track lists can be big.
 
+import { REMOTE } from "./remote/mode.js";
+
 const DB_NAME = "nsupy-apicache";
 const DB_VERSION = 1;
 const MAX_ENTRIES = 400; // prune oldest beyond this
@@ -51,6 +53,9 @@ const CACHE_PREFIXES = [
 ];
 
 export function isCacheable(path) {
+  // A remote control reads somebody else's library: never into this device's
+  // offline copy of its own.
+  if (REMOTE) return false;
   const p = String(path).split("?")[0];
   return CACHE_PREFIXES.some((pre) => p === pre || p.startsWith(pre));
 }

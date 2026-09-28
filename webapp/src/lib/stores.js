@@ -1,5 +1,6 @@
 import { writable, derived, get } from "svelte/store";
 import { logInfo, flushLog } from "./log.js";
+import { REMOTE } from "./remote/mode.js";
 
 // -- auth -------------------------------------------------------------------
 
@@ -14,10 +15,18 @@ export const isAdmin = derived(user, ($u) => !!($u && $u.admin));
 
 // -- small persistence helper ----------------------------------------------
 
+// Every persisted store, by key — what a remote control mirrors (the player's
+// device settings, see lib/remote/settings.js) is looked up here.
+export const persistedStores = new Map();
+
 function persisted(key, initial) {
+  // A remote control keeps its own copy of every setting, apart from this
+  // device's: what it shows (and writes) is the controlled player's, mirrored
+  // in, and driving somebody else's player must never rewrite your own.
+  const storageKey = REMOTE ? "remote:" + key : key;
   let start = initial;
   try {
-    const raw = localStorage.getItem(key);
+    const raw = localStorage.getItem(storageKey);
     if (raw !== null) start = JSON.parse(raw);
   } catch {
     /* ignore */
@@ -25,11 +34,12 @@ function persisted(key, initial) {
   const store = writable(start);
   store.subscribe((v) => {
     try {
-      localStorage.setItem(key, JSON.stringify(v));
+      localStorage.setItem(storageKey, JSON.stringify(v));
     } catch {
       /* ignore */
     }
   });
+  persistedStores.set(key, store);
   return store;
 }
 
@@ -438,6 +448,16 @@ export function closePlaylistPicker() {
 // Mounted once in App.svelte, opened from anywhere (menus, players).
 
 // Listen party host controls (components/PartySheet.svelte).
+// The owner's remote-control sheet (components/RemoteSheet.svelte): links that
+// let someone else drive this player.
+export const remoteSheet = writable(false);
+export function openRemoteSheet() {
+  remoteSheet.set(true);
+}
+export function closeRemoteSheet() {
+  remoteSheet.set(false);
+}
+
 export const partySheet = writable(false);
 export function openPartySheet() {
   partySheet.set(true);
@@ -573,10 +593,13 @@ const SESSION_KEY = "player.session";
 // that would roll the real player's saved position back to then.
 // A listen party guest (#/party/<id>) is the same: it plays the host's audio
 // through its own engine, and must never touch this device's own session.
+// A remote control is the third: the queue it shows is the controlled
+// player's, and it must neither restore this device's session nor save over it.
 const DISPLAY_ONLY =
-  typeof window !== "undefined" &&
-  ((window.location.hash || "").startsWith("#/viz") ||
-    (window.location.hash || "").startsWith("#/party/"));
+  !!REMOTE ||
+  (typeof window !== "undefined" &&
+    ((window.location.hash || "").startsWith("#/viz") ||
+      (window.location.hash || "").startsWith("#/party/")));
 // The playhead position lives in its OWN tiny key ({index, id, time}, ~60
 // bytes). During plain playback only this key is refreshed — re-serializing
 // the whole queue (potentially hundreds of KB) 30×/min just to move the
@@ -700,7 +723,7 @@ function shuffled(arr) {
 }
 
 function createPlayer() {
-  const sess = readSession() || {};
+  const sess = (REMOTE ? null : readSession()) || {};
   const restoredQueue = Array.isArray(sess.queue) ? sess.queue : [];
   const { subscribe, update, set } = writable({
     queue: restoredQueue,

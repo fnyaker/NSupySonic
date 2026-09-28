@@ -22,6 +22,14 @@ const TRANSIENT = new Set([502, 503, 504]);
 // breaks something, rather than at the next scheduled poll. Registered from the
 // outside so this module keeps no dependency on it.
 let serverErrorHook = null;
+// Told when a remote-control session ends under a request (lib/remote/controller.js).
+let remoteEndedHook = null;
+export function onRemoteEnded(fn) {
+  remoteEndedHook = fn;
+}
+export function remoteEnded(restored) {
+  if (remoteEndedHook) remoteEndedHook(restored || null);
+}
 export function onServerError(fn) {
   serverErrorHook = fn;
 }
@@ -105,6 +113,19 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
   reportOnline();
 
   if (res.status === 401) {
+    // A remote-control grant that just ended (the owner cut it, it expired) is
+    // not a logged-out user: the controller says so and offers the account
+    // this browser had before, if the server gave it back.
+    let info = null;
+    try {
+      info = await res.json();
+    } catch {
+      /* not JSON: an ordinary 401 */
+    }
+    if (info && info.error === "remote ended" && remoteEndedHook) {
+      remoteEndedHook(info.restored || null);
+      throw { status: 401, message: "remote ended", remoteEnded: true };
+    }
     user.set(null);
     throw { status: 401, message: "unauthorized" };
   }
@@ -334,6 +355,18 @@ export const api = {
       body: body({ position, label }),
     }),
   deleteMarker: (markerId) => req("/podcast/marker/" + markerId, { method: "DELETE" }),
+
+  // remote control — the OWNER's side (links onto one of their players). The
+  // live traffic (the player's publish/poll, the controller's state/commands)
+  // runs on its own loops in lib/remote/, with its own timeouts and backoff.
+  remoteLinks: (device) =>
+    req("/remote/links" + (device ? "?device=" + encodeURIComponent(device) : "")),
+  remoteCreate: (opts) => req("/remote/links", { method: "POST", body: body(opts) }),
+  remoteRevoke: (id) => req("/remote/links/" + encodeURIComponent(id), { method: "DELETE" }),
+  remoteRevokeDevice: (device) =>
+    req("/remote/links?device=" + encodeURIComponent(device), { method: "DELETE" }),
+  remoteClaim: (token) => req("/remote/claim", { method: "POST", body: body({ token }) }),
+  remoteLeave: () => req("/remote/leave", { method: "POST" }),
 
   // listen party — the HOST's side (guests have no session and talk to the
   // public /api/party/<id>/... endpoints directly, see routes/Party.svelte).

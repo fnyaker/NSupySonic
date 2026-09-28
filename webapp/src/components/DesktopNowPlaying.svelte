@@ -2,6 +2,7 @@
   // Desktop now-playing: two panes — a large cover with controls and a bar
   // visualizer on the left, the up-next queue / lyrics on the right.
   import { onDestroy, tick } from "svelte";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { push } from "svelte-spa-router";
   import { fade } from "svelte/transition";
   import {
@@ -62,6 +63,7 @@
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
   import PartyButton from "./PartyButton.svelte";
+  import RemoteButton from "./RemoteButton.svelte";
   import Icon from "./Icon.svelte";
   import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
@@ -111,6 +113,8 @@
     immersiveOpen.set(false);
   }
   function go(p) {
+    // A queue-only remote control has no screens to go to.
+    if (!CAN_BROWSE) return;
     close();
     push(p);
   }
@@ -175,13 +179,18 @@
   {/if}
 
   <header>
-    <button class="ic" on:click={close} aria-label="Réduire"><Icon name="chevronDown" size={26} /></button>
+    {#if CAN_BROWSE}
+      <button class="ic" on:click={close} aria-label="Réduire"><Icon name="chevronDown" size={26} /></button>
+    {:else}
+      <!-- A queue-only remote control has nothing behind this view. -->
+      <span class="ic" aria-hidden="true"></span>
+    {/if}
     <span class="ctx">
       {$player.context?.kind === "flow" ? "Flow" : "En lecture"}
       {#if styleLabel}<em>{styleLabel}{#if $readout.bpm} · {$readout.bpm} BPM{/if}</em>{/if}
     </span>
     <span class="right">
-      {#if $isAdmin && ($current?.deezer_id || $current?.id)}
+      {#if $isAdmin && CAN_KEEP && ($current?.deezer_id || $current?.id)}
         <!-- Deliberately quiet: a small, dim tag in the corner the empty spacer
              used to hold, only for the admin. Tagging is what you do when you
              notice a wrong genre mid-listen, not a call to action — so it stays
@@ -224,9 +233,11 @@
           <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
           <span class="a" class:status={$playbackLabel}>{#if $playbackLabel}{$playbackLabel}{:else}<ArtistLine track={$current} navigate={go} />{/if}</span>
         </div>
-        <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
-          <Icon name={fav ? "heartFilled" : "heart"} size={24} />
-        </button>
+        {#if CAN_KEEP}
+          <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
+            <Icon name={fav ? "heartFilled" : "heart"} size={24} />
+          </button>
+        {/if}
       </div>
 
       <div class="seek">
@@ -236,11 +247,11 @@
       </div>
 
       <div class="controls">
-        <button class="sm" class:on={$player.shuffle} on:click={() => player.toggleShuffle()} aria-label="Aléatoire"><Icon name="shuffle" size={22} /></button>
+        <button class="sm" class:on={$player.shuffle} class:gone={!CAN_BROWSE} disabled={!CAN_BROWSE} on:click={() => player.toggleShuffle()} aria-label="Aléatoire"><Icon name="shuffle" size={22} /></button>
         <button on:click={() => player.prev()} aria-label="Précédent"><Icon name="prev" size={30} /></button>
         <button class="pp" class:busy={$playbackBusy} on:click={() => player.toggle()} aria-label="Lecture/Pause"><Icon name={$playing ? "pause" : "play"} size={28} /></button>
         <button on:click={() => player.next()} aria-label="Suivant"><Icon name="next" size={30} /></button>
-        <button class="sm" class:on={$player.repeat !== "off"} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
+        <button class="sm" class:on={$player.repeat !== "off"} class:gone={!CAN_BROWSE} disabled={!CAN_BROWSE} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
       </div>
 
       {#if stripViz}
@@ -266,7 +277,7 @@
           </div>
         </div>
         <div class="right">
-          {#if $current.podcast}
+          {#if $current.podcast && CAN_KEEP}
             <button
               class="sm"
               on:click={() => addMarkerAt($current, $player.currentTime)}
@@ -276,11 +287,18 @@
               <Icon name="bookmarkPlus" size={20} />
             </button>
           {/if}
-          <button class="sm" on:click={() => openShare($current)} title="Partager" aria-label="Partager"><Icon name="share" size={19} /></button>
-          <PartyButton size={19} />
-          <button class="sm" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={20} /></button>
-          <EcoToggle />
-          <QualityMenu />
+          {#if CAN_KEEP}
+            <button class="sm" on:click={() => openShare($current)} title="Partager" aria-label="Partager"><Icon name="share" size={19} /></button>
+          {/if}
+          {#if !REMOTE}
+            <PartyButton size={19} />
+            <RemoteButton size={19} />
+          {/if}
+          {#if CAN_BROWSE}
+            <button class="sm" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={20} /></button>
+            <EcoToggle />
+          {/if}
+          {#if CAN_KEEP}<QualityMenu />{/if}
         </div>
       </div>
     </section>
@@ -288,7 +306,9 @@
     <aside class="side">
       <div class="tabs">
         <button class:active={tab === "queue"} on:click={() => (tab = "queue")}>File d'attente</button>
-        <button class:active={tab === "lyrics"} on:click={() => (tab = "lyrics")}>Paroles</button>
+        <!-- A queue-only link lends the transport and the queue, not the
+             library's reading (the lyrics are served at the "read" level). -->
+        {#if CAN_BROWSE}<button class:active={tab === "lyrics"} on:click={() => (tab = "lyrics")}>Paroles</button>{/if}
       </div>
       <div class="side-body">
         {#if tab === "queue"}
@@ -312,6 +332,11 @@
 </div>
 
 <style>
+  /* A control this remote-control link does not lend: gone, its place kept so
+     the transport stays centred. */
+  .gone {
+    visibility: hidden;
+  }
   .d {
     position: fixed;
     inset: 0;

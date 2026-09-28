@@ -1,5 +1,6 @@
 <script>
   import { onMount } from "svelte";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
   import { player, recent, isAdmin } from "../lib/stores.js";
   import Card from "../components/Card.svelte";
@@ -84,14 +85,16 @@
       <button class="pill" on:click={playFlow} disabled={flowLoading}>
         <Icon name="play" size={18} /> Lancer mon Flow
       </button>
-      <button class="pill ghost" on:click={() => (tuner = true)}>
-        <Icon name="sliders" size={16} /> Personnaliser
-      </button>
+      {#if CAN_KEEP}
+        <button class="pill ghost" on:click={() => (tuner = true)}>
+          <Icon name="sliders" size={16} /> Personnaliser
+        </button>
+      {/if}
     </div>
   {/if}
 </div>
 
-{#if tuner && $isAdmin}
+{#if tuner && $isAdmin && CAN_KEEP}
   <FlowTuner onClose={() => (tuner = false)} />
 {/if}
 

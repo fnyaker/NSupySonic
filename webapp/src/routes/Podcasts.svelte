@@ -1,5 +1,6 @@
 <script>
   import { push } from "svelte-spa-router";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { onMount, onDestroy } from "svelte";
   import { api } from "../lib/api.js";
   import { isAdmin, toasts } from "../lib/stores.js";
@@ -78,7 +79,7 @@
     <h1><Icon name="mic" size={26} /> Podcasts</h1>
   </div>
 
-  {#if $isAdmin}
+  {#if $isAdmin && CAN_KEEP}
     <form class="search" on:submit|preventDefault={onSubmit}>
       <input
         placeholder="Rechercher un podcast (ou coller une URL Deezer)…"

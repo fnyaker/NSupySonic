@@ -30,7 +30,19 @@
   import GenreTagSheet from "./components/GenreTagSheet.svelte";
   import ExportSheet from "./components/ExportSheet.svelte";
   import { maybeResumeHosting } from "./lib/party/hostbridge.js";
-  import { partySheet, genreBulkSheet } from "./lib/stores.js";
+  import { partySheet, genreBulkSheet, remoteSheet, immersiveOpen, current } from "./lib/stores.js";
+  import { REMOTE, atLeast, claimToken, rememberRemote, forgetRemote, reloadHome } from "./lib/remote/mode.js";
+  import { initRemoteHost, remoteHost } from "./lib/remote/hoststate.js";
+  import PlayerBar from "./components/PlayerBar.svelte";
+  // The "controlled by… / Couper" chip, fetched the moment this player is lent.
+  let RemoteHostChip = null;
+  $: if ($remoteHost.active && !RemoteHostChip)
+    import("./components/RemoteHostChip.svelte").then((m) => (RemoteHostChip = m.default));
+  // What only a REMOTE CONTROL runs (the controller loop, its banner) and what
+  // only opening a link shows are fetched when this page turns out to be one:
+  // everybody else's first screen does not pay for them.
+  let RemoteBanner = null;
+  let RemoteClaim = null;
   // Tagging a whole album is an admin's occasional act: its sheet is fetched
   // the first time one is opened, then stays mounted.
   let GenreBulkSheet = null;
@@ -94,6 +106,20 @@
   let PartySheet = null;
   $: if ($partySheet && !PartySheet)
     import("./components/PartySheet.svelte").then((m) => (PartySheet = m.default));
+  // The remote-control sheet, the same way (it carries the QR encoder too).
+  let RemoteSheet = null;
+  $: if ($remoteSheet && !RemoteSheet)
+    import("./components/RemoteSheet.svelte").then((m) => (RemoteSheet = m.default));
+
+  // Opening a remote-control link (#/rc/<token>): like a party guest, whoever
+  // holds it may have no account here, so it renders before the login.
+  $: rcToken = $location.startsWith("/rc/") ? claimToken("#" + $location) : null;
+  $: if (rcToken && !RemoteClaim)
+    import("./routes/RemoteClaim.svelte").then((m) => (RemoteClaim = m.default));
+  // A remote control on the "queue" level lends the transport and the queue
+  // and nothing else: the full-screen player IS the app, with nothing behind.
+  const queueOnly = !!REMOTE && !atLeast("read");
+  $: if (queueOnly && $current && !$immersiveOpen) immersiveOpen.set(true);
 
   // The projector window is a SCREEN, not a second copy of the app: no sidebar,
   // no nav, and above all no <Player> — a second player would be a second
@@ -119,8 +145,12 @@
   onMount(async () => {
     // A party guest needs none of the app's own machinery (the library, the
     // offline indexes, the version watch): it is a page, not an install.
-    if (partyId) {
+    if (partyId || rcToken) {
       authChecked.set(true);
+      return;
+    }
+    if (REMOTE) {
+      await bootRemote();
       return;
     }
     initConnectivity();
@@ -152,6 +182,13 @@
     }
     try {
       const r = await api.me();
+      if (r.remote) {
+        // This browser's session is a remote control now (claimed in another
+        // tab): the page has to be rebuilt as one, from the first store up.
+        rememberRemote(r.remote);
+        reloadHome();
+        return;
+      }
       user.set(r.user);
       loadFavorites();
     } catch (e) {
@@ -173,7 +210,7 @@
   // (before onMount), and without the guard it would wipe the saved session
   // right before onMount reads it — so an offline launch fell back to the login
   // screen. Only touch storage once auth has actually been resolved.
-  $: if ($authChecked) {
+  $: if ($authChecked && !REMOTE) {
     try {
       if ($user) localStorage.setItem(SAVED_USER, JSON.stringify($user));
       else localStorage.removeItem(SAVED_USER);
@@ -183,11 +220,53 @@
   }
 
   // Reload favorites + pull the server-side podcast positions at login.
-  $: if ($user) {
+  $: if ($user && !REMOTE) {
     loadFavorites();
     initPodcastProgress();
     startHealthWatch();
     startPartyResume();
+    startRemoteHosting();
+  }
+  // This device may have been lent (a remote-control link made on it): answer
+  // whoever drives it. Once per session, only in the tab that plays.
+  let remoteHosting = false;
+  function startRemoteHosting() {
+    if (remoteHosting || isDisplay || partyId) return;
+    remoteHosting = true;
+    initRemoteHost();
+  }
+
+  // A remote control's boot: nothing of this device's own (no offline index,
+  // no play cache, no saved account — those are this browser's, not the
+  // owner's), the controller loop first so an ended grant is caught by the
+  // very first request, then the server's word on who we are.
+  async function bootRemote() {
+    initConnectivity();
+    initNav(() => mainEl);
+    initVersionWatch();
+    const [ctl, banner] = await Promise.all([
+      import("./lib/remote/controller.js"),
+      import("./components/RemoteBanner.svelte"),
+    ]);
+    ctl.startController();
+    RemoteBanner = banner.default;
+    user.set({ name: REMOTE.owner, admin: REMOTE.level === "admin" });
+    authChecked.set(true);
+    try {
+      const r = await api.me();
+      if (!r.remote) {
+        // The server no longer calls this session a remote control.
+        forgetRemote();
+        reloadHome();
+        return;
+      }
+      rememberRemote(r.remote);
+      user.set(r.user);
+      if (atLeast("read")) loadFavorites();
+    } catch {
+      /* offline: the controller keeps trying and says so; an ended grant is
+         its hook's business (lib/api.js#onRemoteEnded) */
+    }
   }
   // A listen party this user was hosting outlives a reload: its guests are
   // still on the link. Once per session, and only in the tab that plays.
@@ -270,10 +349,26 @@
   {:else}
     <div class="loading">…</div>
   {/if}
+{:else if rcToken}
+  {#if RemoteClaim}
+    <svelte:component this={RemoteClaim} token={rcToken} />
+  {:else}
+    <div class="loading">…</div>
+  {/if}
 {:else if !$authChecked}
   <div class="loading">…</div>
 {:else if !$user}
   <Login />
+{:else if queueOnly}
+  <!-- Remote control, "queue" level: the player and its queue, full screen.
+       Until the controlled player has a track, a quiet wait. -->
+  {#if !$current}
+    <div class="rq-wait">
+      <span class="muted">En attente du lecteur de {REMOTE.owner}…</span>
+    </div>
+  {/if}
+  <PlayerBar />
+  {#if RemoteBanner}<svelte:component this={RemoteBanner} />{/if}
 {:else}
   <div class="layout" class:np-open={$nowPlayingOpen}>
     <Sidebar />
@@ -287,7 +382,15 @@
     {/if}
   </div>
   <MobileNav />
-  <Player />
+  {#if REMOTE}
+    <!-- The same bar and full-screen views, over somebody else's player: the
+         engine is the one that stays home (lib/remote/controller.js). -->
+    <PlayerBar />
+    {#if RemoteBanner}<svelte:component this={RemoteBanner} />{/if}
+  {:else}
+    <Player />
+    {#if RemoteHostChip}<svelte:component this={RemoteHostChip} />{/if}
+  {/if}
 {/if}
 
 <Toasts />
@@ -300,10 +403,19 @@
 <ExportSheet />
 {#if !partyId}
   {#if PartySheet}<svelte:component this={PartySheet} />{/if}
+  {#if RemoteSheet && !REMOTE}<svelte:component this={RemoteSheet} />{/if}
   <NetworkIndicator />
 {/if}
 
 <style>
+  .rq-wait {
+    min-height: 100dvh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    padding-bottom: calc(var(--player-h) + 80px);
+    font-size: 0.95rem;
+  }
   .layout {
     display: grid;
     grid-template-columns: var(--sidebar-w) 1fr;

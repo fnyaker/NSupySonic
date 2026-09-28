@@ -1,5 +1,6 @@
 <script>
   import { onDestroy } from "svelte";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { player, isAdmin, toasts, lastPlaylist, openExport, openGenreBulk } from "../lib/stores.js";
@@ -53,7 +54,7 @@
     load(id);
   }
 
-  $: editable = !!data?.playlist?.editable && $isAdmin;
+  $: editable = !!data?.playlist?.editable && $isAdmin && CAN_KEEP;
   // A sort/search can't coexist with the drag-reorder edit mode.
   $: if (!manualView && editing) editing = false;
   $: existingIds = new Set((data?.tracks || []).map((t) => String(t.deezer_id)));
@@ -278,9 +279,13 @@
     <div class="row actions">
       <button class="pill" on:click={playAll}><Icon name="play" size={18} /> Lire</button>
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
-      <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger la playlist" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
-      <button class="icon-btn" on:click={() => openExport("playlist", id, data.playlist.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
-      {#if $isAdmin && data.tracks.length}
+      {#if !REMOTE}
+        <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger la playlist" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
+      {/if}
+      {#if CAN_KEEP}
+        <button class="icon-btn" on:click={() => openExport("playlist", id, data.playlist.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
+      {/if}
+      {#if $isAdmin && CAN_KEEP && data.tracks.length}
         <button
           class="icon-btn"
           on:click={() => openGenreBulk({ kind: "playlist", title: data.playlist.title, cover: data.playlist.cover, tracks: data.tracks })}
@@ -301,7 +306,7 @@
         >
           {editing ? "Terminé" : "Modifier"}
         </button>
-      {:else if $isAdmin}
+      {:else if $isAdmin && CAN_KEEP}
         <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
       {/if}
     </div>

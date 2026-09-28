@@ -4,6 +4,7 @@
   // current centred, neighbours peeking. When the user settles on a neighbour we
   // advance the queue and re-centre, so the cover they swiped to stays put.
   import { tick, onMount, onDestroy } from "svelte";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { push } from "svelte-spa-router";
   import { fade } from "svelte/transition";
   import {
@@ -49,6 +50,7 @@
   import { currentLyricLine } from "../lib/lyrics.js";
   import Cover from "./Cover.svelte";
   import PartyButton from "./PartyButton.svelte";
+  import RemoteButton from "./RemoteButton.svelte";
   import Icon from "./Icon.svelte";
   import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
@@ -243,6 +245,8 @@
   }
 
   function go(p) {
+    // A queue-only remote control has no screens to go to.
+    if (!CAN_BROWSE) return;
     close();
     push(p);
   }
@@ -724,7 +728,12 @@
   {/if}
 
   <header>
-    <button class="ic" on:click={close} aria-label="Réduire"><Icon name="chevronDown" size={26} /></button>
+    {#if CAN_BROWSE}
+      <button class="ic" on:click={close} aria-label="Réduire"><Icon name="chevronDown" size={26} /></button>
+    {:else}
+      <!-- A queue-only remote control has nothing behind this view. -->
+      <span class="ic" aria-hidden="true"></span>
+    {/if}
     <span class="ctx">
       {$player.context?.kind === "flow" ? "Flow" : "En lecture"}
       {#if styleLabel}<em>{styleLabel}{#if $readout.bpm} · {$readout.bpm} BPM{/if}</em>{/if}
@@ -761,10 +770,12 @@
         <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
         <span class="a" class:status={$playbackLabel}>{#if $playbackLabel}{$playbackLabel}{:else}<ArtistLine track={$current} navigate={go} />{/if}</span>
       </div>
-      <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
-        <Icon name={fav ? "heartFilled" : "heart"} size={24} />
-      </button>
-      {#if $isAdmin && ($current.deezer_id || $current.id)}
+      {#if CAN_KEEP}
+        <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
+          <Icon name={fav ? "heartFilled" : "heart"} size={24} />
+        </button>
+      {/if}
+      {#if $isAdmin && CAN_KEEP && ($current.deezer_id || $current.id)}
         <!-- Deliberately quiet, and next to the heart rather than in the header
              where it would fight the queue button for the thumb: tagging is
              something you reach for when the genre is wrong, not a call to
@@ -782,11 +793,11 @@
     </div>
 
     <div class="controls">
-      <button class="sm" class:on={$player.shuffle} on:click={() => player.toggleShuffle()} aria-label="Aléatoire"><Icon name="shuffle" size={22} /></button>
+      <button class="sm" class:on={$player.shuffle} class:gone={!CAN_BROWSE} disabled={!CAN_BROWSE} on:click={() => player.toggleShuffle()} aria-label="Aléatoire"><Icon name="shuffle" size={22} /></button>
       <button on:click={() => player.prev()} aria-label="Précédent"><Icon name="prev" size={30} /></button>
       <button class="pp" class:busy={$playbackBusy} on:click={() => player.toggle()} aria-label="Lecture/Pause"><Icon name={$playing ? "pause" : "play"} size={28} /></button>
       <button on:click={() => player.next()} aria-label="Suivant"><Icon name="next" size={30} /></button>
-      <button class="sm" class:on={$player.repeat !== "off"} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
+      <button class="sm" class:on={$player.repeat !== "off"} class:gone={!CAN_BROWSE} disabled={!CAN_BROWSE} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
     </div>
 
     {#if stripViz}
@@ -805,8 +816,10 @@
     {/if}
 
     <div class="footer">
-      <button class="sm more" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={22} /></button>
-      {#if $current.podcast}
+      {#if CAN_BROWSE}
+        <button class="sm more" on:click={trackMenu} aria-label="Plus d'options"><Icon name="moreVertical" size={22} /></button>
+      {/if}
+      {#if $current.podcast && CAN_KEEP}
         <button
           class="sm"
           on:click={() => addMarkerAt($current, $player.currentTime)}
@@ -815,11 +828,16 @@
           <Icon name="bookmarkPlus" size={21} />
         </button>
       {/if}
-      <button class="sm" on:click={() => openShare($current)} aria-label="Partager"><Icon name="share" size={20} /></button>
-      <PartyButton size={20} />
+      {#if CAN_KEEP}
+        <button class="sm" on:click={() => openShare($current)} aria-label="Partager"><Icon name="share" size={20} /></button>
+      {/if}
+      {#if !REMOTE}
+        <PartyButton size={20} />
+        <RemoteButton size={20} />
+      {/if}
       <span class="grow"></span>
-      <EcoToggle />
-      <QualityMenu />
+      {#if CAN_BROWSE}<EcoToggle />{/if}
+      {#if CAN_KEEP}<QualityMenu />{/if}
     </div>
   </div>
 
@@ -844,6 +862,11 @@
 </div>
 
 <style>
+  /* A control this remote-control link does not lend: gone, its place kept so
+     the transport stays centred. */
+  .gone {
+    visibility: hidden;
+  }
   .m {
     position: fixed;
     inset: 0;

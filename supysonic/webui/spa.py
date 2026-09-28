@@ -176,3 +176,46 @@ def party_link(pid: str):
     # The page names the host; keep it out of search engines.
     resp.headers["X-Robots-Tag"] = "noindex"
     return resp
+
+
+# A remote-control link, the same way: a short URL for the QR code and a page a
+# messaging app can preview. Opening it claims nothing — the claim is the web
+# app's own POST once it is loaded — so a preview bot fetching this page (they
+# all do) cannot take the grant. The token rides in the FRAGMENT from here on,
+# which no request carries.
+@spa.route("/rc/<token>")
+def remote_link(token: str):
+    from .remote import _parse_token, describe, live_link
+
+    link_id = _parse_token(token)
+    link = live_link(link_id) if link_id else None
+    if link_id is None:
+        abort(404)
+    owner = html.escape(describe(link)["owner"]) if link else ""
+    title = f"Piloter le lecteur de {owner}" if owner else "Contrôle à distance"
+    desc = (
+        "Ouvre le lien pour piloter la musique depuis ton appareil."
+        if link
+        else "Ce lien de contrôle n'est plus valide."
+    )
+    target = f"/app/#/rc/{token}"
+    page = (
+        "<!doctype html><html lang=fr><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>{title}</title>"
+        f"<meta property='og:title' content='{title}'>"
+        f"<meta property='og:description' content='{desc}'>"
+        "<meta name=theme-color content='#0f0d13'>"
+        "<meta name=referrer content=no-referrer>"
+        f"<meta http-equiv=refresh content='0;url={target}'>"
+        "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;"
+        "background:#0f0d13;color:#f3f0f7;font:16px system-ui,sans-serif}"
+        "a{color:#2bd4a4}</style></head>"
+        f"<body><a href='{target}'>{title}</a></body></html>"
+    )
+    resp = make_response(page)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp

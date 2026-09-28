@@ -14,6 +14,8 @@
 // as literals rather than imported for the same reason as everything else in
 // this file: importing the engine to read three integers would pull the whole
 // analysis tree back in.
+import { REMOTE } from "../remote/mode.js";
+
 const SPECTRUM = 0;
 const RHYTHM = 1;
 const SMART = 2;
@@ -75,6 +77,9 @@ export const MODE_BY_ID = new Map(MODES.map((m) => [m.id, m]));
 // means none, and none is not a scene to degrade to a cheaper one.
 export function effectiveMode(mode, beatDetect, eco = false) {
   if (eco) return "off";
+  // A remote control plays nothing, so there is nothing here to analyse: the
+  // animations it chooses are drawn by the player it drives, not by this page.
+  if (REMOTE) return "off";
   if (!MODE_BY_ID.has(mode)) return "bars";
   if (beatDetect) return mode;
   if (mode === "smart") return "aurora";

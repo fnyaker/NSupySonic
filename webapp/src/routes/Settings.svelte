@@ -1,5 +1,7 @@
 <script>
   import { onMount } from "svelte";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, LEVEL_INFO } from "../lib/remote/mode.js";
+  import { leaveRemote } from "../lib/remote/controller.js";
   import { push } from "svelte-spa-router";
   import {
     user,
@@ -54,13 +56,17 @@
   // The page had grown into one long scroll, so it's split into tabs. Sound
   // effects lead because they're what gets tweaked most often outside the
   // player; quality/storage and account sit behind their own tabs.
+  // On a remote control these are the DRIVEN player's settings (mirrored, see
+  // lib/remote/settings.js), narrowed to what the link lends: the animations
+  // from "read", the sound from "full". This device's own storage is not
+  // shown there at all — it is not the one playing.
   const TABS = [
-    { id: "fx", label: "Effets sonores" },
+    ...(CAN_KEEP ? [{ id: "fx", label: "Effets sonores" }] : []),
     { id: "viz", label: "Animations" },
-    { id: "quality", label: "Qualité sonore" },
-    { id: "account", label: "Compte" },
+    ...(REMOTE ? [] : [{ id: "quality", label: "Qualité sonore" }]),
+    { id: "account", label: REMOTE ? "Contrôle" : "Compte" },
   ];
-  let tab = "fx";
+  let tab = TABS[0].id;
   // A settings tab that opens onto a full LIST needs to be a page of its own —
   // otherwise the list buries the settings under it. `sub` is that page; the
   // header turns into a back button while it's up.
@@ -109,7 +115,7 @@
   const canLinkDeezer = nativeDeezerLoginAvailable();
   let arlLinking = false;
   onMount(async () => {
-    if (!$user?.admin) return;
+    if (!$user?.admin || !CAN_ADMIN) return;
     try {
       const s = await api.getSettings();
       quotaGb = s.upload_quota_gb;
@@ -132,7 +138,7 @@
   });
 
   async function refreshDeezerStatus(force = false) {
-    if (!$user?.admin) return;
+    if (!$user?.admin || !CAN_ADMIN) return;
     dzChecking = true;
     try {
       dzStatus = await api.deezerStatus(force);
@@ -274,7 +280,7 @@
   };
 
   async function loadRules() {
-    if (!$user?.admin) return;
+    if (!$user?.admin || !CAN_ADMIN) return;
     try {
       rulesMeta = await api.archiveRules();
       rules = { ...rulesMeta.rules };
@@ -308,7 +314,7 @@
   let cleanupOpen = false;
 
   async function loadCleanup() {
-    if (!$user?.admin) return;
+    if (!$user?.admin || !CAN_ADMIN) return;
     try {
       cleanup = await api.cleanupPreview();
     } catch {
@@ -338,7 +344,7 @@
   let store = null;
   let flushing = false;
   async function loadStorage() {
-    if (!$user?.admin) return;
+    if (!$user?.admin || !CAN_ADMIN) return;
     try {
       store = await api.storage();
     } catch {
@@ -576,6 +582,19 @@
 {/if}
 
 {#if tab === "account"}
+{#if REMOTE}
+<section class="card">
+  <h2>Contrôle à distance</h2>
+  <div class="acct">
+    <div class="acct-info">
+      <span class="acct-name">Lecteur de {REMOTE.owner}</span>
+      <span class="muted acct-sub">{LEVEL_INFO[REMOTE.level].name}{#if REMOTE.device} · {REMOTE.device}{/if}</span>
+    </div>
+    <button class="logout" on:click={leaveRemote}><Icon name="logOut" size={16} /> Quitter le contrôle</button>
+  </div>
+  <p class="muted sub">Ces réglages sont ceux du lecteur que vous pilotez : ils s'appliquent là-bas, pas sur cet appareil.</p>
+</section>
+{:else}
 <section class="card">
   <h2>Compte</h2>
   <div class="acct">
@@ -586,8 +605,9 @@
     <button class="logout" on:click={logout}><Icon name="user" size={16} /> Déconnexion</button>
   </div>
 </section>
+{/if}
 
-{#if $user?.admin}
+{#if $user?.admin && CAN_ADMIN}
 <section class="card">
   <h2>Archive du serveur</h2>
   <p class="muted sub">
@@ -634,7 +654,7 @@
 </section>
 {/if}
 
-{#if $user?.admin && rules}
+{#if $user?.admin && CAN_ADMIN && rules}
 <section class="card">
   <h2>Règles d'archivage</h2>
   <p class="muted sub">
@@ -830,7 +850,7 @@
 </section>
 {/if}
 
-{#if $user?.admin && store}
+{#if $user?.admin && CAN_ADMIN && store}
   <section class="card">
     <div class="dl-head">
       <h2>Stockage serveur</h2>
@@ -876,7 +896,7 @@
   </section>
 {/if}
 
-{#if $user?.admin && dz}
+{#if $user?.admin && CAN_ADMIN && dz}
   <section class="card">
     <h2>Compte Deezer (ARL)</h2>
     <p class="muted sub">
@@ -955,7 +975,7 @@
   </section>
 {/if}
 
-{#if $user?.admin && quotaGb !== null}
+{#if $user?.admin && CAN_ADMIN && quotaGb !== null}
   <section class="card">
     <h2>Quota d'upload (utilisateurs non-admin)</h2>
     <p class="muted sub">Limite l'espace total que chaque utilisateur non-administrateur peut occuper avec ses fichiers importés. Les administrateurs ne sont pas limités. Mettez 0 pour désactiver la limite.</p>

@@ -1,5 +1,6 @@
 <script>
   import { push } from "svelte-spa-router";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
   import { player, toasts, isAdmin, openExport, openGenreBulk } from "../lib/stores.js";
   import { toggleEntityFavorite, downloadTracks } from "../lib/actions.js";
@@ -96,12 +97,16 @@
     <div class="row actions">
       <button class="pill" on:click={() => playAll()}><Icon name="play" size={18} /> Lire</button>
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
-      {#if $isAdmin}
+      {#if $isAdmin && CAN_KEEP}
         <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
       {/if}
-      <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger l'album" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
-      <button class="icon-btn" on:click={() => openExport("album", id, data.album.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
-      {#if $isAdmin}
+      {#if !REMOTE}
+        <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger l'album" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
+      {/if}
+      {#if CAN_KEEP}
+        <button class="icon-btn" on:click={() => openExport("album", id, data.album.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
+      {/if}
+      {#if $isAdmin && CAN_KEEP}
         <button
           class="icon-btn"
           on:click={() => openGenreBulk({ kind: "album", title: data.album.title, cover: data.album.cover, tracks: data.tracks })}
