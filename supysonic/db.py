@@ -1094,20 +1094,24 @@ def list_migrations(provider):
     )
 
 
+def split_sql_script(sql):
+    """The statements of a schema script, comment lines dropped.
+
+    The comment lines go BEFORE the split on ";": a ";" inside a comment
+    ("…from the path; everything else stays NULL") otherwise cut the comment in
+    two, and its second half ran as SQL — a syntax error that failed the
+    upgrade of every database old enough to still need that migration. And a
+    comment is never skipped as a whole chunk, which would silently drop the
+    statement it heads (a CREATE right after a comment)."""
+    kept = "\n".join(
+        line for line in sql.splitlines() if not line.strip().startswith("--")
+    )
+    return [s.strip() for s in kept.split(";") if s.strip()]
+
+
 def execute_sql_resource_script(respath):
-    sql = get_resource_text(respath)
-    for statement in sql.split(";"):
-        # Drop standalone comment lines first: ``split(";")`` keeps a leading
-        # comment attached to the statement that follows it, and skipping the
-        # whole chunk when it starts with "--" would silently drop that
-        # statement (e.g. a CREATE right after a comment).
-        statement = "\n".join(
-            line
-            for line in statement.splitlines()
-            if line.strip() and not line.strip().startswith("--")
-        ).strip()
-        if statement:
-            db.execute_sql(statement)
+    for statement in split_sql_script(get_resource_text(respath)):
+        db.execute_sql(statement)
 
 
 def _database_from_uri(database_uri):

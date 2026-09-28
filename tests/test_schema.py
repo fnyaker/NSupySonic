@@ -100,6 +100,55 @@ class SchemaVersionTestCase(unittest.TestCase):
                     )
 
 
+class ScriptSplitTestCase(unittest.TestCase):
+    """A schema script is cut into statements on ";" — and a ";" inside a comment
+    used to cut the comment instead, running its second half as SQL. The
+    20260730 migration has exactly such a comment, so every SQLite database
+    still upgrading through it failed its boot on a syntax error."""
+
+    SQL_START = re.compile(
+        r"^(CREATE|ALTER|UPDATE|INSERT|DELETE|DROP|PRAGMA|BEGIN|COMMIT|SET|"
+        r"WITH|SELECT|REPLACE|START|VACUUM|REPAIR|OPTIMIZE)\b",
+        re.I,
+    )
+
+    def test_a_semicolon_in_a_comment_is_part_of_the_comment(self):
+        sql = (
+            "ALTER TABLE t ADD COLUMN c INT;\n"
+            "-- recoverable from the path; everything else stays NULL\n"
+            "UPDATE t SET c = 1;\n"
+        )
+        self.assertEqual(
+            dbmod.split_sql_script(sql),
+            ["ALTER TABLE t ADD COLUMN c INT", "UPDATE t SET c = 1"],
+        )
+
+    def test_a_statement_after_a_comment_is_kept(self):
+        self.assertEqual(
+            dbmod.split_sql_script("-- a table\nCREATE TABLE x (a INT);"),
+            ["CREATE TABLE x (a INT)"],
+        )
+
+    def test_every_shipped_script_splits_into_statements(self):
+        root = os.path.join(os.path.dirname(dbmod.__file__), "schema")
+        scripts = [os.path.join(root, f"{p}.sql") for p in PROVIDERS]
+        for provider in PROVIDERS:
+            folder = os.path.join(MIGRATION_ROOT, provider)
+            scripts += [
+                os.path.join(folder, n) for n in os.listdir(folder) if n.endswith(".sql")
+            ]
+        self.assertGreater(len(scripts), 30)
+        for path in scripts:
+            with open(path, encoding="utf-8") as fh:
+                statements = dbmod.split_sql_script(fh.read())
+            for statement in statements:
+                self.assertRegex(
+                    statement,
+                    self.SQL_START,
+                    f"{os.path.relpath(path, root)}: not a statement: {statement[:60]!r}",
+                )
+
+
 class QueryShapeTestCase(unittest.TestCase):
     """Python binds `&` tighter than `>`, so
 
