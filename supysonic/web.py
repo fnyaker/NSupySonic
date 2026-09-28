@@ -190,6 +190,15 @@ def create_application(config=None):
     # always same-origin (/api/stream proxies + transcodes everything), and the
     # only remote images are Deezer's art CDN plus api.deezer.com's redirecting
     # /image endpoints — everything else already goes through /api/cover.
+    #
+    # img-src carries `blob:` because the web app keeps every cover it has
+    # played or downloaded on the device and paints it from an object URL (the
+    # offline cover cache, the lock-screen art). Without it the browser refused
+    # every one of those pictures before loading it, and the app, seeing an
+    # image that "would not decode", deleted the blob and fetched it again —
+    # on every single play. It opens nothing: a blob: URL can only be
+    # minted by script already running on this origin, from bytes it already
+    # holds, so it cannot carry anything off the page.
     csp = (
         "default-src 'self'; "
         # 'wasm-unsafe-eval' is the NARROW directive, added for exactly this
@@ -199,7 +208,7 @@ def create_application(config=None):
         # training kernel cannot be instantiated at all.
         "script-src 'self' 'wasm-unsafe-eval'; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https://*.dzcdn.net https://api.deezer.com; "
+        "img-src 'self' data: blob: https://*.dzcdn.net https://api.deezer.com; "
         "media-src 'self' blob:; "
         "connect-src 'self'; "
         "font-src 'self' data:; "

@@ -1,5 +1,6 @@
 <script>
   import { onDestroy, onMount } from "svelte";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import {
     player,
     favTracks,
@@ -162,14 +163,16 @@
 <div class="head">
   <h1>Ma bibliothèque</h1>
   <div class="head-actions">
-    {#if $isAdmin}
+    {#if $isAdmin && CAN_ADMIN}
       <button class="upload" class:spin={$syncing} on:click={syncDeezer} disabled={$syncing} title="Synchroniser depuis Deezer">
         <Icon name="refresh" size={17} /> {$syncing ? "Sync…" : "Synchroniser Deezer"}
       </button>
     {/if}
-    <button class="upload" on:click={() => fileInput.click()} disabled={uploading}>
-      <Icon name="upload" size={17} /> {uploading ? "Import…" : "Importer des fichiers"}
-    </button>
+    {#if CAN_KEEP}
+      <button class="upload" on:click={() => fileInput.click()} disabled={uploading}>
+        <Icon name="upload" size={17} /> {uploading ? "Import…" : "Importer des fichiers"}
+      </button>
+    {/if}
   </div>
   <input
     bind:this={fileInput}
@@ -193,7 +196,10 @@
   {#if $isAdmin}
     <button class:active={tab === "playlists"} on:click={() => (tab = "playlists")}>Mes playlists</button>
   {/if}
-  <button class:active={tab === "downloaded"} on:click={() => (tab = "downloaded")}>Téléchargés</button>
+  {#if !REMOTE}
+    <!-- This device's own downloads: nothing to do with the player driven. -->
+    <button class:active={tab === "downloaded"} on:click={() => (tab = "downloaded")}>Téléchargés</button>
+  {/if}
   <button class:active={tab === "local"} on:click={() => (tab = "local")}>Mes fichiers</button>
   <button class:active={tab === "gone"} on:click={() => (tab = "gone")}>
     Indisponibles{#if gone?.length}<span class="badge">{gone.length}</span>{/if}

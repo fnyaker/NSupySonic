@@ -121,8 +121,11 @@ export function createBackdrop({
         pushLayer(src, forUrl);
         return;
       }
-      // The image CDN fails transiently; back off and try again.
-      if (attempt < retries) {
+      // The image CDN fails transiently; back off and try again. A blob: is
+      // not the network — it is bytes already in this page, so whatever
+      // refused it will refuse it again, and waiting 1.2 s + 2.4 s to find
+      // that out is 3.6 s of the previous track's backdrop. Straight on.
+      if (attempt < retries && !url.startsWith("blob:")) {
         logInfo("bg", `load failed ${tag(url)} (attempt ${attempt + 1}) — retrying`);
         retryTimer = setTimeout(() => {
           retryTimer = null;

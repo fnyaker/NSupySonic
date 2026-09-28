@@ -172,3 +172,54 @@ test("the fade still lands on its end value", async () => {
   fadeParam(p, 0, 1, 5, 0); // instantaneous (a skip's hard cut path)
   assert.equal(p.events.at(-1).v, 1);
 });
+
+// The Android WebView (Chrome 154) does not truncate a curve that
+// cancelAndHoldAtTime interrupts: it restarts the REST of it at the cancel
+// time. Measured from the log it produced — a 60 ms skip ramp interrupted
+// 9.3 ms in was reported as `setValueCurveAtTime(..., T, 0.0507)` with T the
+// cancel time — and the player's next `setValueAtTime(1, T)` threw
+// NotSupportedError inside the track load, which then never finished. A mock
+// with exactly that behaviour:
+function webviewParam(value = 1) {
+  const p = mockParam(value);
+  p.cancelAndHoldAtTime = (t) => {
+    const ev = p.events;
+    for (let i = ev.length - 1; i >= 0; i--) {
+      const e = ev[i];
+      if (e.type === "curve" && e.t < t && t < e.t + e.d) {
+        ev[i] = { type: "curve", c: e.c, t, d: e.t + e.d - t }; // the remainder, from t
+      } else if (e.t > t) ev.splice(i, 1);
+    }
+    return p;
+  };
+  return p;
+}
+
+test("an engine that restarts an interrupted curve cannot make the player's gain writes throw", async () => {
+  const { fadeParam, setParam } = await import("../src/lib/audio/graph.js");
+  // The unguarded write throws on this engine — the mock is faithful to it.
+  const raw = webviewParam(0);
+  fadeParam(raw, 0, 1, 0, 0.06);
+  raw.cancelAndHoldAtTime(0.0093);
+  assert.throws(() => raw.setValueAtTime(1, 0.0093), /overlaps/);
+
+  // A softened skip's rise (60 ms), then the next skip 9.3 ms in.
+  const p = webviewParam(0);
+  fadeParam(p, 0, 1, 0, 0.06);
+  assert.doesNotThrow(() => setParam(p, 1, 0.0093));
+  const last = p.events.at(-1);
+  assert.deepEqual([last.type, last.v, last.t], ["set", 1, 0.0093]);
+  assert.ok(
+    !p.events.some((e) => e.type === "curve" && e.t + e.d > 0.0093),
+    "nothing left sounding over the value just set"
+  );
+
+  // Same engine, the next skip softened too: the re-armed fade must still be
+  // a curve (a cut would click), starting where it was asked to.
+  const q = webviewParam(0);
+  fadeParam(q, 0, 1, 0, 0.06);
+  assert.doesNotThrow(() => fadeParam(q, 0.4, 0, 0.0093, 0.06));
+  const curves = q.events.filter((e) => e.type === "curve");
+  assert.equal(curves.length, 1);
+  assert.deepEqual([curves[0].t, curves[0].d], [0.0093, 0.06]);
+});

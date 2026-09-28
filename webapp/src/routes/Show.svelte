@@ -1,5 +1,6 @@
 <script>
   import { push } from "svelte-spa-router";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
   import { player, currentId, playing, isAdmin, toasts, seekTo, openMenu, openExport } from "../lib/stores.js";
   import { podcastProgress, setResumePoint } from "../lib/podcastProgress.js";
@@ -187,11 +188,13 @@
         <Icon name={dlBusy ? "downloaded" : "download"} size={17} />
         {dlBusy ? `${dlDone}/${episodes.length}…` : "Tout télécharger"}
       </button>
-      <button class="ghost-btn" on:click={() => openExport("podcast", id, data.title)}
-              disabled={!episodes.length} title="Exporter en ZIP (clé USB, autre lecteur…)">
-        <Icon name="archive" size={17} /> Exporter
-      </button>
-      {#if $isAdmin}
+      {#if CAN_KEEP}
+        <button class="ghost-btn" on:click={() => openExport("podcast", id, data.title)}
+                disabled={!episodes.length} title="Exporter en ZIP (clé USB, autre lecteur…)">
+          <Icon name="archive" size={17} /> Exporter
+        </button>
+      {/if}
+      {#if $isAdmin && CAN_KEEP}
         <button class="icon-btn" on:click={unsubscribe} aria-label="Se désabonner" title="Se désabonner">
           <Icon name="trash" size={22} />
         </button>

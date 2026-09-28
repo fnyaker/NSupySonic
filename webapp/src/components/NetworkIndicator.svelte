@@ -5,6 +5,7 @@
   // contextually (toasts, offline queue filtering). Recovery flashes briefly.
   import { fly } from "svelte/transition";
   import { online, reconnectedAt } from "../lib/net.js";
+  import { REMOTE } from "../lib/remote/mode.js";
 
   let showOffline = false;
   let offTimer = null;
@@ -31,7 +32,9 @@
 {#if !$online && showOffline}
   <div class="net off" role="status" aria-live="polite" transition:fly={{ y: -16, duration: 200 }}>
     <span class="dot"></span>
-    Hors ligne — lecture locale disponible
+    <!-- A remote control plays nothing here: what it can promise is to pick
+         the player back up by itself. -->
+    {REMOTE ? "Hors ligne — reprise automatique" : "Hors ligne — lecture locale disponible"}
   </div>
 {:else if justReconnected}
   <div class="net back" role="status" transition:fly={{ y: -16, duration: 200 }}>

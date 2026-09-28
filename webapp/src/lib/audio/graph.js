@@ -223,22 +223,57 @@ function holdParam(param, t) {
   // interrupting a fade used to throw instead of re-arming.
   const from = curve && curve.start <= t && t < curve.end ? curve.start : t;
   param.cancelScheduledValues(from);
-  param.setValueAtTime(v, t);
+  setAt(param, v, t);
+  runningCurves.delete(param);
+}
+
+// setValueAtTime that cannot throw. After the hold above, nothing should be
+// left over `t` — but engines disagree on what cancelAndHoldAtTime leaves
+// behind a curve it interrupts, and one of them (the Android WebView, Chrome
+// 154) left the REST of the curve, restarted at the cancel time: a 60 ms skip
+// ramp interrupted 9 ms in became a 50.7 ms curve starting exactly at `t`, and
+// the next setValueAtTime(1, t) threw NotSupportedError. That throw landed
+// inside the player's track load, which then never finished — no gain snap, no
+// "done loading", the seek bar ignoring the new track. So whatever an engine
+// leaves, the timeline is cleared and the value set: cancelScheduledValues(0)
+// removes every event, a curve in flight included, and the param is then at
+// `v` from `t`, which is what the caller asked for.
+function setAt(param, v, t) {
+  try {
+    param.setValueAtTime(v, t);
+  } catch {
+    clearParam(param);
+    param.setValueAtTime(v, t);
+  }
+}
+
+function clearParam(param) {
+  param.cancelScheduledValues(0);
   runningCurves.delete(param);
 }
 
 // Schedule the equal-power ramp on a gain param and remember its interval.
 function scheduleFadeCurve(param, from, to, t, seconds) {
-  try {
-    param.setValueCurveAtTime(equalPowerCurve(from, to), t, seconds);
-    runningCurves.set(param, { start: t, end: t + seconds });
-  } catch {
-    // A scheduling quirk must never cost the fade — or the track. Land the end
-    // value instead and forget the curve; the gain is still correct, just not
-    // curved.
-    param.setValueAtTime(to, t);
-    runningCurves.delete(param);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      param.setValueCurveAtTime(equalPowerCurve(from, to), t, seconds);
+      runningCurves.set(param, { start: t, end: t + seconds });
+      return;
+    } catch {
+      // Something an engine left on the timeline is in the way. Clear it and
+      // try once more from where the fade starts: a curve lost is a cut, and a
+      // cut mid-waveform is the click this fade exists to avoid.
+      if (attempt === 0) {
+        clearParam(param);
+        setAt(param, from, t);
+      }
+    }
   }
+  // A scheduling quirk must never cost the fade — or the track. Land the end
+  // value instead and forget the curve; the gain is still correct, just not
+  // curved.
+  setAt(param, to, t);
+  runningCurves.delete(param);
 }
 
 // Re-arm one gain param: hold where it is, then ramp to `to`. Exported so the
@@ -246,11 +281,18 @@ function scheduleFadeCurve(param, from, to, t, seconds) {
 export function fadeParam(param, from, to, t, seconds) {
   holdParam(param, t);
   if (seconds <= 0.01) {
-    param.setValueAtTime(to, t);
+    setAt(param, to, t);
     return;
   }
-  param.setValueAtTime(from, t);
+  setAt(param, from, t);
   scheduleFadeCurve(param, from, to, t, seconds);
+}
+
+// Hold a param at `v` from `t`, whatever is scheduled on it. Exported for the
+// same reason as fadeParam.
+export function setParam(param, v, t) {
+  holdParam(param, t);
+  setAt(param, v, t);
 }
 
 // Build the shared graph once. Returns false if Web Audio is unavailable.
@@ -476,9 +518,7 @@ export function fadeElement(el, to, seconds) {
 export function setFade(el, v) {
   const strip = strips.get(el);
   if (!ctx || !strip) return false;
-  const t = ctx.currentTime;
-  holdParam(strip.fade.gain, t);
-  strip.fade.gain.setValueAtTime(Math.max(0, Math.min(1, v)), t);
+  setParam(strip.fade.gain, Math.max(0, Math.min(1, v)), ctx.currentTime);
   return true;
 }
 

@@ -1,5 +1,6 @@
 <script>
   import { link, push } from "svelte-spa-router";
+  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { location } from "../lib/router.js";
   import { user, isAdmin, syncing, playlists } from "../lib/stores.js";
   import { api } from "../lib/api.js";
@@ -23,6 +24,12 @@
   }
 
   async function logout() {
+    // On a remote control this account is lent: leaving the loan is the way
+    // out, and it hands the browser back its own account (lib/remote/controller.js).
+    if (REMOTE) {
+      const { leaveRemote } = await import("../lib/remote/controller.js");
+      return leaveRemote();
+    }
     try {
       await api.logout();
     } catch {
@@ -76,17 +83,21 @@
     <div class="pl-head">
       <span>Playlists</span>
       <div class="pl-actions">
-        <button
-          class="new"
-          class:spin={$syncing}
-          on:click={syncDeezer}
-          disabled={$syncing}
-          title="Synchroniser depuis Deezer"
-          aria-label="Synchroniser depuis Deezer"
-        >
-          <Icon name="refresh" size={16} />
-        </button>
-        <button class="new" on:click={newPlaylist} aria-label="Nouvelle playlist"><Icon name="plus" size={18} /></button>
+        {#if CAN_ADMIN}
+          <button
+            class="new"
+            class:spin={$syncing}
+            on:click={syncDeezer}
+            disabled={$syncing}
+            title="Synchroniser depuis Deezer"
+            aria-label="Synchroniser depuis Deezer"
+          >
+            <Icon name="refresh" size={16} />
+          </button>
+        {/if}
+        {#if CAN_KEEP}
+          <button class="new" on:click={newPlaylist} aria-label="Nouvelle playlist"><Icon name="plus" size={18} /></button>
+        {/if}
       </div>
     </div>
     <ul class="playlists">
@@ -99,8 +110,13 @@
   {/if}
 
   <div class="account">
-    <span class="who">{$user?.name}</span>
-    <button class="logout" on:click={logout}>Déconnexion</button>
+    {#if REMOTE}
+      <span class="who">Lecteur de {REMOTE.owner}</span>
+      <button class="logout" on:click={logout}>Quitter le contrôle</button>
+    {:else}
+      <span class="who">{$user?.name}</span>
+      <button class="logout" on:click={logout}>Déconnexion</button>
+    {/if}
   </div>
 </nav>
 

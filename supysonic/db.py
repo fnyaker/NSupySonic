@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260919"
+SCHEMA_VERSION = "20260928"
 
 
 def now():
@@ -1081,6 +1081,33 @@ class PodcastMarker(_Model):
         }
 
 
+class RemoteLink(_Model):
+    """A link that lets whoever holds it drive one of its owner's players.
+
+    The row is the capability's identity, never the capability itself: the
+    token handed out is ``id`` plus an HMAC of it under the app's secret key
+    (see supysonic/webui/remote.py), so a copy of this table opens nothing.
+    ``device`` is the player being driven — the device the owner made the link
+    on — and ``level`` what the holder may do with it (queue / read / full /
+    admin). A link ends when it is revoked (the owner's "cut") or expires; the
+    sessions it opened end with it, on their very next request.
+    """
+
+    id = CharField(24, primary_key=True)
+    user = ForeignKeyField(User, backref="+", on_delete="CASCADE")
+    level = CharField(8)
+    device = CharField(40)
+    device_name = CharField(64, null=True)
+    label = CharField(64, null=True)
+    created = DateTimeField(default=now)
+    expires = DateTimeField(null=True)
+    revoked = DateTimeField(null=True)
+    last_used = DateTimeField(null=True)
+
+    class Meta:
+        table_name = "remote_link"
+
+
 def get_resource_text(respath):
     return importlib.resources.files(__package__).joinpath(respath).read_text("utf-8")
 
@@ -1094,20 +1121,24 @@ def list_migrations(provider):
     )
 
 
+def split_sql_script(sql):
+    """The statements of a schema script, comment lines dropped.
+
+    The comment lines go BEFORE the split on ";": a ";" inside a comment
+    ("…from the path; everything else stays NULL") otherwise cut the comment in
+    two, and its second half ran as SQL — a syntax error that failed the
+    upgrade of every database old enough to still need that migration. And a
+    comment is never skipped as a whole chunk, which would silently drop the
+    statement it heads (a CREATE right after a comment)."""
+    kept = "\n".join(
+        line for line in sql.splitlines() if not line.strip().startswith("--")
+    )
+    return [s.strip() for s in kept.split(";") if s.strip()]
+
+
 def execute_sql_resource_script(respath):
-    sql = get_resource_text(respath)
-    for statement in sql.split(";"):
-        # Drop standalone comment lines first: ``split(";")`` keeps a leading
-        # comment attached to the statement that follows it, and skipping the
-        # whole chunk when it starts with "--" would silently drop that
-        # statement (e.g. a CREATE right after a comment).
-        statement = "\n".join(
-            line
-            for line in statement.splitlines()
-            if line.strip() and not line.strip().startswith("--")
-        ).strip()
-        if statement:
-            db.execute_sql(statement)
+    for statement in split_sql_script(get_resource_text(respath)):
+        db.execute_sql(statement)
 
 
 def _database_from_uri(database_uri):
@@ -1221,6 +1252,7 @@ def _migration_order():
         PodcastEpisode,
         PodcastProgress,
         PodcastMarker,
+        RemoteLink,  # after User: it references it
     ]
 
 

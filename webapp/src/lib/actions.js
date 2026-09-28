@@ -2,6 +2,8 @@
 // Kept separate from api.js to avoid an import cycle (api.js imports stores).
 
 import { get } from "svelte/store";
+
+import { REMOTE, CAN_KEEP } from "./remote/mode.js";
 import { api } from "./api.js";
 import {
   favorites,
@@ -267,6 +269,11 @@ function refreshFavTracks() {
 }
 
 export async function toggleFavorite(track) {
+  // A read-only remote control shows the owner's hearts but cannot move them.
+  if (!CAN_KEEP) {
+    toasts.push("Ce lien est en lecture seule", "info");
+    return;
+  }
   const id = String(track.deezer_id);
   const on = !get(favorites).has(id);
   // optimistic
@@ -301,6 +308,10 @@ function updateFavTracksCache(track, on) {
 }
 
 export async function toggleEntityFavorite(kind, id, on) {
+  if (!CAN_KEEP) {
+    toasts.push("Ce lien est en lecture seule", "info");
+    return false;
+  }
   try {
     await api.favoriteEntity(kind, id, on);
     toasts.push(on ? "Ajouté à vos favoris" : "Retiré de vos favoris");
@@ -453,15 +464,16 @@ export function buildEntityMenu(kind, item, nav) {
     { label: "Lire", icon: "play", action: () => playEntity(kind, routeId) },
     { label: "Ouvrir", icon: "open", action: () => nav(route + routeId) },
   ];
-  if (kind === "album" || kind === "playlist")
+  if ((kind === "album" || kind === "playlist") && !REMOTE)
     items.push({
       label: "Télécharger",
       icon: "download",
       action: () => downloadEntity(kind, routeId),
     });
   // Favoriting an album/artist/playlist writes to the shared Deezer account, so
-  // it's admin-only (guests don't mutate the owner's account).
-  if (get(isAdmin)) {
+  // it's admin-only (guests don't mutate the owner's account) — and on a remote
+  // control, only a link that may change what is kept.
+  if (get(isAdmin) && CAN_KEEP) {
     // Only Deezer-backed entities can be favorited on the account (a user's own
     // playlist has no Deezer favorite to add).
     if ((kind === "album" || kind === "playlist") && item.deezer_id)
@@ -524,7 +536,8 @@ function buildEpisodeMenu(ep, nav) {
 export function buildTrackMenu(track, nav) {
   if (track.podcast) return buildEpisodeMenu(track, nav);
   const fav = get(favorites).has(String(track.deezer_id));
-  const admin = get(isAdmin);
+  // The owner's identity, narrowed on a remote control to what its link lends.
+  const admin = get(isAdmin) && CAN_KEEP;
   const items = [
     { label: "Lire ensuite", icon: "next", action: () => player.playNext([track]) },
     { label: "Ajouter à la file", icon: "queue", action: () => player.addToQueue([track]) },
@@ -567,9 +580,10 @@ export function buildTrackMenu(track, nav) {
     });
   }
   // Offline download — device-local, so available to everyone. A plain
-  // "Télécharger" at the default quality, plus a submenu to pick another.
-  const dl = isDownloaded(track.deezer_id);
-  items.push(
+  // "Télécharger" at the default quality, plus a submenu to pick another. Not on
+  // a remote control: this device is not the one playing.
+  const dl = !REMOTE && isDownloaded(track.deezer_id);
+  if (!REMOTE) items.push(
     "divider",
     dl
       ? {
@@ -579,7 +593,7 @@ export function buildTrackMenu(track, nav) {
         }
       : { label: "Télécharger", icon: "download", action: () => downloadTrackTo(track) }
   );
-  if (!dl)
+  if (!dl && !REMOTE)
     items.push({
       label: "Télécharger en…",
       icon: "download",
@@ -590,17 +604,16 @@ export function buildTrackMenu(track, nav) {
       })),
     });
 
-  items.push(
-    "divider",
-    { label: "Partager…", icon: "share", action: () => openShare(track) },
-    { label: "Lancer la radio", icon: "radio", action: () => startTrackRadio(track) },
-    {
+  items.push("divider");
+  if (CAN_KEEP) items.push({ label: "Partager…", icon: "share", action: () => openShare(track) });
+  items.push({ label: "Lancer la radio", icon: "radio", action: () => startTrackRadio(track) });
+  if (CAN_KEEP)
+    items.push({
       label: fav ? "Retirer des favoris" : "Ajouter aux favoris",
       icon: fav ? "heartFilled" : "heart",
       action: () => toggleFavorite(track),
-    },
-    "divider"
-  );
+    });
+  items.push("divider");
   // One entry per credited artist. A single credit stays a plain item (the
   // common case shouldn't grow a submenu for nothing); a feat. track opens a
   // submenu so the guest is reachable too.
