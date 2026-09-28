@@ -438,6 +438,22 @@ class RemoteTestCase(unittest.TestCase):
 
     # -- the short link ------------------------------------------------------------
 
+    def test_a_link_handed_out_under_the_apps_path_still_opens(self):
+        """The client once built the link relative to the page, and a page whose
+        path was not exactly /app/ handed out /app/rc/<token>: the SPA's file
+        route read the token's dot as a missing file's extension and answered
+        404 — the report was exactly that page."""
+        link = self._link("read")
+        anon = self.app.test_client()
+        r = anon.get(f"/app/rc/{link['token']}")
+        self.assertEqual(r.status_code, 200)
+        page = r.get_data(as_text=True)
+        # From /app/rc/<token>, "../" is /app/.
+        self.assertIn(f"url=../#/rc/{link['token']}", page)
+        self.assertIn("Piloter le lecteur de alice", page)
+        self.assertEqual(anon.get("/api/me").status_code, 401, "opening the page claimed nothing")
+        self.assertEqual(anon.get("/app/rc/" + link["id"] + "." + "A" * 24).status_code, 404)
+
     def test_the_short_link_forwards_into_the_app_and_claims_nothing(self):
         """A messaging app fetches the link to preview it: that fetch must not
         take the grant (the claim is the app's own POST), and it must not say
@@ -447,7 +463,8 @@ class RemoteTestCase(unittest.TestCase):
         r = anon.get(f"/rc/{link['token']}")
         self.assertEqual(r.status_code, 200)
         page = r.get_data(as_text=True)
-        self.assertIn(f"url=/app/#/rc/{link['token']}", page)
+        # Relative, so a deployment under a path prefix forwards into its own app.
+        self.assertIn(f"url=../app/#/rc/{link['token']}", page)
         self.assertIn("Piloter le lecteur de alice", page)
         self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(anon.get("/api/me").status_code, 401, "opening the page claimed nothing")

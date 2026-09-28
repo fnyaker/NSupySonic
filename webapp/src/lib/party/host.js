@@ -15,6 +15,7 @@
 // lets guests start the next track on the beat instead of a poll after the
 // host did.
 
+import { shortLink } from "../applink.js";
 import { get } from "svelte/store";
 import { api } from "../api.js";
 import { current, normalization, player } from "../stores.js";
@@ -105,9 +106,7 @@ export async function endParty() {
 }
 
 export function partyLink(id) {
-  // Relative to where the app is served, so a deployment under a path prefix
-  // still hands out a working link.
-  return new URL(`../party/${id}`, window.location.origin + window.location.pathname).href;
+  return shortLink("party", id);
 }
 
 async function begin(view) {

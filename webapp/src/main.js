@@ -1,3 +1,6 @@
+// First: a short link that arrived as "/app/rc/<token>" becomes the route it
+// names before anything reads the location (lib/linkrescue.js).
+import "./lib/linkrescue.js";
 import "./app.css";
 import { mount } from "svelte";
 import App from "./App.svelte";

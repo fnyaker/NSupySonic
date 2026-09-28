@@ -141,7 +141,22 @@ def serve(path: str = ""):
 _PARTY_ID = re.compile(r"\A[A-Za-z0-9_-]{16,64}\Z")
 
 
+def _into_app(route: str) -> str:
+    """Where a short-link page forwards: the app's hash route, RELATIVE to the
+    page, so a deployment under a path prefix lands in its own app rather than
+    the domain's "/app/". Both spellings of a link are one level below their
+    base: "/rc/x" → "../app/#…", "/app/rc/x" → "../#…"."""
+    inside = request.path.startswith("/app/")
+    return ("../#" if inside else "../app/#") + route
+
+
+# Each short link also answers under the app's own path. Clients once built it
+# relative to the page ("../rc/…"), and a page whose path was not exactly
+# "/app/" handed out "/app/rc/<token>" — which the file route below took for a
+# missing file (the token has a dot in it) and answered 404. Those links are
+# out there, in chats and QR codes; they keep working.
 @spa.route("/party/<pid>")
+@spa.route("/app/party/<pid>")
 def party_link(pid: str):
     if not _PARTY_ID.fullmatch(pid):
         abort(404)
@@ -155,7 +170,7 @@ def party_link(pid: str):
         if party
         else "Cette listen party est terminée."
     )
-    target = f"/app/#/party/{pid}"
+    target = _into_app(f"/party/{pid}")
     page = (
         "<!doctype html><html lang=fr><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -184,6 +199,7 @@ def party_link(pid: str):
 # all do) cannot take the grant. The token rides in the FRAGMENT from here on,
 # which no request carries.
 @spa.route("/rc/<token>")
+@spa.route("/app/rc/<token>")
 def remote_link(token: str):
     from .remote import _parse_token, describe, live_link
 
@@ -198,7 +214,7 @@ def remote_link(token: str):
         if link
         else "Ce lien de contrôle n'est plus valide."
     )
-    target = f"/app/#/rc/{token}"
+    target = _into_app(f"/rc/{token}")
     page = (
         "<!doctype html><html lang=fr><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
