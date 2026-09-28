@@ -68,6 +68,7 @@
   import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
   import QueueList from "./QueueList.svelte";
+  import NowPlayingMore from "./NowPlayingMore.svelte";
   import SleepButton from "./SleepButton.svelte";
   import SpeedButton from "./SpeedButton.svelte";
 
@@ -313,12 +314,15 @@
         <!-- A queue-only link lends the transport and the queue, not the
              library's reading (the lyrics are served at the "read" level). -->
         {#if CAN_BROWSE}<button class:active={tab === "lyrics"} on:click={() => (tab = "lyrics")}>Paroles</button>{/if}
+        {#if CAN_BROWSE && !$current.podcast}<button class:active={tab === "more"} on:click={() => (tab = "more")}>Similaires</button>{/if}
       </div>
       <div class="side-body">
         {#if tab === "queue"}
           <div class="queue">
             <QueueList items={q} {idx} bind:this={queueVL} showDuration />
           </div>
+        {:else if tab === "more"}
+          <NowPlayingMore track={$current} />
         {:else}
           <Lyrics />
         {/if}

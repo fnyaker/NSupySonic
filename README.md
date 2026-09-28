@@ -179,7 +179,12 @@ A single-page app built for speed, at `/app`:
   (on startup, then daily); starring a track or editing a playlist here is mirrored back to your
   account.
 - **Flow and mixes**, with **customizable Flow clusters**, track and artist radio, and an endless
-  queue.
+  queue you can reorder by dragging and clear in one tap.
+- **Explore**: what is charting worldwide, by genre and by country, and the new releases.
+- **Under the full-screen player**, swipe up for tracks that sound like the one playing and the
+  artist behind it.
+- **Sleep timer** (minutes, or the end of the track, with a fade-out) and **podcast speed**
+  remembered per show.
 - **Synced lyrics** in the full-screen player, from Deezer first and [LRCLIB](https://lrclib.net)
   after, archived beside the audio.
 - **Podcasts** — subscribe to Deezer shows; episodes are archived on first play, positions are saved

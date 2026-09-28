@@ -12,14 +12,14 @@ le code.
 
 ## Niveau 1 — quelques heures, surtout côté interface
 
-- [ ] **Modifier la file d'attente** — réordonner par glisser-déposer, vider la file.
+- [x] **Modifier la file d'attente** — réordonner par glisser-déposer, vider la file.
   Le store `player` n'a que `removeAt`, `playNext`, `addToQueue` : il manque `move` et `clear`.
   Le glisser-déposer existe déjà dans `Playlist.svelte` (mode édition). La file est une liste
   virtualisée (`VirtualList`) : le glisser doit fonctionner sans monter toutes les lignes.
-- [ ] **Minuteur de sommeil** — arrêt après N minutes, ou à la fin du titre / de l'album en cours,
+- [x] **Minuteur de sommeil** — arrêt après N minutes, ou à la fin du titre / de l'album en cours,
   avec un fondu sur les dernières secondes. À porter par le store `player` pour que la
   télécommande (`lib/remote`) et le lecteur natif Android restent cohérents.
-- [ ] **Vitesse de lecture pour les podcasts** — 0,5× à 3×, mémorisée par émission. Le lecteur
+- [x] **Vitesse de lecture pour les podcasts** — 0,5× à 3×, mémorisée par émission. Le lecteur
   lit `playbackRate` mais ne le règle jamais. Penser à `preservesPitch`, aux marqueurs et à la
   reprise de position (les positions sont en secondes de média, pas en temps réel).
 - [ ] **Mono et balance gauche/droite** — accessibilité. Un `StereoPanner` et une sommation mono
@@ -28,16 +28,17 @@ le code.
 - [ ] **Mode voiture** — écran plein format, très gros boutons (précédent / lecture / suivant,
   file, favori), lisible d'un coup d'œil et sans geste fin.
 - [ ] **Panneau « sous le lecteur »** — dans le lecteur plein écran, glisser vers le haut fait
-  monter une page :
-  - [ ] titres similaires (via l'API Deezer aujourd'hui — `/radio/track/<id>` ; à terme via nos
+  monter une page (fait pour les titres similaires et l'artiste ; les crédits attendent
+  les crédits complets) :
+  - [x] titres similaires (via l'API Deezer aujourd'hui — `/radio/track/<id>` ; à terme via nos
     propres embeddings, voir « Lecture aléatoire intelligente ») ;
-  - [ ] à propos de l'artiste (biographie, artistes similaires : déjà présents sur la page
-    Artiste, à réutiliser) ;
+  - [x] à propos de l'artiste (photo, fans, titres populaires, artistes similaires — l'API
+    publique de Deezer ne donne pas de biographie) ;
   - [ ] crédits du titre, quand les crédits complets seront là.
 
 ## Niveau 2 — une journée, un petit endpoint ou un petit écran
 
-- [ ] **Mode exploration** (Spotify « Parcourir », Apple « Explorer ») — classements, genres,
+- [x] **Mode exploration** (Spotify « Parcourir », Apple « Explorer ») — classements, genres,
   ambiances. `deezerpy` sait déjà faire `get_chart*`, `get_genres`, `get_channels`,
   `get_editorial*` ; il manque l'endpoint `/api` et l'écran.
 - [ ] **Radios** — stations par genre. `get_radios_genres` et `get_genre_radios` existent côté

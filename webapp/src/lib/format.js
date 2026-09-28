@@ -132,3 +132,14 @@ export function loResCover(url, size = 48) {
   const out = url.replace(/\/\d+x\d+(-[^/]*\.(?:jpg|jpeg|png|webp))/i, `/${size}x${size}$1`);
   return out === url ? null : out;
 }
+
+/** 1 234 567 -> "1,2 M": a count as a person would say it (French style). */
+export function compactNumber(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "";
+  try {
+    return new Intl.NumberFormat("fr", { notation: "compact", maximumFractionDigits: 1 }).format(v);
+  } catch {
+    return String(Math.round(v));
+  }
+}

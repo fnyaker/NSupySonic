@@ -57,6 +57,7 @@
   import QueueList from "./QueueList.svelte";
   import SleepButton from "./SleepButton.svelte";
   import SpeedButton from "./SpeedButton.svelte";
+  import NowPlayingMore from "./NowPlayingMore.svelte";
 
   let showQueue = false;
 
@@ -175,6 +176,87 @@
   const AXIS_LOCK = 8;
   const DISMISS_PX = 110;
 
+  // -- swipe up: what is under the player ---------------------------------------
+  // Tracks that sound like this one, and the artist. The same vertical gesture as
+  // the dismissal, the other way: the panel follows the finger up from the bottom
+  // edge, and lets go of it open or closed depending on how far it got. Podcasts
+  // and remote controls with nothing to browse have nothing under them.
+  let reveal = 0; // px of the panel on screen: 0 = away, panelH() = fully open
+  let revealing = false; // a finger is moving it
+  let more = false; // settled open
+  let panelShown = false; // mounted (it stays mounted while it slides away)
+  let hideTimer = null;
+  const REVEAL_PX = 70;
+  $: moreAvailable = CAN_BROWSE && !!$current && !$current.podcast;
+  $: if (reveal > 0) {
+    panelShown = true;
+    clearTimeout(hideTimer);
+  }
+  const panelH = () => (typeof window === "undefined" ? 800 : window.innerHeight);
+
+  function revealMove(up) {
+    if (!moreAvailable || more || up <= 0) return;
+    revealing = true;
+    reveal = Math.min(up, panelH());
+  }
+  // Returns true when the release opened the panel.
+  function revealEnd() {
+    if (!revealing) return false;
+    revealing = false;
+    if (reveal > REVEAL_PX) {
+      openMore();
+      return true;
+    }
+    closeMore();
+    return false;
+  }
+  function openMore() {
+    if (!moreAvailable) return;
+    more = true;
+    revealing = false;
+    reveal = panelH();
+  }
+  function closeMore() {
+    more = false;
+    revealing = false;
+    reveal = 0;
+    // Unmounted once it has slid away (the transition is 280 ms).
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      if (reveal === 0 && !revealing) panelShown = false;
+    }, 320);
+  }
+  onDestroy(() => clearTimeout(hideTimer));
+  // The panel's own header drags it back down.
+  let panelDrag = null; // { y0 }
+  function panelStart(e) {
+    if (e.touches.length !== 1) return;
+    panelDrag = { y0: e.touches[0].clientY };
+  }
+  function panelMove(e) {
+    if (!panelDrag) return;
+    const dy = e.touches[0].clientY - panelDrag.y0;
+    if (dy <= 0) return;
+    if (e.cancelable) e.preventDefault();
+    revealing = true;
+    reveal = Math.max(0, panelH() - dy);
+  }
+  function panelEnd() {
+    if (!panelDrag) return;
+    panelDrag = null;
+    if (!revealing) return;
+    revealing = false;
+    if (panelH() - reveal > 90) closeMore();
+    else reveal = panelH();
+  }
+  function panelCancel() {
+    // A cancel decides nothing: it stays where it was.
+    panelDrag = null;
+    if (!revealing) return;
+    revealing = false;
+    reveal = more ? panelH() : 0;
+  }
+
   function dismissMove(dy) {
     if (dy <= 0) return;
     dragging = true;
@@ -207,6 +289,11 @@
     dragAxis = null;
     dragging = false;
     dragY = 0;
+    if (revealing) {
+      revealing = false;
+      if (more) reveal = panelH();
+      else closeMore();
+    }
   }
 
   function onTouchStart(e) {
@@ -215,7 +302,7 @@
       return;
     }
     const t = e.target;
-    if (t.closest(".scroller") || t.closest("input") || t.closest(".sheet")) {
+    if (t.closest(".scroller") || t.closest("input") || t.closest(".sheet") || t.closest(".under")) {
       dragArmed = false;
       return;
     }
@@ -234,6 +321,9 @@
       // cancel the browser's native pull-to-refresh while we drag to dismiss
       if (e.cancelable) e.preventDefault();
       dismissMove(dy);
+    } else if (dragAxis === "y" && dy < 0) {
+      if (e.cancelable) e.preventDefault();
+      revealMove(-dy);
     }
   }
   function onTouchEnd() {
@@ -241,6 +331,7 @@
     dragArmed = false;
     dragAxis = null;
     dismissEnd();
+    revealEnd();
   }
   function onTouchCancel() {
     resetDrag();
@@ -444,7 +535,9 @@
       covDragging = covAxis === "x";
     }
     if (covAxis === "y") {
-      dismissMove(y - covStartY);
+      const dy = y - covStartY;
+      if (dy >= 0) dismissMove(dy);
+      else revealMove(-dy);
       return;
     }
 
@@ -500,6 +593,11 @@
     covAxis = null;
     if (axis === "y") {
       // Dismissing unmounts the component, so don't touch the carousel then.
+      if (revealing) {
+        revealEnd();
+        settleCover();
+        return;
+      }
       if (!dismissEnd()) settleCover();
       return;
     }
@@ -843,7 +941,40 @@
       {#if CAN_BROWSE}<EcoToggle />{/if}
       {#if CAN_KEEP}<QualityMenu />{/if}
     </div>
+    {#if moreAvailable}
+      <button class="peek" on:click={openMore} aria-label="Titres similaires et artiste">
+        <Icon name="chevronUp" size={16} /> Titres similaires
+      </button>
+    {/if}
   </div>
+
+  {#if panelShown}
+    <div
+      class="under"
+      class:revealing
+      style={`transform:translateY(${panelH() - reveal}px)`}
+      role="dialog"
+      aria-label="Titres similaires et artiste"
+      aria-hidden={!more}
+    >
+      <div
+        class="under-h"
+        on:touchstart={panelStart}
+        on:touchmove={panelMove}
+        on:touchend={panelEnd}
+        on:touchcancel={panelCancel}
+      >
+        <span class="grab" aria-hidden="true"></span>
+        <div class="under-t">
+          <span>Sous le lecteur</span>
+          <button class="ic" on:click={closeMore} aria-label="Fermer"><Icon name="chevronDown" size={22} /></button>
+        </div>
+      </div>
+      <div class="under-b">
+        <NowPlayingMore track={$current} />
+      </div>
+    </div>
+  {/if}
 
   {#if showQueue}
     <div class="sheet" transition:fade={{ duration: 120 }}>
@@ -1194,5 +1325,67 @@
     --ql-hover: rgba(255, 255, 255, 0.08);
     --ql-bg: rgba(16, 12, 22, 0.97);
     color: #fff;
+  }
+
+  /* The swipe-up panel: what is under the player. */
+  .peek {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    align-self: center;
+    padding: 6px 14px;
+    margin-top: 2px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: rgba(255, 255, 255, 0.6);
+  }
+  .peek:hover {
+    color: #fff;
+  }
+  .under {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    display: flex;
+    flex-direction: column;
+    background: rgba(16, 12, 22, 0.98);
+    backdrop-filter: blur(18px);
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -14px 44px rgba(0, 0, 0, 0.5);
+    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+  }
+  .under.revealing {
+    transition: none;
+  }
+  .under-h {
+    flex: none;
+    touch-action: none;
+    padding: 8px 10px 4px 18px;
+  }
+  .grab {
+    display: block;
+    width: 38px;
+    height: 4px;
+    margin: 2px auto 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.28);
+  }
+  .under-t {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-weight: 700;
+    color: #fff;
+  }
+  .under-b {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0 14px calc(24px + env(safe-area-inset-bottom, 0px));
   }
 </style>

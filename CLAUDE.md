@@ -98,6 +98,12 @@ cd webapp && node test/render/run.mjs --check        # every world, held to the 
 cd webapp && node test/render/run.mjs --strip        # the players' 40 px bar strip, photographed over the blurred cover
 cd webapp && node test/ui/run.mjs                    # the lists' main-thread cost in Chromium on a 8000-track library (needs npm run build):
                                                      # open the favourites, type into them, sort, open a 4000-track playlist
+cd webapp && node test/queue/run.mjs [--phone]       # the queue's editing in headless Chromium on a 4000-track queue: drag a row (mouse, or real touch
+                                                     # events), drag to the far end with the list scrolling under the finger, the keyboard, clear
+cd webapp && node test/player/run.mjs                # the sleep timer and the podcast speed on the audio elements the browser really plays (a fake page clock)
+cd webapp && node test/explore/run.mjs [--phone]     # the Explore screen: front page, into a genre, play a chart, back (Deezer's answers put in by the test)
+cd webapp && node test/panel/run.mjs [--desktop]     # what is under the full-screen player: the swipe up (touch events), the desktop tab
+                                                     # (the four browser tests above start tools/perf_api.py --serve; PYTHON=<venv python>, SHOTS=<dir> keeps pictures)
 
 # Deezer CLI
 supysonic-cli deezer login-test                      # check the ARL works
@@ -521,6 +527,45 @@ any honest label gets clipped to a word naming a different action ("Lire ensuite
 toast on release says it in full. A gesture starting on a control belongs to that control, one
 starting at the very left edge is left to iOS's own back gesture, and a drag swallows the click the
 browser synthesises from it.
+
+**The queue is edited in ONE component** (`components/QueueList.svelte`, shared by the desktop side
+panel, the full-screen player and the phone's sheet): tap to play, remove, **drag the grip to reorder**,
+*Vider la file*. Only what is AFTER the playing track can be moved or removed. The list is windowed, so a
+drag never depends on a row being mounted: the target comes from geometry (`VirtualList.indexAt`), the
+picture under the finger is a separate floating copy, the pointer is followed on the WINDOW (the row may
+leave the DOM while the list scrolls under the finger toward the end of a 4 000-track queue — `autoScroll`,
+whose edge zone is capped at a quarter of the list), and `touch-action: none` on the grip alone is what
+leaves the rest of the row to the scroller. `player.move(from, to)` carries the playing track's index along
+and does NOT bump `seq` (a bump is a deliberate navigation: the audio owner would restart the track); under
+shuffle it leaves `_orig` alone. `player.clearUpcoming()` also switches `autoplay` off — a radio refilling the
+queue five seconds after it was cleared is the opposite of the request — and a new queue (`playQueue`,
+`shufflePlay`) switches it back on. Both are remote commands (`move`, `clear`, read level, validated server-side).
+
+**Sleep timer** (`lib/sleep.js`, `components/SleepButton.svelte`): minutes, or the end of the track. The deadline
+is a wall-clock comparison, never ticks counted (a phone on a bedside table is throttled or frozen and must still
+end where the clock says). The last 15 s fade through `sleepFade`, a multiplier the audio owner applies ON TOP of
+the volume, so the user's own level is never touched and never has to be put back. "End of the track" holds the
+crossfade and the silence trim back (`sleepStopsAtTrackEnd`, also in `partyPlan` and `beginCrossfade`) so the file
+finishes, then `player.advancePaused()` lines the next track up paused. It fires a PAUSE, not a stop. Not offered
+on a remote control: the timer runs where the audio is.
+
+**Podcast speed** (`lib/speed.js`, `components/SpeedButton.svelte`, store `podcast.speeds`, mirrored to remote
+controls): per show, applied to BOTH audio elements and as `defaultPlaybackRate` too (`load()` resets the rate to
+it on every source), `preservesPitch` on. Music is never touched. Forced to 1 while a listen party is hosted: its
+guests schedule the audio in real time, a faster host would leave them further behind every second.
+
+**Explore** (`/api/explore`, `/explore/genre/<id>`, `/explore/countries`, `routes/Explore.svelte`): Deezer's public
+API only — the world and per-genre charts, editorial releases, the per-country chart playlists. A screen is several
+calls, run side by side; the answer is kept ten minutes but ONLY WHEN COMPLETE (`_explore_cached`): a call that
+failed is a hole in the answer, not something to remember. The account owner's (admin) screen, like the home.
+
+**Under the full-screen player** (`components/NowPlayingMore.svelte`): tracks that sound like the playing one (the
+radio's mix — one call to swap for our own embeddings later) and the artist (photo, fans, top titles, similar
+artists; the public API has no biography, so the card does not pretend to). On the phone a swipe UP is the mirror
+of the swipe down that dismisses (`MobileNowPlaying`: `revealMove` / `revealEnd` beside `dismissMove` /
+`dismissEnd`, from the sheet or forwarded from the cover; the panel follows the finger and settles open or shut;
+its header drags it back down; a cancelled gesture decides nothing). On the desktop it is the *Similaires* tab.
+Following any link from in there leaves the player (a `hashchange` listener).
 
 **Back goes to the SCREEN, not the route** (`lib/nav.js`): hash routing gives real history, but the
 router destroys a page's component state on the way out and rebuilds it empty on the way in — so
