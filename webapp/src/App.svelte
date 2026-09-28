@@ -84,6 +84,8 @@
     "/library": Library,
     "/podcasts": Podcasts,
     "/podcast/:id": Show,
+    "/explore": wrap({ asyncComponent: () => import("./routes/Explore.svelte") }),
+    "/explore/:genre": wrap({ asyncComponent: () => import("./routes/Explore.svelte") }),
     "/settings": wrap({ asyncComponent: () => import("./routes/Settings.svelte") }),
     "/genres": wrap({ asyncComponent: () => import("./routes/Genres.svelte") }),
   };

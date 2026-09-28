@@ -2173,6 +2173,153 @@ def recommendations():
     )
 
 
+# -- explore ----------------------------------------------------------------
+# Deezer's own shop window: what is charting, by genre and by country, and the
+# editorial releases. Public API only (stable, typed). The answer is the same
+# for everyone and moves slowly, so it is kept for a few minutes: opening the
+# screen twice, or a phone and a laptop, costs Deezer one visit.
+_EXPLORE_TTL = 600
+_explore_cache = {}
+_explore_lock = threading.Lock()
+
+
+def _explore_cached(key, build):
+    now = time.monotonic()
+    with _explore_lock:
+        hit = _explore_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+    value = build()
+    # An empty part is a Deezer call that did not answer (`_data` swallows the
+    # error): caching an answer with a hole in it would keep the hole for ten
+    # minutes, so only a complete one is kept.
+    if value and all(value.values()):
+        with _explore_lock:
+            if len(_explore_cache) > 64:
+                _explore_cache.clear()
+            _explore_cache[key] = (now + _EXPLORE_TTL, value)
+    return value
+
+
+def _explore_fetch(calls):
+    """Run several public-API calls side by side: a screen is six of them, and
+    one after the other that is the sum of six round trips."""
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        futures = {name: pool.submit(_data, fn) for name, fn in calls.items()}
+        return {name: f.result() for name, f in futures.items()}
+
+
+def _genre_api(g):
+    if not g or not g.get("id"):
+        return None
+    return {
+        "deezer_id": str(g["id"]),
+        "name": g.get("name", ""),
+        "picture": _pic(g, "picture_medium", "picture_big", "picture"),
+    }
+
+
+def _explore_charts(dzapi, gid):
+    got = _explore_fetch(
+        {
+            "tracks": lambda: dzapi.get_chart_tracks(gid, limit=50),
+            "albums": lambda: dzapi.get_chart_albums(gid, limit=25),
+            "artists": lambda: dzapi.get_chart_artists(gid, limit=25),
+            "playlists": lambda: dzapi.get_chart_playlists(gid, limit=25),
+        }
+    )
+    return {
+        "tracks": [x for x in map(_track_api, got["tracks"]) if x],
+        "albums": [x for x in map(_album_api, got["albums"]) if x],
+        "artists": [x for x in map(_artist_api, got["artists"]) if x],
+        "playlists": [x for x in map(_playlist_api, got["playlists"]) if x],
+    }
+
+
+_EMPTY_EXPLORE = {"genres": [], "tracks": [], "albums": [], "artists": [], "playlists": [], "releases": []}
+
+
+@webapi.route("/explore")
+@login_required
+def explore():
+    """The front page of Explore: genres, and what is charting worldwide."""
+    if not _is_admin():
+        return jsonify(_EMPTY_EXPLORE)
+    provider, err = _need_provider()
+    if err:
+        return err
+    dzapi = _dz_api()
+    if dzapi is None:
+        return jsonify(_EMPTY_EXPLORE)
+
+    def build():
+        got = _explore_fetch(
+            {
+                "genres": lambda: dzapi.get_genres(limit=100),
+                "releases": lambda: dzapi.get_editorial_releases(limit=25),
+            }
+        )
+        out = _explore_charts(dzapi, 0)
+        # Genre 0 is "everything": not a place to go, the page itself is that.
+        out["genres"] = [x for x in map(_genre_api, got["genres"]) if x and x["deezer_id"] != "0"]
+        out["releases"] = [x for x in map(_album_api, got["releases"]) if x]
+        return out
+
+    return jsonify(_explore_cached("home", build) or _EMPTY_EXPLORE)
+
+
+@webapi.route("/explore/genre/<gid>")
+@login_required
+def explore_genre(gid):
+    """One genre: its charts (tracks, albums, artists, playlists)."""
+    if not _valid_id(gid):
+        return jsonify({"error": "invalid id"}), 400
+    if not _is_admin():
+        return jsonify({"genre": None, **{k: [] for k in _EMPTY_EXPLORE if k != "genres"}})
+    provider, err = _need_provider()
+    if err:
+        return err
+    dzapi = _dz_api()
+    if dzapi is None:
+        return jsonify({"genre": None, **{k: [] for k in _EMPTY_EXPLORE if k != "genres"}})
+
+    def build():
+        try:
+            genre = _genre_api(dzapi.get_genre(gid))
+        except Exception:
+            _log_deezer_failure("Deezer genre lookup failed")
+            genre = None
+        out = _explore_charts(dzapi, gid)
+        out["genre"] = genre
+        return out
+
+    return jsonify(_explore_cached("genre:" + gid, build) or {"genre": None, "tracks": [], "albums": [], "artists": [], "playlists": []})
+
+
+@webapi.route("/explore/countries")
+@login_required
+def explore_countries():
+    """Deezer's per-country charts, as playlists (\"Top France\", \"Top Japan\"…)."""
+    if not _is_admin():
+        return jsonify({"playlists": []})
+    provider, err = _need_provider()
+    if err:
+        return err
+    dzapi = _dz_api()
+    if dzapi is None:
+        return jsonify({"playlists": []})
+
+    def build():
+        try:
+            lists = dzapi.get_countries_charts()
+        except Exception:
+            _log_deezer_failure("Deezer country charts failed")
+            lists = []
+        return {"playlists": [x for x in map(_playlist_api, lists) if x]}
+
+    return jsonify(_explore_cached("countries", build) or {"playlists": []})
+
+
 # -- my library -------------------------------------------------------------
 
 

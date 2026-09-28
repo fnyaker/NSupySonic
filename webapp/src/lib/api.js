@@ -218,6 +218,9 @@ export const api = {
   setFlowClusters: (clusters) =>
     req("/flow/clusters", { method: "POST", body: body({ clusters }) }),
   recommendations: () => req("/recommendations"),
+  explore: () => req("/explore"),
+  exploreGenre: (id) => req("/explore/genre/" + id),
+  exploreCountries: () => req("/explore/countries"),
   search: (q) => req("/search?q=" + encodeURIComponent(q)),
 
   // entities
