@@ -329,6 +329,34 @@ class RemoteTestCase(unittest.TestCase):
         r, _ = self._controller("read")
         self.assertEqual(r.post("/api/remote/cmd", json={"op": "add", "args": {"tracks": [track]}}).status_code, 200)
 
+    def test_reordering_and_clearing_the_queue_are_read_level_and_validated(self):
+        q, _ = self._controller("queue")
+        poll = self._host_online()
+        move = {"op": "move", "args": {"i": 2, "id": "77", "to": 5}}
+        # A queue-only link drives the transport, it does not edit the queue.
+        self.assertEqual(q.post("/api/remote/cmd", json=move).status_code, 403)
+        self.assertEqual(q.post("/api/remote/cmd", json={"op": "clear"}).status_code, 403)
+        r, _ = self._controller("read")
+        self.assertEqual(r.post("/api/remote/cmd", json=move).status_code, 200)
+        self.assertEqual(r.post("/api/remote/cmd", json={"op": "clear"}).status_code, 200)
+        # A destination is a number (clamped like every index here), and the row
+        # it moves is named by id as well.
+        for bad in (
+            {"i": 2, "id": "77"},
+            {"i": 2, "id": "77", "to": "x"},
+            {"i": 2, "id": "../x", "to": 1},
+            {"i": 2, "to": 1},
+        ):
+            self.assertEqual(r.post("/api/remote/cmd", json={"op": "move", "args": bad}).status_code, 400, bad)
+        self.assertEqual(
+            r.post("/api/remote/cmd", json={"op": "move", "args": {"i": 2, "id": "77", "to": -9}}).status_code, 200
+        )
+        got = self.owner.get(f"/api/remote/host/{DEVICE}/poll?since=0&chan={poll['chan']}").get_json()
+        self.assertEqual(
+            [(x["op"], x["args"]) for x in got["cmds"]],
+            [("move", {"i": 2, "id": "77", "to": 5}), ("clear", {}), ("move", {"i": 2, "id": "77", "to": 0})],
+        )
+
     def test_settings_only_those_the_player_has_and_the_pictures_from_read(self):
         r, _ = self._controller("read")
         poll = self._host_online()

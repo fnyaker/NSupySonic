@@ -23,7 +23,7 @@
   } from "../lib/stores.js";
   import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
   import { addMarkerAt } from "../lib/markers.js";
-  import { duration as fmtDuration, hiResCover, resolveCover, cssUrl, artistLine } from "../lib/format.js";
+  import { duration as fmtDuration, hiResCover, resolveCover, cssUrl } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
   import { createBackdrop } from "../lib/backdrop.js";
   import { api } from "../lib/api.js";
@@ -54,7 +54,9 @@
   import Icon from "./Icon.svelte";
   import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
-  import VirtualList from "./VirtualList.svelte";
+  import QueueList from "./QueueList.svelte";
+  import SleepButton from "./SleepButton.svelte";
+  import SpeedButton from "./SpeedButton.svelte";
 
   let showQueue = false;
 
@@ -834,7 +836,9 @@
       {#if !REMOTE}
         <PartyButton size={20} />
         <RemoteButton size={20} />
+        <SleepButton size={20} align="left" />
       {/if}
+      {#if !REMOTE || CAN_KEEP}<SpeedButton align="left" />{/if}
       <span class="grow"></span>
       {#if CAN_BROWSE}<EcoToggle />{/if}
       {#if CAN_KEEP}<QualityMenu />{/if}
@@ -848,14 +852,7 @@
         <button class="ic" on:click={() => (showQueue = false)} aria-label="Fermer"><Icon name="chevronDown" size={22} /></button>
       </div>
       <div class="queue">
-        <VirtualList items={q} bind:this={queueVL} let:item let:index>
-          <div class="qitem" class:now={index === idx} class:past={index < idx}>
-            <button on:click={() => { player.jump(index); showQueue = false; }}>
-              <Cover src={item.album?.cover} alt="" size={42} kind="track" fallbackId={item.deezer_id} />
-              <span class="qm"><span class="qt">{item.title}</span><span class="qa">{artistLine(item)}</span></span>
-            </button>
-          </div>
-        </VirtualList>
+        <QueueList items={q} {idx} bind:this={queueVL} onPick={() => (showQueue = false)} />
       </div>
     </div>
   {/if}
@@ -1193,40 +1190,9 @@
     overflow-y: auto;
     flex: 1;
     min-height: 0;
-  }
-  .qitem button {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 7px;
-    border-radius: 8px;
-    text-align: left;
+    --ql-dim: rgba(255, 255, 255, 0.6);
+    --ql-hover: rgba(255, 255, 255, 0.08);
+    --ql-bg: rgba(16, 12, 22, 0.97);
     color: #fff;
-  }
-  .qitem.now .qt {
-    color: var(--accent);
-  }
-  .qitem.past {
-    opacity: 0.5;
-  }
-  .qm {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-  }
-  .qt,
-  .qa {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .qt {
-    font-weight: 600;
-    font-size: 0.92rem;
-  }
-  .qa {
-    font-size: 0.78rem;
-    color: rgba(255, 255, 255, 0.6);
   }
 </style>

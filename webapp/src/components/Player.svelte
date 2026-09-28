@@ -60,7 +60,9 @@
     saveEpisodeProgress,
     markEpisodeFinished,
   } from "../lib/podcastProgress.js";
-  import { bindPartySource, partyPoke } from "../lib/party/hostbridge.js";
+  import { bindPartySource, partyPoke, partyHost } from "../lib/party/hostbridge.js";
+  import { sleepFade, sleepStopsAtTrackEnd, finishSleepAtTrackEnd } from "../lib/sleep.js";
+  import { currentSpeed } from "../lib/speed.js";
   import PlayerBar from "./PlayerBar.svelte";
 
   // Two managed audio elements so a quality change can be gapless: we preload
@@ -88,6 +90,9 @@
   function makeEl() {
     const el = new Audio();
     el.preload = "auto";
+    // A podcast at 1.5x must still sound like the same voice.
+    el.preservesPitch = true;
+    el.webkitPreservesPitch = true;
     el.addEventListener("timeupdate", onTime);
     el.addEventListener("ended", onEnded);
     el.addEventListener("play", onElPlay);
@@ -1327,11 +1332,26 @@
     }
   }
   $: if (audio) {
-    const v = $player.muted ? 0 : $player.volume;
+    // The sleep timer's fade-out rides on top of the volume, so the level the
+    // user chose is never touched and never has to be put back.
+    const v = ($player.muted ? 0 : $player.volume) * $sleepFade;
     audio.volume = v;
     // The outgoing element of a crossfade is still audible: a volume change
     // mid-fade has to reach it too, or the two tracks drift apart in level.
     if (xfade?.old) xfade.old.volume = v;
+  }
+
+  // Podcast speed: remembered per show, and music always plays at 1. It goes on
+  // BOTH elements (the idle one is what a quality switch hands over to) and as
+  // the default rate too, because load() puts playbackRate back to that on every
+  // new source. A hosted listen party plays at 1: its guests schedule the audio
+  // in real time, so a faster host would leave them further behind each second.
+  $: wantedRate = $partyHost ? 1 : $currentSpeed;
+  $: if (els.length) {
+    for (const el of els) {
+      el.defaultPlaybackRate = wantedRate;
+      el.playbackRate = wantedRate;
+    }
   }
 
   // Keep the OS media notification's transport state in sync (play/pause glyph).
@@ -1388,6 +1408,8 @@
   function maybeTrimEnding(d) {
     if (xfade || !get(trimSilence) || trimmedId === curId) return;
     if (loadingTrack || chasing || switching) return;
+    // Stopping at the end of this track: let the file end, do not cut it short.
+    if (sleepStopsAtTrackEnd()) return;
     if (!$current || $current.podcast || !get(player).playing) return;
     const end = audioEndsAt();
     // Only when there is something to trim: `audioEndsAt` falls back to the
@@ -1560,6 +1582,8 @@
     const s = get(player);
     const end = audioEndsAt();
     if (!end) return null;
+    // Nothing is announced when the player is about to stop at this track's end.
+    if (sleepStopsAtTrackEnd()) return null;
     if (s.repeat === "one") return { track: cur, at: end, start: 0, fade: 0 };
     const next = peekNext(s);
     if (!next) return null;
@@ -1574,6 +1598,8 @@
   function maybeCrossfade() {
     if (xfade || !get(crossfadeEnabled)) return;
     if (switching || chasing || loadingTrack || recovering) return;
+    // Nothing to blend into when the player stops at the end of this track.
+    if (sleepStopsAtTrackEnd()) return;
     const cur = $current;
     if (!cur || cur.podcast) return;
     const s = get(player);
@@ -1687,7 +1713,7 @@
     // The queue may have moved under us while we preloaded (a track removed, a
     // reorder). Blending into something that is no longer next would be worse
     // than not blending at all.
-    if (peekNext(get(player))?.deezer_id !== x.track.deezer_id) {
+    if (peekNext(get(player))?.deezer_id !== x.track.deezer_id || sleepStopsAtTrackEnd()) {
       cancelCrossfade();
       return;
     }
@@ -1870,6 +1896,12 @@
     // into the credits). (repeat "one" restarts it, so leave it alone.)
     if (cur && cur.podcast && s.repeat !== "one")
       markEpisodeFinished(cur.deezer_id, cur.duration || 0);
+    // A sleep timer set to "end of the track" ends here: the next track is lined
+    // up, paused, and the play time is reported like any other stop.
+    if (finishSleepAtTrackEnd()) {
+      flushListen(null);
+      return;
+    }
     if (s.repeat === "one") {
       audio.currentTime = 0;
       startPlayback("repeat-one");

@@ -940,6 +940,15 @@ def _a_index(a, ch):
     return {"i": i, "id": tid}
 
 
+def _a_move(a, ch):
+    args = _a_index(a, ch)
+    to = _int(a.get("to"), 0, MAX_QUEUE * 4)
+    if args is None or to is None:
+        return None
+    args["to"] = to
+    return args
+
+
 def _a_volume(a, ch):
     v = _num(a.get("v"), 0, 1)
     return None if v is None else {"v": v}
@@ -985,6 +994,8 @@ OPS = {
     "shuffle": ("read", _a_none),
     "repeat": ("read", _a_none),
     "remove": ("read", _a_index),
+    "move": ("read", _a_move),
+    "clear": ("read", _a_none),
     "add": ("read", _a_tracks(2000)),
     "play_next": ("read", _a_tracks(2000)),
     "play_queue": ("read", _a_tracks(MAX_QUEUE)),
