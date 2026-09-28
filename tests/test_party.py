@@ -575,10 +575,15 @@ class PartyTestCase(unittest.TestCase):
         r = self.guest.get(f"/party/{pid}")
         self.assertEqual(r.status_code, 200)
         body = r.get_data(as_text=True)
-        self.assertIn(f"url=/app/#/party/{pid}", body)
+        # Relative, so a deployment under a path prefix forwards into its own app.
+        self.assertIn(f"url=../app/#/party/{pid}", body)
         self.assertIn("Listen party de alice", body)
         self.assertEqual(r.headers["X-Robots-Tag"], "noindex")
         self.assertEqual(self.guest.get("/party/bad").status_code, 404)
+        # The spelling a client once handed out, under the app's own path.
+        inside = self.guest.get(f"/app/party/{pid}").get_data(as_text=True)
+        self.assertIn(f"url=../#/party/{pid}", inside)
+        self.assertIn("Listen party de alice", inside)
         # An ended party still forwards (the app says it is over), naming nobody.
         self.host.delete(f"/api/party/{pid}")
         body = self.guest.get(f"/party/{pid}").get_data(as_text=True)

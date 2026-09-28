@@ -13,6 +13,7 @@
   import { deviceId, deviceName } from "../lib/remote/device.js";
   import { remoteHost, startHosting, cutAll } from "../lib/remote/hoststate.js";
   import Icon from "./Icon.svelte";
+  import { shortLink } from "../lib/applink.js";
 
   const DURATIONS = [
     { id: "1h", label: "1 heure", ttl: 3600 },
@@ -45,9 +46,7 @@
   $: if (invite && linkOf(invite) !== qrFor) makeQr(linkOf(invite));
 
   function linkOf(l) {
-    // Relative to where the app is served, like the party's: a deployment under
-    // a path prefix still hands out a working link.
-    return new URL(`../rc/${l.token}`, window.location.origin + window.location.pathname).href;
+    return shortLink("rc", l.token);
   }
 
   function start() {

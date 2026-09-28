@@ -199,3 +199,32 @@ test("only a well-formed link is claimed", () => {
   assert.equal(claimToken("#/rc/AbCdEfGhIjKlMnOp.ABCDEFGHIJKLMNOPQRSTUVWX/../settings"), null);
   assert.equal(claimToken("#/party/AbCdEfGhIjKlMnOp"), null);
 });
+
+test("a link is built from where the app is served, whatever the page's own path", async () => {
+  const { shortLink, appRoot } = await import("../src/lib/applink.js");
+  const T = "5w2T6xuj4bZpU9Sa._7flFFqdWNgqXgRm-ZQXTvj5";
+  const at = (pathname) => shortLink("rc", T, { origin: "https://h", pathname });
+  // The reported link was /app/rc/<token>: "../rc/" resolved from a path one
+  // level deeper than "/app/". Every one of these must name /rc/.
+  for (const p of ["/app/", "/app", "/app/index.html", "/app//", "//app/", "/app/app/"])
+    assert.equal(at(p), `https://h/rc/${T}`, p);
+  assert.equal(at("/music/app/"), `https://h/music/rc/${T}`, "a path prefix is kept");
+  assert.equal(appRoot("/"), "/");
+});
+
+test("a link that arrives under the app's path opens the route it names", async () => {
+  const { routeForPath, rescuePathLink } = await import("../src/lib/applink.js");
+  const T = "5w2T6xuj4bZpU9Sa._7flFFqdWNgqXgRm-ZQXTvj5";
+  assert.equal(routeForPath(`/app/rc/${T}`), `#/rc/${T}`);
+  assert.equal(routeForPath("/app/party/AbCdEfGhIjKlMnOpQr"), "#/party/AbCdEfGhIjKlMnOpQr");
+  assert.equal(routeForPath("/app/"), null);
+  assert.equal(routeForPath("/app/rc/../../api/x"), null);
+  assert.equal(routeForPath("/app/settings/AbCdEfGhIjKlMnOpQr"), null);
+  let url = null;
+  const hist = { state: null, replaceState: (_s, _t, u) => (url = u) };
+  assert.ok(rescuePathLink({ pathname: `/music/app/rc/${T}`, hash: "" }, hist));
+  assert.equal(url, `/music/app/#/rc/${T}`);
+  url = null;
+  assert.ok(!rescuePathLink({ pathname: "/app/", hash: "#/search" }, hist));
+  assert.equal(url, null);
+});

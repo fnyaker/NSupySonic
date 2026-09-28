@@ -2186,7 +2186,13 @@ second interface to keep in step with the first, and that is the whole design:
   cache of the owner's library, records no history and draws no animation.
 - **Links**: 1 h / 1 day / 7 days / unlimited, an optional name ("Salon"), at most 24 live per
   owner. `/rc/<token>` is the short link the QR carries (`spa.py`: a preview for link unfurlers,
-  then `/app/#/rc/<token>`), 404 for a malformed token.
+  then `/app/#/rc/<token>`, relative so a path prefix survives), 404 for a malformed token. Both
+  short links are built from the app's ROOT (`lib/applink.js#shortLink`: whatever precedes its
+  `/app/` segment), never as `../rc/` from the page: a page whose path was not exactly `/app/`
+  handed out `/app/rc/<token>`, which the SPA's file route took for a missing file (the token has
+  a dot) and answered 404. Those links still open — the server serves both pages under `/app/`
+  too, and where the service worker answers the navigation, `lib/linkrescue.js` (main.js's FIRST
+  import, before the router reads the location) turns the path back into its hash route.
 
 ## Database / schema
 
