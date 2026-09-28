@@ -261,6 +261,11 @@ export const api = {
     req(`/analysis/${encodeURIComponent(id)}/live`, { method: "POST", body: body(summary), keepalive: true }),
   genreRelabelStart: () => req("/genre/relabel", { method: "POST" }),
   genreConstruction: () => req("/genre/construction"),
+  // Well-known recordings per genre, looked up on Deezer (deezer/references.py).
+  genreReferenceGenres: () => req("/genre/references"),
+  genreReferences: (genre) => req("/genre/references?genre=" + encodeURIComponent(genre)),
+  genreReferenceImport: (deezerId, tag) =>
+    req("/genre/references/import", { method: "POST", body: body({ deezer_id: deezerId, tag }) }),
   // A whole album / playlist / artist: what tagging it would do, then do it.
   genreBulkPreview: (scope, tag) =>
     req("/genre/bulk/preview", { method: "POST", body: body({ ...scope, tag }) }),

@@ -1302,6 +1302,145 @@ def _run_redecide(app, ids):
                 pass
 
 
+# -- well-known recordings per genre (deezer/references.py) ------------------------
+
+#: A genre's lookups, kept a day: the catalogue does not move faster than that,
+#: and the list is a handful of searches per genre.
+REFERENCE_TTL = 24 * 3600.0
+_ref_cache: dict = {}
+_ref_lock = threading.Lock()
+
+
+def _reference_lookup(dzapi, genre):
+    """[(artist, title, hit or None)], [artist hits], complete?"""
+    from ..deezer import references as refs
+
+    complete = True
+    tracks = []
+    for artist, title in refs.REFERENCES.get(genre, ()):
+        try:
+            found = (dzapi.advanced_search(artist=refs.first_artist(artist), track=title, limit=10) or {}).get("data") or []
+            hit = refs.match(artist, title, found)
+        except Exception:
+            logger.info("genre: reference lookup failed for %s - %s", artist, title, exc_info=True)
+            hit, complete = None, False
+        tracks.append((artist, title, hit))
+    artists = []
+    for name in refs.SCENE_ARTISTS.get(genre, ()):
+        try:
+            found = (dzapi.search_artist(name, limit=5) or {}).get("data") or []
+        except Exception:
+            found, complete = [], False
+        # The name itself, not the nearest one: "Sefa" must not become "Sefano".
+        same = [a for a in found if isinstance(a, dict) and refs.fold(a.get("name")) == refs.fold(name)]
+        artists.append((name, same[0] if same else None))
+    return tracks, artists, complete
+
+
+@webapi.route("/genre/references")
+@login_required
+@admin_required
+def genre_references():
+    """A genre's well-known recordings, each looked up on Deezer now — or,
+    without ``genre``, which genres have a list at all.
+
+    A reference is offered only when Deezer's own catalogue has THAT artist and
+    THAT title (references.match); one it does not carry is listed as not found
+    rather than swapped for whatever the search returned. With Deezer out of
+    reach the list still comes back, unchecked (``offline``), and is not cached.
+    """
+    from ..deezer import references as refs
+    from . import _artist_api, _dz_api, _track_api
+
+    genre = str(request.args.get("genre") or "")
+    if not genre:
+        return jsonify({"genres": refs.genres_with_references()})
+    if genre not in refs.REFERENCES and genre not in refs.SCENE_ARTISTS:
+        return jsonify({"genre": genre, "tracks": [], "artists": [], "listed": False})
+    now_t = time.monotonic()
+    with _ref_lock:
+        hit = _ref_cache.get(genre)
+    if hit and now_t - hit[0] < REFERENCE_TTL:
+        tracks, artists, complete = hit[1]
+    else:
+        dzapi = _dz_api()
+        if dzapi is None:
+            tracks = [(a, t, None) for a, t in refs.REFERENCES.get(genre, ())]
+            artists = [(n, None) for n in refs.SCENE_ARTISTS.get(genre, ())]
+            complete = False
+        else:
+            tracks, artists, complete = _reference_lookup(dzapi, genre)
+            if complete:
+                with _ref_lock:
+                    _ref_cache[genre] = (now_t, (tracks, artists, complete))
+    # Which of them this library already has, and what they wear.
+    ids = [str(h["id"]) for _a, _t, h in tracks if h]
+    have = {}
+    if ids:
+        from ..deezer import ids as dz_ids
+
+        uuids = [dz_ids.track_uuid(i) for i in ids]
+        rows = list(Track.select(Track.id, Track.deezer_id).where(Track.id.in_(uuids)))
+        tags = _current_tags(rows)
+        for t in rows:
+            tag = tags.get(t.id)
+            have[str(t.deezer_id)] = tag.name if tag else ""
+    out = []
+    for artist, title, h in tracks:
+        row = {"artist": artist, "title": title, "match": _track_api(h) if h else None}
+        if h and str(h["id"]) in have:
+            row["in_library"] = True
+            row["tag"] = have[str(h["id"])] or None
+        out.append(row)
+    return jsonify({
+        "genre": genre,
+        "listed": True,
+        "offline": not complete,
+        "tracks": out,
+        "artists": [{"name": n, "match": _artist_api(a) if a else None} for n, a in artists],
+    })
+
+
+@webapi.route("/genre/references/import", methods=["POST"])
+@login_required
+@admin_required
+def genre_reference_import():
+    """Bring one reference into the library and tag it: the Track row is made
+    from Deezer's own record, the tag applied, and the audio queued for the
+    archive — where it gets the vector that makes it a training example."""
+    from ..deezer import library
+    from ..deezer.workload import Priority
+    from . import _dz_live, _ensure_track_row
+
+    data = request.get_json(silent=True) or {}
+    did = str(data.get("deezer_id") or "")
+    if not _valid_id(did):
+        return jsonify({"error": "a Deezer track id is required"}), 400
+    tag = _bulk_tag(data)
+    if tag is None:
+        return jsonify({"error": "unknown tag"}), 404
+    track = _resolve(did)
+    if track is None:
+        provider = _dz_live()
+        if provider is None:
+            return jsonify({"error": "Deezer is out of reach"}), 503
+        try:
+            root = library.get_root_folder(provider.archive_dir)
+            track = _ensure_track_row(provider, did, root, library.ImportCache())
+        except Exception:
+            logger.warning("genre: could not import reference %s", did, exc_info=True)
+            return jsonify({"error": "the track could not be imported"}), 502
+    TrackTag.delete().where(TrackTag.track == track).execute()
+    TrackTag.create(track=track, tag=tag)
+    _forget_centroids()
+    _redecide(track)
+    queued = False
+    pf = getattr(current_app, "deezer_prefetch", None)
+    if pf is not None and not track.last_modification:
+        queued = bool(pf.download_ids([did], priority=Priority.USER))
+    return jsonify({"track": _track_json(track), "tag": _tag_json(tag), "queued": queued})
+
+
 @webapi.route("/genre/construction")
 @login_required
 @admin_required

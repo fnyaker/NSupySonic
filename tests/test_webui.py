@@ -6114,6 +6114,163 @@ class GenreStudioTestCase(unittest.TestCase):
         body = self.client.post("/api/genre/bulk/preview", json={"artist": "../x", "tag": tag["id"]}).json
         self.assertEqual(body["tracks"], [])
 
+    # -- well-known recordings per genre ---------------------------------------------
+
+    @staticmethod
+    def _hit(i, title, artist, contributors=(), title_short=None):
+        """A result as api.deezer.com/search returns one."""
+        return {
+            "id": i, "title": title, "title_short": title_short or title, "duration": 200,
+            "artist": {"id": 1000 + i, "name": artist},
+            "contributors": [{"id": 2000 + k, "name": n, "role": "Main"} for k, n in enumerate(contributors)],
+            "album": {"id": 3000 + i, "title": "Album", "cover_medium": "https://img/c.jpg"},
+        }
+
+    def test_a_reference_is_that_artist_and_that_title_or_nothing(self):
+        """A search for "Jolene" answers with covers and karaoke first more often
+        than not. Only the recording itself may be offered — and when Deezer
+        does not carry it, nothing is, rather than the nearest thing."""
+        from supysonic.deezer import references as refs
+
+        h = self._hit
+        jolene = [
+            h(1, "Jolene (Karaoke Version)", "Karaoke Stars"),
+            h(2, "Jolene", "Jolene Tribute Band"),
+            h(3, "Jolene (Live)", "Dolly Parton"),
+            h(4, "Jolene", "Dolly Parton"),
+        ]
+        self.assertEqual(refs.match("Dolly Parton", "Jolene", jolene)["id"], 4, "the studio take")
+        self.assertEqual(refs.match("Dolly Parton", "Jolene", jolene[:3])["id"], 3, "a live take beats no take")
+        self.assertIsNone(refs.match("Dolly Parton", "Jolene", jolene[:2]), "never a cover")
+        # A duo credited to one name, accents folded, the second name a contributor.
+        ipanema = [h(5, "The Girl From Ipanema", "Stan Getz", ("Stan Getz", "Joao Gilberto"))]
+        self.assertEqual(refs.match("Stan Getz & João Gilberto", "The Girl from Ipanema", ipanema)["id"], 5)
+        self.assertEqual(refs.first_artist("Stan Getz & João Gilberto"), "Stan Getz")
+        # A title fragment starts a word: a classical title's edition-long tail is
+        # allowed, a word that merely contains it is not.
+        satie = [h(6, "Gymnopédies: No. 1, Lent et douloureux", "Erik Satie")]
+        self.assertEqual(refs.match("Erik Satie", "Gymnopédie", satie)["id"], 6)
+        self.assertIsNone(refs.match("Hans Zimmer", "Time", [h(7, "Sometimes", "Hans Zimmer")]))
+        # "Snoop Dogg" is who "Snoop Doggy Dogg" became.
+        self.assertIsNotNone(refs.match("Snoop Dogg", "Gin and Juice", [h(8, "Gin and Juice", "Snoop Doggy Dogg")]))
+        self.assertIsNone(refs.match("Snoop Dogg", "Gin and Juice", [h(9, "Gin and Juice", "The Gourds")]))
+
+    def test_every_reference_list_names_a_genre_of_the_studio(self):
+        """A list filed under a name the vocabulary does not have would never be
+        shown — so the keys are held to it, and each list to being a list."""
+        from supysonic.deezer import analysis as ana
+        from supysonic.deezer import references as refs
+
+        labels = {name for name, _arch in ana.known_genres()}
+        for genre, pairs in refs.REFERENCES.items():
+            self.assertIn(genre, labels, genre)
+            self.assertTrue(pairs, genre)
+            self.assertEqual(len(set(pairs)), len(pairs), genre)
+            for artist, title in pairs:
+                self.assertTrue(refs.fold(artist) and refs.fold(title), (genre, artist, title))
+        for genre, names in refs.SCENE_ARTISTS.items():
+            self.assertIn(genre, labels, genre)
+            self.assertTrue(names, genre)
+        # The scenes nobody has written a canon for have no track list: an
+        # invented one would be worse than none. (Their artists may be offered.)
+        for genre in ("Pieep", "Deutscher Krach", "Hardtekk", "Zaag", "Uptempo", "Frenchcore"):
+            self.assertNotIn(genre, refs.REFERENCES, genre)
+
+    def _with_catalogue(self, tracks=None, artists=None, fail=False):
+        """A provider whose public API answers from these search results."""
+        from supysonic.deezer.provider import DeezerProvider
+
+        class Api(MockApi):
+            calls = []
+
+            def advanced_search(self, artist="", track="", limit=25, **kw):
+                self.calls.append((artist, track))
+                if fail:
+                    raise ConnectionError("unreachable")
+                return {"data": [t for t in (tracks or []) if t["artist"]["name"] == artist]}
+
+            def search_artist(self, query, limit=25, **kw):
+                if fail:
+                    raise ConnectionError("unreachable")
+                return {"data": list(artists or [])}
+
+        dz = MockDz()
+        dz.api = Api()
+        provider = DeezerProvider("arl", self.archive, "FLAC")
+        provider._dz = dz
+        self.app.deezer = provider
+        self.app.deezer_prefetch = MockPrefetch()
+        self.app.config["DEEZER"]["archive_dir"] = self.archive
+        from supysonic.webui import genre as wg
+
+        wg._ref_cache.clear()
+        return dz.api
+
+    def test_the_studio_shows_a_genre_s_references_as_deezer_has_them(self):
+        from supysonic.deezer import references as refs
+
+        self._login("bob", "B0bbb")
+        self.assertEqual(self.client.get("/api/genre/references").status_code, 403)
+        self._login()
+        body = self.client.get("/api/genre/references").json
+        self.assertIn("Techno", body["genres"])
+        self.assertIn("Frenchcore", body["genres"], "listed for its scene's artists")
+        self.assertFalse(self.client.get("/api/genre/references?genre=Pieep").json["listed"])
+
+        h = self._hit
+        api = self._with_catalogue(
+            tracks=[h(11, "The Bells", "Jeff Mills"), h(12, "Energy Flash (Live)", "Joey Beltram")],
+            artists=[{"id": 55, "name": "Sefano"}, {"id": 56, "name": "Sefa", "picture_medium": "p"}],
+        )
+        body = self.client.get("/api/genre/references?genre=Techno").json
+        self.assertFalse(body["offline"])
+        got = {r["title"]: r["match"] for r in body["tracks"]}
+        self.assertEqual(got["The Bells"]["deezer_id"], "11")
+        self.assertEqual(got["Energy Flash"]["deezer_id"], "12")
+        self.assertIsNone(got["Born Slippy"], "not carried: not replaced")
+        self.assertEqual(len(api.calls), len(refs.REFERENCES["Techno"]))
+        # A day's cache: asking again searches nothing.
+        self.client.get("/api/genre/references?genre=Techno")
+        self.assertEqual(len(api.calls), len(refs.REFERENCES["Techno"]))
+        # A scene's artists: that name, not the nearest one.
+        body = self.client.get("/api/genre/references?genre=Frenchcore").json
+        self.assertEqual(body["tracks"], [])
+        self.assertEqual({a["name"]: (a["match"] or {}).get("deezer_id") for a in body["artists"]},
+                         {"Dr. Peacock": None, "Sefa": "56"})
+
+    def test_an_unreachable_deezer_leaves_the_list_unchecked_and_uncached(self):
+        api = self._with_catalogue(fail=True)
+        self._login()
+        body = self.client.get("/api/genre/references?genre=Techno").json
+        self.assertTrue(body["offline"])
+        self.assertTrue(all(r["match"] is None for r in body["tracks"]))
+        n = len(api.calls)
+        self.client.get("/api/genre/references?genre=Techno")
+        self.assertGreater(len(api.calls), n, "a failed lookup is asked again, not remembered")
+
+    def test_importing_a_reference_brings_it_in_tagged(self):
+        from supysonic.db import TrackTag
+
+        self._with_catalogue()
+        self._login()
+        tag = self._tag("Techno", "groove")
+        for bad in ("", "12a", "../1"):
+            self.assertEqual(
+                self.client.post("/api/genre/references/import", json={"deezer_id": bad, "tag": tag["id"]}).status_code, 400
+            )
+        self.assertEqual(
+            self.client.post("/api/genre/references/import", json={"deezer_id": "4242", "tag": 999}).status_code, 404
+        )
+        r = self.client.post("/api/genre/references/import", json={"deezer_id": "4242", "tag": tag["id"]})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual((r.json["track"]["deezer_id"], r.json["tag"]["name"], r.json["queued"]), ("4242", "Techno", True))
+        self.assertEqual(self.app.deezer_prefetch.ids, ["4242"], "queued for the archive, where it gets its vector")
+        self.assertEqual([tt.tag.name for tt in TrackTag.select()], ["Techno"])
+        # Already in the library: no Deezer needed at all.
+        self.app.deezer = None
+        again = self.client.post("/api/genre/references/import", json={"deezer_id": "4242", "tag": tag["id"]})
+        self.assertEqual(again.status_code, 200)
+
     def test_removing_a_tag_gives_the_verdict_back(self):
         """A tag removed left the row naming the tag's genre with source "tag" —
         served as somebody's choice, by nobody, for ever."""

@@ -12,7 +12,7 @@
   // Training runs in a Web Worker (lib/genre/trainer.js) because it is seconds
   // of solid arithmetic, and a frozen tab is not a progress bar.
   import { onMount, onDestroy } from "svelte";
-  import { pop } from "svelte-spa-router";
+  import { pop, push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { user, toasts, player, downloadQuality } from "../lib/stores.js";
   import { decodeEmbedding, encodeHead } from "../lib/genre/wire.js";
@@ -368,22 +368,27 @@
   // does pause the player, because two things playing at once is nobody's
   // intent. The volume is the player's own — one volume for the whole app.
   function togglePreview() {
-    if (!current) return;
-    if (previewing && previewId === current.id) {
+    if (current) previewTrack(current);
+  }
+  // Any track the studio shows: the candidate being tagged, or a genre's
+  // reference (which has no local id yet — its Deezer id is its key).
+  function previewTrack(t) {
+    const key = t.id || t.deezer_id;
+    if (previewing && previewId === key) {
       stopPreview();
       return;
     }
     if (!audio) return;
     player.pause();
-    previewId = current.id;
+    previewId = key;
     previewTime = 0;
     previewDuration = 0;
-    audio.src = api.streamUrl(current.deezer_id || current.id, $downloadQuality);
+    audio.src = api.streamUrl(t.deezer_id || t.id, $downloadQuality);
     // A third of the way in: past the intro, into whatever the track actually
     // is. A genre judged from the first eight bars is a genre judged wrong. The
     // stream may not be seekable yet (the server archives while it streams), so
     // this goes through the same chase as a user seek rather than being lost.
-    previewSeekTarget = current.duration ? current.duration * 0.33 : null;
+    previewSeekTarget = t.duration ? t.duration * 0.33 : null;
     audio.play().then(
       () => (previewing = true),
       () => (previewing = false)
@@ -611,6 +616,60 @@
       trainError = e?.message || "entraînement impossible";
     } finally {
       training = false;
+    }
+  }
+
+  // -- well-known recordings per genre ------------------------------------------
+  // Eight tagged tracks before a genre means anything, and the first eight are
+  // the hardest to find in a library nobody sorted by genre. A genre with a
+  // list opens it under its row; each entry is looked up on Deezer, listened
+  // to here, and tagged with one click (which also archives it, so it gets a
+  // vector). Scenes nobody has written a canon for list their artists instead.
+  let refGenres = new Set();
+  let refOpen = null; // genre name whose panel is open
+  let refData = null;
+  let refLoading = false;
+  let refBusy = null; // deezer id being imported
+  async function loadRefGenres() {
+    try {
+      refGenres = new Set((await api.genreReferenceGenres()).genres || []);
+    } catch {
+      refGenres = new Set();
+    }
+  }
+  async function toggleRefs(tag) {
+    if (refOpen === tag.name) {
+      refOpen = null;
+      refData = null;
+      return;
+    }
+    refOpen = tag.name;
+    refData = null;
+    refLoading = true;
+    try {
+      const d = await api.genreReferences(tag.name);
+      if (refOpen === tag.name) refData = d;
+    } catch (e) {
+      toasts.push(e?.message || "Références indisponibles", "error");
+      refOpen = null;
+    } finally {
+      refLoading = false;
+    }
+  }
+  async function importRef(tag, ref) {
+    if (refBusy || !ref.match) return;
+    refBusy = ref.match.deezer_id;
+    try {
+      const r = await api.genreReferenceImport(ref.match.deezer_id, tag.id);
+      ref.in_library = true;
+      ref.tag = tag.name;
+      refData = refData;
+      toasts.push(`« ${ref.title} » étiqueté ${tag.name}${r.queued ? " — archivage lancé" : ""}`);
+      await refresh();
+    } catch (e) {
+      toasts.push(e?.message || "Import impossible", "error");
+    } finally {
+      refBusy = null;
     }
   }
 
@@ -981,6 +1040,7 @@
     loadJobStatus();
     watchRelabel();
     loadConstruction();
+    loadRefGenres();
     // Unconditionally: the extractor is what MEASURES a track, and tagging only
     // needs what was already measured. An archive carried over from a server
     // that had onnxruntime is a perfectly good training set on one that does
@@ -1120,10 +1180,89 @@
               <span class="count" class:thin={(counts[tag.name] || 0) < 8}>
                 {counts[tag.name] || 0}
               </span>
-              <button class="icon-btn danger" on:click={() => removeTag(tag)} aria-label="Supprimer">
-                <Icon name="trash" size={16} />
-              </button>
+              <span class="row-actions">
+                {#if refGenres.has(tag.name)}
+                  <button
+                    class="icon-btn"
+                    class:on={refOpen === tag.name}
+                    on:click={() => toggleRefs(tag)}
+                    aria-label="Titres de référence"
+                    title="Titres de référence"
+                  >
+                    <Icon name="disc" size={16} />
+                  </button>
+                {/if}
+                <button class="icon-btn danger" on:click={() => removeTag(tag)} aria-label="Supprimer">
+                  <Icon name="trash" size={16} />
+                </button>
+              </span>
             </div>
+            {#if refOpen === tag.name}
+              <div class="refs">
+                {#if refLoading || !refData}
+                  <p class="muted small">Recherche des références sur Deezer…</p>
+                {:else}
+                  {#if refData.offline}
+                    <p class="muted small">
+                      Deezer ne répond pas : la liste n'a pas pu être vérifiée. Réessayez plus tard.
+                    </p>
+                  {/if}
+                  {#each refData.tracks as ref (ref.artist + ref.title)}
+                    <div class="ref" class:missing={!ref.match}>
+                      {#if ref.match}
+                        <button
+                          class="ref-play"
+                          on:click={() => previewTrack(ref.match)}
+                          aria-label={previewing && previewId === ref.match.deezer_id ? "Pause" : "Écouter"}
+                        >
+                          <Icon name={previewing && previewId === ref.match.deezer_id ? "pause" : "play"} size={14} />
+                        </button>
+                      {:else}
+                        <span class="ref-play off"><Icon name="close" size={12} /></span>
+                      {/if}
+                      <span class="ref-txt">
+                        <span class="ref-t">{ref.title}</span>
+                        <span class="ref-a muted">
+                          {ref.artist}{#if !ref.match && !refData.offline} · introuvable sur Deezer{/if}
+                        </span>
+                      </span>
+                      {#if ref.match}
+                        {#if ref.in_library && ref.tag === tag.name}
+                          <span class="ref-done muted"><Icon name="check" size={14} /> étiqueté</span>
+                        {:else}
+                          <button
+                            class="ghost small-btn"
+                            disabled={!!refBusy}
+                            on:click={() => importRef(tag, ref)}
+                            title={ref.tag ? `Porte déjà « ${ref.tag} »` : ""}
+                          >
+                            {refBusy === ref.match.deezer_id ? "…" : ref.tag ? `Remplacer ${ref.tag}` : "Étiqueter"}
+                          </button>
+                        {/if}
+                      {/if}
+                    </div>
+                  {/each}
+                  {#if refData.artists?.length}
+                    <p class="muted small ref-note">
+                      {refData.tracks.length ? "Et ses artistes phares" : "Pas de liste de titres fiable pour ce genre — ses artistes phares"}, à écouter puis
+                      étiqueter en masse depuis leur page&nbsp;:
+                    </p>
+                    <div class="ref-artists">
+                      {#each refData.artists as a (a.name)}
+                        {#if a.match}
+                          <button class="chip-btn" on:click={() => push("/artist/" + a.match.deezer_id)}>{a.name}</button>
+                        {:else}
+                          <span class="chip-btn off" title="Introuvable sur Deezer">{a.name}</span>
+                        {/if}
+                      {/each}
+                    </div>
+                  {/if}
+                  <p class="muted small ref-note">
+                    Des exemples reconnus du genre, pas une vérité&nbsp;: écoutez avant d'étiqueter.
+                  </p>
+                {/if}
+              </div>
+            {/if}
           {/each}
           {#if !tags.length}
             <p class="muted empty">Aucun genre. Commencez par en créer quelques-uns.</p>
@@ -2083,13 +2222,18 @@
   }
   .tag-row {
     display: grid;
-    grid-template-columns: 14px minmax(110px, 1fr) auto auto 40px 34px;
+    grid-template-columns: 14px minmax(110px, 1fr) auto auto 40px 72px;
     align-items: center;
     gap: 10px;
     background: var(--surface-2, #1b1d21);
     border-radius: 12px;
     padding: 8px 10px;
     transition: opacity 0.15s;
+  }
+  .row-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
   }
   .tag-row.busy {
     opacity: 0.5;
@@ -2634,6 +2778,95 @@
     margin-top: 10px;
     font-size: 0.84rem;
   }
+  .refs {
+    margin: -2px 0 10px 22px;
+    padding: 10px 12px;
+    border-left: 2px solid var(--border, #2a2d33);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ref {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+  }
+  .ref.missing .ref-txt {
+    opacity: 0.55;
+  }
+  .ref-play {
+    width: 30px;
+    height: 30px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--surface-2, #1b1d21);
+    border: 1px solid var(--border, #2a2d33);
+    color: var(--text);
+  }
+  .ref-play:hover {
+    border-color: var(--accent, #22d3ee);
+  }
+  .ref-play.off {
+    color: var(--text-dim);
+    background: transparent;
+  }
+  .ref-txt {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  .ref-t,
+  .ref-a {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ref-t {
+    font-weight: 600;
+    font-size: 0.88rem;
+  }
+  .ref-a {
+    font-size: 0.78rem;
+  }
+  .ref .ghost {
+    flex: none;
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    border-radius: 9px;
+  }
+  .ref-done {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+  }
+  .ref-note {
+    margin: 8px 0 2px;
+  }
+  .ref-artists {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chip-btn {
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border, #2a2d33);
+    background: var(--surface-2, #1b1d21);
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+  }
+  .chip-btn:hover {
+    border-color: var(--accent, #22d3ee);
+  }
+  .chip-btn.off {
+    opacity: 0.5;
+  }
   .measure {
     display: flex;
     align-items: center;
@@ -2967,8 +3200,18 @@
       font-size: 0.92rem;
     }
     .tag-row {
-      grid-template-columns: 14px 1fr 34px;
+      grid-template-columns: 14px 1fr 72px;
       grid-template-areas: "dot name del" "sw sw sw" "arch arch count";
+    }
+    .row-actions {
+      grid-area: del;
+    }
+    .refs {
+      margin-left: 6px;
+      padding: 8px 4px 8px 10px;
+    }
+    .ref {
+      gap: 10px;
     }
     .tag-row .dot {
       grid-area: dot;

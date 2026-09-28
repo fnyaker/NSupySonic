@@ -921,6 +921,20 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   the verdicts are re-decided on a worker and the devices told through the generation. Tracks not in
   the library are counted, not created — favouriting the album archives them. Statement counts are
   pinned: the tracks, their tags and the head, not a query per row.
+- **Each genre can open a short list of its textbook recordings** (`deezer/references.py`,
+  `/genre/references`, the disc button on a row of the *Genres* tab), because a genre's first eight
+  examples are the hardest to find in a library nobody sorted by genre. The list's rule is that
+  **nothing in it is a guess**: a pair is there only if that recording exists under that artist and
+  the genre's literature names it; the young local scenes this app cares most about (Pieep,
+  Deutscher Krach, Hardtekk, Zaag, Uptempo, Frenchcore) have NO track list — a test says so — and a
+  few of them list their scene's established artists instead, as links to artist pages where bulk
+  tagging (with its review) takes over. Every pair is looked up on Deezer when shown and offered
+  only if the artist AND the title match (`references.match`: accents and punctuation folded, the
+  title at a word start, a live take or a remix only when nothing else is there, never a cover); a
+  pair Deezer does not carry reads "introuvable", never whatever the search returned. Answers are
+  kept a day; an unreachable Deezer returns the list unchecked and caches nothing. Importing one
+  (`/genre/references/import`) makes the row from Deezer's record, tags it and queues the archive,
+  which is where it gets the vector that makes it a training example.
 - **The genre chip reads the SERVED verdict first** (`webapp/src/lib/trackverdict.js`). It used to
   read the live classifier only, so it needed the analysis engine running, the `smart` scene
   selected AND the classifier past its confidence floor — miss any one and there was no label at
