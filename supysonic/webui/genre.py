@@ -1125,7 +1125,10 @@ def genre_embeddings():
         vec = emb.load_embedding(track)
         if vec is None:
             continue
-        if len(vec) != emb.EMBED_DIM:
+        # v3 and v2 are both served, each at its own width: the studio trains
+        # on one width (a v3 row's prefix IS its v2 vector). A v1 row lives in
+        # another space and is counted, not served.
+        if len(vec) not in emb.HEAD_DIMS:
             stale += 1
             continue
         out[ident] = emb.encode_embedding(vec)

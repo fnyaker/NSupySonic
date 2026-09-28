@@ -751,9 +751,23 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   `backfill_embeddings(on_stats=…)` is the one implementation, shared with `deezer embed`.
 - **The big model is FROZEN and only ever extracts.** Fine-tuning something trained on millions of
   recordings with two hundred of your own mostly destroys what it knew. So `discogs-effnet` (ONNX,
-  via onnxruntime) turns a track into one 1280-d vector and nothing else, and every bit of learning
-  happens in a small head on top — a few hundred examples by 1280 dimensions, which trains in a
-  browser tab. It is also exactly how the model's licence asks to be used: unmodified.
+  via onnxruntime) turns each two-second patch into one 1280-d vector and nothing else, and every
+  bit of learning happens in a small head on top — a few hundred examples by a few thousand
+  dimensions, which trains in a browser tab. It is also exactly how the model's licence asks to be
+  used: unmodified.
+- **A stored vector is three summaries of the patches** (`embedding._aggregate`, v3, 3840): their
+  mean, their spread (v2 stopped at those two) and the mean over the LOUD HALF of them — the patches
+  at or above the upper median RMS (`patch_loudness`, `loud_half`), by rank because a drop sits only
+  ~3 dB over a kick-only intro under the same limiter (measured on an arranged track through the
+  real front-end, `test_the_loud_half_is_the_drops`: every patch inside a drop picked, none outside).
+  A genre is decided where the music is IN; the whole-track mean spends as much of itself on the
+  intro, the breakdown and the outro. The first 2560 numbers ARE the v2 vector, value for value,
+  and the loud block weighs what the mean block does — so a v2 head reads a v3 vector's prefix
+  (`genre._PREFIX_OK`), the prototypes compare the shared part (`embedding.common_part`), and
+  `/genre/embeddings` serves v2 and v3 at their own widths. The studio trains on ONE width: the loud
+  block is a candidate only when every labelled row has it, and is kept on a point of gain over the
+  prefix alone (quick linear heads, same folds and seed), before tempo and construction are judged
+  on top of the width that won. v2 vectors are re-extracted by the library backfill like v1 ones were.
 - **The model is never vendored and never fetched silently.** It is a third-party artefact with its
   own licence (CC BY-NC-ND), so the operator supplies a copy they obtained themselves — imported
   from the studio's **Extracteur** card (`POST /api/genre/extractor`, admin-only, stored in

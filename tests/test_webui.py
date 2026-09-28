@@ -4842,9 +4842,14 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertFalse(emb.vector_is_current(back))
         self.assertEqual(emb.embedding_version(track), 1)
 
-        # A v2 one is the current width, and says so.
-        self.assertTrue(emb.save_embedding(track, [0.1] * emb.EMBED_DIM))
+        # A v2 one reads back and is not current any more (the extractor
+        # re-does it when it can); a v3 one is the current width, and says so.
+        self.assertTrue(emb.save_embedding(track, [0.1] * 2560))
         self.assertEqual(emb.embedding_version(track), 2)
+        self.assertEqual(len(emb.load_embedding(track)), 2560)
+        self.assertFalse(emb.vector_is_current(emb.load_embedding(track)))
+        self.assertTrue(emb.save_embedding(track, [0.1] * emb.EMBED_DIM))
+        self.assertEqual(emb.embedding_version(track), 3)
         self.assertTrue(emb.vector_is_current(emb.load_embedding(track)))
         # Nothing else is a vector at all.
         with open(emb.sidecar_path(track), "wb") as fp:
@@ -4919,14 +4924,21 @@ class GenreStudioTestCase(unittest.TestCase):
         self._login()
         fresh = self._track("1031")
         legacy = self._track("1032")
+        older = self._track("1033")
         self._store_embedding(fresh, [0.2] * emb.EMBED_DIM)
+        self._store_embedding(older, [0.2] * 2560)
         os.makedirs(os.path.dirname(legacy.path), exist_ok=True)
         with open(emb.sidecar_path(legacy), "wb") as fp:
             fp.write(emb._pack_f16([0.2] * emb.LEGACY_EMBED_DIM))
         body = self.client.post(
-            "/api/genre/embeddings", json={"ids": [fresh.deezer_id, legacy.deezer_id]}
+            "/api/genre/embeddings",
+            json={"ids": [fresh.deezer_id, legacy.deezer_id, older.deezer_id]},
         ).json
-        self.assertEqual(list(body["embeddings"]), [fresh.deezer_id])
+        # v3 and v2 are served at their own widths (a v3 row's prefix IS its v2
+        # vector, so the studio can train on either); v1 is counted.
+        self.assertEqual(list(body["embeddings"]), [fresh.deezer_id, older.deezer_id])
+        self.assertEqual(len(base64.b64decode(body["embeddings"][fresh.deezer_id])), 3840 * 2)
+        self.assertEqual(len(base64.b64decode(body["embeddings"][older.deezer_id])), 2560 * 2)
         self.assertEqual(body["stale"], 1)
         self.assertEqual(body["dim"], emb.EMBED_DIM)
 
@@ -4950,26 +4962,163 @@ class GenreStudioTestCase(unittest.TestCase):
             ])
         )
         self.assertEqual(len(steady), emb.EMBED_DIM)
-        # The second half IS the standard deviation: zero for a track that never
-        # moves, and clearly not zero for one that does.
-        self.assertLess(float(numpy.linalg.norm(steady[dim:])), 1e-6)
-        self.assertGreater(float(numpy.linalg.norm(wild[dim:])), 0.1)
+        # The second block IS the standard deviation: zero for a track that
+        # never moves, and clearly not zero for one that does.
+        self.assertLess(float(numpy.linalg.norm(steady[dim : 2 * dim])), 1e-6)
+        self.assertGreater(float(numpy.linalg.norm(wild[dim : 2 * dim])), 0.1)
         self.assertLess(float(numpy.dot(steady, wild)), 0.99)
 
     def test_the_aggregation_is_a_unit_vector(self):
-        """Everything downstream is a dot product, so the stored vector has to
-        be on the unit sphere whichever way the patches went."""
+        """Everything downstream is a dot product, so the v2 part has to be on
+        the unit sphere whichever way the patches went — and the loud block
+        weighs exactly what the mean block does, so neither outvotes the other."""
         numpy = _numpy()
         if numpy is None:
             self.skipTest("numpy is not installed (it comes with the extractor)")
         from supysonic.deezer import embedding as emb
 
         rng = numpy.random.default_rng(7)
+        d = emb.MODEL_DIM
         for n in (1, 2, 60):
             v = emb._aggregate(
-                rng.standard_normal((n, emb.MODEL_DIM)).astype(numpy.float32)
+                rng.standard_normal((n, d)).astype(numpy.float32),
+                list(rng.standard_normal(n) * 6 - 12),
             )
-            self.assertAlmostEqual(float(numpy.linalg.norm(v)), 1.0, places=5)
+            self.assertAlmostEqual(float(numpy.linalg.norm(v[: 2 * d])), 1.0, places=5)
+            self.assertAlmostEqual(
+                float(numpy.linalg.norm(v[2 * d :])), float(numpy.linalg.norm(v[:d])), places=5
+            )
+
+    def test_v3_begins_with_v2_and_adds_the_loud_half(self):
+        """Two loud patches on one axis, two quiet ones on another. Worked by
+        hand: mean (e0+e1)/2 and std (e0+e1)/2 after the v2 normalisation, and
+        the loud block e0 at the mean block's norm, 1/sqrt(2)."""
+        numpy = _numpy()
+        if numpy is None:
+            self.skipTest("numpy is not installed (it comes with the extractor)")
+        from supysonic.deezer import embedding as emb
+
+        d = emb.MODEL_DIM
+        e0, e1 = numpy.zeros(d), numpy.zeros(d)
+        e0[0], e1[1] = 1.0, 1.0
+        v = emb._aggregate(numpy.stack([e0, e1, e0, e1]), [-6.0, -20.0, -7.0, -21.0])
+        self.assertEqual(len(v), 3840)
+        for i, want in ((0, 0.5), (1, 0.5), (d, 0.5), (d + 1, 0.5), (2 * d, 0.70711), (2 * d + 1, 0.0)):
+            self.assertAlmostEqual(float(v[i]), want, places=5, msg=i)
+        self.assertAlmostEqual(float(numpy.abs(v).sum()), 2 + 0.70711, places=4)
+        # Without levels the loud block is the whole mean again.
+        flat = emb._aggregate(numpy.stack([e0, e1, e0, e1]))
+        self.assertAlmostEqual(float(flat[2 * d]), 0.5, places=5)
+        self.assertAlmostEqual(float(flat[2 * d + 1]), 0.5, places=5)
+        with self.assertRaises(ValueError):
+            emb._aggregate(numpy.stack([e0, e1]), [-6.0])
+        # The loud half is rank-based: at or above the median, ties together.
+        self.assertEqual(emb.loud_half([-6, -20, -7, -21]), [0, 2])
+        self.assertEqual(emb.loud_half([-9, -9, -9]), [0, 1, 2])
+        self.assertEqual(emb.loud_half([-3]), [0])
+
+    def test_the_loud_half_is_the_drops(self):
+        """An arranged track, made the way one is: an intro of kick and hats, a
+        drop (kick, a sidechained sub bass, a detuned saw lead), a breakdown of
+        pad alone, the second drop, a kick-only outro — the whole mix through
+        one limiter, so every section peaks at the same ceiling and only its
+        DENSITY sets its level. Run through the extractor's own front-end (the
+        model replaced by one that answers each patch with its own index), the
+        loud block must be exactly the patches that sit in the drops.
+
+        Measured: the drops' patches read -6.4..-6.0 dB RMS, the intro
+        -9.8..-9.0, the breakdown -17.7, the outro -9.9..-9.4 — three decibels
+        between a drop and a kick-only intro under the same limiter, which is
+        why the half is chosen by RANK and not by a threshold in dB."""
+        numpy = _numpy()
+        if numpy is None:
+            self.skipTest("numpy is not installed (it comes with the extractor)")
+        from supysonic.deezer import embedding as emb
+
+        sr = emb.SAMPLE_RATE
+        beat = 60.0 / 128
+        sections = [("intro", 45.0), ("drop", 45.0), ("breakdown", 30.0), ("drop", 45.0), ("outro", 15.0)]
+        total = int(sum(s for _n, s in sections) * sr)
+        t = numpy.arange(total) / sr
+        rng = numpy.random.default_rng(3)
+        mix = numpy.zeros(total)
+        kt = numpy.arange(int(0.35 * sr)) / sr
+        # A kick: a sine swept 160 -> 48 Hz, driven.
+        freq = 48 + 112 * numpy.exp(-kt / 0.03)
+        kick = numpy.tanh(3 * numpy.sin(2 * numpy.pi * numpy.cumsum(freq) / sr)) * numpy.exp(-kt / 0.12)
+        ht = numpy.arange(int(0.05 * sr)) / sr
+        hat = numpy.diff(rng.standard_normal(len(ht) + 1)) * numpy.exp(-ht / 0.012) * 0.25
+
+        def place(sample, at):
+            i = int(at * sr)
+            n = min(len(sample), total - i)
+            if n > 0:
+                mix[i : i + n] += sample[:n]
+
+        spans = []
+        start = 0.0
+        for name, secs in sections:
+            end = start + secs
+            spans.append((name, start, end))
+            b = start
+            while b < end - 1e-6:
+                if name != "breakdown":
+                    place(kick, b)
+                if name in ("intro", "drop"):
+                    place(hat, b + beat / 2)
+                b += beat
+            seg = (t >= start) & (t < end)
+            if name == "drop":
+                # The sub ducks under each kick (the sidechain), the lead is
+                # three detuned saws.
+                phase = ((t - start) % beat) / beat
+                duck = numpy.clip(phase * 4, 0, 1)
+                bass = 0.5 * numpy.sin(2 * numpy.pi * 55 * t) * duck
+                lead = sum(((t * f) % 1.0) * 2 - 1 for f in (440, 441.7, 438.2)) * 0.12
+                mix[seg] += (bass + lead)[seg]
+            if name == "breakdown":
+                pad = sum(numpy.sin(2 * numpy.pi * f * t) for f in (220, 277.2, 329.6)) * 0.08
+                mix[seg] += pad[seg]
+            start = end
+        # One limiter over the whole master: a ceiling, not a per-section gain.
+        mix = numpy.tanh(1.5 * mix) * 0.9
+        samples = mix.astype(numpy.float32)
+
+        offsets = emb.patch_offsets(len(samples))
+
+        def section_of(off):
+            mid = (off + emb.PATCH_SAMPLES / 2) / sr
+            return next(n for n, a, b in spans if a <= mid < b)
+
+        def straddles(off):
+            a, b = off / sr, (off + emb.PATCH_SAMPLES) / sr
+            return any(a < edge < b for _n, x, y in spans for edge in (x, y))
+
+        seen = {}
+
+        def model(patches):
+            seen["n"] = len(patches)
+            rows = numpy.zeros((len(patches), emb.MODEL_DIM), dtype=numpy.float32)
+            rows[numpy.arange(len(patches)), numpy.arange(len(patches))] = 1.0
+            return rows
+
+        saved = emb.available, emb._decode, emb._run
+        emb.available = lambda: True
+        emb._decode = lambda path, seconds=None, start=None: samples
+        emb._run = model
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".flac") as fp:
+                vec, reason = emb.embed_file_verbose(fp.name)
+        finally:
+            emb.available, emb._decode, emb._run = saved
+        self.assertIsNone(reason)
+        self.assertEqual(seen["n"], len(offsets))
+        loud = {i for i in range(len(offsets)) if vec[2 * emb.MODEL_DIM + i] > 1e-6}
+        drops = {i for i, o in enumerate(offsets) if section_of(o) == "drop" and not straddles(o)}
+        others = {i for i, o in enumerate(offsets) if section_of(o) != "drop" and not straddles(o)}
+        self.assertTrue(drops and others)
+        self.assertEqual(drops - loud, set(), "every patch inside a drop is in the loud half")
+        self.assertEqual(loud & others, set(), "no intro, breakdown or outro patch is")
 
     def test_a_vector_reads_back_without_the_extractor(self):
         """The optional dependency EXTRACTS; it must not be needed to READ.
@@ -5255,6 +5404,29 @@ class GenreStudioTestCase(unittest.TestCase):
             legacy = [c for c in r.json["candidates"] if c["deezer_id"] == v1_candidate.deezer_id]
             self.assertEqual(len(legacy), 1, url)
             self.assertNotIn("prototype", legacy[0])
+
+    def test_a_half_re_extracted_library_keeps_one_prototype_table(self):
+        """Re-extracting a library to v3 takes hours. Meanwhile a genre's
+        examples are some v2, some v3, and so are the candidates — and they all
+        share the v2 part, so the prototypes must keep speaking, whichever width
+        each side happens to be."""
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        a, b = self._track("2071"), self._track("2072")
+        self._store_embedding(a, self._vec(2560, 0, 1.0))  # still v2
+        self._store_embedding(b, self._vec(emb.EMBED_DIM, 1, 1.0))  # already v3
+        self.client.post("/api/genre/label", json={"track": a.deezer_id, "tag": self._tag("techno")["id"]})
+        self.client.post("/api/genre/label", json={"track": b.deezer_id, "tag": self._tag("rap")["id"]})
+        gen.invalidate_centroids()
+        self.assertEqual(gen.prototype_predict(self._vec(emb.EMBED_DIM, 0, 1.0))[0], "techno")
+        self.assertEqual(gen.prototype_predict(self._vec(2560, 1, 1.0))[0], "rap")
+        # The loud block is not part of the comparison: a v3 query whose prefix
+        # says techno is techno whatever its loud half says.
+        q = self._vec(emb.EMBED_DIM, 0, 1.0)
+        q[2560 + 1] = 5.0
+        self.assertEqual(gen.prototype_predict(q)[0], "techno")
 
     def test_a_second_label_on_a_genre_moves_its_prototype(self):
         """The cache keys on the labelled SET. Adding a second track under a

@@ -139,7 +139,7 @@
     }
   }
   // Read the served tempo and the construction summaries next to the
-  // embedding — when a quick head says they help (CONSTRUCTION_MIN_GAIN).
+  // embedding — when a quick head says they help (INPUT_MIN_GAIN).
   let useConstruction = true;
   try {
     useConstruction = localStorage.getItem("genre.construction") !== "0";
@@ -158,7 +158,12 @@
   // embedding separates stay at 1.0; 0.1 learns them only partly, 1.0 starts
   // trading the embedding's genres for noise in the extras.
   const EXTRA_SCALE = 0.3;
-  const CONSTRUCTION_MIN_GAIN = 0.01;
+  // An optional input is kept on a gain of a point of balanced accuracy.
+  const INPUT_MIN_GAIN = 0.01;
+  // The stored vectors' widths (supysonic/deezer/embedding.py): v2 is mean +
+  // spread, v3 adds the mean over the loud half of the track.
+  const V2_DIM = 2560;
+  const V3_DIM = 3840;
   let training = false;
   let progress = 0;
   let progressStage = "";
@@ -483,7 +488,11 @@
     const usable = keep.filter((r) => vectors.has(String(r.deezer_id || r.id)));
     if (!usable.length)
       throw new Error("aucun vecteur disponible — lancez « supysonic-cli deezer embed »");
-    const d = vectors.get(String(usable[0].deezer_id || usable[0].id)).length;
+    // v3 vectors carry the loud half of the track after the v2 ones (which they
+    // begin with, value for value). One matrix has one width: the loud block is
+    // a candidate only when EVERY row has it; otherwise all train on the v2 part.
+    const older = usable.filter((r) => vectors.get(String(r.deezer_id || r.id)).length < V3_DIM).length;
+    const d = older ? V2_DIM : V3_DIM;
     const y = new Int32Array(usable.length);
     // Each row's artist as a small integer, for the artist folds.
     const groups = new Int32Array(usable.length);
@@ -500,21 +509,22 @@
       groups[i] = a ? artistIds.get(a) : -1;
     });
     return {
-      rowsV, raws, y, groups, n: usable.length, d, labels: names,
+      rowsV, raws, y, groups, n: usable.length, d, older, labels: names,
       measured: raws.filter((r) => r.slice(1).some(Number.isFinite)).length,
       skipped: keep.length - usable.length,
     };
   }
 
   // The matrix a trainer gets, built fresh per call (the worker takes the
-  // buffers): the embeddings alone, or with the extras block after them.
-  function pack(data, scaler) {
+  // buffers): the first `width` numbers of each embedding (a v3 vector's first
+  // 2560 ARE its v2 one), then the extras block when there is a scaler.
+  function pack(data, scaler, width = data.d) {
     const k = scaler ? EXTRAS.length + 1 : 0;
-    const dim = data.d + k;
+    const dim = width + k;
     const X = new Float32Array(data.n * dim);
     for (let i = 0; i < data.n; i++) {
-      X.set(data.rowsV[i], i * dim);
-      if (scaler) X.set(extrasBlock(data.raws[i], scaler, EXTRA_SCALE), i * dim + data.d);
+      X.set(data.rowsV[i].subarray(0, width), i * dim);
+      if (scaler) X.set(extrasBlock(data.raws[i], scaler, EXTRA_SCALE), i * dim + width);
     }
     return { X, y: data.y.slice(), groups: data.groups.slice(), n: data.n, d: dim, labels: data.labels };
   }
@@ -531,19 +541,35 @@
       const skipped = data.skipped;
       const seed = (Math.random() * 0x100000000) >>> 0;
       const base = { grouped: byArtist, seed };
-      // Tempo and construction: worth it only if they MEASURABLY help. A quick
-      // linear head with them and one without, on the same folds and seed; the
-      // requested mode then trains once, on whichever input won.
+      // Two optional inputs, each kept only if it MEASURABLY helps: a quick
+      // linear head with it and one without, on the same folds and seed. The
+      // loud half of the track first (a width), then tempo and construction on
+      // top of the width that won; the requested mode then trains once.
+      const quickHead = (scaler, width, from, to) =>
+        train(pack(data, scaler, width), "linear", (st, pct) => (progress = from + (to - from) * (pct || 0)), base);
+      let width = data.d;
+      let quick = null;
+      let loud = null;
+      if (data.d === V3_DIM) {
+        progressStage = "moitié forte";
+        const narrow = await quickHead(null, V2_DIM, 0.2, 0.3);
+        const wide = await quickHead(null, V3_DIM, 0.3, 0.4);
+        const used = wide.metrics.balanced >= narrow.metrics.balanced + INPUT_MIN_GAIN;
+        loud = { used, with: wide.metrics.balanced, without: narrow.metrics.balanced, older: 0 };
+        width = used ? V3_DIM : V2_DIM;
+        quick = used ? wide : narrow;
+      } else {
+        loud = { used: false, older: data.older };
+      }
       let scaler = null;
       let construction = null;
-      let quick = null;
       const hasExtras = data.raws.some((r) => r.some(Number.isFinite));
       if (useConstruction && hasExtras) {
         progressStage = "tempo et construction";
         const fitted = fitScaler(data.raws);
-        const without = await train(pack(data, null), "linear", (st, pct) => (progress = 0.2 + 0.15 * (pct || 0)), base);
-        const withX = await train(pack(data, fitted), "linear", (st, pct) => (progress = 0.35 + 0.15 * (pct || 0)), base);
-        const used = withX.metrics.balanced >= without.metrics.balanced + CONSTRUCTION_MIN_GAIN;
+        const without = quick || (await quickHead(null, width, 0.4, 0.45));
+        const withX = await quickHead(fitted, width, 0.45, 0.5);
+        const used = withX.metrics.balanced >= without.metrics.balanced + INPUT_MIN_GAIN;
         construction = {
           used,
           with: withX.metrics.balanced,
@@ -560,7 +586,7 @@
         mode === "linear" && quick
           ? quick
           : await train(
-              pack(data, scaler),
+              pack(data, scaler, width),
               mode === "linear" ? "linear" : "deep",
               (stage, pct) => {
                 progressStage = stage === "done" ? "terminé" : progressStage;
@@ -569,9 +595,10 @@
               { ...(TRAIN_OPTS[mode] || {}), ...base }
             );
       if (construction) trained.metrics.construction = construction;
+      if (loud) trained.metrics.loud = loud;
       if (scaler)
         trained.metrics.inputs = {
-          embed: data.d,
+          embed: width,
           extras: EXTRAS,
           mean: scaler.mean,
           std: scaler.std,
@@ -1445,7 +1472,9 @@
       <section class="card">
         <h2><Icon name="activity" size={18} /> Extracteur</h2>
         <p class="sub muted">
-          Le modèle gelé qui transforme un titre en empreinte de 1280 nombres. Il a
+          Le modèle gelé qui transforme un titre en empreinte : 1280 nombres par
+          fenêtre de deux secondes, résumés sur tout le titre et sur sa moitié la
+          plus forte — le drop, le refrain, là où le genre se décide. Il a
           sa propre licence, alors le serveur ne le télécharge jamais tout seul :
           importez la copie que vous vous êtes procurée. Elle sert aussi bien ici
           qu'à <code>supysonic-cli deezer embed</code>.
@@ -1713,6 +1742,22 @@
                       ? "le modèle était trop sûr de lui : ses confiances sont ramenées à ce qu'elles valent avant que le serveur ne s'en serve"
                       : "le modèle était trop timide : ses confiances sont relevées"}
                   </span>
+                </div>
+              {/if}
+              {#if head.metrics.loud}
+                {@const l = head.metrics.loud}
+                <div class="score">
+                  <span class="k">Moitié forte du titre</span>
+                  {#if l.older}
+                    <span class="v">indisponible</span>
+                    <span class="muted small">
+                      {l.older} empreinte{l.older > 1 ? "s" : ""} antérieure{l.older > 1 ? "s" : ""} — relancez
+                      la mesure de la bibliothèque pour les refaire
+                    </span>
+                  {:else}
+                    <span class="v">{l.used ? "utilisée" : "écartée"}</span>
+                    <span class="muted small">tête rapide {pct(l.with)} % avec, {pct(l.without)} % sans</span>
+                  {/if}
                 </div>
               {/if}
               {#if head.metrics.construction}

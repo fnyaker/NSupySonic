@@ -103,7 +103,7 @@ def _inputs(metrics_json, dim):
 #: A stored vector a head over a narrower one may read the start of: a v3
 #: vector (mean, std, loud-half mean) BEGINS with the v2 one, value for value
 #: (embedding.py#_aggregate), so a head trained on v2 keeps working.
-_PREFIX_OK = {3840: 2560}
+_PREFIX_OK = {3840: 2560}  # embedding.EMBED_DIM: embedding.V2_EMBED_DIM
 
 
 def assemble(head, vec, extra=None):
@@ -455,8 +455,8 @@ def _labelled_rows() -> list[tuple[str, list[float]]]:
 
     out = []
     for tt in TrackTag.select(TrackTag, Track, GenreTag).join(Track).switch(TrackTag).join(GenreTag):
-        vec = emb.load_embedding(tt.track)
-        if vec is None or len(vec) != emb.EMBED_DIM:
+        vec = emb.common_part(emb.load_embedding(tt.track))
+        if vec is None:
             continue
         name = tt.tag.name
         out.append((name, vec))
@@ -539,18 +539,22 @@ def prototype_predict(vec):
     similarity is returned raw (roughly 0.5-0.95 in practice) rather than dressed
     up as a probability it does not mean.
 
-    A prototype is only compared with a vector of the SAME width. `_labelled_rows`
-    keeps the table on the current width, but `vec` comes from a sidecar that may
-    still be a v1 one (1280) while the centroids are v2 (2560) — two different
-    feature spaces, and indexing one with the other's length is how this endpoint
-    used to answer 500. Such a track is given no opinion rather than a wrong one.
+    A prototype is only compared with a vector of the SAME space. Both sides go
+    through ``embedding.common_part`` — the v2 vector, which a v3 one begins
+    with — so a library half re-extracted keeps one table; a v1 sidecar (1280,
+    another space: indexing one with the other's length is how this endpoint
+    used to answer 500) is given no opinion rather than a wrong one.
     """
+    from . import embedding as emb
+
+    # The prototypes live in the part every head-readable vector shares.
+    vec = emb.common_part(vec)
     if vec is None:
         return None
     table = centroids()
     if not table:
         return None
-    u = _unit(list(vec))
+    u = _unit(vec)
     if u is None:
         return None
     width = len(u)

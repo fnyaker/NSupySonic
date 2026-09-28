@@ -53,7 +53,7 @@ import time
 logger = logging.getLogger(__name__)
 
 # Bump when the extractor changes in a way that invalidates stored vectors.
-EMBED_VERSION = 2
+EMBED_VERSION = 3
 # discogs-effnet's penultimate layer, i.e. what ONE patch of the model emits.
 MODEL_DIM = 1280
 # What we STORE: the mean AND the standard deviation over the track's patches,
@@ -64,11 +64,21 @@ MODEL_DIM = 1280
 # literature measures as a straight accuracy gain over the mean on a frozen
 # extractor. Nothing downstream needed to learn it: the head simply sees 2560
 # numbers instead of 1280.
-EMBED_DIM = MODEL_DIM * 2
+V2_EMBED_DIM = MODEL_DIM * 2
+# v3 appends a THIRD block: the mean over the LOUD half of the track's patches.
+# A genre is decided where the music is IN — the drop, the chorus — and the
+# whole-track mean spends as much of itself on the intro, the breakdown and the
+# outro, which sound like any genre's. The first 2560 numbers are the v2 vector,
+# value for value, so a head trained on v2 reads a v3 vector's prefix unchanged
+# (genre.assemble) and a library half re-extracted keeps working.
+EMBED_DIM = MODEL_DIM * 3
 # What a v1 sidecar holds (the mean alone). Kept readable rather than deleted:
 # a library extracted before this change must keep working on a server that can
 # no longer extract, exactly like the v1 -> v2 story everywhere else here.
 LEGACY_EMBED_DIM = MODEL_DIM
+#: The widths a head can be trained on and read: v3, and v2 (which is also every
+#: v3 vector's prefix). A v1 vector is readable but lives in another space.
+HEAD_DIMS = (EMBED_DIM, V2_EMBED_DIM)
 
 # The one export this front-end is written for. It must be the DYNAMIC-batch
 # ONNX, not the "-bs64" one: the latter declares a fixed batch of 64, while the
@@ -742,15 +752,46 @@ def _run(patches):
 _HALF_FLOOR = 1e-5
 
 
-def _aggregate(rows):
-    """Per-patch embeddings (n, 1280) → ONE stored vector (2560,).
+def patch_loudness(samples, offsets):
+    """Each patch's RMS level in dB — what picks the LOUD half (_aggregate)."""
+    import numpy as np
+
+    out = []
+    for off in offsets:
+        seg = np.asarray(samples[off : off + PATCH_SAMPLES], dtype=np.float64)
+        rms = float(np.sqrt(np.mean(seg * seg))) if seg.size else 0.0
+        out.append(20.0 * math.log10(max(rms, 1e-9)))
+    return out
+
+
+def loud_half(loudness):
+    """Indices of the loud half of the patches: every patch at or above the
+    upper median level (half of them, more only when levels tie — ties are
+    kept together). Rank-based on
+    purpose — a limitered master's drop and breakdown differ by a few dB, a
+    live recording's by twenty, and a threshold in dB would suit only one."""
+    if not loudness:
+        return []
+    ranked = sorted(loudness)
+    median = ranked[len(ranked) // 2]
+    return [i for i, v in enumerate(loudness) if v >= median]
+
+
+def _aggregate(rows, loudness=None):
+    """Per-patch embeddings (n, 1280) → ONE stored vector (3840,).
 
     The mean and the standard deviation over the track, concatenated, exactly
     as the model's authors publish it. Each patch is L2-normalized first, so a
     loud patch does not outvote a quiet one (this is a summary of what the
     music IS, not of how loud the master is), then each half is normalized
     before the two are joined, so neither half can dominate the dot product a
-    linear head performs.
+    linear head performs. That is the v2 vector, and it is kept as the first
+    2560 numbers unchanged.
+
+    Then the mean over the loud half of the patches (``loudness``, one level
+    per row: patch_loudness), scaled to the norm the mean block has — the same
+    weight as each v2 half. Without levels it is the whole mean again (the
+    self-test, which compares halves of one track, has none to give).
     """
     import numpy as np
 
@@ -759,6 +800,10 @@ def _aggregate(rows):
         x = x.reshape(1, -1)
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     x = x / np.maximum(norms, 1e-9)
+    if loudness is not None and len(loudness) != x.shape[0]:
+        raise ValueError("one loudness per patch")
+    loud_rows = loud_half(list(loudness)) if loudness is not None else []
+    loud = x[loud_rows].mean(axis=0) if loud_rows else x.mean(axis=0)
     mean = x.mean(axis=0)
     std = x.std(axis=0) if x.shape[0] > 1 else np.zeros_like(mean)
     for half in (mean, std):
@@ -773,7 +818,11 @@ def _aggregate(rows):
             half[:] = 0.0
     vec = np.concatenate([mean, std]).astype(np.float32)
     norm = float(np.linalg.norm(vec))
-    return (vec / norm) if norm > 1e-9 else vec
+    v2 = (vec / norm) if norm > 1e-9 else vec
+    weight = float(np.linalg.norm(v2[:MODEL_DIM]))
+    n = float(np.linalg.norm(loud))
+    loud = loud * (weight / n) if n > _HALF_FLOOR else np.zeros_like(loud)
+    return np.concatenate([v2, loud]).astype(np.float32)
 
 
 def embed_file(path):
@@ -794,7 +843,9 @@ def embed_file_verbose(path):
         return None, "file missing"
     try:
         samples = _decode(path)
-        patches = _log_mel_patches(samples, patch_offsets(len(samples)))
+        offsets = patch_offsets(len(samples))
+        patches = _log_mel_patches(samples, offsets)
+        loudness = patch_loudness(samples, offsets)
         del samples
     except Exception as exc:
         logger.warning("embedding: front-end failed for %s", path, exc_info=True)
@@ -806,7 +857,7 @@ def embed_file_verbose(path):
         return None, f"inference: {exc}"
     if rows is None:
         return None, session_error() or "no model session"
-    return _aggregate(rows).astype("float32"), None
+    return _aggregate(rows, loudness).astype("float32"), None
 
 
 # --- storage ----------------------------------------------------------------
@@ -866,7 +917,7 @@ def load_embedding(track):
         with open(p, "rb") as fp:
             raw = fp.read()
         dim = len(raw) // 2
-        if dim * 2 != len(raw) or dim not in (EMBED_DIM, LEGACY_EMBED_DIM):
+        if dim * 2 != len(raw) or dim not in (EMBED_DIM, V2_EMBED_DIM, LEGACY_EMBED_DIM):
             return None
         return list(struct.unpack(f"<{dim}e", raw))
     except Exception:
@@ -874,7 +925,8 @@ def load_embedding(track):
 
 
 def embedding_version(track) -> int:
-    """1 for a mean-only sidecar, 2 for the mean+std one, 0 for none.
+    """1 for a mean-only sidecar, 2 for the mean+std one, 3 for mean+std+loud
+    mean, 0 for none.
 
     Read from the file's own width rather than a header byte: the sidecar is a
     raw float16 blob on purpose (see the module docstring), and a 1280-float
@@ -888,6 +940,8 @@ def embedding_version(track) -> int:
     except OSError:
         return 0
     if size == EMBED_DIM * 2:
+        return 3
+    if size == V2_EMBED_DIM * 2:
         return 2
     if size == LEGACY_EMBED_DIM * 2:
         return 1
@@ -897,6 +951,16 @@ def embedding_version(track) -> int:
 def vector_is_current(vec) -> bool:
     """Whether a vector is the width the current extractor produces."""
     return vec is not None and len(vec) == EMBED_DIM
+
+
+def common_part(vec):
+    """The part every vector a head can read shares: the v2 vector, which is a
+    v3 one's prefix. None for anything else (a v1 vector lives in another
+    space). What the prototypes compare, so a library half re-extracted still
+    has one table of them."""
+    if vec is None or len(vec) not in HEAD_DIMS:
+        return None
+    return list(vec[:V2_EMBED_DIM])
 
 
 def encode_embedding(vec) -> str | None:
