@@ -909,6 +909,18 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   *Étiqueter le genre…* in any track's three-dot menu (`actions.buildTrackMenu` → `openGenreTag`),
   opening the same global sheet over the current screen, plus the quiet tag button in both
   now-playing views.
+- **A whole album, playlist or artist is tagged after a REVIEW** (`components/GenreBulkSheet.svelte`,
+  loaded on first use; `/genre/bulk/preview` then `/genre/bulk`). A Frenchcore album is Frenchcore
+  nearly always, and "nearly" — the intro, the collab, the closing ballad — is exactly what a blind
+  bulk tag would teach the head to confuse. The preview says per track what it already wears
+  (another tag is a disagreement) and what the head thinks: a disagreement only past the analysis's
+  own gate AND for a tag the head knows (a head that never learnt Hardtekk is confidently something
+  else on every Hardtekk track), compared at family level when the head is only sure of the family.
+  Disagreements come unticked; only the listed tracks are tagged (an artist scope previews every
+  library row of that artist but is never APPLIED by scope), one tag per track, in one transaction;
+  the verdicts are re-decided on a worker and the devices told through the generation. Tracks not in
+  the library are counted, not created — favouriting the album archives them. Statement counts are
+  pinned: the tracks, their tags and the head, not a query per row.
 - **The genre chip reads the SERVED verdict first** (`webapp/src/lib/trackverdict.js`). It used to
   read the live classifier only, so it needed the analysis engine running, the `smart` scene
   selected AND the classifier past its confidence floor — miss any one and there was no label at

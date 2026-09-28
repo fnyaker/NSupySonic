@@ -261,6 +261,10 @@ export const api = {
     req(`/analysis/${encodeURIComponent(id)}/live`, { method: "POST", body: body(summary), keepalive: true }),
   genreRelabelStart: () => req("/genre/relabel", { method: "POST" }),
   genreConstruction: () => req("/genre/construction"),
+  // A whole album / playlist / artist: what tagging it would do, then do it.
+  genreBulkPreview: (scope, tag) =>
+    req("/genre/bulk/preview", { method: "POST", body: body({ ...scope, tag }) }),
+  genreBulk: (tracks, tag) => req("/genre/bulk", { method: "POST", body: body({ tracks, tag }) }),
 
   // The frozen ONNX extractor: install the operator's own copy of the model
   // from the browser, remove it, or run the built-in sanity check on real

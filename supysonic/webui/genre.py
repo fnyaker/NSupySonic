@@ -1055,6 +1055,253 @@ def genre_labelled():
     return jsonify({"labelled": out})
 
 
+# -- a whole album, playlist or artist at once --------------------------------------
+#
+# Tagging one track at a time is right for the tracks that need a decision and
+# tedious for the ones that do not: a Frenchcore album is Frenchcore from its
+# first track to its last, nearly always. "Nearly" is the part that matters —
+# the intro, the collab with a hardstyle producer, the ballad at the end of a
+# metal record — and a bulk tag that silently labels those too teaches the head
+# exactly the confusion it is meant to learn out of. So a bulk tag is two
+# steps: a PREVIEW that says, for every track in scope, what it already wears
+# and what the model thinks, with the disagreements unticked; then the tag is
+# applied to the tracks the admin kept.
+
+#: How many tracks one bulk request may name (an artist's whole library, a
+#: long playlist). Beyond that it is not a review anybody will read.
+BULK_MAX = 1000
+#: The model's opinion is a vector read and a head evaluation per track; past
+#: this much time the rest of the preview goes out without one.
+BULK_PREVIEW_BUDGET = 3.0
+_IN_CHUNK = 400
+
+
+def _bulk_tracks(data):
+    """The Track rows a bulk request names, in its order, and how many of the
+    ids it named are not in the library. ``tracks``: ids as the SPA holds them
+    (a Deezer numeric id or a local UUID); ``artist``: every library row whose
+    main artist that is (a Deezer id or the local UUID)."""
+    from ..deezer import ids as dz_ids
+
+    if data.get("artist") not in (None, ""):
+        ident = str(data["artist"])
+        if _valid_id(ident):
+            cond = Artist.deezer_id == ident
+        else:
+            try:
+                cond = Artist.id == UUID(ident)
+            except (ValueError, AttributeError, TypeError):
+                return [], 0
+        rows = list(
+            Track.select(Track, Artist, Album)
+            .join(Artist, on=(Track.artist == Artist.id))
+            .switch(Track)
+            .join(Album, on=(Track.album == Album.id))
+            .where(cond)
+            .order_by(Album.name, Track.disc, Track.number)
+            .limit(BULK_MAX)
+        )
+        return rows, 0
+    raw = data.get("tracks")
+    if not isinstance(raw, list):
+        raise ValueError("tracks must be a list")
+    wanted = []
+    for x in list(dict.fromkeys(str(v) for v in raw))[:BULK_MAX]:
+        try:
+            wanted.append(dz_ids.track_uuid(x) if _valid_id(x) else UUID(x))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    found = {}
+    for i in range(0, len(wanted), _IN_CHUNK):
+        part = wanted[i : i + _IN_CHUNK]
+        for t in (
+            Track.select(Track, Artist, Album)
+            .join(Artist, on=(Track.artist == Artist.id))
+            .switch(Track)
+            .join(Album, on=(Track.album == Album.id))
+            .where(Track.id.in_(part))
+        ):
+            found[t.id] = t
+    rows = [found[u] for u in wanted if u in found]
+    missing = len(dict.fromkeys(str(v) for v in raw)) - len(rows)
+    return rows, max(0, missing)
+
+
+def _bulk_tag(data):
+    raw = data.get("tag")
+    if raw in (None, ""):
+        return None
+    try:
+        tag = GenreTag.get_or_none(GenreTag.id == int(raw))
+    except (TypeError, ValueError):
+        tag = None
+    return tag or GenreTag.get_or_none(GenreTag.name == str(raw))
+
+
+def _current_tags(rows):
+    out = {}
+    ids = [t.id for t in rows]
+    for i in range(0, len(ids), _IN_CHUNK):
+        for tt in (
+            TrackTag.select(TrackTag, GenreTag)
+            .join(GenreTag)
+            .where(TrackTag.track.in_(ids[i : i + _IN_CHUNK]))
+        ):
+            out[tt.track_id] = tt.tag
+    return out
+
+
+def _served_bpms(rows):
+    out = {}
+    ids = [t.id for t in rows]
+    for i in range(0, len(ids), _IN_CHUNK):
+        for row in TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.bpm).where(
+            TrackAnalysis.track.in_(ids[i : i + _IN_CHUNK])
+        ):
+            out[row.track_id] = row.bpm
+    return out
+
+
+@webapi.route("/genre/bulk/preview", methods=["POST"])
+@login_required
+@admin_required
+def genre_bulk_preview():
+    """What tagging these tracks would do, track by track, before it does it.
+
+    Each row says whether the track already wears a tag (another one is a
+    disagreement: applying would overwrite a decision somebody made) and what
+    the head thinks. The head's opinion is a DISAGREEMENT only when it is past
+    the gate the analysis acts on and the head knows the tag being applied —
+    a head that never learnt Hardtekk is confidently something else on every
+    Hardtekk track, and flagging all of them would bury the ones that matter.
+    Where the head and the tag are siblings (rawstyle / rawphase) and the head
+    is sure only of the family, the family is compared.
+    """
+    from ..deezer import analysis as ana
+    from ..deezer import embedding as emb
+    from ..deezer import genre as gen
+
+    data = request.get_json(silent=True) or {}
+    tag = _bulk_tag(data)
+    if tag is None:
+        return jsonify({"error": "unknown tag"}), 404
+    try:
+        rows, missing = _bulk_tracks(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    current = _current_tags(rows)
+    head = gen.active_head()
+    knows = bool(head) and tag.name in head["labels"]
+    family = (head or {}).get("families", {}).get(tag.name) if head else None
+    bpms = _served_bpms(rows) if head and head.get("inputs") else {}
+    deadline = time.monotonic() + BULK_PREVIEW_BUDGET
+    out = []
+    counts = {"tracks": len(rows), "missing": missing, "same": 0, "other_tag": 0,
+              "model": 0, "no_vector": 0, "unjudged": 0}
+    for t in rows:
+        row = _track_json(t)
+        have = current.get(t.id)
+        row["current"] = have.name if have else None
+        reason = None
+        if have is not None and have.id == tag.id:
+            counts["same"] += 1
+            row["same"] = True
+        elif have is not None:
+            reason = "tag"
+        opinion = None
+        if head is not None:
+            if time.monotonic() > deadline:
+                counts["unjudged"] += 1
+            else:
+                vec = emb.load_embedding(t)
+                if vec is None:
+                    counts["no_vector"] += 1
+                else:
+                    extra = _extras(t, bpms.get(t.id)) if head.get("inputs") else None
+                    opinion = gen.decide(vec, ana.MODEL_MIN_CONFIDENCE, ana.MODEL_MIN_MARGIN, extra)
+        if opinion:
+            row["model"] = {"label": opinion["style"], "conf": opinion["conf"],
+                            "level": opinion.get("level") or "label"}
+            if knows and reason is None:
+                if row["model"]["level"] == "family":
+                    differs = not family or opinion["style"] != family
+                else:
+                    differs = opinion["style"] != tag.name
+                if differs:
+                    reason = "model"
+        if reason:
+            counts["other_tag" if reason == "tag" else "model"] += 1
+        row["disagree"] = reason
+        out.append(row)
+    return jsonify({"tag": _tag_json(tag), "tracks": out, "counts": counts,
+                    "model": {"active": bool(head), "knows": knows}})
+
+
+@webapi.route("/genre/bulk", methods=["POST"])
+@login_required
+@admin_required
+def genre_bulk():
+    """Tag the tracks the admin kept after the preview. One tag per track, as
+    everywhere: a track wearing another tag is re-tagged only when it is listed
+    (the preview leaves those unticked). The verdicts are re-decided on a
+    worker — hundreds of rows through the head is not a request's work — and
+    the devices told once it is done."""
+    from ..db import db
+
+    data = request.get_json(silent=True) or {}
+    tag = _bulk_tag(data)
+    if tag is None:
+        return jsonify({"error": "unknown tag"}), 404
+    if data.get("artist") not in (None, ""):
+        # Applying is always to an explicit list: what was reviewed is what is
+        # tagged, never "whatever the artist's rows are by now".
+        return jsonify({"error": "tracks must be listed"}), 400
+    try:
+        rows, missing = _bulk_tracks(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    ids = [t.id for t in rows]
+    with db.atomic():
+        for i in range(0, len(ids), _IN_CHUNK):
+            TrackTag.delete().where(TrackTag.track.in_(ids[i : i + _IN_CHUNK])).execute()
+        if ids:
+            TrackTag.insert_many(
+                [{"track": i, "tag": tag.id, "created": now()} for i in ids]
+            ).execute()
+    _forget_centroids()
+    invalidate_predictions()
+    if ids:
+        _spawn(_run_redecide, current_app._get_current_object(), ids)
+    return jsonify({"tag": _tag_json(tag), "applied": len(ids), "missing": missing})
+
+
+def _run_redecide(app, ids):
+    """Re-decide the verdicts of tracks whose tag just changed, then tell the
+    devices (the generation) if any moved."""
+    from ..db import close_connection, open_connection
+    from ..deezer import analysis as ana
+
+    with app.app_context():
+        try:
+            open_connection(reuse=True)
+            changed = 0
+            for i in range(0, len(ids), _IN_CHUNK):
+                for row in TrackAnalysis.select(TrackAnalysis, Track).join(Track).where(
+                    TrackAnalysis.track.in_(ids[i : i + _IN_CHUNK])
+                ):
+                    # A tag decides the verdict by itself: no vector to read.
+                    changed += bool(ana.redecide(row, vec=None))
+            if changed:
+                ana.bump_verdict_generation()
+        except Exception:
+            logger.warning("genre: re-deciding a bulk tag failed", exc_info=True)
+        finally:
+            try:
+                close_connection()
+            except Exception:
+                pass
+
+
 @webapi.route("/genre/construction")
 @login_required
 @admin_required

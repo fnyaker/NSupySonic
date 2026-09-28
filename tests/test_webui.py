@@ -5976,6 +5976,144 @@ class GenreStudioTestCase(unittest.TestCase):
         put({"families": {"Rawstyle": "made-up", "Rawphase": "made-up"}})
         self.assertIsNone(gen.decide([1.0], ana.MODEL_MIN_CONFIDENCE, ana.MODEL_MIN_MARGIN))
 
+    # -- a whole album / playlist / artist at once ---------------------------------
+
+    def _bulk_head(self, labels, logits_on_axis, families=None):
+        """A full-width head whose logits, on the one-hot vector e_k, are
+        ``logits_on_axis[k]`` (a list per label)."""
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+
+        dim = emb.EMBED_DIM
+        rows = [[0.0] * dim for _ in labels]
+        for k, per_label in enumerate(logits_on_axis):
+            for j, v in enumerate(per_label):
+                rows[j][k] = v
+        r = self.client.put(
+            "/api/genre/model",
+            json={"labels": labels, "weights": self._encode([v for r in rows for v in r] + [0.0] * len(labels)),
+                  "dim": dim, "kind": "linear", "metrics": {"families": families or {}}},
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        gen.invalidate()
+
+    def test_bulk_tagging_is_the_admin_s_and_checks_what_it_is_given(self):
+        self._login("bob", "B0bbb")
+        self.assertEqual(self.client.post("/api/genre/bulk/preview", json={"tracks": [], "tag": 1}).status_code, 403)
+        self.assertEqual(self.client.post("/api/genre/bulk", json={"tracks": [], "tag": 1}).status_code, 403)
+        self._login()
+        tag = self._tag("Frenchcore", "hard")
+        self.assertEqual(self.client.post("/api/genre/bulk/preview", json={"tracks": ["1"], "tag": 999}).status_code, 404)
+        self.assertEqual(self.client.post("/api/genre/bulk/preview", json={"tracks": "1", "tag": tag["id"]}).status_code, 400)
+        # Applying is always to what was reviewed: an explicit list.
+        self.assertEqual(self.client.post("/api/genre/bulk", json={"artist": "1", "tag": tag["id"]}).status_code, 400)
+
+    def test_a_bulk_preview_leaves_the_disagreements_out(self):
+        """An album of five: one already wears the tag, one wears another, the
+        model is sure one is something else, two agree — and two ids are not
+        tracks of this library at all."""
+        from supysonic.deezer import embedding as emb
+
+        from .test_deezer import count_statements
+
+        self._login()
+        french = self._tag("Frenchcore", "hard")
+        techno = self._tag("Techno", "groove")
+        self._bulk_head(["Frenchcore", "Techno"], [[6.0, -6.0], [-6.0, 6.0]])
+        same, other, heard, ok1, ok2 = (self._track(str(8500 + i)) for i in range(5))
+        for t in (same, other, ok1, ok2):
+            self._store_embedding(t, self._vec(emb.EMBED_DIM, 0))
+        self._store_embedding(heard, self._vec(emb.EMBED_DIM, 1))
+        self.client.post("/api/genre/label", json={"track": same.deezer_id, "tag": french["id"]})
+        self.client.post("/api/genre/label", json={"track": other.deezer_id, "tag": techno["id"]})
+        ids = [t.deezer_id for t in (same, other, heard, ok1, ok2)] + ["777777777", "not-an-id"]
+        with count_statements() as stmts:
+            body = self.client.post("/api/genre/bulk/preview", json={"tracks": ids, "tag": french["id"]}).json
+        rows = {r["deezer_id"]: r for r in body["tracks"]}
+        self.assertEqual([r["deezer_id"] for r in body["tracks"]], ids[:5], "in the order given")
+        self.assertTrue(rows[same.deezer_id].get("same"))
+        self.assertIsNone(rows[same.deezer_id]["disagree"])
+        self.assertEqual((rows[other.deezer_id]["disagree"], rows[other.deezer_id]["current"]), ("tag", "Techno"))
+        self.assertEqual(rows[heard.deezer_id]["disagree"], "model")
+        self.assertEqual(rows[heard.deezer_id]["model"]["label"], "Techno")
+        for t in (ok1, ok2):
+            self.assertIsNone(rows[t.deezer_id]["disagree"])
+        self.assertEqual(
+            {k: body["counts"][k] for k in ("tracks", "missing", "same", "other_tag", "model")},
+            {"tracks": 5, "missing": 2, "same": 1, "other_tag": 1, "model": 1},
+        )
+        # Not a statement per track: the tracks, their tags and the head, joined.
+        self.assertLessEqual(sum(stmts.values()), 8, stmts)
+        # A head that never learnt the tag has an opinion, not a disagreement.
+        hardtekk = self._tag("Hardtekk", "hard")
+        body = self.client.post("/api/genre/bulk/preview", json={"tracks": [heard.deezer_id], "tag": hardtekk["id"]}).json
+        self.assertIsNone(body["tracks"][0]["disagree"])
+        self.assertEqual(body["tracks"][0]["model"]["label"], "Techno")
+        self.assertFalse(body["model"]["knows"])
+
+    def test_a_head_sure_only_of_the_family_agrees_with_a_sibling(self):
+        """Rawstyle 0.45 / Rawphase 0.40: the head serves the FAMILY. Tagging the
+        record Rawphase is not a disagreement with that; tagging it Techno is."""
+        import math
+
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        self._bulk_head(
+            ["Rawphase", "Rawstyle", "Techno"],
+            [[math.log(0.40), math.log(0.45), math.log(0.15)]],
+            families={"Rawstyle": "rawstyle", "Rawphase": "rawstyle", "Techno": "techno"},
+        )
+        t = self._track("8510")
+        self._store_embedding(t, self._vec(emb.EMBED_DIM, 0))
+        for name, want in (("Rawphase", None), ("Techno", "model")):
+            tag = self._tag(name, "hard")
+            row = self.client.post("/api/genre/bulk/preview", json={"tracks": [t.deezer_id], "tag": tag["id"]}).json["tracks"][0]
+            self.assertEqual(row["model"]["level"], "family")
+            self.assertEqual(row["disagree"], want, name)
+
+    def test_a_bulk_tag_applies_to_what_was_kept_and_re_decides_it(self):
+        from supysonic.db import TrackTag
+        from supysonic.deezer import analysis as ana
+        from supysonic.webui import genre as wg
+
+        self._login()
+        french = self._tag("Frenchcore", "hard")
+        techno = self._tag("Techno", "groove")
+        a, b, kept_out = self._measured("8520"), self._measured("8521"), self._measured("8522")
+        self.client.post("/api/genre/label", json={"track": b.deezer_id, "tag": techno["id"]})
+        self.client.post("/api/genre/label", json={"track": kept_out.deezer_id, "tag": techno["id"]})
+        gen_before = self.client.post("/api/analyses", json={"ids": []}).json["gen"]
+        r = self.client.post("/api/genre/bulk", json={"tracks": [a.deezer_id, str(b.id), "404404404"], "tag": french["id"]})
+        self.assertEqual((r.status_code, r.json["applied"], r.json["missing"]), (200, 2, 1))
+        tags = sorted((str(tt.track_id), tt.tag_id) for tt in TrackTag.select())
+        self.assertEqual(
+            tags,
+            sorted([(str(a.id), french["id"]), (str(b.id), french["id"]), (str(kept_out.id), techno["id"])]),
+            "one tag per track (b's Techno is replaced, not joined); the one left out keeps its own",
+        )
+        # The verdicts move on the worker, and the devices are told.
+        self.assertEqual(len(self.relabels), 1)
+        wg._run_redecide(*self.relabels[0])
+        for t in (a, b):
+            row, data = self._row(t)
+            self.assertEqual((row.style, data["styleSource"]), ("Frenchcore", "tag"))
+        ana._gen_cache.update(at=0.0)
+        self.assertEqual(self.client.post("/api/analyses", json={"ids": []}).json["gen"], gen_before + 1)
+
+    def test_an_artist_scope_is_every_library_track_of_that_artist(self):
+        from supysonic.deezer import library
+
+        self._login()
+        tag = self._tag("Frenchcore", "hard")
+        root = library.get_root_folder(self.archive)
+        mine = [library.upsert_track(raw_track(str(8530 + i), art=("77", "Dr. Peacock")), root) for i in range(3)]
+        library.upsert_track(raw_track("8539", art=("78", "Someone Else")), root)
+        body = self.client.post("/api/genre/bulk/preview", json={"artist": "77", "tag": tag["id"]}).json
+        self.assertEqual(sorted(r["deezer_id"] for r in body["tracks"]), sorted(t.deezer_id for t in mine))
+        body = self.client.post("/api/genre/bulk/preview", json={"artist": "../x", "tag": tag["id"]}).json
+        self.assertEqual(body["tracks"], [])
+
     def test_removing_a_tag_gives_the_verdict_back(self):
         """A tag removed left the row naming the tag's genre with source "tag" —
         served as somebody's choice, by nobody, for ever."""

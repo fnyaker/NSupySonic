@@ -2,7 +2,7 @@
   import { onDestroy } from "svelte";
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
-  import { player, isAdmin, toasts, lastPlaylist, openExport } from "../lib/stores.js";
+  import { player, isAdmin, toasts, lastPlaylist, openExport, openGenreBulk } from "../lib/stores.js";
   import {
     toggleEntityFavorite,
     invalidatePlaylists,
@@ -280,6 +280,13 @@
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
       <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger la playlist" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
       <button class="icon-btn" on:click={() => openExport("playlist", id, data.playlist.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
+      {#if $isAdmin && data.tracks.length}
+        <button
+          class="icon-btn"
+          on:click={() => openGenreBulk({ kind: "playlist", title: data.playlist.title, cover: data.playlist.cover, tracks: data.tracks })}
+          aria-label="Donner un genre à la playlist"
+          title="Donner un genre à toute la playlist"><Icon name="tag" size={21} /></button>
+      {/if}
 
       {#if editable}
         <button class="icon-btn" on:click={() => (showAdd = true)} aria-label="Ajouter des titres" title="Ajouter des titres"><Icon name="plus" size={24} /></button>
