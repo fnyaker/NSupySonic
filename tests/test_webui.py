@@ -5820,6 +5820,206 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertEqual(data["styleSource"], "heuristic")
         self.assertEqual(row.style, ana.classify(ana._stored_features(row, self.MEASURES))[0])
 
+    # -- how a track is BUILT, next to the embedding -----------------------------
+
+    # The studio's standardisation for the contract tests; the SAME numbers are in
+    # webapp/test/construction.test.mjs, which pins the block the browser builds.
+    CX_MEAN = [0.3, 150, 0.1, 0.4, 0.2, 0.1, 0.05, 0.3, 0.5, 0.1, 0.6, 0.33, 0.33, 0.33]
+    CX_STD = [0.4, 40, 0.2, 0.2, 0.2, 0.1, 0.05, 0.2, 0.3, 0.1, 0.3, 0.2, 0.2, 0.2]
+
+    def _cx_inputs(self, embed, scale=0.3):
+        from supysonic.deezer import construction as cx
+
+        return {"embed": embed, "extras": list(cx.EXTRAS), "mean": self.CX_MEAN,
+                "std": self.CX_STD, "scale": scale}
+
+    def test_assemble_matches_the_studio(self):
+        """The head was trained on the block construction.js#extrasBlock builds;
+        the server must rebuild it number for number, or every verdict it gives
+        is computed on inputs the head never saw — and nothing would fail."""
+        from supysonic.deezer import construction as cx
+        from supysonic.deezer import genre as gen
+
+        head = {"dim": 4 + 15, "inputs": self._cx_inputs(4)}
+        summary = {"n": 5000, "features": {"kickF0": 180, "piep": 0.9, "tail": 0.3,
+                                           "four": 0.95, "roll": 0.2}}
+        x = gen.assemble(head, [1, 2, 3, 4], cx.raw_extras(150, summary))
+        want = [
+            0.01644607074558735, 0.22499999403953552, 1.2000000476837158, -0.15000000596046448,
+            0, 0, 0, 0, 0, 0.30000001192092896, 0.3499999940395355, 0, 0, 0, 0,
+        ]
+        self.assertEqual(x[:4], [1, 2, 3, 4])
+        self.assertEqual(len(x), 19)
+        for got, w in zip(x[4:], want):
+            self.assertAlmostEqual(got, w, places=6)
+        bare = gen.assemble(head, [1, 2, 3, 4], cx.raw_extras(150, None))
+        want_bare = [0.01644607074558735] + [0] * 13 + [0.30000001192092896]
+        for got, w in zip(bare[4:], want_bare):
+            self.assertAlmostEqual(got, w, places=6)
+        # Clipped at four standard deviations, like the studio.
+        loud = gen.assemble(head, [0] * 4, {"piep": 3.0, "kickF0": -1e6})
+        self.assertAlmostEqual(loud[6], 1.2)
+        self.assertAlmostEqual(loud[5], -1.2)
+        # The wrong width is refused; a v3 vector's v2 prefix is read.
+        self.assertIsNone(gen.assemble(head, [1, 2, 3], {}))
+        self.assertEqual(gen.assemble({"dim": 2560, "inputs": None}, list(range(3840)), None),
+                         list(range(2560)))
+
+    def test_a_head_s_inputs_must_add_up(self):
+        import json
+
+        from supysonic.deezer import genre as gen
+
+        good = self._cx_inputs(4)
+        self.assertIsNotNone(gen._inputs(json.dumps({"inputs": good}), 19))
+        self.assertIsNone(gen._inputs(json.dumps({}), 19), "no inputs: a plain head")
+        for bad, dim in (
+            (good, 20),  # one column too many
+            ({**good, "extras": good["extras"][:-1]}, 18),  # names and numbers disagree
+            ({**good, "extras": ["tempo"] * 14}, 19),  # the same input twice
+            ({**good, "extras": ["tempo", "loudness"] + good["extras"][2:]}, 19),
+            ({**good, "scale": 0}, 19),
+            ({**good, "scale": "inf"}, 19),
+            ({**good, "mean": good["mean"][:-1] + ["x"]}, 19),
+            ({**good, "embed": 0}, 15),
+        ):
+            self.assertIsNone(gen._inputs(json.dumps({"inputs": bad}), dim), bad)
+
+    def test_a_head_whose_inputs_do_not_add_up_is_refused(self):
+        """Stored, it would be read as a head over a wider embedding nobody has,
+        and silently decide nothing for ever."""
+        self._login()
+        dim = 4 + 15
+        rows = [[0.0] * dim, [0.0] * dim]
+        r = self.client.put(
+            "/api/genre/model",
+            json={"labels": ["a", "b"], "weights": self._encode([v for r in rows for v in r] + [0, 0]),
+                  "dim": dim, "kind": "linear",
+                  "metrics": {"inputs": {**self._cx_inputs(4), "embed": 5}}},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("inputs", r.json["error"])
+        self.assertIsNone(self.client.get("/api/genre/model").json.get("labels"))
+
+    def test_construction_summaries_are_cleaned(self):
+        from supysonic.deezer import construction as cx
+
+        for bad in (None, [], {"n": 0, "features": {"piep": 1}}, {"n": "x", "features": {}},
+                    {"n": 10, "features": []}, {"n": 10, "features": {"unknown": 1}},
+                    {"n": 10, "features": {"piep": "loud"}},
+                    {"n": 10, "features": {"piep": float("nan")}}):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                cx.clean(bad)
+        n, f = cx.clean({"n": 10**9, "features": {"kickF0": 1e9, "piep": -7, "other": 3}})
+        self.assertEqual(n, 30000, "one post counts for one play's worth at most")
+        self.assertEqual(f, {"kickF0": 2000.0, "piep": -1.0})
+
+    def _cx_post(self, ident, n, features):
+        return self.client.post(f"/api/analysis/{ident}/live",
+                                json={"n": n, "features": features})
+
+    def test_the_player_s_summary_is_kept_beside_the_audio(self):
+        import json as _json
+
+        from supysonic.deezer import construction as cx
+
+        self.assertEqual(self._cx_post("1", 3000, {"piep": 1}).status_code, 401)
+        self._login("bob", "B0bbb")
+        t = self._track("8301")
+        self._store_embedding(t, [0.1] * 4)  # any file: the audio is on disk
+        for ident in ("999999999", "not-a-track", "..%2F..%2Fetc"):
+            self.assertEqual(self._cx_post(ident, 3000, {"piep": 1}).status_code, 404, ident)
+        self.assertEqual(self._cx_post(t.deezer_id, 3000, {"nope": 1}).status_code, 400)
+        r = self._cx_post(t.deezer_id, 3000, {"piep": 1.0, "four": 0.9})
+        self.assertEqual((r.status_code, r.json["n"]), (200, 3000))
+        self.assertTrue(cx.sidecar_path(t).startswith(os.path.splitext(t.path)[0]))
+        # A mean weighted by frames: a second play of equal length meets it halfway.
+        self._cx_post(str(t.id), 3000, {"piep": 0.0})
+        self.assertEqual(cx.load(t), {"n": 6000, "features": {"piep": 0.5, "four": 0.9}})
+        # Once the stored weight is capped, no single post moves it more than a
+        # third of the way, however many frames it claims.
+        with open(cx.sidecar_path(t), "w") as fp:
+            _json.dump({"v": 1, "n": 60000, "features": {"piep": 0.0}}, fp)
+        self._cx_post(t.deezer_id, 10**9, {"piep": 1.0})
+        self.assertAlmostEqual(cx.load(t)["features"]["piep"], 0.33333, places=5)
+        # A track nobody archived keeps nothing (there is nothing to keep it by).
+        u = self._track("8302", archived=False)
+        r = self._cx_post(u.deezer_id, 3000, {"piep": 1})
+        self.assertEqual((r.status_code, r.json["stored"]), (202, False))
+        self.assertIsNone(cx.load(u))
+
+    def test_a_private_upload_takes_no_summary_from_another_user(self):
+        from supysonic.db import User
+
+        t = self._track("8303")
+        t.owner = User.get(User.name == "alice")
+        t.save()
+        self._login("bob", "B0bbb")
+        self.assertEqual(self._cx_post(str(t.id), 3000, {"piep": 1}).status_code, 404)
+
+    def test_a_head_reading_construction_decides_by_it(self):
+        """Two tracks with the SAME embedding — the pair the extractor cannot
+        tell apart — and a head that reads the piep: one is Pieep, the other
+        Techno, and a summary arriving from the player re-decides the row."""
+        from supysonic.deezer import analysis as ana
+        from supysonic.deezer import embedding as emb
+        from supysonic.deezer import genre as gen
+
+        from .test_deezer import count_statements
+
+        self._login()
+        embed = emb.EMBED_DIM
+        dim = embed + 15
+        vec = self._vec(embed, 0)
+        piep = self._measured("8401", vec)
+        plain = self._measured("8402", vec)
+        # Logits: +8·(piep column) for Pieep, −8· for Techno; the embedding votes
+        # for neither.
+        col = embed + 2
+        w = [[0.0] * dim, [0.0] * dim]
+        w[0][col], w[1][col] = 8.0, -8.0
+        mean, std = list(self.CX_MEAN), list(self.CX_STD)
+        mean[2], std[2] = 0.5, 0.25
+        r = self.client.put(
+            "/api/genre/model",
+            json={"labels": ["Pieep", "Techno"], "weights": self._encode(w[0] + w[1] + [0, 0]),
+                  "dim": dim, "kind": "linear",
+                  "metrics": {"inputs": {**self._cx_inputs(embed), "mean": mean, "std": std}}},
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        gen.invalidate()
+        self.assertTrue(gen.reads_extras())
+        self._cx_post(piep.deezer_id, 3000, {"piep": 0.95})
+        self._cx_post(plain.deezer_id, 3000, {"piep": 0.0})
+        row, data = self._row(piep)
+        self.assertEqual((row.style, data["styleSource"]), ("Pieep", "model"))
+        row, data = self._row(plain)
+        self.assertEqual((row.style, data["styleSource"]), ("Techno", "model"))
+        # Without a summary the head reads the flag instead, and keeps quiet here.
+        self.assertIsNone(gen.decide(vec, ana.MODEL_MIN_CONFIDENCE, ana.MODEL_MIN_MARGIN, {}))
+        # The studio sees what it needs to measure the rest, in one statement.
+        blank = self._measured("8403", vec)
+        tag = self._tag("Pieep", "hard")
+        for t in (piep, blank):
+            self.client.post("/api/genre/label", json={"track": t.deezer_id, "tag": tag["id"]})
+        with count_statements() as stmts:
+            body = self.client.get("/api/genre/construction").json
+        self.assertEqual((body["labelled"], body["measured"]), (2, 1))
+        self.assertEqual(body["missing"], [{"id": blank.deezer_id, "bpm": 150.0}])
+        self.assertLessEqual(sum(stmts.values()), 4, stmts)
+        # And the vectors it trains on carry the same extras.
+        ex = self.client.post("/api/genre/embeddings", json={"ids": [piep.deezer_id]}).json["extras"]
+        self.assertEqual(ex[piep.deezer_id]["bpm"], 150.0)
+        self.assertEqual(ex[piep.deezer_id]["live"], {"piep": 0.95})
+        # The candidate list reads them too (the tempo JOINED, not asked per row).
+        hard, soft = self._measured("8404", vec), self._measured("8405", vec)
+        self._cx_post(hard.deezer_id, 3000, {"piep": 0.95})
+        self._cx_post(soft.deezer_id, 3000, {"piep": 0.0})
+        cands = self.client.get("/api/genre/candidates?limit=10").json["candidates"]
+        guess = {c["deezer_id"]: c.get("predicted") for c in cands}
+        self.assertEqual(guess[hard.deezer_id], "Pieep")
+        self.assertEqual(guess[soft.deezer_id], "Techno")
+
     def test_predict_is_none_without_a_model(self):
         """No head is not an error — the heuristic classifier keeps its job."""
         from supysonic.deezer import genre as gen

@@ -86,6 +86,8 @@ import {
   LOOK_KEYS,
 } from "./style.js";
 import { parseLayout } from "./rhythm-core.js";
+import { ConstructionMeter } from "../genre/construction.js";
+import { api } from "../api.js";
 
 // 120 log-spaced bands over 22 Hz..18 kHz — about 20 per octave, so roughly
 // half a semitone. Fixed rather than per-view: scenes that want fewer bars
@@ -826,6 +828,7 @@ function deliver(q, nowMs, heard) {
 
     if (analysisLevel >= LEVEL.SMART) {
       decodeStyle(buf, I);
+      if (meterTrack === id) meter.add(buf, I);
       // Where the server has measured the track, ITS verdict is the authority:
       // it heard the whole piece, this one has heard a few seconds of it. The
       // kick stays the live reading either way — that is a per-event property
@@ -997,7 +1000,24 @@ function emit() {
   }
 }
 
+// How the track is BUILT, averaged over its groove while it plays at the
+// "smart" level (lib/genre/construction.js), and sent once the track changes:
+// the genre head reads it next to the embedding. Thirteen additions a frame.
+const meter = new ConstructionMeter();
+let meterTrack = null;
+
+function flushMeter() {
+  const summary = meter.summary();
+  const id = meterTrack;
+  meter.reset();
+  meterTrack = null;
+  if (summary && id) api.analysisLive(id, summary).catch(() => {});
+}
+if (typeof window !== "undefined") window.addEventListener("pagehide", flushMeter);
+
 function newTrack(id) {
+  flushMeter();
+  meterTrack = id;
   lastTrackId = id;
   frame.trackId = id;
   gen++;

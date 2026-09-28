@@ -68,6 +68,88 @@ def _families(metrics_json, labels):
     }
 
 
+def _inputs(metrics_json, dim):
+    """What the head reads NEXT TO the embedding, as the studio built it
+    (webapp/src/lib/genre/construction.js#extrasBlock), or None for a head
+    over the embedding alone: ``{embed, extras, mean, std, scale}``. Anything
+    that does not add up to the head's own width is refused, not guessed at."""
+    try:
+        raw = (json.loads(metrics_json or "{}") or {}).get("inputs")
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    from .construction import EXTRAS
+
+    names, mean, std = raw.get("extras"), raw.get("mean"), raw.get("std")
+    try:
+        embed = int(raw.get("embed"))
+        scale = float(raw.get("scale"))
+        mean = [float(v) for v in mean]
+        std = [max(1e-3, float(v)) for v in std]
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(names, list) or not (len(names) == len(mean) == len(std)):
+        return None
+    if any(n not in EXTRAS for n in names) or len(set(names)) != len(names):
+        return None
+    if embed <= 0 or embed + len(names) + 1 != dim:
+        return None
+    if not (math.isfinite(scale) and 0 < scale <= 100) or not all(map(math.isfinite, mean + std)):
+        return None
+    return {"embed": embed, "extras": names, "mean": mean, "std": std, "scale": scale}
+
+
+#: A stored vector a head over a narrower one may read the start of: a v3
+#: vector (mean, std, loud-half mean) BEGINS with the v2 one, value for value
+#: (embedding.py#_aggregate), so a head trained on v2 keeps working.
+_PREFIX_OK = {3840: 2560}
+
+
+def assemble(head, vec, extra=None):
+    """The head's input for one track, or None when it cannot be built.
+
+    The embedding (or the v2 prefix of a v3 one), then — for a head that reads
+    them — each extra standardised as the studio standardised it, clipped to
+    ±4 and scaled, and a flag for "no construction summary". ``extra`` is
+    construction.raw_extras() for the track.
+    """
+    if vec is None:
+        return None
+    x = list(vec)
+    inputs = head.get("inputs")
+    want = inputs["embed"] if inputs else head["dim"]
+    if len(x) != want:
+        if _PREFIX_OK.get(len(x)) != want:
+            return None
+        x = x[:want]
+    if not inputs:
+        return x
+    extra = extra or {}
+    live = False
+    scale = inputs["scale"]
+    for name, m, s in zip(inputs["extras"], inputs["mean"], inputs["std"]):
+        v = extra.get(name)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            v = math.nan
+        if not math.isfinite(v):
+            x.append(0.0)
+            continue
+        if name != "tempo":
+            live = True
+        x.append(max(-4.0, min(4.0, (v - m) / s)) * scale)
+    x.append(0.0 if live else scale)
+    return x
+
+
+def reads_extras() -> bool:
+    """Does the active head read anything next to the embedding?"""
+    head = active_head()
+    return bool(head and head.get("inputs"))
+
+
 def active_head():
     """The live head as {labels, dim, w, b}, or None."""
     now = time.monotonic()
@@ -113,6 +195,7 @@ def active_head():
         except Exception:
             pass
         head["families"] = _families(row.metrics, labels)
+        head["inputs"] = _inputs(row.metrics, dim)
         if kind == "mlp2":
             want = (
                 hidden * dim + hidden
@@ -258,8 +341,11 @@ def _logits(head, x):
     return logits
 
 
-def predict(vec):
+def predict(vec, extra=None):
     """(label, confidence, probabilities, margin) for one embedding, or None.
+
+    ``extra``: the track's construction.raw_extras(), for a head that reads
+    them (assemble); ignored by one that does not.
 
     ``margin`` is top1 − top2. It is reported because it is the better gate on
     whether a guess is worth acting on: a head can be 0.6 on the right label
@@ -270,9 +356,8 @@ def predict(vec):
     head = active_head()
     if head is None or vec is None:
         return None
-    dim = head["dim"]
-    x = list(vec)
-    if len(x) != dim:
+    x = assemble(head, vec, extra)
+    if x is None:
         return None
     logits = _logits(head, x)
     # Temperature scaling, as loaded with the head. Dividing every logit by the
@@ -296,7 +381,7 @@ def predict(vec):
     return head["labels"][best], round(probs[best], 4), dist, margin
 
 
-def decide(vec, min_conf, min_margin):
+def decide(vec, min_conf, min_margin, extra=None):
     """What the head may say about a track, or None when it should keep quiet.
 
     ``{"style", "conf", "dist", "level"}``: ``level`` is "label" when its own
@@ -308,7 +393,7 @@ def decide(vec, min_conf, min_margin):
     families come from the studio (``_families``); a label without one is no
     evidence for any family and competes on its own.
     """
-    guess = predict(vec)
+    guess = predict(vec, extra)
     if not guess:
         return None
     label, conf, dist, margin = guess

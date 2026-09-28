@@ -36,7 +36,9 @@ run it is about to play, in one call, before any of it starts.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import uuid
 
 from flask import current_app, jsonify, request
 
@@ -468,6 +470,50 @@ def track_analysis(mid):
         return jsonify({"ready": True, **ana.payload_for(row, tag=tag)})
     pending = [str(mid)] if ana.request_analysis(track) else []
     return jsonify({"ready": False, "pending": pending})
+
+
+@webapi.route("/analysis/<mid>/live", methods=["POST"])
+@login_required
+def track_construction(mid):
+    """How a track is BUILT, as the player's analyser heard it while it played
+    (webapp/src/lib/genre/construction.js): kept beside the audio and read by
+    the genre head next to the embedding (deezer/construction.py).
+
+    Only for a track the caller may read and that is archived (the summary
+    lives beside the file). Every value is clamped and merged into a running
+    mean of capped weight, so a post can refine a summary, never take it over.
+    """
+    from ..deezer import analysis as ana
+    from ..deezer import construction as cx
+    from ..deezer import genre as gen
+    from ..deezer import ids as dz_ids
+
+    try:
+        if _valid_id(mid):
+            track = Track.get_or_none(Track.id == dz_ids.track_uuid(str(mid)))
+        else:
+            track = Track.get_or_none(Track.id == uuid.UUID(str(mid)))
+    except (ValueError, AttributeError, TypeError):
+        track = None
+    if track is None or not _may_access_track(track):
+        return jsonify({"error": "unknown track"}), 404
+    try:
+        n, features = cx.clean(request.get_json(silent=True))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not track.path or not os.path.isfile(track.path):
+        # Nothing on disk to keep it beside: a summary for a stream that was
+        # never archived is simply not kept.
+        return jsonify({"stored": False}), 202
+    doc = cx.merge_and_save(track, n, features)
+    if doc is None:
+        return jsonify({"stored": False}), 202
+    # A head that reads construction decides this track again, now.
+    if gen.reads_extras():
+        row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+        if row is not None:
+            ana.redecide(row)
+    return jsonify({"stored": True, "n": doc["n"]})
 
 
 @webapi.route("/analyses", methods=["POST"])

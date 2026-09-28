@@ -1517,7 +1517,13 @@ def _decide_style(track, feats, vec):
     try:
         from . import genre as gen
 
-        verdict = gen.decide(vec, MODEL_MIN_CONFIDENCE, MODEL_MIN_MARGIN)
+        extra = None
+        if gen.reads_extras():
+            # How the track is built, and its tempo, for a head that reads them.
+            from . import construction as cx
+
+            extra = cx.raw_extras(feats.get("bpm"), cx.load(track))
+        verdict = gen.decide(vec, MODEL_MIN_CONFIDENCE, MODEL_MIN_MARGIN, extra)
     except Exception as exc:
         logger.warning(
             "analysis: genre head failed for %s: %s", getattr(track, "path", track), exc, exc_info=True

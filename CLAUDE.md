@@ -846,6 +846,29 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   label's family with the model (`metrics.families`, from `style.js#genreOf`); the server sums the
   probabilities per family and serves the family id under the same gate (`styleLevel: "family"`).
   A label with no family, or a family the server does not know, votes for nothing.
+- **The head can also read how the track is BUILT, and its tempo** (`lib/genre/construction.js`,
+  `deezer/construction.py`, `genre.assemble`). The frozen extractor hears timbre well and tempo
+  poorly, and Discogs has no Pieep and no Deutscher Krach — what separates those is what the live
+  analyser reads kick by kick. A `ConstructionMeter` averages thirteen of its descriptors (`kickF0`,
+  `piep`, `tail`, the lead, the buzz, rolls, four on the floor, the kick-shape weights…) over the
+  frames where the grid is locked and the level is up (≥ 1900 of them, ~20 s), fed by the PLAYER at
+  the smart level (thirteen additions a frame, posted on the next track to
+  `POST /api/analysis/<id>/live`) and by the studio's own measurer (`measure.js` + a worker running
+  the same `rhythm.wasm` over a decoded Opus 128 copy, for tagged tracks nobody played that way).
+  Measured through the shipped binary: piep 0.95 on the pieep record against ≤ 0.10 everywhere else;
+  kick pitch 63 Hz on techno against 173-175 on uptempo and Krach; four on the floor 0.90-0.95 on
+  every 4/4 record against 0.33 on dnb. The summary is a `<track>.live.json` beside the audio,
+  clamped, merged as a frame-weighted mean whose post weight (`MAX_FRAMES_PER_POST`) and stored
+  weight (`MAX_WEIGHT`) are capped — once two plays are in, no post moves it more than a third of
+  the way — and only for a track the caller may read and that is archived. The head's input is the
+  embedding, then `log2(bpm/120)` and the thirteen, each standardised on the training set, clipped
+  to ±4 and scaled by **0.3** (measured on genres that differ only by tempo and piep: 0.1 learns
+  them partly, 1.0 starts trading the embedding's genres for noise), then ONE flag for "no summary".
+  The studio decides whether to use them at all: a quick linear head with and without, same folds
+  and seed, kept only on a gain of a point. The layout ships as `metrics.inputs` and the server
+  rebuilds it number for number — a shared literal in `construction.test.mjs` and `test_webui.py`
+  holds the two to it, and `PUT /genre/model` refuses inputs that do not add up to the head's width.
+  A summary arriving re-decides its row at once; the candidate scan JOINS the served tempo.
 - **The CSP had to be widened by exactly one token.** `script-src 'self' 'wasm-unsafe-eval'` permits
   WebAssembly compilation and nothing else — not `eval()`, not `new Function`, not inline script.
   Without it `WebAssembly.instantiate` is refused outright and deep training cannot run at all.

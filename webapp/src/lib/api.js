@@ -256,7 +256,11 @@ export const api = {
   genreModelDelete: () => req("/genre/model", { method: "DELETE" }),
   // Re-deciding the stored verdicts under the active head (no re-measure).
   genreRelabel: () => req("/genre/relabel"),
+  // How a track is built, as the analyser heard it (lib/genre/construction.js).
+  analysisLive: (id, summary) =>
+    req(`/analysis/${encodeURIComponent(id)}/live`, { method: "POST", body: body(summary), keepalive: true }),
   genreRelabelStart: () => req("/genre/relabel", { method: "POST" }),
+  genreConstruction: () => req("/genre/construction"),
 
   // The frozen ONNX extractor: install the operator's own copy of the model
   // from the browser, remove it, or run the built-in sanity check on real

@@ -17,6 +17,8 @@
   import { user, toasts, player, downloadQuality } from "../lib/stores.js";
   import { decodeEmbedding, encodeHead } from "../lib/genre/wire.js";
   import { genreOf } from "../lib/audio/style.js";
+  import { EXTRAS, rawExtras, fitScaler, extrasBlock } from "../lib/genre/construction.js";
+  import { measureTrack, releaseMeasurer } from "../lib/genre/measure.js";
   import { train, release } from "../lib/genre/trainer.js";
   import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
@@ -136,6 +138,27 @@
       /* not remembered, still applied */
     }
   }
+  // Read the served tempo and the construction summaries next to the
+  // embedding — when a quick head says they help (CONSTRUCTION_MIN_GAIN).
+  let useConstruction = true;
+  try {
+    useConstruction = localStorage.getItem("genre.construction") !== "0";
+  } catch {
+    /* default */
+  }
+  $: {
+    try {
+      localStorage.setItem("genre.construction", useConstruction ? "1" : "0");
+    } catch {
+      /* not remembered, still applied */
+    }
+  }
+  // Measured on synthetic genres that differ only in tempo and piep: 0.3 lets
+  // them be told apart (recall 1.0 on all four, three seeds) while genres the
+  // embedding separates stay at 1.0; 0.1 learns them only partly, 1.0 starts
+  // trading the embedding's genres for noise in the extras.
+  const EXTRA_SCALE = 0.3;
+  const CONSTRUCTION_MIN_GAIN = 0.01;
   let training = false;
   let progress = 0;
   let progressStage = "";
@@ -443,33 +466,57 @@
 
     // Embeddings in batches: /genre/embeddings never extracts, so a track whose
     // vector is missing is simply left out rather than making the whole run wait.
+    // Each comes with what the head can read next to it: the served tempo and
+    // the construction summary (lib/genre/construction.js).
     const ids = keep.map((r) => r.deezer_id || r.id);
     const vectors = new Map();
+    const extras = new Map();
     const BATCH = 200;
     for (let i = 0; i < ids.length; i += BATCH) {
       progressStage = "vecteurs";
-      progress = (0.25 * i) / Math.max(1, ids.length);
+      progress = (0.2 * i) / Math.max(1, ids.length);
       const part = await api.genreEmbeddings(ids.slice(i, i + BATCH));
       for (const [k, v] of Object.entries(part.embeddings || {}))
         vectors.set(k, decodeEmbedding(v));
+      for (const [k, v] of Object.entries(part.extras || {})) extras.set(k, v);
     }
     const usable = keep.filter((r) => vectors.has(String(r.deezer_id || r.id)));
     if (!usable.length)
       throw new Error("aucun vecteur disponible — lancez « supysonic-cli deezer embed »");
     const d = vectors.get(String(usable[0].deezer_id || usable[0].id)).length;
-    const X = new Float32Array(usable.length * d);
     const y = new Int32Array(usable.length);
     // Each row's artist as a small integer, for the artist folds.
     const groups = new Int32Array(usable.length);
     const artistIds = new Map();
+    const rowsV = [];
+    const raws = [];
     usable.forEach((r, i) => {
-      X.set(vectors.get(String(r.deezer_id || r.id)), i * d);
+      const key = String(r.deezer_id || r.id);
+      rowsV.push(vectors.get(key));
+      raws.push(rawExtras(extras.get(key)));
       y[i] = names.indexOf(r.tag.name);
       const a = r.artist_id || null;
       if (a && !artistIds.has(a)) artistIds.set(a, artistIds.size);
       groups[i] = a ? artistIds.get(a) : -1;
     });
-    return { X, y, groups, n: usable.length, d, labels: names, skipped: keep.length - usable.length };
+    return {
+      rowsV, raws, y, groups, n: usable.length, d, labels: names,
+      measured: raws.filter((r) => r.slice(1).some(Number.isFinite)).length,
+      skipped: keep.length - usable.length,
+    };
+  }
+
+  // The matrix a trainer gets, built fresh per call (the worker takes the
+  // buffers): the embeddings alone, or with the extras block after them.
+  function pack(data, scaler) {
+    const k = scaler ? EXTRAS.length + 1 : 0;
+    const dim = data.d + k;
+    const X = new Float32Array(data.n * dim);
+    for (let i = 0; i < data.n; i++) {
+      X.set(data.rowsV[i], i * dim);
+      if (scaler) X.set(extrasBlock(data.raws[i], scaler, EXTRA_SCALE), i * dim + data.d);
+    }
+    return { X, y: data.y.slice(), groups: data.groups.slice(), n: data.n, d: dim, labels: data.labels };
   }
 
   async function runTraining() {
@@ -482,16 +529,54 @@
     try {
       const data = await buildMatrix();
       const skipped = data.skipped;
+      const seed = (Math.random() * 0x100000000) >>> 0;
+      const base = { grouped: byArtist, seed };
+      // Tempo and construction: worth it only if they MEASURABLY help. A quick
+      // linear head with them and one without, on the same folds and seed; the
+      // requested mode then trains once, on whichever input won.
+      let scaler = null;
+      let construction = null;
+      let quick = null;
+      const hasExtras = data.raws.some((r) => r.some(Number.isFinite));
+      if (useConstruction && hasExtras) {
+        progressStage = "tempo et construction";
+        const fitted = fitScaler(data.raws);
+        const without = await train(pack(data, null), "linear", (st, pct) => (progress = 0.2 + 0.15 * (pct || 0)), base);
+        const withX = await train(pack(data, fitted), "linear", (st, pct) => (progress = 0.35 + 0.15 * (pct || 0)), base);
+        const used = withX.metrics.balanced >= without.metrics.balanced + CONSTRUCTION_MIN_GAIN;
+        construction = {
+          used,
+          with: withX.metrics.balanced,
+          without: without.metrics.balanced,
+          measured: data.measured,
+          examples: data.n,
+        };
+        scaler = used ? fitted : null;
+        quick = used ? withX : without;
+      }
+      const from = quick ? 0.5 : 0.2;
       progressStage = mode === "linear" ? "entraînement" : "entraînement approfondi";
-      const trained = await train(
-        data,
-        mode === "linear" ? "linear" : "deep",
-        (stage, pct) => {
-          progressStage = stage === "done" ? "terminé" : progressStage;
-          progress = 0.25 + 0.75 * (pct || 0);
-        },
-        { ...(TRAIN_OPTS[mode] || {}), grouped: byArtist }
-      );
+      const trained =
+        mode === "linear" && quick
+          ? quick
+          : await train(
+              pack(data, scaler),
+              mode === "linear" ? "linear" : "deep",
+              (stage, pct) => {
+                progressStage = stage === "done" ? "terminé" : progressStage;
+                progress = from + (1 - from) * (pct || 0);
+              },
+              { ...(TRAIN_OPTS[mode] || {}), ...base }
+            );
+      if (construction) trained.metrics.construction = construction;
+      if (scaler)
+        trained.metrics.inputs = {
+          embed: data.d,
+          extras: EXTRAS,
+          mean: scaler.mean,
+          std: scaler.std,
+          scale: EXTRA_SCALE,
+        };
       trained.skipped = skipped;
       head = trained;
       progress = 1;
@@ -500,6 +585,49 @@
     } finally {
       training = false;
     }
+  }
+
+  // -- construction: how many tagged tracks have been measured -----------------
+  let constr = null;
+  let measuring = false;
+  let measureDone = 0;
+  let measureTotal = 0;
+  let measureFailed = 0;
+  let measureAbort = null;
+  async function loadConstruction() {
+    try {
+      constr = await api.genreConstruction();
+    } catch {
+      constr = null;
+    }
+  }
+  async function measureMissing() {
+    if (measuring || !constr?.missing?.length) return;
+    measuring = true;
+    measureAbort = new AbortController();
+    const list = constr.missing.slice();
+    measureTotal = list.length;
+    measureDone = 0;
+    measureFailed = 0;
+    try {
+      for (const t of list) {
+        if (measureAbort.signal.aborted) break;
+        try {
+          await measureTrack(t.id, t.bpm, measureAbort.signal);
+        } catch {
+          if (measureAbort.signal.aborted) break;
+          measureFailed++;
+        }
+        measureDone++;
+      }
+    } finally {
+      measuring = false;
+      measureAbort = null;
+      await loadConstruction();
+    }
+  }
+  function stopMeasuring() {
+    measureAbort?.abort();
   }
 
   async function sendModel() {
@@ -825,6 +953,7 @@
     refresh();
     loadJobStatus();
     watchRelabel();
+    loadConstruction();
     // Unconditionally: the extractor is what MEASURES a track, and tagging only
     // needs what was already measured. An archive carried over from a server
     // that had onnxruntime is a perfectly good training set on one that does
@@ -838,6 +967,8 @@
     stopEmbedPoll();
     stopAnalysisPoll();
     stopRelabelPoll();
+    stopMeasuring();
+    releaseMeasurer();
     release();
   });
 
@@ -1501,6 +1632,40 @@
           </span>
         </label>
 
+        <label class="option" class:on={useConstruction}>
+          <input type="checkbox" bind:checked={useConstruction} />
+          <span class="option-text">
+            <strong>Lire aussi le tempo et la construction</strong>
+            <span class="muted">
+              Le modèle d'empreinte entend bien le timbre mais mal le tempo, et il n'a
+              jamais appris le Pieep ni le Deutscher Krach. L'analyseur du lecteur mesure,
+              lui, comment le morceau est construit : la hauteur du kick, le squeak du
+              pieep, les rolls, le buzz, le kick sur chaque temps. Ces mesures sont
+              gardées si elles améliorent réellement la note — l'entraînement le vérifie.
+            </span>
+          </span>
+        </label>
+        <!-- Outside the label: a button inside one would be a second control it
+             labels, and a click on it would tick the box. -->
+        {#if useConstruction && constr && constr.labelled}
+          <div class="measure">
+            <span class="muted small">
+              Construction mesurée pour <strong>{constr.measured}</strong> titre{constr.measured > 1 ? "s" : ""}
+              étiqueté{constr.measured > 1 ? "s" : ""} sur {constr.labelled}.
+            </span>
+            {#if measuring}
+              <span class="muted small">
+                Mesure… {measureDone} / {measureTotal}{#if measureFailed}, {measureFailed} en échec{/if}
+              </span>
+              <button class="ghost small-btn" on:click={stopMeasuring}>Arrêter</button>
+            {:else if constr.missing?.length}
+              <button class="ghost small-btn" on:click={measureMissing}>
+                <Icon name="activity" size={14} /> Mesurer les {constr.missing.length} restants
+              </button>
+            {/if}
+          </div>
+        {/if}
+
         <div class="run">
           <button class="primary big" on:click={runTraining} disabled={training || !trainable}>
             {#if training}
@@ -1547,6 +1712,17 @@
                     {head.metrics.temperature > 1
                       ? "le modèle était trop sûr de lui : ses confiances sont ramenées à ce qu'elles valent avant que le serveur ne s'en serve"
                       : "le modèle était trop timide : ses confiances sont relevées"}
+                  </span>
+                </div>
+              {/if}
+              {#if head.metrics.construction}
+                {@const c = head.metrics.construction}
+                <div class="score">
+                  <span class="k">Tempo et construction</span>
+                  <span class="v">{c.used ? "utilisés" : "écartés"}</span>
+                  <span class="muted small">
+                    tête rapide {pct(c.with)} % avec, {pct(c.without)} % sans ·
+                    construction mesurée pour {c.measured} / {c.examples} titres
                   </span>
                 </div>
               {/if}
@@ -2412,6 +2588,18 @@
   .small-btn {
     margin-top: 10px;
     font-size: 0.84rem;
+  }
+  .measure {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    /* Tucked under the option card, aligned with its text (the card's padding,
+       the checkbox and the gap). */
+    margin: -6px 0 14px 43px;
+  }
+  .measure .small-btn {
+    margin-top: 0;
   }
   .option {
     display: flex;

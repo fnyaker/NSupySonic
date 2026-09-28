@@ -28,8 +28,18 @@ import time
 from uuid import UUID
 
 from flask import current_app, jsonify, request
+from peewee import JOIN
 
-from ..db import Album, Artist, GenreModel, GenreTag, Track, TrackTag, now
+from ..db import (
+    Album,
+    Artist,
+    GenreModel,
+    GenreTag,
+    Track,
+    TrackAnalysis,
+    TrackTag,
+    now,
+)
 from . import _is_admin, _valid_id, admin_required, login_required, webapi
 
 logger = logging.getLogger(__name__)
@@ -445,7 +455,8 @@ def _candidate_row(track, emb, gen, cache):
         # The head is only one of two opinions once labels exist. The prototype
         # needs no training, so it is the only one with something to say while a
         # genre is still one or two examples old — see deezer/genre.py.
-        hit = (gen.predict(vec), gen.prototype_predict(vec))
+        extra = _extras(track, _served_bpm(track)) if gen.reads_extras() else None
+        hit = (gen.predict(vec, extra), gen.prototype_predict(vec))
         if len(cache) < _PRED_CACHE_MAX:
             cache[track.id] = hit
     guess, proto = hit
@@ -458,6 +469,21 @@ def _candidate_row(track, emb, gen, cache):
     margin = (guess[3] if len(guess) > 3 else 1.0) if guess else 0.0
     row["uncertainty"] = round(max(0.0, 1.0 - margin), 4)
     return row
+
+
+def _served_bpm(track):
+    """The served tempo the candidate scan JOINED onto the row (``served``),
+    None when the track has no verdict yet."""
+    served = getattr(track, "served", None)
+    return served.bpm if served is not None else None
+
+
+def _extras(track, bpm):
+    """The track's served tempo and construction summary, as the head reads
+    them next to the embedding (deezer/construction.py)."""
+    from ..deezer import construction as cx
+
+    return cx.raw_extras(bpm, cx.load(track))
 
 
 def _resolve(ident):
@@ -916,10 +942,18 @@ def genre_candidates():
         # off a bare Track row is a second SELECT, and `track.album.name` a
         # third, so a four-thousand-row scan opened eight thousand round trips
         # before it had looked at a single vector.
-        Track.select(Track, Artist, Album)
+        Track.select(Track, Artist, Album, TrackAnalysis.bpm)
         .join(Artist, on=(Track.artist == Artist.id))
         .switch(Track)
         .join(Album, on=(Track.album == Album.id))
+        # The served tempo, for a head that reads it next to the vector.
+        .switch(Track)
+        .join(
+            TrackAnalysis,
+            JOIN.LEFT_OUTER,
+            on=(TrackAnalysis.track == Track.id),
+            attr="served",
+        )
         .where(Track.last_modification > 0)
         .order_by(Track.play_count.desc(), Track.created.desc())
         # Bounded: whether a track HAS a vector is a file on disk, not a column,
@@ -1021,6 +1055,42 @@ def genre_labelled():
     return jsonify({"labelled": out})
 
 
+@webapi.route("/genre/construction")
+@login_required
+@admin_required
+def genre_construction():
+    """Which tagged tracks carry a construction summary (deezer/construction.py),
+    and which do not — with their served tempo, which the studio's measurer
+    seeds the analyser with, as the player does."""
+    import os
+
+    from ..deezer import construction as cx
+
+    # One statement: the tags, their tracks and the served tempo, joined.
+    tagged = list(
+        TrackTag.select(TrackTag, Track, TrackAnalysis.bpm)
+        .join(Track)
+        .join(
+            TrackAnalysis,
+            JOIN.LEFT_OUTER,
+            on=(TrackAnalysis.track == Track.id),
+            attr="served",
+        )
+    )
+    measured = 0
+    missing = []
+    for tt in tagged:
+        t = tt.track
+        if not t.path or not os.path.isfile(t.path):
+            continue
+        p = cx.sidecar_path(t)
+        if p and os.path.isfile(p):
+            measured += 1
+        else:
+            missing.append({"id": t.deezer_id or str(t.id), "bpm": _served_bpm(t)})
+    return jsonify({"labelled": len(tagged), "measured": measured, "missing": missing})
+
+
 @webapi.route("/genre/embeddings", methods=["POST"])
 @login_required
 @admin_required
@@ -1038,6 +1108,7 @@ def genre_embeddings():
     re-run since the aggregation changed, which the studio already offers as a
     button — so the honest answer is "not yet", not a padded vector.
     """
+    from ..deezer import construction as cx
     from ..deezer import embedding as emb
 
     data = request.get_json(silent=True) or {}
@@ -1045,6 +1116,7 @@ def genre_embeddings():
     if not isinstance(raw, list):
         return jsonify({"error": "ids must be a list"}), 400
     out = {}
+    tracks = {}
     stale = 0
     for ident in list(dict.fromkeys(str(x) for x in raw))[:EMBED_BATCH_MAX]:
         track = _resolve(ident)
@@ -1057,7 +1129,23 @@ def genre_embeddings():
             stale += 1
             continue
         out[ident] = emb.encode_embedding(vec)
-    return jsonify({"embeddings": out, "dim": emb.EMBED_DIM, "stale": stale})
+        tracks[ident] = track
+    # What the head can read next to each vector: the served tempo (one query
+    # for the batch) and the construction summary the player measured.
+    bpms = {}
+    if tracks:
+        for row in TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.bpm).where(
+            TrackAnalysis.track.in_([t.id for t in tracks.values()])
+        ):
+            bpms[row.track_id] = row.bpm
+    extras = {}
+    for ident, track in tracks.items():
+        summary = cx.load(track)
+        extras[ident] = {
+            "bpm": bpms.get(track.id),
+            "live": summary["features"] if summary else None,
+        }
+    return jsonify({"embeddings": out, "dim": emb.EMBED_DIM, "stale": stale, "extras": extras})
 
 
 @webapi.route("/genre/model", methods=["GET", "PUT", "DELETE"])
@@ -1123,10 +1211,17 @@ def genre_model():
     # head is retired — the other order left a refused upload with no model at
     # all, the working one switched off on the way to finding out.
     head = gen.active_head()
+    problem = None
     if head is None or head["id"] != row.id:
+        problem = "weights do not match the labels and dim given"
+    elif isinstance(data.get("metrics"), dict) and "inputs" in data["metrics"] and not head["inputs"]:
+        # A head over the embedding AND extras whose description does not add up
+        # would be read as a head over a wider embedding nobody has: never used.
+        problem = "the inputs described do not add up to the head's width"
+    if problem:
         row.delete_instance()
         gen.invalidate()
-        return jsonify({"error": "weights do not match the labels and dim given"}), 400
+        return jsonify({"error": problem}), 400
     GenreModel.update(active=False).where(GenreModel.id != row.id).execute()
     gen.invalidate()
     # The new head reaches the whole library from what is already measured.
