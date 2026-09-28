@@ -18,6 +18,8 @@ import {
   playCacheSize,
 } from "./stores.js";
 import { isDownloaded } from "./offline.js";
+import { blobDecodes } from "./imagebytes.js";
+import { logInfo } from "./log.js";
 import { primeGain } from "./gaincache.js";
 import { primeAnalyses } from "./analysis.js";
 
@@ -289,28 +291,68 @@ export async function enforce(limit) {
 // in-memory flag that resets on every re-render, so the broken blob is handed
 // back on every cover change, every playback and every launch. Deleting it is
 // what turns a permanently artless album into one that fixes itself.
-export async function forgetCachedCover(coverUrl) {
-  if (!coverUrl) return false;
+//
+// But only what really does not decode. An <img> fails for reasons that have
+// nothing to do with its bytes — a page policy refusing blob: images did, for
+// every cover, and this function then deleted each one and the player fetched
+// it again on the next play, forever. So the stored bytes are decoded first
+// (lib/imagebytes.js) and a picture that decodes is kept, blob URL and all.
+//
+// Resolves true when the playback cache OWNED this art (the caller then leaves
+// the permanent downloads' copy alone).
+const forgetting = new Map(); // key -> in-flight forget, shared by every caller
+const keptNoted = new Set(); // keys already logged as "refused but intact"
+export function forgetCachedCover(coverUrl) {
+  if (!coverUrl) return Promise.resolve(false);
   const key = coverKey(coverUrl);
-  let owned = false;
+  // Every Cover showing this art fails at once; one check answers all of them.
+  if (forgetting.has(key)) return forgetting.get(key);
+  const p = forgetCover(key).finally(() => forgetting.delete(key));
+  forgetting.set(key, p);
+  return p;
+}
+
+async function forgetCover(key) {
+  const owned = ownedCovers.has(key);
+  let kept = false;
   try {
     const db = await openDB();
     // Match by the RESOLUTION-INDEPENDENT key: the row was stored under the
     // 500px URL the lists use, while the full-screen views ask for 1000px — the
     // exact string would never match, and the bad blob would survive.
-    const t = tx(db, "covers", "readwrite");
-    const store = t.objectStore("covers");
-    for (const row of await reqp(store.getAll())) {
-      if (coverKey(row.url) === key) store.delete(row.url);
+    const rows = (
+      await reqp(tx(db, "covers", "readonly").objectStore("covers").getAll())
+    ).filter((row) => coverKey(row.url) === key);
+    // Decoded outside any transaction: an IndexedDB transaction commits as soon
+    // as it has nothing pending, and a decode is not an IndexedDB request.
+    const bad = [];
+    for (const row of rows) {
+      if (await blobDecodes(row.blob)) kept = true;
+      else bad.push(row);
     }
-    await done(t);
+    if (bad.length) {
+      const t = tx(db, "covers", "readwrite");
+      for (const row of bad) t.objectStore("covers").delete(row.url);
+      await done(t);
+      const freed = bad.reduce((n, row) => n + (row.size || 0), 0);
+      playCacheSize.update((n) => Math.max(0, n - freed));
+    }
   } catch {
     /* best effort — the in-memory flag still gets the caller past it */
   }
-  if (ownedCovers.has(key)) {
-    owned = true;
-    ownedCovers.delete(key);
+  if (kept) {
+    if (!keptNoted.has(key)) {
+      keptNoted.add(key);
+      logInfo("cover", "page refused a cached cover whose bytes decode — kept it", key.slice(-44),
+              { important: true });
+    }
+    return owned;
   }
+  // The object URL on screen may be the permanent downloads' (offline.js mints
+  // those): theirs to judge against their own copy, which may well be intact.
+  // Re-read, not `owned`: an eviction during the decode already dropped it.
+  if (!ownedCovers.has(key)) return owned;
+  ownedCovers.delete(key);
   offlineCovers.update((m) => {
     const n = { ...m };
     if (n[key]) {
@@ -323,7 +365,7 @@ export async function forgetCachedCover(coverUrl) {
     }
     return n;
   });
-  return owned;
+  return true;
 }
 
 async function evictEntry(e) {

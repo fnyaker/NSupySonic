@@ -51,6 +51,8 @@ let captureInstalled = false;
 const originals = {};
 // Hosts already reported as failing, so repeats coalesce into one counted line.
 const seenBadHosts = new Set();
+// Policy refusals already reported in full (directive + what it refused).
+const seenViolations = new Set();
 // A plain module-level mirror of the store, so the hot path never touches a
 // Svelte subscription just to decide "am I on?".
 let enabled = readEnabled();
@@ -174,10 +176,12 @@ export function logText() {
     `entrées : ${buffer.length}`,
     typeof navigator !== "undefined" ? `agent   : ${navigator.userAgent}` : "",
     typeof screen !== "undefined" ? `écran   : ${screen.width}x${screen.height}` : "",
-    "",
   ]
     .filter(Boolean)
-    .join("\n");
+    // A blank line after the header, spelled out: the empty entry this list
+    // used to end with was filtered out with the others, and the first line of
+    // the log came glued to the screen size ("412x9152026-09-28 …").
+    .join("\n") + "\n\n";
   const body = buffer
     .map(([t, scope, msg, extra, n]) =>
       `${stamp(t)}  ${String(scope).padEnd(12)} ${msg}${n > 1 ? ` (x${n})` : ""}${extra ? "  " + extra : ""}`
@@ -352,6 +356,13 @@ export function installCapture() {
   originals.onerror = window.onerror;
   window.addEventListener("error", onWindowError, true);
   window.addEventListener("unhandledrejection", onRejection);
+  // A resource the page's own Content-Security-Policy refused. The element
+  // only ever reports a bare `error` — identical to a file that would not
+  // decode — so this is the one place the actual cause gets written down. It
+  // is why every cached cover failed for weeks with nothing in this log but
+  // "img failed from blob:…": img-src lacked blob:, and the refusal was only
+  // visible here.
+  document.addEventListener("securitypolicyviolation", onPolicyViolation);
 
   // --- network -------------------------------------------------------------
   // The single most valuable stream here: a failed download, a 502 on a stream,
@@ -456,6 +467,35 @@ function onWindowError(e) {
     logInfo("error", `${e.message} @ ${safeUrl(e.filename || "")}:${e.lineno || 0}`,
             e.error && e.error.stack ? String(e.error.stack).split("\n").slice(0, 4).join(" | ") : null,
             { important: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+function onPolicyViolation(e) {
+  try {
+    const dir = e.effectiveDirective || e.violatedDirective || "?";
+    // "blob", "inline", "eval" or a URL — reduced to its origin, since a path
+    // can carry an id and the origin is the part the policy speaks about.
+    let what = e.blockedURI || "?";
+    try {
+      if (/^https?:/.test(what)) what = new URL(what).origin;
+    } catch {
+      /* keep it as reported */
+    }
+    const key = dir + " " + what;
+    const first = !seenViolations.has(key);
+    seenViolations.add(key);
+    // The first refusal carries the directive as the page received it, which
+    // is what says whether the policy or the page is the one to change.
+    const rule = first
+      ? String(e.originalPolicy || "")
+          .split(";")
+          .map((d) => d.trim())
+          .find((d) => d.split(/\s+/)[0] === dir) || null
+      : null;
+    logInfo("csp", `${dir} refused ${what}${e.disposition === "report" ? " (report only)" : ""}`,
+            rule, { important: first });
   } catch {
     /* ignore */
   }

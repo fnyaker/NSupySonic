@@ -240,11 +240,14 @@
       // eviction): fall through to the network sources instead of a placeholder.
       blobFailed = true;
       loaded = false;
-      // And DROP it, so the next launch (and the next track that shares this
-      // album art) fetches fresh bytes. The flag above is per-component and
-      // resets on every src change — on its own it would leave the bad blob
-      // being re-served forever, which is exactly what repeated `img failed
-      // from blob:` lines for the same art across sessions were.
+      // And DROP it if its bytes really are broken, so the next launch (and
+      // the next track that shares this album art) fetches fresh ones. The
+      // flag above is per-component and resets on every src change — on its
+      // own it would leave a bad blob being re-served forever. The caches
+      // decode the stored bytes before deleting anything: the repeated `img
+      // failed from blob:` lines this was written against were NOT bad blobs
+      // but a page policy refusing every blob: image, and deleting on sight
+      // re-downloaded each cover on every play.
       const url = src;
       Promise.resolve()
         .then(() => forgetCachedCover(url))

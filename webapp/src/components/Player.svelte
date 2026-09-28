@@ -2097,6 +2097,9 @@
         const res = await fetch(api.coverUrl(track.deezer_id), {
           credentials: "include",
         });
+        // The server's answer that there is no art at all: asking again in
+        // 800 ms gets the same one (it was asked three times per such track).
+        if (res.status === 404) break;
         if (!res.ok) throw new Error(String(res.status));
         const url = URL.createObjectURL(await res.blob());
         if (artCache.url && artCache.url.startsWith("blob:")) {

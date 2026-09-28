@@ -378,6 +378,25 @@ class WebHardeningTestCase(unittest.TestCase):
         self.assertNotIn("img-src 'self' data: https:;", csp)
         self.assertIn("Permissions-Policy", headers)
 
+    def test_csp_lets_the_app_paint_the_covers_it_keeps(self):
+        """The web app paints every cover it holds on the device from a blob:
+        URL. With img-src lacking `blob:`, Chromium refused each one before
+        loading it (a securitypolicyviolation on img-src, 4 ms, measured under
+        this exact header) and the client, reading that as a corrupt blob,
+        deleted it and fetched it again on every play. Pinned here because the
+        failure is silent on the server: every /api/cover answer was a 200."""
+        csp = self.client.get("/user/login").headers["Content-Security-Policy"]
+        directives = {
+            d.split()[0]: d.split()[1:] for d in csp.split(";") if d.strip()
+        }
+        self.assertIn("blob:", directives["img-src"])
+        # The audio element plays cached tracks from blob: URLs as well.
+        self.assertIn("blob:", directives["media-src"])
+        # ...and allowing them widened nothing else.
+        self.assertNotIn("https:", directives["img-src"])
+        self.assertNotIn("*", directives["img-src"])
+        self.assertEqual(directives["connect-src"], ["'self'"])
+
     def test_csp_allows_wasm_but_not_eval(self):
         """The genre studio's training kernel needs WebAssembly.
 

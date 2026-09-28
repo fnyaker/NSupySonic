@@ -10,7 +10,9 @@
 import { get } from "svelte/store";
 import { api } from "./api.js";
 import { coverKey } from "./format.js";
+import { blobDecodes } from "./imagebytes.js";
 import { logInfo } from "./log.js";
+import { online } from "./net.js";
 import { primeGain } from "./gaincache.js";
 import {
   downloads,
@@ -127,42 +129,120 @@ export async function loadCoverCache() {
       if (have[key] || map[key]) continue;
       map[key] = URL.createObjectURL(r.blob);
     }
-    if (!Object.keys(map).length) return;
-    offlineCovers.update((m) => ({ ...map, ...m }));
+    if (Object.keys(map).length) offlineCovers.update((m) => ({ ...map, ...m }));
+    scheduleCoverRepair(rows);
   } catch {
     /* IndexedDB unavailable — covers just fall back to the network URL */
   }
 }
 
 // Download + store the archived cover for a track (best-effort, idempotent).
-async function cacheCover(coverUrl, deezerId) {
-  if (!coverUrl) return;
+// Resolves true when this store holds the art afterwards.
+//
+// A download keeps its OWN copy, whoever else has one: the play cache's copy
+// of the same art is evictable, and a download's pochette is the one that has
+// to still be there in airplane mode a month later. (This used to return as
+// soon as ANY copy was on screen, so a track downloaded after being played
+// never stored its art at all.)
+async function cacheCover(coverUrl, deezerId, background = false) {
+  if (!coverUrl) return false;
   const key = coverKey(coverUrl);
-  if (get(offlineCovers)[key]) return; // already cached this session
+  // Publish only when nothing shows this art yet: swapping a live object URL
+  // for another of the same picture re-renders every Cover showing it.
+  const publish = (blob) => {
+    if (!get(offlineCovers)[key])
+      offlineCovers.update((m) => ({ ...m, [key]: URL.createObjectURL(blob) }));
+  };
   try {
     const db = await openDB();
     const existing = await reqp(
       tx(db, "covers", "readonly").objectStore("covers").get(coverUrl)
     );
     if (existing && existing.blob) {
-      offlineCovers.update((m) => ({ ...m, [key]: URL.createObjectURL(existing.blob) }));
-      return;
+      publish(existing.blob);
+      return true;
     }
-    const res = await fetch(api.coverUrl(deezerId), { credentials: "include" });
-    if (!res.ok) return;
+    const res = await fetch(api.coverUrl(deezerId), {
+      credentials: "include",
+      headers: background ? { "X-NS-Background": "1" } : {},
+    });
+    if (!res.ok) return false;
     const blob = await res.blob();
-    if (!blob || !blob.size) return;
+    if (!blob || !blob.size) return false;
     const t = tx(db, "covers", "readwrite");
     t.objectStore("covers").put({ url: coverUrl, blob });
     await done(t);
-    offlineCovers.update((m) => ({ ...m, [key]: URL.createObjectURL(blob) }));
+    publish(blob);
+    return true;
   } catch {
     /* best effort — a missing cover never fails the download */
+    return false;
   }
+}
+
+// Put back the pochette of every download that has lost it.
+//
+// Until the server's policy allowed blob: images, every downloaded cover the
+// app tried to show was refused, read as corrupt, and DELETED — so a library
+// downloaded for the plane lost its art one screen at a time, and nothing ever
+// fetched it again (a cover is only stored at download time). This finds each
+// download whose art has no row here and fetches it once, in the background.
+// It costs nothing when nothing is missing: one read of the metadata, which the
+// launch has just done anyway.
+//
+// Sequential, marked as background (the server holds those to a share of its
+// threads) and started a while after launch, so it never competes with the
+// first screen; it stops the moment the device goes offline.
+const REPAIR_DELAY_MS = 20000;
+let repairScheduled = false;
+function scheduleCoverRepair(rows) {
+  if (repairScheduled || typeof setTimeout !== "function") return;
+  repairScheduled = true;
+  const have = new Set();
+  for (const r of rows) if (r && r.url && r.blob) have.add(coverKey(r.url));
+  setTimeout(() => {
+    // Offline at the time: wait for the network instead of trying past it.
+    if (get(online)) repairMissingCovers(have).catch(() => {});
+    else {
+      const stop = online.subscribe((up) => {
+        if (!up) return;
+        queueMicrotask(() => stop());
+        repairMissingCovers(have).catch(() => {});
+      });
+    }
+  }, REPAIR_DELAY_MS);
+}
+
+export async function repairMissingCovers(have) {
+  const db = await openDB();
+  const metas = await reqp(tx(db, "meta", "readonly").objectStore("meta").getAll());
+  const todo = new Map(); // key -> [cover url, id]; one fetch per distinct art
+  for (const m of metas) {
+    const url = m && m.track && m.track.album && m.track.album.cover;
+    const id = m && ((m.track && m.track.deezer_id) || m.id);
+    if (!url || !id) continue;
+    const key = coverKey(url);
+    if (!have.has(key) && !todo.has(key)) todo.set(key, [url, id]);
+  }
+  if (!todo.size) return { missing: 0, repaired: 0 };
+  logInfo("download", `${todo.size} downloaded cover(s) missing — fetching them back`, null,
+          { important: true });
+  let repaired = 0;
+  for (const [key, [url, id]] of todo) {
+    if (!get(online)) break;
+    if (await cacheCover(url, id, true)) {
+      repaired++;
+      have.add(key);
+    }
+  }
+  logInfo("download", `covers repaired: ${repaired} of ${todo.size}`, null, { important: true });
+  return { missing: todo.size, repaired };
 }
 
 // Drop a DOCUMENT-cover blob that turned out not to decode (see the sibling in
 // playcache.js): a stored blob that won't decode must not be re-offered forever.
+// A download's cover is the one copy that works in airplane mode, so it goes
+// only if its bytes really do not decode — never because a page refused it.
 export async function forgetDownloadedCover(coverUrl) {
   if (!coverUrl) return false;
   const key = coverKey(coverUrl);
@@ -170,12 +250,21 @@ export async function forgetDownloadedCover(coverUrl) {
     const db = await openDB();
     // Canonical key again: the row is stored under the 500px URL while a caller
     // may hold the 1000px one.
-    const t = tx(db, "covers", "readwrite");
-    const store = t.objectStore("covers");
-    for (const row of await reqp(store.getAll())) {
-      if (coverKey(row.url) === key) store.delete(row.url);
+    const rows = (
+      await reqp(tx(db, "covers", "readonly").objectStore("covers").getAll())
+    ).filter((row) => coverKey(row.url) === key);
+    let kept = false;
+    const bad = [];
+    for (const row of rows) {
+      if (await blobDecodes(row.blob)) kept = true;
+      else bad.push(row.url);
     }
-    await done(t);
+    if (bad.length) {
+      const t = tx(db, "covers", "readwrite");
+      for (const url of bad) t.objectStore("covers").delete(url);
+      await done(t);
+    }
+    if (kept) return false;
   } catch {
     /* best effort */
   }
