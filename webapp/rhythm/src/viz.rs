@@ -256,6 +256,7 @@ pub extern "C" fn viz_scene_len(which: u32) -> u32 {
         7 => SPEC_W * 2,
         8 => SPEC_W,
         9 => SPEC_W,
+        10 => 3,
         _ => 0,
     }) as u32
 }
@@ -263,7 +264,8 @@ pub extern "C" fn viz_scene_len(which: u32) -> u32 {
 /// Where buffer `which` lives: 0 the reading's input (f64), 1 its output
 /// (f64), 2 the bands (f32), 3 the chroma (f32), 4 what `pack` is told (f64),
 /// 5 what `prepare` returned (f64), 6 the block (f32), 7 the spectrum texture
-/// (u8, two rows), 8 the history row (u8), 9 the released spectrum (f32).
+/// (u8, two rows), 8 the history row (u8), 9 the released spectrum (f32), 10
+/// the crossover's three ways (f32).
 #[no_mangle]
 pub extern "C" fn viz_scene_ptr(h: u32, which: u32) -> *const u8 {
     match get(&mut v().scenes, h) {
@@ -278,6 +280,7 @@ pub extern "C" fn viz_scene_ptr(h: u32, which: u32) -> *const u8 {
             7 => s.spec.as_ptr(),
             8 => s.hist_row.as_ptr(),
             9 => s.spec_smooth.as_ptr() as *const u8,
+            10 => s.ways_in.as_ptr() as *const u8,
             _ => core::ptr::null(),
         },
         None => core::ptr::null(),

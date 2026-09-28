@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "pretest": "node test/preflight.mjs",
     "test": "node --test \"test/*.test.mjs\"",
-    "wasm": "node rhythm/build.mjs"
+    "wasm": "node rhythm/build.mjs && node appcore/build.mjs && node trainer/build.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.1",

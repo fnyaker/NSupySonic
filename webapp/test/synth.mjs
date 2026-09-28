@@ -163,12 +163,14 @@ function renderKick(buf, at, o) {
     f0 = 190, f1 = 44, sweepMs = 90, lenMs = 300,
     drive = 14, gain = 0.7, click = 0.45, saw = 0, sawDrive = 8,
     sub = 0.2, subMs = 0,
+    piep = 0, piepHz = 2300, piepTo = 1600, piepMs = 30,
   } = o;
   const start = Math.round(at * SR);
   const n = Math.round((lenMs / 1000) * SR);
   const sweep = (sweepMs / 1000) * SR;
   let phase = 0;
   let sawPhase = 0;
+  let piepPhase = 0;
   for (let i = 0; i < n; i++) {
     const j = start + i;
     if (j < 0 || j >= buf.length) continue;
@@ -194,7 +196,22 @@ function renderKick(buf, at, o) {
       const k = 1 - i / (SR * 0.008);
       x += noise() * click * k * k;
     }
-    buf[j] += clip(x, 1) * gain;
+    // THE PIEP: the squeak tekk and uptempo producers layer on the attack — a
+    // short sine of its own, a couple of kilohertz up and falling a few
+    // semitones as it dies. It is its own layer on the kick bus, summed AFTER
+    // the body's clipper: through it, a body already driven square would
+    // shave the squeak off every cycle it rides on. It is PITCHED, which is
+    // the whole difference from the beater: one line on a spectrogram where
+    // the beater is a smear.
+    let py = 0;
+    if (piep > 0 && i < SR * piepMs * 0.003) {
+      const pt = i / SR;
+      const pf = piepHz * Math.pow(piepTo / piepHz, Math.min(1, pt / (piepMs / 1000)));
+      piepPhase += (2 * Math.PI * pf) / SR;
+      const pe = Math.min(1, i / (SR * 0.001)) * Math.exp(-pt / (piepMs / 2500));
+      py = shape(Math.sin(piepPhase), 1.6) * piep * pe;
+    }
+    buf[j] += (clip(x, 1) + py) * gain;
   }
   // THE SUB LAYER, WHICH OUTLASTS THE PUNCH — and the element whose absence
   // made this bench lie about what an empty bar looks like.
@@ -412,6 +429,8 @@ function limit(buf, { ceil = 0.95, lookaheadMs = 2, releaseMs = 140 } = {}) {
 export const KICKS = {
   techno: { f0: 110, f1: 48, sweepMs: 25, lenMs: 170, drive: 3, click: 0.18, gain: 0.62 },
   hardtekk: { f0: 170, f1: 46, sweepMs: 45, lenMs: 175, drive: 9, click: 0.3, gain: 0.7 },
+  // The piep kick: hardtekk's short saturated stomp with the squeak on top.
+  pieep: { f0: 175, f1: 48, sweepMs: 40, lenMs: 180, drive: 11, click: 0.3, gain: 0.72, piep: 0.35, piepHz: 2400, piepTo: 1650, piepMs: 28 },
   hardstyle: { f0: 150, f1: 44, sweepMs: 40, lenMs: 200, drive: 8, click: 0.3, gain: 0.7 },
   gabber: { f0: 200, f1: 52, sweepMs: 60, lenMs: 260, drive: 16, click: 0.4, gain: 0.75 },
   frenchcore: { f0: 190, f1: 44, sweepMs: 95, lenMs: 300, drive: 20, click: 0.45, gain: 0.78 },

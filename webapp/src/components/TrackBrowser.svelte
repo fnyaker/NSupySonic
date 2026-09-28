@@ -3,7 +3,8 @@
   import Icon from "./Icon.svelte";
   import { api } from "../lib/api.js";
   import { toasts } from "../lib/stores.js";
-  import { artistSearch } from "../lib/format.js";
+  import { onDestroy } from "svelte";
+  import { SORTS, createProjector } from "../lib/tracklist.js";
 
   export let tracks = [];
   export let context = null;
@@ -17,44 +18,12 @@
   let dir = 1; // 1 = ascending, -1 = descending
   let dlBusy = false;
 
-  const SORTS = [
-    { key: "default", label: "Ordre d'origine" },
-    { key: "title", label: "Titre" },
-    { key: "artist", label: "Artiste" },
-    { key: "album", label: "Album" },
-    { key: "duration", label: "Durée" },
-    { key: "added", label: "Date d'ajout" },
-  ];
-  const lc = (s) => (s || "").toLowerCase();
-
-  $: shown = (() => {
-    let list = tracks;
-    const q = lc(query.trim());
-    if (q)
-      list = list.filter(
-        (t) =>
-          lc(t.title).includes(q) ||
-          artistSearch(t).includes(q) || // matches featured artists too
-          lc(t.album?.title).includes(q)
-      );
-    if (sort !== "default") {
-      const key = {
-        title: (t) => lc(t.title),
-        artist: (t) => lc(t.artist?.name),
-        album: (t) => lc(t.album?.title),
-        duration: (t) => t.duration || 0,
-        added: (t) => t.added || 0,
-      }[sort];
-      list = [...list].sort((a, b) => {
-        const ka = key(a);
-        const kb = key(b);
-        return ka < kb ? -dir : ka > kb ? dir : 0;
-      });
-    } else if (dir === -1) {
-      list = [...list].reverse();
-    }
-    return list;
-  })();
+  // Search and sort run on the app core's index (lib/tracklist.js): built
+  // once per list, so a keystroke on 4 000 favourites is one pass over folded
+  // bytes, and "beyonce" finds "Beyoncé".
+  const project = createProjector();
+  onDestroy(() => project.free());
+  $: shown = project(tracks, sort, dir, query);
 
   async function downloadAll() {
     if (dlBusy) return;

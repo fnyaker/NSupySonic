@@ -39,7 +39,9 @@ function ensure() {
 /**
  * Train a head off the main thread.
  *
- * @param {{X: Float32Array, y: Int32Array, n: number, d: number, labels: string[]}} data
+ * @param {{X: Float32Array, y: Int32Array, n: number, d: number, labels: string[],
+ *          groups?: Int32Array}} data  `groups`: an artist id per row, for folds
+ *          that hold out whole artists (`options.grouped`)
  * @param {"linear"|"deep"} mode
  */
 export function train(data, mode = "linear", onProgress = null, options = {}) {
@@ -49,6 +51,8 @@ export function train(data, mode = "linear", onProgress = null, options = {}) {
   // the studio rebuilds its matrix per run, which is cheap next to training.
   const X = data.X.buffer;
   const y = data.y.buffer;
+  const groups = data.groups ? data.groups.buffer : null;
+  const transfer = groups ? [X, y, groups] : [X, y];
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject, onProgress });
     w.postMessage(
@@ -58,12 +62,13 @@ export function train(data, mode = "linear", onProgress = null, options = {}) {
         mode,
         X,
         y,
+        groups,
         n: data.n,
         dim: data.d,
         labels: data.labels,
         options,
       },
-      [X, y]
+      transfer
     );
   });
 }

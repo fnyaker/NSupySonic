@@ -1,36 +1,46 @@
-// SPECTRE — the spectrum, as glass bars.
+// SPECTRE — the spectrum, as a row of light.
 //
-// The most literal picture in the catalogue, and for that reason the one where
-// craft shows most: everybody has seen a bar graph, and the difference between
-// a cheap one and a good one is entirely in the details. Four of them matter.
+// The most literal picture in the catalogue, and the one where fashion shows
+// most. It used to be glass tubes: a rim light down each edge, a specular
+// stripe, a hot top, hairline peak caps hanging above, a mirror-polished floor
+// reflecting it all — every one of them a 2005 idea, and together they read as
+// a media player from that year. What a spectrum looks like today is LESS:
 //
-//   THE LEVELLING. One gain across the whole spectrum parks the bass: the mids
-//   and highs carry most of the energy, so they drive the gain down and the low
-//   end sits at the bottom whatever it does. The strip is split into three
-//   zones, each with its own slow gain, interpolated so there is no seam.
-//   THE FALL. Bars rise instantly and fall at a musical speed (the smoothed row
-//   of the spectrum texture releases in beats), and the PEAK CAPS are computed
-//   from the spectrum history — the highest value in the last two beats, minus
-//   a fall that is linear in sixteenth notes — so they hang, then drop, at the
-//   tempo of the track, with no per-bar state anywhere.
-//   THE MATERIAL. Each bar is glass: a deep body, a brighter top, a thin rim
-//   light down both edges, a specular stripe, and a hot cap the bloom turns
-//   into light. Anti-aliased in pixels, so a 7 px bar is still a clean shape.
-//   THE ROOM. Full screen, the bars stand on a dark floor that reflects them,
-//   under a haze lit by the average spectrum. In the player's strip (the
-//   `strip` layout) they are mirrored about the middle and the background is
-//   transparent, so they sit on the blurred artwork.
+//   THE SHAPE. One capsule per band, fully rounded, a single continuous shape
+//   mirrored about its axis — not two rounded bars meeting in the middle, which
+//   drew a dark pinch along the axis — and at rest it is a DOT, not a stub. A
+//   quiet passage is a row of dots breathing; a drop is a wall of light.
+//   THE MATERIAL. Flat, luminous, no edges drawn: the band's colour, a white
+//   core that grows with its level, a gentle fade toward the tips. The bloom
+//   does the glow; nothing is painted on to fake one.
+//   THE LEVEL. The three zone gains keep every register alive (one gain across
+//   the spectrum parks the bass: the mids and highs drive it down), but a gain
+//   that normalises everything also makes a breakdown as tall as the drop. So
+//   the heights are scaled by the track's own DYNAMICS (this moment against its
+//   loud level): level is information, and the bars say how loud it is.
+//   THE TRAIL. No peak caps. The highest each band has been in the last two
+//   beats, falling linearly in sixteenths, is drawn as a faint extension of the
+//   capsule — an afterglow that hangs and drops at the tempo of the track,
+//   computed from the spectrum history with no per-bar state anywhere.
+//
+// Full screen the row runs along the middle of the frame, over a light the
+// bars themselves cast; with the artwork in front, one row fills the band
+// under it and one the band above, so they frame it instead of growing up
+// behind it. In the player's strip (the `strip` layout) the background is
+// transparent and the row sits on the blurred artwork.
 //
 // Parameters:
-//   glass    rim-light and specular strength     reflect  floor reflection
-//   width    bar width as a share of its pitch    peaks    peak-cap strength
-//   curve    loudness gamma (higher = more contrast between quiet and loud)
+//   width    capsule width as a share of its pitch   glow   the axis light
+//   curve    loudness gamma (higher = more contrast)  trail  the afterglow
+//   pitch    CSS px per band in the strip (fewer, rounder capsules = larger)
 
 export default {
   id: "spectrum",
   uses: ["sdf"],
-  params: { glass: 1, reflect: 1, width: 0.64, peaks: 1, curve: 1.55 },
-  look: { exposure: 1, bloom: 0.85, threshold: 0.85, saturation: 1.12 },
+  params: { width: 0.5, curve: 1.8, glow: 1, trail: 1, pitch: 7.5 },
+  // No lens fringe: on thin light lines it reads as a colour-fringed LCD, and
+  // on a 40 px strip it split every capsule into three.
+  look: { exposure: 1, bloom: 0.7, threshold: 0.8, saturation: 1.08, ca: 0 },
 
   fragment: `
 // The zone gains (uS0.xyz: bass, mid, high), interpolated between the zone
@@ -42,7 +52,6 @@ float gainAt(float f) {
   return mix(uS0.y, uS0.z, (f - 0.5) * 3.0);
 }
 
-// The level of the band under frequency position f (0..1), from the row given.
 float level(float f, float row) {
   return texture(uSpec, vec2(f, row)).r;
 }
@@ -57,135 +66,118 @@ float histAt(float f, float k) {
   return texture(uHist, vec2(f, fract(y) + 0.5 / 64.0)).r;
 }
 
+// A capsule of half width w and half height h (h >= w), centred on the origin.
+float capsule(vec2 q, float w, float h) {
+  return sdRound2(q, vec2(w, max(h, w)), w);
+}
+
 void main() {
   vec2 frag = gl_FragCoord.xy;
   vec2 uv = frag / uRes;
   bool strip = uCtl.z > 0.5;
   float N = max(8.0, uS0.w);
   float pitchPx = uRes.x / N;
-  float x = uv.x * N;
-  float bi = floor(x);
+  float bi = clamp(floor(frag.x / pitchPx), 0.0, N - 1.0);
   float f = (bi + 0.5) / N;
-  // The bar's value: the peak of three taps across its span, so a narrow
-  // partial inside a wide bar is still seen (averaging it away is what makes a
-  // spectrum look limp).
+  // The band's value: the peak of three taps across its span, so a narrow
+  // partial inside a wide band is still seen (averaging it away is what makes
+  // a spectrum look limp).
   float span = 0.5 / N;
   float vS = max(level(f, 0.25), max(level(f - span * 0.6, 0.25), level(f + span * 0.6, 0.25)));
-  float v = shape(vS, f);
-  // The peak cap: the highest this bar has been in the last two beats, minus a
-  // fall of 0.045 per sixteenth. Stateless, and it falls in musical time.
+  // Level is information: a breakdown is a row of small capsules, not the
+  // drop's wall renormalised to the same height.
+  float dyn = clamp(uMood.z, 0.0, 1.0);
+  float loud = mix(0.28, 1.0, smoothstep(0.05, 0.9, dyn));
+  float v = shape(vS, f) * loud;
+  // The afterglow: the highest this band has been in the last two beats,
+  // falling 0.05 per sixteenth. Stateless, and it falls in musical time.
   float cap = v;
-  for (int k = 0; k < 8; k++) {
+  for (int k = 1; k < 8; k++) {
     float fk = float(k);
-    cap = max(cap, shape(histAt(f, fk), f) - fk * 0.045);
+    cap = max(cap, shape(histAt(f, fk), f) * loud - fk * 0.05);
   }
 
-  // Geometry, in pixels, so the edges are anti-aliased at any bar width.
-  float base = strip ? 0.5 * uRes.y : 0.3 * uRes.y;
-  float room = strip ? 0.5 * uRes.y - 1.0 : (uRes.y - base) * 0.86;
-  // With the artwork in front, the bars FRAME it rather than growing up
-  // behind it: one bank standing on the floor under the cover, and its mirror
-  // hanging from the top above it. Grown from just under the cover, they
-  // spent 30% of their light where nobody could see it. Where the artwork
-  // leaves no room above or below (a cover beside the bars rather than in
-  // front of them), the floor layout stands and the cover simply dims them.
-  float yy;
-  bool banked = false;
+  // Where the row runs: its axis and how far a capsule may reach from it, in
+  // pixels, so the edges are anti-aliased at any size.
+  float axis = 0.5 * uRes.y;
+  float reach = strip ? 0.5 * uRes.y - 1.5 : 0.36 * uRes.y;
   if (!strip && uHole.z > 0.0) {
+    // With the artwork in front: the band under it and the band above it,
+    // each with its own row, when both have room for one.
     float below = (0.5 + 0.5 * uHoleR.z) * uRes.y;
     float above = (0.5 + 0.5 * (uHole.y + uHole.w + 0.03)) * uRes.y;
-    float floorPx = 0.05 * uRes.y;
-    float ceilPx = 0.95 * uRes.y;
-    float roomLo = (below - floorPx) * 0.92;
-    float roomHi = (ceilPx - above) * 0.92;
-    if (min(roomLo, roomHi) > 0.12 * uRes.y) {
-      banked = true;
+    float lo = below - 0.04 * uRes.y;
+    float hi = 0.96 * uRes.y - above;
+    if (min(lo, hi) > 0.1 * uRes.y) {
       bool upper = frag.y > 0.5 * (below + above);
-      base = upper ? ceilPx : floorPx;
-      room = upper ? roomHi : roomLo;
+      axis = upper ? above + 0.5 * hi : 0.04 * uRes.y + 0.5 * lo;
+      reach = 0.46 * (upper ? hi : lo);
     }
   }
-  float hgt = max(v * room, 1.5);
-  float halfW = pitchPx * P_WIDTH * 0.5;
+
+  float halfW = max(0.75, pitchPx * P_WIDTH * 0.5);
   float cx = (bi + 0.5) * pitchPx;
-  float dx = frag.x - cx;
-  float y = frag.y - base;
-  // Mirrored about the middle in the strip; hanging from the ceiling in the
-  // upper bank; standing on the floor otherwise.
-  yy = strip ? abs(y) : (banked && base > 0.5 * uRes.y ? -y : y);
-  float radius = min(halfW, 3.0);
-  vec2 q = vec2(dx, yy - hgt * 0.5);
-  float sd = sdRound2(q, vec2(halfW, hgt * 0.5), radius);
+  vec2 q = vec2(frag.x - cx, frag.y - axis);
+  float h = max(halfW, v * reach);
+  float sd = capsule(q, halfW, h);
   float cover = clamp(0.5 - sd, 0.0, 1.0);
+  float hg = max(halfW, cap * reach);
+  float ghost = clamp(0.5 - capsule(q, halfW, hg), 0.0, 1.0) * (1.0 - cover);
 
   vec3 hue = pal(f);
-  float t = clamp(yy / max(hgt, 1.0), 0.0, 1.0);
-  // The glass: a deep body, brightening toward the top; a rim light down each
-  // edge; a specular stripe a third of the way across.
-  float edge = 1.0 - clamp(abs(dx) / max(halfW, 1.0), 0.0, 1.0);
-  float rim = pow(1.0 - edge, 6.0);
-  float spec = exp(-pow((dx / max(halfW, 1.0) + 0.38) / 0.12, 2.0));
-  vec3 body = hue * (0.25 + 1.1 * t * t) * (0.55 + 0.9 * v);
-  body += mix(hue, vec3(1.0), 0.5) * (rim * 0.9 + spec * 0.45) * P_GLASS * (0.35 + v);
-  // The hot top: a thin cap of light the bloom turns into a glow.
-  float top = exp(-pow((yy - hgt) / 2.2, 2.0)) * step(abs(dx), halfW);
-  body += mix(hue, vec3(1.0), 0.35) * top * (1.2 + 2.2 * uHit.x) * (0.3 + v);
-
-  // The peak cap: a hairline that hangs above the bar.
-  float capY = cap * room;
-  float capLine = exp(-pow((yy - capY - 3.0) / 1.2, 2.0)) * step(abs(dx), halfW) * step(hgt + 4.0, capY + 3.0);
-  vec3 capCol = mix(hue, vec3(1.0), 0.6) * capLine * 1.4 * P_PEAKS;
+  // Flat light: the band's colour, a white core growing with its level, a
+  // gentle fade toward the tips. The kick lifts the low end a little.
+  float along = clamp(abs(q.y) / max(h, 1.0), 0.0, 1.0);
+  float kick = uHit.x * (1.0 - f) * 0.45 + uHit.y * 0.15;
+  vec3 core = mix(hue, vec3(1.0), 0.1 + 0.3 * v);
+  vec3 c = mix(core, hue, smoothstep(0.1, 1.0, along)) * (0.62 + 0.75 * v + kick);
+  c *= 1.0 - 0.3 * smoothstep(0.55, 1.0, along);
+  vec3 g = hue * (0.5 + 0.5 * cap);
+  float ga = ghost * 0.2 * P_TRAIL;
 
   if (strip) {
-    // Transparent, over the blurred artwork: the bars and their caps and
-    // nothing else. The alpha is the bar's own coverage.
-    vec3 c = body * cover + capCol;
-    float a = max(cover * 0.92, clamp(capLine * P_PEAKS, 0.0, 1.0));
-    emitA(c * uEnergy, a);
+    // Transparent, over the blurred artwork. The colour goes out unmultiplied:
+    // the post pass multiplies it by the alpha itself.
+    // A quiet band is a little translucent, a loud one solid: the row reads
+    // as light over the artwork rather than stickers on it.
+    float a = max(cover * (0.62 + 0.38 * smoothstep(0.0, 0.6, v)), ga);
+    vec3 col = (c * cover + g * ga) / max(cover + ga, 1e-3);
+    emitA(col * uEnergy, a);
     return;
   }
 
-  // --- the room ---------------------------------------------------------------
-  vec2 p = fragP();
-  float horizon = base / uRes.y;
-  // Haze above the floor, lit by the whole spectrum; a darker floor below.
+  // --- the room -------------------------------------------------------------
+  // A deep field, and the light the row casts along its own axis: tinted band
+  // by band, swelling with the low end and on the kick. No floor, no mirror.
+  vec3 col = uPalBg.rgb * (0.85 + 0.25 * uv.y);
+  float dy = abs(frag.y - axis) / uRes.y;
   float lowE = uBandA.x + uBandA.y;
-  vec3 col = uPalBg.rgb * (0.9 + 0.4 * uv.y);
-  float hz = exp(-abs(uv.y - horizon) * 7.0);
-  col += mix(uPalLow.rgb, uPalMid.rgb, uv.x) * hz * (0.05 + 0.1 * uMood.y + 0.12 * uHit.x * lowE);
-  col += body * cover + capCol;
-
-  // The reflection: the bars upside down in a dark polished floor, fading and
-  // softening with depth.
-  if (y < 0.0 && !banked) {
-    float ry = -y;
-    float rv = shape(vS, f) * room;
-    vec2 rq = vec2(dx, ry - rv * 0.5);
-    float rsd = sdRound2(rq, vec2(halfW, rv * 0.5), radius);
-    float rcov = clamp(0.5 - rsd / (1.0 + ry * 0.03), 0.0, 1.0);
-    float fade = exp(-ry / (uRes.y * 0.09)) * 0.3 * P_REFLECT;
-    col += hue * (0.3 + 0.8 * v) * rcov * fade;
-    // The floor line itself, catching the light on each kick.
-    col += mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * exp(-ry / 1.5) * (0.25 + 0.9 * uHit.x) * 0.6;
-  }
+  float spill = exp(-dy * 9.0) * (0.05 + 0.08 * uMood.y + 0.1 * uHit.x * lowE) * P_GLOW * loud;
+  col += pal(uv.x) * spill;
+  col += pal(uv.x) * exp(-dy * 40.0) * 0.05 * P_GLOW * loud;
+  col = mix(col, g, ga);
+  col = mix(col, c, cover);
   col += (uPalHigh.rgb * 0.25) * uHit2.w;
   emit(col * mix(1.0, uEnergy, 0.5));
 }
 `,
 
-  create({ preset, state, flash }) {
+  create({ preset, state, flash, params, opts }) {
     // Three slow zone gains: each zone brought to the same working level, so
     // the bass keeps its own life instead of sitting under the mids.
     const zone = [0.2, 0.2, 0.2];
+    const sums = [0, 0, 0];
+    const cnt = [0, 0, 0];
     let drop = -1e9;
     const ceiling = Math.max(24, preset.bars || 64);
+    const pitch = Math.max(4, params?.pitch ?? 7.5);
     return {
       step(dt, m, c) {
         const s = c.spec;
         if (s) {
           const n = s.length;
-          const sums = [0, 0, 0];
-          const cnt = [0, 0, 0];
+          sums[0] = sums[1] = sums[2] = 0;
+          cnt[0] = cnt[1] = cnt[2] = 0;
           for (let i = 0; i < n; i++) {
             const z = i < n / 3 ? 0 : i < (2 * n) / 3 ? 1 : 2;
             sums[z] += s[i];
@@ -194,13 +186,15 @@ void main() {
           for (let z = 0; z < 3; z++) {
             const mean = cnt[z] ? sums[z] / cnt[z] : 0;
             zone[z] = m.ease(zone[z], mean, 2, dt);
-            state[z] = 0.62 / Math.max(0.1, zone[z]);
+            state[z] = 0.7 / Math.max(0.1, zone[z]);
           }
         }
-        // As many bars as the frame has room for — one per ~14 px of a 16:9
-        // frame's width — under the tier's ceiling.
+        // As many bands as the frame has room for: in the strip one per
+        // `pitch` CSS px of its width; full screen one per ~14 px of a 16:9
+        // frame. Always under the tier's ceiling.
         const aspect = c.aspect || 16 / 9;
-        state[3] = Math.round(Math.min(ceiling, Math.max(24, aspect * 36)));
+        const want = opts?.layout === "strip" && c.height ? (aspect * c.height) / pitch : aspect * 36;
+        state[3] = Math.round(Math.min(ceiling, Math.max(24, want)));
         if (m.stamp.drop !== drop) {
           drop = m.stamp.drop;
           flash(0.5);

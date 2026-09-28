@@ -5,17 +5,20 @@
 // the lights — every light behind them melted into a disc the shape of the
 // lens's aperture.
 //
-//   THE DISCS are drawn the way a lens draws them, not as blurred dots: the
-//   aperture's polygon (six or eight blades, turned a little per layer), a
-//   rim brighter than the middle — the spherical aberration that makes real
-//   bokeh look like soap bubbles — and a hair of colour fringing on the edge.
-//   Three layers at three distances, so they drift at three speeds and the
-//   nearest ones are huge and faint while the far ones are small and bright.
+//   THE DISCS are drawn the way a lens draws them, not as blurred dots — the
+//   way a MODERN fast lens draws them: round (a wide-open aperture has no
+//   corners; the hexagons of a cheap kit lens are what dated the old picture
+//   to 2008, and remain a skin's choice via `blades`), evenly lit with only a
+//   gentle rim, and an edge whose softness is the disc's distance from the
+//   focal plane — the nearest layer huge, faint and melting, the far one small
+//   and nearly crisp. No colour fringe: that was a lens flaw worn as a filter.
+//   Three layers at three distances, drifting at three speeds.
 //   THE ROOM is not black: it is the glow of everything out of focus, three
 //   soft pools of the palette drifting on the bar.
-//   THE GLITTER is the one thing in focus: four-rayed glints hanging in
+//   THE GLITTER is the one thing in focus: pinpoints of light hanging in
 //   front of the lens, twinkling with the hi-hats — the sharp contrast that
-//   makes the discs read as melted.
+//   makes the discs read as melted. Points, not four-rayed star glints: the
+//   star filter is the other thing that dated it.
 //   THE MUSIC. Every disc belongs to a slice of the spectrum and breathes with
 //   it, so the frame's light is the mix; each beat a scatter of discs swells
 //   and flares; the kick pushes the near layer toward the camera; the drop
@@ -30,8 +33,8 @@ const DISCS = 150;
 export default {
   id: "bokeh",
   uses: [],
-  params: { count: 1, blades: 6, drift: 1 },
-  look: { exposure: 1.0, bloom: 1.15, threshold: 0.8, saturation: 1.2 },
+  params: { count: 1, blades: 0, drift: 1 },
+  look: { exposure: 1.0, bloom: 0.9, threshold: 0.82, saturation: 1.12, ca: 0 },
 
   fragment: `
 void main() {
@@ -61,11 +64,12 @@ void main() {
   if (gh.x > 0.9) {
     vec2 at = gc + 0.3 + 0.4 * gh.yz;
     vec2 dq = (gq - at) * 0.12;
-    vec2 ad = abs(rot(gh.y * 0.8) * dq);
     float tw = pow(0.5 + 0.5 * sin(uClock.x * (1.3 + gh.z) * PI + gh.y * 40.0), 6.0);
     float hit = 0.4 + tw + 1.2 * uHit2.x + 0.8 * envB(fract(uClock.x + gh.z), 0.2) * step(0.6, gh.z);
-    float star = exp(-dot(dq, dq) * 9e4) + 0.5 * (exp(-ad.x * 600.0 - ad.y * 60.0) + exp(-ad.y * 600.0 - ad.x * 60.0));
-    col += mix(pal(gh.z), vec3(1.0), 0.6) * star * hit * 0.5 * clearOfHole(p, 0.03);
+    // A pinpoint and its own small halo, sized in pixels so it stays a point.
+    float r2 = dot(dq, dq) / (uFrame.w * uFrame.w);
+    float star = exp(-r2 * 0.35) + 0.12 * exp(-r2 * 0.03);
+    col += mix(pal(gh.z), vec3(1.0), 0.6) * star * hit * 0.45 * clearOfHole(p, 0.03);
   }
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
   col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
@@ -130,14 +134,14 @@ vec4 sprite(vec2 q, vec4 c, float k) {
     d = mix(d, length(q), 0.25);   // blades are curved, a little
   }
   float aa = max(fwidth(d), 1e-3);
-  float inside = smoothstep(1.0, 1.0 - aa * 1.5, d);
-  // Brighter at the rim, the way real bokeh is.
-  float rim = smoothstep(0.7, 0.97, d);
-  // ...and faintly ringed inside, like the onion rings a real lens leaves in
-  // its bokeh from the polishing of its elements.
-  vec3 body = c.rgb * (0.35 + 0.65 * rim) * (0.96 + 0.04 * sin(d * 38.0)) * inside;
-  // A hair of fringing on the edge: warm outside, cool inside.
-  body += vec3(0.06, 0.0, -0.03) * c.rgb * smoothstep(0.92, 1.0, d) * inside * 4.0;
+  // The edge's softness is the distance from the focal plane: the near layer
+  // melts over a quarter of its radius, the far one is nearly crisp.
+  float soft = layer < 0.5 ? 0.3 : layer < 1.5 ? 0.12 : 0.05;
+  float inside = smoothstep(1.0, 1.0 - max(soft, aa * 1.5), d);
+  // Evenly lit, with only a gentle rim: the soap-bubble ring of a strongly
+  // aberrated lens is a period look.
+  float rim = smoothstep(0.62, 0.98, d);
+  vec3 body = c.rgb * (0.72 + 0.28 * rim) * inside;
   return vec4(body, 1.0);
 }
 `,

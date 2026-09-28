@@ -79,12 +79,15 @@ import {
   familyAt,
   familyLook,
   familyTable,
+  grooveOf,
   tempoRangeFor,
   ARCHETYPES,
   KICK_TYPES,
   LOOK_KEYS,
 } from "./style.js";
 import { parseLayout } from "./rhythm-core.js";
+import { ConstructionMeter } from "../genre/construction.js";
+import { api } from "../api.js";
 
 // 120 log-spaced bands over 22 Hz..18 kHz — about 20 per octave, so roughly
 // half a semitone. Fixed rather than per-view: scenes that want fewer bars
@@ -259,9 +262,15 @@ export const GENRE_KEYS = ["lead", "buzz", "screech", "sub", "offbeat", "density
 const genreOut = {};
 for (const k of GENRE_KEYS) genreOut[k] = 0;
 
+// THE CROSSOVER's three ways — 20-160 Hz, 160 Hz-2 kHz, 2-16 kHz — as power off
+// the fast spectrum (rhythm/src/lib.rs `ways`): what a rig's subs, mids and
+// horns each move with. Null until something has measured them.
+const waysOut = new Float32Array(3);
+
 export const frame = {
   t: 0,
   dt: 1 / 94,
+  ways: null,
   bands: new Float32Array(BAND_COUNT),
   bandsDb: new Float32Array(BAND_COUNT).fill(FLOOR_DB),
   centers: new Float32Array(BAND_COUNT),
@@ -392,9 +401,28 @@ function adoptVerdict(id, late = false) {
   // that settles the octave question, which no amount of signal processing can:
   // 250 BPM uptempo and 125 BPM house produce the same autocorrelation. A
   // served genre also retires the live classifier's say in it.
-  const range = tempoRangeFor(v.style || v.styleLabel || "");
-  if (range) send({ t: "range", lo: range[0], hi: range[1] });
-  send({ t: "liveRange", on: !range });
+  //
+  // ...when the genre can be believed. A TAG or the trained model's verdict
+  // always can. The server's HEURISTIC reads whole-file averages that cannot
+  // hear how a genre is built (the kick's shape, a piep, a roll), and a wrong
+  // family here does real damage: served "jazz" for a 205 BPM Krach record set
+  // an 80-165 plateau against a 205 seed. So a heuristic genre sets the range
+  // only when it is confident AND its own figure lies inside that range, and
+  // otherwise the live classifier keeps its say (liveRange).
+  const name = v.style || v.styleLabel || "";
+  const trusted = servedTrusted(v);
+  const range = tempoRangeFor(name);
+  const bpm = +v.bpm || 0;
+  const fits = range && (!bpm || (bpm >= range[0] * 0.97 && bpm <= range[1] * 1.03));
+  const useRange = range && fits && (trusted || (v.styleConfidence ?? 0) >= HEURISTIC_RANGE_CONF);
+  if (useRange) send({ t: "range", lo: range[0], hi: range[1] });
+  send({ t: "liveRange", on: !useRange });
+  // ...and how its bar is marked (beat.rs DOWN_MODELS). A genre somebody chose
+  // says how the music is built whatever its tempo figure says, and a sub-genre
+  // with no band of its own (dembow, a prog rock tag) still has a groove; a
+  // heuristic genre is believed about its groove only where it set the range.
+  // Any other leaves the choice to the live reading.
+  send({ t: "groove", g: trusted || useRange ? grooveOf(name) : 0 });
   // ...and the figure itself, WHETHER OR NOT the grid has already locked: the
   // verdict comes over the network, behind the audio in the request ladder,
   // and a late seed moves the grid's LEVEL while keeping its phase, so it
@@ -711,6 +739,12 @@ function deliver(q, nowMs, heard) {
     energyDb[i] = buf[I.energyDb + i];
     energyLin[ENERGY_BANDS[i][0]] = buf[I.energy + i];
   }
+  if (I.ways != null) {
+    waysOut[0] = buf[I.ways];
+    waysOut[1] = buf[I.ways + 1];
+    waysOut[2] = buf[I.ways + 2];
+    frame.ways = waysOut;
+  }
 
   const f = features;
   f.level = buf[I.level];
@@ -794,6 +828,7 @@ function deliver(q, nowMs, heard) {
 
     if (analysisLevel >= LEVEL.SMART) {
       decodeStyle(buf, I);
+      if (meterTrack === id) meter.add(buf, I);
       // Where the server has measured the track, ITS verdict is the authority:
       // it heard the whole piece, this one has heard a few seconds of it. The
       // kick stays the live reading either way — that is a per-event property
@@ -913,11 +948,29 @@ const mergedStyle = {
   served: true,
 };
 
+// A served genre somebody CHOSE — a tag, or the head trained on the admin's
+// tags — against one the server's heuristic GUESSED.
+function servedTrusted(v) {
+  return v?.styleSource === "tag" || v?.styleSource === "model";
+}
+// The heuristic's confidence needed before its genre sets the tempo range, and
+// the live classifier's needed before it overrides a heuristic genre. The live
+// one reads how the track is BUILT, kick by kick (rhythm/src/style.rs), and its
+// confidence is backed by how much its rules actually found; the server's
+// heuristic reads whole-file averages. So when the live reading is sure of a
+// different family, it is the better witness — and it is what names the
+// genre, picks the look and the world. A tag or a trained model still wins.
+const HEURISTIC_RANGE_CONF = 0.5;
+const LIVE_OVERRIDE_CONF = 0.5;
+
 function merged(live, v) {
+  if (!servedTrusted(v) && live.dominant && live.dominant !== v.style && (live.confidence || 0) > LIVE_OVERRIDE_CONF)
+    return live;
   mergedStyle.kick = live.kick;
   mergedStyle.families = live.families;
-  // The served verdict names a family; the renderer needs the seven numbers
-  // that family implies (style.js LOOK_KEYS). Where the server has no opinion
+  // The served verdict names a genre — a family, or a studio sub-genre that
+  // resolves to one (style.js genreOf); the renderer needs the seven numbers
+  // that family implies (LOOK_KEYS). Where the server has no opinion
   // the live vector stands, exactly as for everything else here.
   const served = familyLook(v.style);
   const src = served || live.look;
@@ -947,7 +1000,24 @@ function emit() {
   }
 }
 
+// How the track is BUILT, averaged over its groove while it plays at the
+// "smart" level (lib/genre/construction.js), and sent once the track changes:
+// the genre head reads it next to the embedding. Thirteen additions a frame.
+const meter = new ConstructionMeter();
+let meterTrack = null;
+
+function flushMeter() {
+  const summary = meter.summary();
+  const id = meterTrack;
+  meter.reset();
+  meterTrack = null;
+  if (summary && id) api.analysisLive(id, summary).catch(() => {});
+}
+if (typeof window !== "undefined") window.addEventListener("pagehide", flushMeter);
+
 function newTrack(id) {
+  flushMeter();
+  meterTrack = id;
   lastTrackId = id;
   frame.trackId = id;
   gen++;
@@ -1026,6 +1096,19 @@ function fallbackTick() {
   readEnergy(fb.plans.energy, fb.lo, fb.hi, energyDb, FLOOR_DB);
   for (let i = 0; i < ENERGY_BANDS.length; i++)
     energyLin[ENERGY_BANDS[i][0]] = Math.pow(10, energyDb[i] / 10);
+  // The crossover, off the fast analyser, as the Rust reads it.
+  {
+    const hz = fb.plans.sampleRate / FFT_HI;
+    const hi = fb.hi;
+    const edge = (f) => Math.min(hi.length - 1, Math.max(1, Math.round(f / hz)));
+    const e = [edge(20), edge(160), edge(2000), edge(16000)];
+    for (let k = 0; k < 3; k++) {
+      let p = 0;
+      for (let i = e[k]; i < e[k + 1]; i++) p += Math.pow(10, hi[i] / 10);
+      waysOut[k] = p;
+    }
+    frame.ways = waysOut;
+  }
   let peak = FLOOR_DB;
   for (let i = 0; i < BAND_COUNT; i++) if (frame.bandsDb[i] > peak) peak = frame.bandsDb[i];
   frame.silent = peak < FLOOR_DB + 12;

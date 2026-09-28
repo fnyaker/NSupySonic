@@ -20,7 +20,8 @@ import html
 import os.path
 import re
 
-from flask import Blueprint, abort, make_response, send_from_directory
+from flask import Blueprint, abort, make_response, request, send_from_directory
+from werkzeug.security import safe_join
 
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
 
@@ -67,15 +68,46 @@ def _has_build() -> bool:
     return os.path.isfile(os.path.join(DIST_DIR, "index.html"))
 
 
+# The build writes a brotli and a gzip copy next to every text or wasm file
+# that compresses (vite.config.js#precompress). These responses are FILES — the
+# app's on-the-fly gzip (web.py) never touches a passthrough response — so
+# without this the main bundle went out as 460 kB where brotli makes it 132.
+_ENCODINGS = (("br", ".br"), ("gzip", ".gz"))
+_COMPRESSIBLE = {".js", ".mjs", ".css", ".html", ".wasm", ".svg", ".json", ".webmanifest", ".txt"}
+
+
+def _send(path: str, mimetype: str | None):
+    """``send_from_directory`` for a file of the build, as the smallest
+    precompressed copy the client accepts."""
+    served = path
+    encoding = None
+    if os.path.splitext(path)[1].lower() in _COMPRESSIBLE:
+        accepted = request.accept_encodings
+        for enc, ext in _ENCODINGS:
+            if accepted[enc] <= 0:
+                continue
+            candidate = safe_join(DIST_DIR, path + ext)
+            if candidate and os.path.isfile(candidate):
+                served, encoding = path + ext, enc
+                break
+    response = send_from_directory(DIST_DIR, served, mimetype=mimetype)
+    if encoding:
+        response.headers["Content-Encoding"] = encoding
+    if os.path.splitext(path)[1].lower() in _COMPRESSIBLE:
+        response.vary.add("Accept-Encoding")
+    return response
+
+
 @spa.route("/app/")
 @spa.route("/app/<path:path>")
 def serve(path: str = ""):
     if not _has_build():
         return _NOT_BUILT
     if path:
-        if os.path.isfile(os.path.join(DIST_DIR, path)):
+        full = safe_join(DIST_DIR, path)
+        if full and os.path.isfile(full):
             mimetype = _MIME_BY_EXT.get(os.path.splitext(path)[1].lower())
-            response = send_from_directory(DIST_DIR, path, mimetype=mimetype)
+            response = _send(path, mimetype)
             # Vite asset filenames are content-hashed, so they're immutable.
             if path.startswith("assets/"):
                 response.headers["Cache-Control"] = (
@@ -96,9 +128,7 @@ def serve(path: str = ""):
     # Hash-routing fallback: any unknown route serves the SPA entry point.
     # Never cache it, so a redeploy's new asset references are picked up
     # immediately (a stale index.html points at assets that no longer exist).
-    response = send_from_directory(
-        DIST_DIR, "index.html", mimetype="text/html; charset=utf-8"
-    )
+    response = _send("index.html", "text/html; charset=utf-8")
     response.headers["Cache-Control"] = "no-cache"
     return response
 

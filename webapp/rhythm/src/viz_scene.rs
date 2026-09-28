@@ -43,7 +43,7 @@ pub const MAX_BLOCK: usize = 512;
 pub const SLOTS: &[&str] = &[
     "uClock", "uPhase", "uHit", "uHit2", "uFlow", "uMood", "uArc", "uLookA", "uLookB", "uBandA", "uBandB",
     "uChroma", "uCount", "uSince", "uGenre", "uPalLow", "uPalMid", "uPalHigh", "uPalAcc", "uPalBg", "uFrame",
-    "uHole", "uHoleR", "uCtl", "uQual",
+    "uHole", "uHoleR", "uCtl", "uQual", "uPump",
 ];
 const U_CLOCK: usize = 0;
 const U_PHASE: usize = 1;
@@ -70,6 +70,10 @@ const U_HOLE: usize = 21;
 const U_HOLE_R: usize = 22;
 const U_CTL: usize = 23;
 const U_QUAL: usize = 24;
+const U_PUMP: usize = 25;
+/// THE CROSSOVER's release per way, in SECONDS — a cone's mass, not a musical
+/// value: the sub cone falls back slowest, the horn at once (see `pump`).
+const PUMP_RELEASE: [f64; 3] = [0.12, 0.07, 0.045];
 
 macro_rules! fields {
     ($list:ident; $($name:ident = $idx:expr, $len:expr;)*) => {
@@ -123,6 +127,8 @@ pub const F_PITCH: u32 = 4;
 pub const F_MELODY: u32 = 8;
 pub const F_DYNAMICS: u32 = 16;
 pub const F_FEATURES: u32 = 32;
+/// The frame carries the crossover's three ways (`ways_in`).
+pub const F_WAYS: u32 = 64;
 
 #[inline]
 fn clamp(v: f64, a: f64, b: f64) -> f64 {
@@ -182,12 +188,14 @@ fn normalise(c: [f32; 3], target: f64) -> [f32; 3] {
 
 pub struct Scene {
     pub m: Motion,
-    offsets: [usize; 25],
+    offsets: [usize; 26],
     block_len: usize,
     pub block: [f32; MAX_BLOCK],
     /// The next update's bands and chroma, written by the page.
     pub bands: [f32; MAX_BANDS],
     pub chroma_in: [f32; 12],
+    /// The analyser's crossover ways for the next update, when F_WAYS says so.
+    pub ways_in: [f32; 3],
     pub pack_in: [f64; PACK_LEN],
     pub prep: [f64; PREP_LEN],
     /// The two texture rows (released, raw) as bytes, and the history row.
@@ -199,6 +207,11 @@ pub struct Scene {
     hist_due: f64,
     band_share: [f32; 6],
     band_smooth: [f32; 6],
+    /// THE CROSSOVER: each way's power reference, its excursion max-held
+    /// since the last picture, and the released excursion the block carries.
+    pump_ref: [f64; 3],
+    pump_in: [f32; 3],
+    pump: [f32; 3],
     chroma: [f32; 12],
     has_chroma: bool,
     pitch: f64,
@@ -214,11 +227,12 @@ impl Scene {
     pub fn new() -> Scene {
         Scene {
             m: Motion::new(),
-            offsets: [0; 25],
+            offsets: [0; 26],
             block_len: 0,
             block: [0.0; MAX_BLOCK],
             bands: [0.0; MAX_BANDS],
             chroma_in: [0.0; 12],
+            ways_in: [0.0; 3],
             pack_in: [0.0; PACK_LEN],
             prep: [0.0; PREP_LEN],
             spec: [0; SPEC_W * 2],
@@ -228,6 +242,9 @@ impl Scene {
             hist_due: 0.0,
             band_share: [0.0; 6],
             band_smooth: [0.0; 6],
+            pump_ref: [0.0; 3],
+            pump_in: [0.0; 3],
+            pump: [0.0; 3],
             chroma: [0.0; 12],
             has_chroma: false,
             pitch: 0.5,
@@ -307,6 +324,45 @@ impl Scene {
                 }
             }
         }
+        // THE CROSSOVER (uPump): a rig splits the music three ways, and each
+        // way's cones move with THEIR part of it — the subs with the kick and
+        // the sub bass (20-160 Hz), the mids with the snare, the chords and
+        // the voice (160 Hz-2 kHz), the horns with the hats and the top of the
+        // leads (2-16 kHz). The band shares above are the mix's balance,
+        // smoothed over a fifth of a beat: every cone moved with the same slow
+        // swell, and the kick's envelope had to be added to the mids to make
+        // them move at all. Here each way is read against ITS OWN recent loud
+        // level (up in 0.3 s, down over 8 s), so a quiet top end still
+        // flutters on its own hats: a cone is fully out at its loud level and
+        // at rest 15 dB under it (the fourth root of the power ratio — sqrt
+        // only, which the reference computes to the same bit). The ways come
+        // from the analyser's fast spectrum (lib.rs `ways`); a publisher that
+        // sends none (an older player tab) falls back to the energy bands,
+        // whose low end is a quarter of a beat late.
+        let way = if flags & F_WAYS != 0 {
+            Some([self.ways_in[0] as f64, self.ways_in[1] as f64, self.ways_in[2] as f64])
+        } else if self.m.input[I_HAS_ENERGY] != 0.0 {
+            let e = &self.m.input[I_ENERGY..I_ENERGY + 6];
+            Some([e[0] + e[1], e[2] + e[3], e[4] + e[5]])
+        } else {
+            None
+        };
+        if let Some(way) = way {
+            let up = 1.0 - exp64(-dt / 0.3);
+            let down = 1.0 - exp64(-dt / 8.0);
+            for k in 0..3 {
+                let pw = way[k].fmax(1e-12);
+                let r = &mut self.pump_ref[k];
+                if !(*r > 0.0) {
+                    *r = pw;
+                }
+                *r += (pw - *r) * if pw > *r { up } else { down };
+                let x = clamp(((pw / *r).sqrt().sqrt() - 0.42) / 0.58, 0.0, 1.0);
+                if x > self.pump_in[k] as f64 {
+                    self.pump_in[k] = x as f32;
+                }
+            }
+        }
         if flags & F_FEATURES != 0 {
             if flags & F_CHROMA != 0 {
                 self.chroma = self.chroma_in;
@@ -347,6 +403,14 @@ impl Scene {
         for i in 0..6 {
             self.band_smooth[i] = approach(self.band_smooth[i] as f64, self.band_share[i] as f64, beat * 0.2, rdt) as f32;
             self.band_share[i] = (self.band_share[i] as f64 * 0.5) as f32;
+        }
+        // A cone is thrown out at once and falls back with its own mass.
+        for k in 0..3 {
+            let v = self.pump_in[k] as f64;
+            let s = self.pump[k] as f64;
+            let rel = exp64(-rdt / PUMP_RELEASE[k]);
+            self.pump[k] = (if v > s { v } else { v + (s - v) * rel }) as f32;
+            self.pump_in[k] = (v * 0.4) as f32;
         }
         let row = beats_now >= self.hist_due;
         if row {
@@ -463,6 +527,7 @@ impl Scene {
             self.put(U_HOLE, 0, [0.0; 4]);
             self.put(U_HOLE_R, 0, [0.0, 0.0, -1.0 / 3.0, 0.0]);
         }
+        self.put(U_PUMP, 0, [self.pump[0] as f64, self.pump[1] as f64, self.pump[2] as f64, 0.0]);
         self.put(U_CTL, 0, [p[P_INTENSITY], p[P_REDUCED], p[P_STRIP], 0.0]);
         self.put(U_QUAL, 0, [p[P_STEPS], p[P_PARTICLES], p[P_TIER], scale]);
     }

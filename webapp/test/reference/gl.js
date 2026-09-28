@@ -169,6 +169,11 @@ export function createGLScene(opts = {}) {
   let histDue = 0;
   const bandShare = new Float32Array(6);
   const bandSmooth = new Float32Array(6);
+  // The crossover (viz_scene.rs `pump`), written the Rust's way.
+  const PUMP_RELEASE = [0.12, 0.07, 0.045];
+  const pumpRef = [0, 0, 0];
+  const pumpIn = new Float32Array(3);
+  const pump = new Float32Array(3);
   let chroma = null;
   let pitch = 0.5;
   let melody = 0;
@@ -205,7 +210,19 @@ export function createGLScene(opts = {}) {
   let geomRef = null;
 
   // --- dynamic resolution ---------------------------------------------------------
-  const gq = () => o.preset.gl || {};
+  // The strip renders at full resolution (lib/viz/scenes/gl.js#gq): policy,
+  // mirrored here so the block comparison stays about the arithmetic.
+  let gqFor = null;
+  let gqStrip = null;
+  const gq = () => {
+    const g = o.preset.gl || {};
+    if (o.layout !== "strip") return g;
+    if (gqFor !== g) {
+      gqFor = g;
+      gqStrip = { ...g, scale: 1, min: 1, max: 1 };
+    }
+    return gqStrip;
+  };
   let scale = 1;
   let scaleAt = 0;
   let starved = false;
@@ -454,6 +471,19 @@ export function createGLScene(opts = {}) {
         if (share > bandShare[i]) bandShare[i] = share;
       }
     }
+    const w = frame.ways;
+    const way = w ? [w[0], w[1], w[2]] : e ? [e.sub + e.bass, e.lowMid + e.mid, e.high + e.air] : null;
+    if (way) {
+      const up = 1 - Math.exp(-dt / 0.3);
+      const down = 1 - Math.exp(-dt / 8);
+      for (let k = 0; k < 3; k++) {
+        const pw = Math.max(way[k], 1e-12);
+        if (!(pumpRef[k] > 0)) pumpRef[k] = pw;
+        pumpRef[k] += (pw - pumpRef[k]) * (pw > pumpRef[k] ? up : down);
+        const x = clamp((Math.sqrt(Math.sqrt(pw / pumpRef[k])) - 0.42) / 0.58, 0, 1);
+        if (x > pumpIn[k]) pumpIn[k] = x;
+      }
+    }
     const f = frame.features;
     if (f) {
       chroma = f.chroma || chroma;
@@ -510,6 +540,7 @@ export function createGLScene(opts = {}) {
     put("uLookB", m.warm, m.melodic, m.chaos, m.rollDiv / 16);
     put("uBandA", bandSmooth[0], bandSmooth[1], bandSmooth[2], bandSmooth[3]);
     put("uBandB", bandSmooth[4], bandSmooth[5], pitch, melody);
+    put("uPump", pump[0], pump[1], pump[2], 0);
     for (let i = 0; i < 3; i++) {
       const c = chroma;
       put("uChroma", c ? c[i * 4] : 0, c ? c[i * 4 + 1] : 0, c ? c[i * 4 + 2] : 0, c ? c[i * 4 + 3] : 0, i);
@@ -688,6 +719,13 @@ export function createGLScene(opts = {}) {
     for (let i = 0; i < 6; i++) {
       bandSmooth[i] = approach(bandSmooth[i], bandShare[i], m.beat * 0.2, rdt);
       bandShare[i] *= 0.5;
+    }
+    for (let k = 0; k < 3; k++) {
+      const v = pumpIn[k];
+      const s = pump[k];
+      const rel = Math.exp(-rdt / PUMP_RELEASE[k]);
+      pump[k] = v > s ? v : v + (s - v) * rel;
+      pumpIn[k] = v * 0.4;
     }
     let row = null;
     if (beatsNow >= histDue) {

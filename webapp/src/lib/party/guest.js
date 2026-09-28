@@ -16,6 +16,7 @@
 import { get, writable } from "svelte/store";
 import { outputTrim } from "../stores.js";
 import { startClock } from "./clock.js";
+import { appCore, loadAppCore } from "../appcore/core.js";
 import { PartyEngine, makeClockBridge } from "./engine.js";
 import { compressorDelay } from "./latency.js";
 import { serverTimeAt } from "./timeline.js";
@@ -65,7 +66,9 @@ export async function peekParty(pid) {
   return res.json();
 }
 
-// Must be called from a user gesture (it creates the AudioContext).
+// Must be called from a user gesture (it creates the AudioContext). The clocks
+// are the app core's estimators; routes/Party.svelte loads it on the landing
+// screen, and a session started without it starts its clocks once it is in.
 export function joinParty(pid, name) {
   const base = `/api/party/${encodeURIComponent(pid)}`;
   const view = writable({
@@ -161,6 +164,11 @@ export function joinParty(pid, name) {
 
   (async () => {
     const graphDelay = await compressorDelay();
+    try {
+      await loadAppCore();
+    } catch {
+      return; // the clock's own load failed too, and ended the session
+    }
     if (stopped) return;
     // The first probes ride a fresh connection (its handshake is in the round
     // trip): a few are needed before an offset is worth placing audio on.
@@ -232,11 +240,20 @@ export function joinParty(pid, name) {
     poll();
   })();
 
-  const clock = startClock(`${base}/clock`, (e) => {
-    if (e) probes++;
-    clockEst = e;
-    patch({ clock: e ? { spread: e.spread, rtt: e.rtt } : null });
-  });
+  // The clock is the app core's (Rust). The landing screen loads it before
+  // the tap, so this is normally immediate; a caller that did not wait gets
+  // the clock a few milliseconds later instead of an error.
+  let clock = null;
+  const probe = () => {
+    if (stopped || clock) return;
+    clock = startClock(`${base}/clock`, (e) => {
+      if (e) probes++;
+      clockEst = e;
+      patch({ clock: e ? { spread: e.spread, rtt: e.rtt } : null });
+    });
+  };
+  if (appCore()) probe();
+  else loadAppCore().then(probe, () => end("unsupported"));
 
   // Join as a named listener (the host sees who is there). A reload keeps its
   // seat rather than appearing twice; a seat the server dropped (a tab frozen
@@ -343,10 +360,11 @@ export function joinParty(pid, name) {
     stopped = true;
     clearTimeout(pollTimer);
     clearInterval(tickTimer);
-    clock.stop();
+    if (clock) clock.stop();
     document.removeEventListener("visibilitychange", onVisible);
     window.removeEventListener("pagehide", onHide);
     if (engine) engine.stop();
+    if (bridge) bridge.free();
     if (window.__nsParty) delete window.__nsParty.guest;
     try {
       if (wake) wake.release();

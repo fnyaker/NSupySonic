@@ -8,6 +8,7 @@
   import { createBackdrop } from "../lib/backdrop.js";
   import { cssUrl, duration as fmtDuration } from "../lib/format.js";
   import { joinParty, peekParty, rememberName, savedName } from "../lib/party/guest.js";
+  import { loadAppCore } from "../lib/appcore/core.js";
   import Icon from "../components/Icon.svelte";
   import TrimControl from "../components/TrimControl.svelte";
 
@@ -48,13 +49,20 @@
 
   onMount(async () => {
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC || !window.fetch) {
+    if (!AC || !window.fetch || typeof WebAssembly !== "object") {
       phase = "unsupported";
       return;
     }
+    // The party's clocks are the app core's (Rust): loaded while the landing
+    // screen is up, so the tap that joins — which must create the audio
+    // context synchronously — finds it there.
+    const core = loadAppCore().then(
+      () => true,
+      () => false
+    );
     try {
       peek = await peekParty(id);
-      phase = peek ? "landing" : "missing";
+      phase = peek ? ((await core) ? "landing" : "unsupported") : "missing";
     } catch {
       phase = "missing";
     }

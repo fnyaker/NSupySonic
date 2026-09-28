@@ -212,6 +212,26 @@ function fakeCover() {
   return c;
 }
 
+// The players' backdrop: the cover blown up and blurred, under the scrim
+// (MobileNowPlaying.svelte's .bg + .scrim), seen through a strip-sized window.
+let backdropCache = null;
+function paintBackdrop(g, w, h) {
+  if (!backdropCache || backdropCache.width !== w || backdropCache.height !== h) {
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const cg = c.getContext("2d");
+    cg.filter = `blur(${Math.max(8, Math.round(w / 12))}px) saturate(1.4)`;
+    const side = w * 1.6;
+    cg.drawImage(fakeCover(), (w - side) / 2, h / 2 - side * 0.62, side, side);
+    cg.filter = "none";
+    cg.fillStyle = "rgba(8,8,12,0.55)";
+    cg.fillRect(0, 0, w, h);
+    backdropCache = c;
+  }
+  g.drawImage(backdropCache, 0, 0);
+}
+
 /**
  * Run one world through the track and photograph it.
  *
@@ -245,6 +265,13 @@ async function run(opts) {
     cover = true,
     // Pinned rather than fixed: the smart engine's own path, skin included.
     skin = false,
+    // "strip": the transparent layout the players draw under their controls.
+    layout = "full",
+    // Composite each shot over the player's backdrop (the blurred cover under
+    // its scrim): a transparent layout can only be judged on what it sits on.
+    backdrop = false,
+    // Device pixels per CSS pixel: the strip is judged at a phone's density.
+    dpr = 1,
   } = opts;
   // The animation core (Rust): the scope's trace runs through it.
   await loadVizCore();
@@ -274,12 +301,13 @@ async function run(opts) {
     now: () => simT,
     fps: 60,
     flash: "full",
+    layout,
   });
   scene.attach(renderer);
   if (cover) renderer.setCover(fakeCover());
   const geometry = createGeometry();
   geometry.set(w, h, hole);
-  scene.resize(w, h, preset, geometry.out, 1);
+  scene.resize(w, h, preset, geometry.out, dpr);
   const pal = createPalette(palette);
   const track = createTrack({ bpm, genre, loud });
   const times = shots.map((name) => [name, track.moments[name]]).sort((a, b) => a[1] - b[1]);
@@ -337,9 +365,11 @@ async function run(opts) {
     costN++;
     const a = sample(canvas);
     const shot = document.createElement("canvas");
-    shot.width = w;
-    shot.height = h;
-    shot.getContext("2d").drawImage(canvas, 0, 0);
+    shot.width = canvas.width;
+    shot.height = canvas.height;
+    const sgx = shot.getContext("2d");
+    if (backdrop) paintBackdrop(sgx, shot.width, shot.height);
+    sgx.drawImage(canvas, 0, 0);
     // The motion measurement: the same scene a frame later — or, over a
     // window, the mean change from each frame to the next.
     const m = metrics(a, hole, w, h);
@@ -369,12 +399,14 @@ async function run(opts) {
   // The contact sheet.
   const rows = Math.ceil(frames.length / cols);
   const sheet = document.createElement("canvas");
-  sheet.width = w * Math.min(cols, frames.length);
-  sheet.height = h * rows;
+  const sw = canvas.width;
+  const sh = canvas.height;
+  sheet.width = sw * Math.min(cols, frames.length);
+  sheet.height = sh * rows;
   const sg = sheet.getContext("2d");
   frames.forEach((fr, i) => {
-    const x = (i % cols) * w;
-    const y = Math.floor(i / cols) * h;
+    const x = (i % cols) * sw;
+    const y = Math.floor(i / cols) * sh;
     sg.drawImage(fr.shot, x, y);
     if (hole) {
       // Where the artwork sits in the player: drawn as a dim plate so the

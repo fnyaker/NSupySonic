@@ -18,7 +18,7 @@
 use crate::util::{above, below, in_range};
 use crate::util::MinMax;
 
-pub const N_FEAT: usize = 19;
+pub const N_FEAT: usize = 29;
 // Descriptor slots, in the order style.js's RULE_FEATURES names them.
 pub const F_BPM: usize = 0;
 pub const F_PULSE: usize = 1;
@@ -27,7 +27,13 @@ pub const F_FLAT: usize = 3;
 pub const F_CENTROID: usize = 4;
 pub const F_PERC: usize = 5;
 pub const F_VOCAL: usize = 6;
-pub const F_CREST: usize = 7;
+/// How SQUASHED the master is: the spread of the level over the last few
+/// seconds, in dB (lib.rs). It replaced the spectrum's crest, a peak bin
+/// over the bins' RMS that reads 12-18 on every record there is, while the
+/// rules written on it asked for "below 3.2" to mean "limitered" — so the
+/// families that asked (krach, rawstyle, speedcore, industrial, metal)
+/// could never be named at all.
+pub const F_RANGE: usize = 7;
 pub const F_LEVEL: usize = 8;
 pub const F_SUB: usize = 9;
 pub const F_MID: usize = 10;
@@ -39,8 +45,38 @@ pub const F_MELODY: usize = 15;
 pub const F_TONAL: usize = 16;
 pub const F_CHORD: usize = 17;
 pub const F_DYN: usize = 18;
+// What the music is BUILT from, rather than what it averages out to: the
+// timbre descriptors above are a mix's overall colour, and genres that are
+// made differently can share one (a limitered uptempo drop and a limitered
+// Krach drop are equally flat and equally loud). These say what is in it.
+/// Where the kick's pitch starts, Hz, averaged over the kicks.
+pub const F_KF0: usize = 19;
+/// Share of kicks carrying a piep (KickShape::piep).
+pub const F_PIEP: usize = 20;
+/// How long the kick rings, 0..1 over 0..400 ms (genre.rs `tail`).
+pub const F_TAIL: usize = 21;
+/// A sustained, pitched lead; a sustained flat one (saw stack, noise wall);
+/// hoover and screech attacks (genre.rs).
+pub const F_LEAD: usize = 22;
+pub const F_BUZZ: usize = 23;
+pub const F_SCREECH: usize = 24;
+/// How much of the rhythm sits on the offbeat (beat.rs).
+pub const F_OFFBEAT: usize = 25;
+/// Onsets per beat, 0..1 over 0..4 (genre.rs `density`).
+pub const F_DENSITY: usize = 26;
+/// How much of the time a kick roll is running, over the last few bars.
+pub const F_ROLL: usize = 27;
+/// FOUR ON THE FLOOR: the share of recent beats that carried a main kick
+/// (pattern.rs), over about two bars. The onset grid's `kickPulse` cannot say
+/// it — a techno rumble on every offbeat pulls it down to 0.64, inside the
+/// window the broken-beat families were written for.
+pub const F_FOUR: usize = 28;
 
 pub const LOOK_N: usize = 7;
+/// The specific families' summed rule weight that counts as full evidence:
+/// a record whose family fits reads 0.3-1 (its own rule, times the tempo's
+/// trust); one on the wrong octave, 0.03-0.1.
+const EVIDENCE_FULL: f32 = 0.25;
 pub const ARCH_N: usize = 5;
 
 #[derive(Clone, Copy)]
@@ -56,8 +92,12 @@ struct Term {
 struct Family {
     arch: usize,
     tempo_free: bool,
+    /// The catch-all: it wins by default and is no evidence of anything.
+    fallback: bool,
     look: [f32; LOOK_N],
     range: (f32, f32),
+    /// How it builds its groove: beat.rs DOWN_MODELS.
+    groove: u8,
     terms: Vec<Term>,
 }
 
@@ -99,6 +139,16 @@ pub struct KickShape {
     trust: f32,
     flat_sum: f32,
     flat_n: f32,
+    piep_max: f32,
+    /// Frames since the kick whose piep is being judged, or -1.
+    piep_age: i32,
+    /// The share of this track's kicks that carry a piep, 0..1, and where
+    /// its kicks' pitch starts (Hz), both eased kick by kick.
+    pub piep: f32,
+    pub f0_avg: f32,
+    /// How many kicks have been measured: until a few have, the kick-shape
+    /// weights are their neutral thirds, not a reading.
+    pub measured: u32,
     pub soft: f32,
     pub hard: f32,
     pub indus: f32,
@@ -129,6 +179,14 @@ fn ramp(x: f32, lo: f32, hi: f32) -> f32 {
     ((x - lo) / (hi - lo)).clamp(0.0, 1.0)
 }
 
+/// One frame's piep reading, 0..1, from features.rs's two numbers: a line
+/// standing clear of the harmonics beneath it AND loud enough to be heard
+/// next to the kick. The ramps sit between the measured populations (see
+/// features.rs `piep`).
+pub fn piep_frame(stand: f32, rel: f32) -> f32 {
+    ramp(stand, 1.5, 5.5) * ramp(rel, -27.0, -20.0)
+}
+
 impl KickShape {
     fn new() -> KickShape {
         KickShape {
@@ -142,6 +200,11 @@ impl KickShape {
             trust: 0.0,
             flat_sum: 0.0,
             flat_n: 0.0,
+            piep_max: 0.0,
+            piep_age: -1,
+            piep: 0.0,
+            f0_avg: 0.0,
+            measured: 0,
             soft: 1.0 / 3.0,
             hard: 1.0 / 3.0,
             indus: 1.0 / 3.0,
@@ -159,9 +222,38 @@ impl KickShape {
         *self = KickShape::new();
     }
 
-    /// One output frame: `kick` is the kick this frame carries, if any.
-    fn process(&mut self, kick: Option<KickSeen>, low_lin: f32, flatness: f32, now: f64) {
+    /// One output frame: `kick` is the kick this frame carries, if any;
+    /// `piep_late` is features.rs's verdict on the frame PIEP_LATE back.
+    fn process(&mut self, kick: Option<KickSeen>, low_lin: f32, flatness: f32, piep_late: f32, now: f64) {
         self.hit = false;
+        // The piep starts WITH the kick, so it is read on the three frames
+        // after the kick's own — windows ending ~5 to ~37 ms past the onset,
+        // which hold its first milliseconds — and each of those frames is
+        // judged PIEP_LATE frames later. Not on the kick's frame itself: that
+        // window ends at the onset and is the previous beat's audio, where an
+        // upward-bending screech's last partials are born and die exactly
+        // like a squeak (measured, half the kicks of a 280 BPM speedcore
+        // record read as pieps on that frame alone).
+        const LATE: i32 = crate::features::PIEP_LATE as i32;
+        if self.piep_age >= 0 {
+            self.piep_age += 1;
+            if self.piep_age > LATE && self.piep_age <= LATE + 3 {
+                self.piep_max = self.piep_max.fmax(piep_late);
+            }
+            if self.piep_age >= LATE + 3 {
+                self.piep += (self.piep_max - self.piep) * 0.3;
+                self.piep_age = -1;
+            }
+        }
+        if kick.is_some() {
+            // A kick before the last one's verdict is in (a roll): judge that
+            // one on what has come in, if anything has.
+            if self.piep_age > LATE {
+                self.piep += (self.piep_max - self.piep) * 0.3;
+            }
+            self.piep_age = 0;
+            self.piep_max = 0.0;
+        }
         if let Some(k) = kick {
             if self.capturing {
                 self.finish(now);
@@ -189,6 +281,7 @@ impl KickShape {
                 self.flat_sum += flatness;
                 self.flat_n += 1.0;
             }
+
             if self.decay_at == 0.0 && low_lin < self.peak_low * 0.25 && now - self.peak_at > 0.01 {
                 self.decay_at = now;
             }
@@ -223,7 +316,11 @@ impl KickShape {
         let soft = 1.0 - pitched;
         let hard = pitched * (1.0 - noisy);
         let indus = pitched * noisy;
+        if self.f0 > 0.0 {
+            self.f0_avg = if self.f0_avg <= 0.0 { self.f0 } else { self.f0_avg + (self.f0 - self.f0_avg) * 0.3 };
+        }
         let k = 0.35 * self.trust;
+        self.measured = self.measured.saturating_add(1);
         self.soft += (soft - self.soft) * k;
         self.hard += (hard - self.hard) * k;
         self.indus += (indus - self.indus) * k;
@@ -242,6 +339,8 @@ pub struct Style {
     pending: i32,
     pending_since: f64,
     pub confidence: f32,
+    /// How much the SPECIFIC families' rules found, smoothed like the weights.
+    evidence: f32,
     pub top: [(i32, f32); 3],
     pub kick: KickShape,
 }
@@ -259,14 +358,15 @@ impl Style {
             pending: -1,
             pending_since: 0.0,
             confidence: 0.0,
+            evidence: 0.0,
             top: [(-1, 0.0); 3],
             kick: KickShape::new(),
         }
     }
 
     /// The family table, flattened by style.js#familyTable:
-    ///   [count, then per family: arch, tempoFree, look x7, rangeLo, rangeHi,
-    ///    nTerms, then per term: op, a, b, p1, p2, p3]
+    ///   [count, then per family: arch, flag, look x7, rangeLo, rangeHi,
+    ///    groove, nTerms, then per term: op, a, b, p1, p2, p3]
     pub fn load_families(&mut self, t: &[f32]) -> bool {
         let mut fams = Vec::new();
         let mut i = 0;
@@ -281,13 +381,16 @@ impl Style {
         };
         for _ in 0..count {
             let arch = next(&mut i).unwrap_or(2.0) as usize;
-            let tempo_free = next(&mut i).unwrap_or(0.0) > 0.5;
+            let flag = next(&mut i).unwrap_or(0.0);
+            let tempo_free = flag > 0.5 && flag < 1.5;
+            let fallback = flag > 1.5;
             let mut look = [0f32; LOOK_N];
             for l in look.iter_mut() {
                 *l = next(&mut i).unwrap_or(0.5);
             }
             let lo = next(&mut i).unwrap_or(0.0);
             let hi = next(&mut i).unwrap_or(0.0);
+            let groove = next(&mut i).unwrap_or(0.0).clamp(0.0, 15.0) as u8;
             let n = next(&mut i).unwrap_or(0.0) as usize;
             if n > 32 {
                 return false;
@@ -305,7 +408,7 @@ impl Style {
             if i > t.len() {
                 return false;
             }
-            fams.push(Family { arch: arch.fmin(ARCH_N - 1), tempo_free, look, range: (lo, hi), terms });
+            fams.push(Family { arch: arch.fmin(ARCH_N - 1), tempo_free, fallback, look, range: (lo, hi), groove, terms });
         }
         self.weights = vec![0.0; fams.len()];
         self.raw = vec![0.0; fams.len()];
@@ -320,10 +423,16 @@ impl Style {
         self.dominant = -1;
         self.pending = -1;
         self.confidence = 0.0;
+        self.evidence = 0.0;
         self.top = [(-1, 0.0); 3];
         // The look and the archetypes are NOT reset: a new track eases the
         // picture from where the last one left it, rather than snapping it to
         // neutral for the length of a dissolve.
+    }
+
+    /// How family `id` builds its groove (beat.rs DOWN_MODELS), 0 unknown.
+    pub fn groove_of(&self, id: i32) -> u8 {
+        self.families.get(id as usize).map_or(0, |f| f.groove)
     }
 
     pub fn range_of(&self, id: i32) -> Option<(f32, f32)> {
@@ -365,22 +474,40 @@ impl Style {
         self.s[F_KSOFT] = self.kick.soft;
         self.s[F_KHARD] = self.kick.hard;
         self.s[F_KINDUS] = self.kick.indus;
+        self.s[F_KF0] = self.kick.f0_avg;
+        self.s[F_PIEP] = self.kick.piep;
         if self.families.is_empty() {
             return;
         }
         let tempo_trust = if locked { (confidence * 1.6).clamp(0.25, 1.0) } else { 0.0 };
         let mut sum = 0f32;
+        let mut specific = 0f32;
         for i in 0..self.families.len() {
             let w = self.eval(&self.families[i], tempo_trust);
             self.raw[i] = w;
             sum += w;
+            if !self.families[i].fallback {
+                specific += w;
+            }
         }
         let a = (1.0 - (-dt / 2.5).exp()) * (0.04 + 0.96 * dyn_ * dyn_);
+        // THE SHARES ARE ONLY AS GOOD AS WHAT THEY ARE SHARES OF. Where no
+        // rule fits — the grid on the wrong octave, a passage nothing
+        // describes — every family reads next to nothing, and normalising
+        // hands the whole of it to whichever reads least nothing: measured,
+        // speedcore at 0.03 on the kick-only intro of a techno record (the
+        // grid at 264, twice its tempo) took the share, read as confident,
+        // and set the tempo's range there. So the weights move toward the
+        // shares only as fast as there is evidence behind them, and the
+        // confidence is capped by that evidence too.
+        self.evidence += (specific.fmin(1.0) - self.evidence) * a;
+        let ev_now = (specific / EVIDENCE_FULL).clamp(0.0, 1.0);
         if sum < 1e-4 {
             for w in self.weights.iter_mut() {
                 *w *= 1.0 - a;
             }
         } else {
+            let a = a * ev_now.fmax(0.1);
             for i in 0..self.weights.len() {
                 self.weights[i] += (self.raw[i] / sum - self.weights[i]) * a;
             }
@@ -452,7 +579,8 @@ impl Style {
         }
         let t0 = top[0].1.fmax(0.0);
         let t1 = top[1].1.fmax(0.0);
-        self.confidence = (t0 * 2.4 * (0.45 + 0.55 * if t0 > 1e-6 { (t0 - t1) / t0 } else { 0.0 })).clamp(0.0, 1.0);
+        let backed = ((self.evidence - 0.05) / (EVIDENCE_FULL - 0.05)).clamp(0.0, 1.0);
+        self.confidence = (t0 * 2.4 * (0.45 + 0.55 * if t0 > 1e-6 { (t0 - t1) / t0 } else { 0.0 })).clamp(0.0, 1.0) * backed;
     }
 
     /// Every family's smoothed weight, in table order.
@@ -461,8 +589,8 @@ impl Style {
     }
 
     /// The kick-shape half, per output frame.
-    pub fn kick_frame(&mut self, kick: Option<KickSeen>, low_lin: f32, flatness: f32, now: f64) {
-        self.kick.process(kick, low_lin, flatness, now);
+    pub fn kick_frame(&mut self, kick: Option<KickSeen>, low_lin: f32, flatness: f32, piep: f32, now: f64) {
+        self.kick.process(kick, low_lin, flatness, piep, now);
     }
 }
 

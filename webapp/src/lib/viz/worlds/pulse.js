@@ -1,40 +1,46 @@
-// PULSATIONS — a basin of light.
+// PULSATIONS — colour that breathes, under a sheet of liquid glass.
 //
-// The mode that shows "colours on the beat", rebuilt as one physical idea
-// instead of four overlaid ones: a dark pool of liquid light. Every beat drops
-// a ripple into it; the ripple REFRACTS what is underneath — the slow currents
-// of the pool, the lobes of light — so a beat is seen as the whole picture
-// bending rather than as a ring drawn on top of it. That bending is what the
-// old canvas version could never do (a canvas stroke is paint, not a lens), and
-// it is most of why this reads as water rather than as a diagram.
+// The mode that shows "colours on the beat". It used to be a pool: caustic
+// folds lit by six lobes, rings travelling out on every beat. On screen the
+// caustics won — a purple web over the whole frame, rings with a coloured
+// fringe on top — and it read as a media-player plug-in from twenty years ago.
+// What colour-on-the-beat looks like now is a MESH GRADIENT: a few large,
+// soft fields of colour that drift into one another, and a surface over them
+// that the music bends.
 //
-// What is in the pool:
-//
-//   THE CURRENTS. A domain-warped field, lit from above, drifting at a pace
-//   counted in bars. Its thin bright folds are the caustics a real pool throws
-//   on its floor.
-//   THE LOBES. Six soft bodies of light, one per energy band — sub, bass, low
-//   mids, mids, highs, air — orbiting the artwork (or the centre) on the
-//   frame's own polar mapping, so they sit around the cover in the player and
-//   spread across a beamer. Each one's size and heat is its band; they merge
-//   like metaballs where they meet.
-//   THE RIPPLES. One per beat, a wider one on the downbeat, a sharper, faster
-//   shock on each MAIN kick, and a slow tidal ring at the drop. They start at
-//   the artwork's rim and travel at a speed counted in beats.
+//   THE FIELDS. Six of them, one per energy band — sub, bass, low mids, mids,
+//   highs, air — each a broad Gaussian of its palette colour, orbiting the
+//   artwork (or the centre) on the frame's own polar mapping, so they sit
+//   around the cover in the player and spread across a beamer. They BLEND by
+//   weight (the colour where two meet is between theirs, as in a mesh
+//   gradient) instead of adding up to white; a band's level is how much light
+//   its field gives, and the domain they live in is warped slowly, counted in
+//   bars, so the edges drift like dye in water.
+//   THE GLASS. One ripple per beat, a wider one on the downbeat, a sharper,
+//   faster one on each MAIN kick and a slow tide at the drop, starting at the
+//   artwork's rim and travelling at a speed counted in beats. A ripple is not
+//   a ring drawn on top: it REFRACTS the colour under it, shades like a lens
+//   (lighter on its inner slope, darker on its outer one) and catches one
+//   highlight on the side facing the light — which is what makes it read as
+//   glass rather than as paint.
+//   THE SHEEN. The warped surface's own gentle highlight, a slow satin that
+//   says the fields are under something.
 //
 // Parameters (the skin may override any of them):
-//   lobes   brightness of the band lobes          ripple  refraction strength
-//   crest   brightness of the ripple crests       caustic caustic-line strength
-//   spin    lobe orbit, turns per 8 bars (signed)
+//   lobes   brightness of the colour fields       ripple   refraction strength
+//   crest   the glass highlight and lens shading  caustic  the sheen
+//   spin    field orbit, turns per 8 bars (signed)
 
 export default {
   id: "pulse",
-  uses: ["noise", "caustic"],
+  uses: ["noise"],
   params: { lobes: 1, ripple: 1, crest: 1, caustic: 1, spin: 1 },
-  look: { exposure: 1.05, bloom: 1.1, threshold: 0.75, saturation: 1.15 },
+  // No lens fringe: the glass is the surface, and a coloured split along every
+  // edge is the one thing that made the old pool look cheap.
+  look: { exposure: 1.02, bloom: 0.75, threshold: 0.85, saturation: 1.1, ca: 0 },
 
   fragment: `
-// The ring's life, in beats, by kind: 0 beat, 1 main kick, 2 downbeat, 3 drop.
+// The ripple's life, in beats, by kind: 0 beat, 1 main kick, 2 downbeat, 3 drop.
 float lifeOf(float k) { return k < 0.5 ? 2.4 : k < 1.5 ? 1.6 : k < 2.5 ? 3.2 : 7.0; }
 float speedOf(float k) { return k < 0.5 ? 0.36 : k < 1.5 ? 0.7 : k < 2.5 ? 0.3 : 0.2; }
 
@@ -52,12 +58,14 @@ void main() {
   float bars = uClock.y * uSpeed;
   float amp = 0.55 + 0.45 * uCtl.x;
 
-  // --- the ripples: a displacement field and a crest --------------------------
+  // --- the glass: a displacement field, and the lens's shading ----------------
   float rc = ringCoord(p);
   vec2 dir = (p - uHole.xy) / max(length(p - uHole.xy), 1e-4);
   vec2 disp = vec2(0.0);
-  float crest = 0.0;
-  float crestHot = 0.0;
+  float shade = 0.0;
+  float glint = 0.0;
+  // The light comes from above and a little to the left.
+  float facing = 0.5 + 0.5 * dot(dir, normalize(vec2(-0.45, 1.0)));
   for (int i = 0; i < 8; i++) {
     vec4 e = uEv[i];
     float age = uClock.x - e.x;
@@ -65,78 +73,64 @@ void main() {
     float life = lifeOf(kind);
     if (e.y <= 0.0 || age < 0.0 || age > life) continue;
     float R = age * speedOf(kind);
-    float w = (kind > 0.5 && kind < 1.5 ? 0.016 : 0.03) + age * 0.01;
+    float w = (kind > 0.5 && kind < 1.5 ? 0.028 : 0.05) + age * 0.018;
     float d = rc - R;
     float prof = exp(-d * d / (w * w));
     float fade = 1.0 - age / life;
     fade *= fade * e.y;
     // The derivative of the ring's profile is what bends the light: the
     // surface slopes up on the inside of the crest and down on the outside.
-    disp += dir * (-2.0 * d / (w * w)) * prof * fade * w * 0.13 * P_RIPPLE * amp;
-    // The crest itself is a GLINT — the sharp top of the profile, where the
-    // surface catches the light — not the whole swell, which is already
-    // visible through what it bends.
-    float glint = prof * prof * prof * prof;
-    // Beat ripples are seen through what they bend; only the kick's shock
-    // and the downbeat's wave carry a visible glint.
-    crest += glint * fade * (kind < 0.5 ? 0.25 : 1.0);
-    crestHot += glint * fade * step(0.5, kind) * step(kind, 1.5);
+    float slope = (-2.0 * d / (w * w)) * prof * w;
+    disp += dir * slope * fade * 0.16 * P_RIPPLE * amp;
+    // A lens is lighter where it faces the light and darker where it turns
+    // away: the slope, signed, is exactly that.
+    shade += slope * fade * (kind < 0.5 ? 0.35 : 0.8);
+    glint += pow(prof, 6.0) * fade * facing * facing * (kind < 0.5 ? 0.3 : 1.0);
   }
   vec2 q = p + disp;
 
-  // --- the lobes: six lights hovering over the pool, one per band -------------
+  // --- the fields: a mesh gradient, one field per band --------------------------
+  vec2 wq = q * 0.55;
+  vec2 warp = vec2(fbm(wq + vec2(bars * 0.05, 1.7), 3), fbm(wq + vec2(-3.1, -bars * 0.04), 3));
+  vec2 r = q + warp * 0.6;
   float bands[6];
   bands[0] = uBandA.x; bands[1] = uBandA.y; bands[2] = uBandA.z;
   bands[3] = uBandA.w; bands[4] = uBandB.x; bands[5] = uBandB.y;
   float spin = bars * TAU / 8.0 * P_SPIN;
-  float swell = 1.0 + 0.35 * uHit.y * amp;
-  vec3 tintSum = vec3(0.0);
-  vec3 wideSum = vec3(0.0);
-  float field = 0.0;
-  float wideField = 0.0;
+  float swell = 1.0 + 0.18 * uHit.y * amp;
+  vec3 acc = vec3(0.0);
+  float wsum = 0.0;
+  float light = 0.0;
   for (int i = 0; i < 6; i++) {
     float fi = float(i);
     float b = bands[i];
-    float a = spin + fi * TAU / 6.0 + 0.3 * sin(bars * 0.5 + fi * 1.7);
-    float rr = 0.3 + 0.14 * sin(bars * 0.37 + fi * 2.3) + b * 0.16;
+    float a = spin + fi * TAU / 6.0 + 0.35 * sin(bars * 0.5 + fi * 1.7);
+    float rr = 0.32 + 0.2 * sin(bars * 0.37 + fi * 2.3) + b * 0.12;
     vec2 c = place(a, rr);
     vec2 da = vec2(cos(a), sin(a));
     float room = frameEdge(da) - holeEdge(da);
-    float size = (0.05 + 0.13 * b) * max(room, 0.4) * swell;
-    float dist = length(q - c);
-    float k = b * (0.4 + 0.6 * b);
-    vec3 hue = pal(fi / 5.0);
-    float g = glow(dist, size);
-    float gw = glow(dist, size * 2.4);
-    field += g * g * k;
-    tintSum += hue * g * g * k;
-    wideField += gw * k;
-    wideSum += hue * gw * k;
+    float size = (0.17 + 0.26 * b) * max(room, 0.5) * swell;
+    vec2 dd = (r - c) / size;
+    float g = exp(-dot(dd, dd));
+    float wgt = g * (0.2 + b);
+    acc += pal(fi / 5.0) * wgt;
+    wsum += wgt;
+    light += g * b * (0.35 + b);
   }
-  vec3 tint = tintSum / max(field, 1e-4);
-  vec3 wideTint = wideSum / max(wideField, 1e-4);
+  vec3 mesh = acc / max(wsum, 1e-4);
+  float lit = 1.0 - exp(-light * 1.8);
 
-  // --- the pool ---------------------------------------------------------------
-  // Deep water: the palette's own black, with currents so slow and so low in
-  // contrast that they are felt more than seen.
-  float n = fbm(q * 0.7 + vec2(bars * 0.02, -bars * 0.013), 3);
-  vec3 col = uPalBg.rgb * (0.65 + 0.7 * smoothstep(-0.45, 0.45, n));
-  // The floor, lit by the lobes through the rippled surface. The caustics are
-  // multiplied by that light: they exist only where a lobe shines, which is
-  // exactly where a real pool has them.
-  float ca = caustics(q * 0.9 + vec2(0.0, bars * 0.02), bars * 1.4);
-  float illum = wideField * wideField * (0.5 + 0.5 * uMood.y);
-  col += wideTint * illum * (0.06 + 1.1 * ca * P_CAUSTIC) * uEnergy;
-  // The lobes themselves: a body and a hot core, merged like metaballs where
-  // two meet.
-  float body = smoothstep(0.02, 0.9, field);
-  col += tint * body * (0.35 + 0.6 * uMood.y) * P_LOBES * uEnergy;
-  col += mix(tint, vec3(1.0), 0.25) * pow(body, 4.0) * (0.9 + 1.6 * uHit.y) * P_LOBES * uEnergy;
+  // Deep water under it all: the palette's own black, never quite flat.
+  vec3 col = uPalBg.rgb * (0.55 + 0.45 * smoothstep(-0.5, 0.5, warp.x));
+  vec3 bright = mesh * (0.4 + 0.7 * uMood.y + 0.3 * uHit.y) * P_LOBES;
+  col = mix(col, bright, lit * uEnergy);
+  // The sheen: a slow satin across the warped surface, where the fields are.
+  float sat = smoothstep(0.18, 0.55, warp.x - warp.y * 0.6);
+  col += mix(mesh, vec3(1.0), 0.4) * sat * lit * 0.12 * P_CAUSTIC;
 
-  // --- the crests ------------------------------------------------------------------
-  vec3 cc = mix(uPalMid.rgb, uPalHigh.rgb, 0.7);
-  col += cc * crest * (0.22 + 0.3 * uFlow.x) * P_CREST * uEnergy;
-  col += mix(uPalHigh.rgb, vec3(1.0), 0.3) * crestHot * 0.6 * P_CREST * uEnergy;
+  // --- the glass, lit ------------------------------------------------------------
+  col *= 1.0 + clamp(shade, -1.0, 1.0) * 0.45 * P_CREST;
+  col += mix(mesh, vec3(1.0), 0.6) * glint * (0.35 + 0.35 * uFlow.x) * P_CREST * uEnergy;
 
   // A drop, and the flash the engine allowed.
   col += (uPalAcc.rgb * 0.3 + uPalHigh.rgb * 0.2) * uHit2.w;

@@ -35,6 +35,12 @@ import {
   hostState,
 } from "../src/lib/party/hostrules.js";
 import { MockContext, audibleAt, chunkBuffer } from "./partymock.mjs";
+import { readFileSync } from "node:fs";
+import { appCoreFromBytes } from "../src/lib/appcore/core.js";
+
+// The estimators are the app core's (Rust): loaded from the committed binary,
+// as the page loads it before a party starts or the output clock is read.
+appCoreFromBytes(readFileSync(new URL("../src/lib/appcore/appcore.wasm", import.meta.url)));
 
 // -- a deterministic random source ------------------------------------------------
 

@@ -32,6 +32,7 @@
 // AudioContext and checks where the sound actually lands.
 
 import { reportedLag } from "../audio/latency.js";
+import { adopt, release, requireCore } from "../appcore/core.js";
 import {
   KEEP_MS,
   WAIT_MAX_MS,
@@ -749,12 +750,6 @@ export class PartyEngine {
 
 // -- the clock bridge (browser) -------------------------------------------------
 
-const median = (xs) => {
-  const s = [...xs].sort((a, b) => a - b);
-  const m = s.length >> 1;
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-};
-
 // Map server time onto this AudioContext's clock: audio scheduled at the
 // returned context time is HEARD at the given server time. getOutputTimestamp
 // relates the two clocks where the sound actually leaves the device (it carries
@@ -776,32 +771,23 @@ const median = (xs) => {
 // `latencyMs()` is what the browser cannot know — a Bluetooth link, a speaker's
 // own DSP — as set by the listener; `graphDelay` is this page's own processing
 // (the limiter's lookahead), measured, not assumed.
-const MAP_KEEP = 15;
-const MAP_READY = 3;
-const MAP_OUTLIER = 0.004; // s
-// A move is believed once two readings in a row agree on it. The readings
-// hold to ±0.1 ms, so two that land within a millisecond of each other and
-// four or more from the mapping are not noise — and every reading spent
-// doubting a real move is audio placed on the wrong mapping. Measured end to
-// end: the guest's context stepped by 20-30 ms mid-track, and waiting for five
-// readings plus the next tick left the next click 20-40 ms late.
-const MAP_AGREE = 0.001; // s
-
-const LAG_KEEP = 30;
+//
+// THE MAPPING IS RUST (webapp/appcore/src/sync.rs#Bridge): the median, the
+// refusals and the moves, in fixed rings. What stays here is the reading
+// itself, which only the browser can take. The JavaScript it replaced sorted
+// a copy of its readings two or three times per reading, twenty times a second
+// for the whole party; it is kept as the oracle in test/reference/sync.js.
+const OFFER_MOVED = 2;
 
 export function makeClockBridge(ctx, clockOffset, latencyMs, graphDelay = 0) {
-  const ds = [];
-  const lags = [];
+  const c = requireCore();
+  let h = c.x.bridge_new();
+  const owner = {};
+  adopt(owner, c, "bridge_free", h);
   let lastCtx = -1;
-  let rejected = null; // the last reading refused, while it may be a move
-  // Readings needed before anything is placed: a few at the start (the first
-  // readings of a new context are garbage), two after a confirmed move — they
-  // agree to the millisecond, and with fewer than MAP_READY the re-place that
-  // move calls for would find no clock and do nothing at all.
-  let need = MAP_READY;
   // True when this reading moved the mapping: the caller re-places at once.
   function sample() {
-    if (ctx.state !== "running") return false;
+    if (!h || ctx.state !== "running") return false;
     let d = null;
     const hasTs = typeof ctx.getOutputTimestamp === "function";
     try {
@@ -821,49 +807,38 @@ export function makeClockBridge(ctx, clockOffset, latencyMs, graphDelay = 0) {
       d = ctx.currentTime - reportedLag(ctx) - performance.now() / 1000;
     }
     if (d == null) return false;
-    let moved = false;
-    // Checked against the mapping as soon as it is believed — right after a
-    // move that is two readings, and the next one must not get in unexamined.
-    if (ds.length >= need && Math.abs(d - median(ds)) > MAP_OUTLIER) {
-      if (rejected == null || Math.abs(d - rejected) > MAP_AGREE) {
-        rejected = d;
-        return false;
-      }
-      ds.length = 0; // it really moved: learn it again
-      lags.length = 0;
-      ds.push(rejected); // ...from the two readings that showed it
-      need = 2;
-      moved = true;
-    }
-    rejected = null;
-    ds.push(d);
-    if (ds.length > MAP_KEEP) ds.shift();
-    // How far this context runs ahead of the listener — the output latency the
-    // OS reports, for the listener to read. sample() runs on the guest's own
-    // timers, which the audio thread's rhythm has nothing to do with.
-    lags.push(ctx.currentTime - (performance.now() / 1000 + median(ds)));
-    if (lags.length > LAG_KEEP) lags.shift();
-    return moved;
+    // How far this context runs ahead of the listener is recorded with each
+    // reading, for the listener to read — on the guest's own timers, which the
+    // audio thread's rhythm has nothing to do with.
+    return c.x.bridge_offer(h, d, ctx.currentTime, performance.now()) === OFFER_MOVED;
   }
+  const median = () => (h ? c.x.bridge_median(h) : NaN);
   return {
     sample,
     get ready() {
-      return ds.length >= need;
+      return !!h && c.x.bridge_ready(h) === 1;
     },
     // null until BOTH clocks are known: the scheduler places nothing before.
     serverNow() {
       const off = clockOffset();
-      return off == null || ds.length < need ? null : performance.now() + off;
+      return off == null || !h || c.x.bridge_ready(h) !== 1 ? null : performance.now() + off;
     },
     toCtx(serverMs) {
       const off = clockOffset();
-      if (off == null || !ds.length) return ctx.currentTime;
-      return median(ds) + (serverMs - off - latencyMs()) / 1000 - graphDelay;
+      const m = median();
+      if (off == null || Number.isNaN(m)) return ctx.currentTime;
+      return m + (serverMs - off - latencyMs()) / 1000 - graphDelay;
     },
     // Seconds: how far the context runs ahead of the listener, the median of
     // the recent readings. Null until there are enough of them.
     outputLag() {
-      return lags.length >= MAP_READY * 3 ? Math.max(0, median(lags)) : null;
+      if (!h) return null;
+      const v = c.x.bridge_output_lag(h);
+      return Number.isNaN(v) ? null : v;
+    },
+    free() {
+      release(owner, c, "bridge_free", h);
+      h = 0;
     },
   };
 }

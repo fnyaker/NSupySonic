@@ -41,8 +41,8 @@ function refreshInBackground(path) {
     .then(async (res) => {
       reportOnline(); // any response at all proves the server is reachable
       if (!res.ok) return;
-      const data = await res.json();
-      cachePut(path, data).catch(() => {});
+      const text = await res.text();
+      cachePut(path, null, text).catch(() => {});
     })
     .catch(() => {});
 }
@@ -123,9 +123,20 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
     throw { status: res.status, message };
   }
   if (res.status === 204) return null;
+  // The offline cache stores the response's TEXT (apicache.js#cachePut): a
+  // string copy where the parsed object cost a deep clone. Read from a clone
+  // of the response, and after the caller has had its data — the parsed copy
+  // comes from res.json(), which parses straight from the bytes (measured,
+  // text() + JSON.parse on the critical path cost more than it saved).
+  const copy = cacheable ? res.clone() : null;
   const data = await res.json();
-  // Refresh the offline cache with the fresh copy (fire-and-forget).
-  if (cacheable) cachePut(path, data).catch(() => {});
+  if (copy)
+    setTimeout(() => {
+      copy
+        .text()
+        .then((text) => cachePut(path, null, text))
+        .catch(() => {});
+    }, 0);
   return data;
 }
 
@@ -243,6 +254,22 @@ export const api = {
   genreModelPut: (payload) =>
     req("/genre/model", { method: "PUT", body: body(payload) }),
   genreModelDelete: () => req("/genre/model", { method: "DELETE" }),
+  // Re-deciding the stored verdicts under the active head (no re-measure).
+  genreRelabel: () => req("/genre/relabel"),
+  // How a track is built, as the analyser heard it (lib/genre/construction.js).
+  analysisLive: (id, summary) =>
+    req(`/analysis/${encodeURIComponent(id)}/live`, { method: "POST", body: body(summary), keepalive: true }),
+  genreRelabelStart: () => req("/genre/relabel", { method: "POST" }),
+  genreConstruction: () => req("/genre/construction"),
+  // Well-known recordings per genre, looked up on Deezer (deezer/references.py).
+  genreReferenceGenres: () => req("/genre/references"),
+  genreReferences: (genre) => req("/genre/references?genre=" + encodeURIComponent(genre)),
+  genreReferenceImport: (deezerId, tag) =>
+    req("/genre/references/import", { method: "POST", body: body({ deezer_id: deezerId, tag }) }),
+  // A whole album / playlist / artist: what tagging it would do, then do it.
+  genreBulkPreview: (scope, tag) =>
+    req("/genre/bulk/preview", { method: "POST", body: body({ ...scope, tag }) }),
+  genreBulk: (tracks, tag) => req("/genre/bulk", { method: "POST", body: body({ tracks, tag }) }),
 
   // The frozen ONNX extractor: install the operator's own copy of the model
   // from the browser, remove it, or run the built-in sanity check on real

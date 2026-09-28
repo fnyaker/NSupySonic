@@ -28,8 +28,18 @@ import time
 from uuid import UUID
 
 from flask import current_app, jsonify, request
+from peewee import JOIN
 
-from ..db import Album, Artist, GenreModel, GenreTag, Track, TrackTag, now
+from ..db import (
+    Album,
+    Artist,
+    GenreModel,
+    GenreTag,
+    Track,
+    TrackAnalysis,
+    TrackTag,
+    now,
+)
 from . import _is_admin, _valid_id, admin_required, login_required, webapi
 
 logger = logging.getLogger(__name__)
@@ -248,6 +258,154 @@ def resume_if_interrupted(app):
     threading.Thread(target=start, name="genre-embed-resume", daemon=True).start()
 
 
+# -- re-applying the head to the whole library ---------------------------------
+# A verdict was frozen at the moment a track was measured, so a head trained
+# today reached only what was archived after it; everything else needed the full
+# re-measure (hours of ffmpeg) for an answer that needs none of it. So storing a
+# head — or disabling it — re-decides every stored verdict from what is stored
+# (analysis.reapply_head): the measures, the vector, the tag. Seconds to minutes.
+_relabel_lock = threading.Lock()
+_relabel_job = {
+    "running": False,
+    "again": False,
+    "started": None,
+    "finished": None,
+    "total": 0,
+    "scanned": 0,
+    "changed": 0,
+    "model": 0,
+    "family": 0,
+    "tag": 0,
+    "heuristic": 0,
+    "error": None,
+}
+
+
+def _relabel_json() -> dict:
+    with _relabel_lock:
+        return {k: v for k, v in _relabel_job.items() if k != "again"}
+
+
+def _spawn(fn, *args):
+    """Where the re-application's thread is started (a seam: the tests drive the
+    worker synchronously, like every other job here)."""
+    threading.Thread(target=fn, args=args, name="genre-relabel", daemon=True).start()
+
+
+def start_relabel(app) -> bool:
+    """Re-decide the library under the head active now. A run already going is
+    told to start over once it is through (a newer head just arrived), rather
+    than two runs racing over the same rows."""
+    with _relabel_lock:
+        if _relabel_job["running"]:
+            _relabel_job["again"] = True
+            return False
+        _relabel_job.update(
+            running=True, again=False, started=now().isoformat(), finished=None,
+            total=0, scanned=0, changed=0, model=0, family=0, tag=0, heuristic=0,
+            error=None,
+        )
+    _spawn(_run_relabel, app)
+    return True
+
+
+def _run_relabel(app):
+    from ..db import close_connection, open_connection
+    from ..deezer import analysis as ana
+    from ..deezer import genre as gen
+    from ..deezer.workload import renice
+
+    renice(12)
+    with app.app_context():
+        try:
+            open_connection(reuse=True)
+            while True:
+                gen.invalidate()
+                head = gen.active_head()
+                head_id = head["id"] if head else "none"
+
+                def on_stats(stats):
+                    with _relabel_lock:
+                        _relabel_job.update(stats)
+
+                def should_stop():
+                    with _relabel_lock:
+                        return _relabel_job["again"]
+
+                stats = ana.reapply_head(on_stats=on_stats, should_stop=should_stop)
+                with _relabel_lock:
+                    again = _relabel_job["again"]
+                    _relabel_job["again"] = False
+                    _relabel_job.update(stats)
+                if again:
+                    continue
+                ana.mark_relabeled(head_id)
+                if stats.get("changed"):
+                    # Devices keep verdicts and never re-ask one they have:
+                    # this is what tells them the library's answers moved.
+                    ana.bump_verdict_generation()
+                break
+        except Exception as exc:
+            logger.warning("Re-applying the genre head crashed", exc_info=True)
+            with _relabel_lock:
+                _relabel_job["error"] = str(exc)
+        finally:
+            with _relabel_lock:
+                _relabel_job["running"] = False
+                _relabel_job["finished"] = now().isoformat()
+            invalidate_predictions()
+            try:
+                close_connection()
+            except Exception:
+                pass
+
+
+def relabel_if_stale(app):
+    """On boot: if the library was never re-decided under the head active now
+    (a run cut short by a restart, or a head stored by an older version), do it."""
+
+    def start():
+        import time
+
+        time.sleep(RESUME_DELAY)
+        with app.app_context():
+            from ..db import close_connection, open_connection
+            from ..deezer import analysis as ana
+            from ..deezer import genre as gen
+
+            try:
+                open_connection(reuse=True)
+                head = gen.active_head()
+                want = str(head["id"]) if head else "none"
+                done = ana.relabeled_head()
+                # Never re-decided and no head: nothing to change.
+                stale = done != want and not (done is None and want == "none")
+            except Exception:
+                logger.debug("Could not read the relabel mark", exc_info=True)
+                return
+            finally:
+                try:
+                    close_connection()
+                except Exception:
+                    pass
+        if stale:
+            logger.info("Re-applying the genre head to the library")
+            start_relabel(app)
+
+    threading.Thread(target=start, name="genre-relabel-resume", daemon=True).start()
+
+
+@webapi.route("/genre/relabel", methods=["GET", "POST"])
+@login_required
+@admin_required
+def genre_relabel():
+    """The re-application's progress; POST starts one (the studio's button,
+    for after tags were changed in bulk)."""
+    if request.method == "POST":
+        start_relabel(current_app._get_current_object())
+    return jsonify(_relabel_json())
+
+
 # -- what the model thinks of a track, remembered ----------------------------
 # Running a trained head over one embedding is a few million multiply-adds in
 # plain Python, and the vector it runs on is a file on a disk. On a library of
@@ -297,7 +455,8 @@ def _candidate_row(track, emb, gen, cache):
         # The head is only one of two opinions once labels exist. The prototype
         # needs no training, so it is the only one with something to say while a
         # genre is still one or two examples old — see deezer/genre.py.
-        hit = (gen.predict(vec), gen.prototype_predict(vec))
+        extra = _extras(track, _served_bpm(track)) if gen.reads_extras() else None
+        hit = (gen.predict(vec, extra), gen.prototype_predict(vec))
         if len(cache) < _PRED_CACHE_MAX:
             cache[track.id] = hit
     guess, proto = hit
@@ -310,6 +469,21 @@ def _candidate_row(track, emb, gen, cache):
     margin = (guess[3] if len(guess) > 3 else 1.0) if guess else 0.0
     row["uncertainty"] = round(max(0.0, 1.0 - margin), 4)
     return row
+
+
+def _served_bpm(track):
+    """The served tempo the candidate scan JOINED onto the row (``served``),
+    None when the track has no verdict yet."""
+    served = getattr(track, "served", None)
+    return served.bpm if served is not None else None
+
+
+def _extras(track, bpm):
+    """The track's served tempo and construction summary, as the head reads
+    them next to the embedding (deezer/construction.py)."""
+    from ..deezer import construction as cx
+
+    return cx.raw_extras(bpm, cx.load(track))
 
 
 def _resolve(ident):
@@ -678,6 +852,7 @@ def genre_label():
         # The prototype is a running average over the labelled set, so a label
         # removed has to leave it, not linger for the length of a TTL.
         _forget_centroids()
+        _redecide(track)
         return jsonify({"track": str(track.id), "tag": None})
     tag = GenreTag.get_or_none(GenreTag.id == raw) or GenreTag.get_or_none(
         GenreTag.name == str(raw)
@@ -689,7 +864,23 @@ def genre_label():
     # admin sees is the candidate list — showing them a prediction that ignores
     # the label they just applied would be worse than showing none.
     _forget_centroids()
+    _redecide(track)
     return jsonify({"track": str(track.id), "tag": _tag_json(tag)})
+
+
+def _redecide(track):
+    """The track's stored verdict, decided again now its tag changed. A tag
+    REMOVED used to leave the row naming the tag's genre with the source "tag"
+    — served as a choice somebody made, by nobody, for ever."""
+    from ..db import TrackAnalysis
+    from ..deezer import analysis as ana
+
+    try:
+        row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+        if row is not None:
+            ana.redecide(row)
+    except Exception:
+        logger.debug("genre: could not re-decide %s", track.id, exc_info=True)
 
 
 def _forget_centroids():
@@ -751,10 +942,18 @@ def genre_candidates():
         # off a bare Track row is a second SELECT, and `track.album.name` a
         # third, so a four-thousand-row scan opened eight thousand round trips
         # before it had looked at a single vector.
-        Track.select(Track, Artist, Album)
+        Track.select(Track, Artist, Album, TrackAnalysis.bpm)
         .join(Artist, on=(Track.artist == Artist.id))
         .switch(Track)
         .join(Album, on=(Track.album == Album.id))
+        # The served tempo, for a head that reads it next to the vector.
+        .switch(Track)
+        .join(
+            TrackAnalysis,
+            JOIN.LEFT_OUTER,
+            on=(TrackAnalysis.track == Track.id),
+            attr="served",
+        )
         .where(Track.last_modification > 0)
         .order_by(Track.play_count.desc(), Track.created.desc())
         # Bounded: whether a track HAS a vector is a file on disk, not a column,
@@ -825,20 +1024,457 @@ def genre_candidates():
 @login_required
 @admin_required
 def genre_labelled():
-    """What has been tagged so far, newest first."""
+    """Everything tagged so far, newest first: the studio's training set.
+
+    ALL of it. This was capped at the 500 most recent tags, so a studio past
+    that trained on a silently truncated set — the older tags, often the ones
+    that took the most care, simply stopped counting. And every row lazily read
+    its artist and its album back (two statements a row); they are joined now,
+    so the whole set is one statement whatever its size.
+
+    ``artist_id`` is what the trainer's artist folds group by: two tracks off
+    one album must be held out together, or the held-out score measures
+    recognising the album.
+    """
     out = []
-    for tt in (
-        TrackTag.select(TrackTag, Track, GenreTag)
+    query = (
+        TrackTag.select(TrackTag, Track, GenreTag, Artist, Album)
         .join(Track)
+        .join(Artist, on=(Track.artist == Artist.id))
+        .switch(Track)
+        .join(Album, on=(Track.album == Album.id))
         .switch(TrackTag)
         .join(GenreTag)
         .order_by(TrackTag.created.desc())
-        .limit(500)
-    ):
+    )
+    for tt in query:
         row = _track_json(tt.track)
+        row["artist_id"] = str(tt.track.artist_id) if tt.track.artist_id else None
         row["tag"] = _tag_json(tt.tag)
         out.append(row)
     return jsonify({"labelled": out})
+
+
+# -- a whole album, playlist or artist at once --------------------------------------
+#
+# Tagging one track at a time is right for the tracks that need a decision and
+# tedious for the ones that do not: a Frenchcore album is Frenchcore from its
+# first track to its last, nearly always. "Nearly" is the part that matters —
+# the intro, the collab with a hardstyle producer, the ballad at the end of a
+# metal record — and a bulk tag that silently labels those too teaches the head
+# exactly the confusion it is meant to learn out of. So a bulk tag is two
+# steps: a PREVIEW that says, for every track in scope, what it already wears
+# and what the model thinks, with the disagreements unticked; then the tag is
+# applied to the tracks the admin kept.
+
+#: How many tracks one bulk request may name (an artist's whole library, a
+#: long playlist). Beyond that it is not a review anybody will read.
+BULK_MAX = 1000
+#: The model's opinion is a vector read and a head evaluation per track; past
+#: this much time the rest of the preview goes out without one.
+BULK_PREVIEW_BUDGET = 3.0
+_IN_CHUNK = 400
+
+
+def _bulk_tracks(data):
+    """The Track rows a bulk request names, in its order, and how many of the
+    ids it named are not in the library. ``tracks``: ids as the SPA holds them
+    (a Deezer numeric id or a local UUID); ``artist``: every library row whose
+    main artist that is (a Deezer id or the local UUID)."""
+    from ..deezer import ids as dz_ids
+
+    if data.get("artist") not in (None, ""):
+        ident = str(data["artist"])
+        if _valid_id(ident):
+            cond = Artist.deezer_id == ident
+        else:
+            try:
+                cond = Artist.id == UUID(ident)
+            except (ValueError, AttributeError, TypeError):
+                return [], 0
+        rows = list(
+            Track.select(Track, Artist, Album)
+            .join(Artist, on=(Track.artist == Artist.id))
+            .switch(Track)
+            .join(Album, on=(Track.album == Album.id))
+            .where(cond)
+            .order_by(Album.name, Track.disc, Track.number)
+            .limit(BULK_MAX)
+        )
+        return rows, 0
+    raw = data.get("tracks")
+    if not isinstance(raw, list):
+        raise ValueError("tracks must be a list")
+    wanted = []
+    for x in list(dict.fromkeys(str(v) for v in raw))[:BULK_MAX]:
+        try:
+            wanted.append(dz_ids.track_uuid(x) if _valid_id(x) else UUID(x))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    found = {}
+    for i in range(0, len(wanted), _IN_CHUNK):
+        part = wanted[i : i + _IN_CHUNK]
+        for t in (
+            Track.select(Track, Artist, Album)
+            .join(Artist, on=(Track.artist == Artist.id))
+            .switch(Track)
+            .join(Album, on=(Track.album == Album.id))
+            .where(Track.id.in_(part))
+        ):
+            found[t.id] = t
+    rows = [found[u] for u in wanted if u in found]
+    missing = len(dict.fromkeys(str(v) for v in raw)) - len(rows)
+    return rows, max(0, missing)
+
+
+def _bulk_tag(data):
+    raw = data.get("tag")
+    if raw in (None, ""):
+        return None
+    try:
+        tag = GenreTag.get_or_none(GenreTag.id == int(raw))
+    except (TypeError, ValueError):
+        tag = None
+    return tag or GenreTag.get_or_none(GenreTag.name == str(raw))
+
+
+def _current_tags(rows):
+    out = {}
+    ids = [t.id for t in rows]
+    for i in range(0, len(ids), _IN_CHUNK):
+        for tt in (
+            TrackTag.select(TrackTag, GenreTag)
+            .join(GenreTag)
+            .where(TrackTag.track.in_(ids[i : i + _IN_CHUNK]))
+        ):
+            out[tt.track_id] = tt.tag
+    return out
+
+
+def _served_bpms(rows):
+    out = {}
+    ids = [t.id for t in rows]
+    for i in range(0, len(ids), _IN_CHUNK):
+        for row in TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.bpm).where(
+            TrackAnalysis.track.in_(ids[i : i + _IN_CHUNK])
+        ):
+            out[row.track_id] = row.bpm
+    return out
+
+
+@webapi.route("/genre/bulk/preview", methods=["POST"])
+@login_required
+@admin_required
+def genre_bulk_preview():
+    """What tagging these tracks would do, track by track, before it does it.
+
+    Each row says whether the track already wears a tag (another one is a
+    disagreement: applying would overwrite a decision somebody made) and what
+    the head thinks. The head's opinion is a DISAGREEMENT only when it is past
+    the gate the analysis acts on and the head knows the tag being applied —
+    a head that never learnt Hardtekk is confidently something else on every
+    Hardtekk track, and flagging all of them would bury the ones that matter.
+    Where the head and the tag are siblings (rawstyle / rawphase) and the head
+    is sure only of the family, the family is compared.
+    """
+    from ..deezer import analysis as ana
+    from ..deezer import embedding as emb
+    from ..deezer import genre as gen
+
+    data = request.get_json(silent=True) or {}
+    tag = _bulk_tag(data)
+    if tag is None:
+        return jsonify({"error": "unknown tag"}), 404
+    try:
+        rows, missing = _bulk_tracks(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    current = _current_tags(rows)
+    head = gen.active_head()
+    knows = bool(head) and tag.name in head["labels"]
+    family = (head or {}).get("families", {}).get(tag.name) if head else None
+    bpms = _served_bpms(rows) if head and head.get("inputs") else {}
+    deadline = time.monotonic() + BULK_PREVIEW_BUDGET
+    out = []
+    counts = {"tracks": len(rows), "missing": missing, "same": 0, "other_tag": 0,
+              "model": 0, "no_vector": 0, "unjudged": 0}
+    for t in rows:
+        row = _track_json(t)
+        have = current.get(t.id)
+        row["current"] = have.name if have else None
+        reason = None
+        if have is not None and have.id == tag.id:
+            counts["same"] += 1
+            row["same"] = True
+        elif have is not None:
+            reason = "tag"
+        opinion = None
+        if head is not None:
+            if time.monotonic() > deadline:
+                counts["unjudged"] += 1
+            else:
+                vec = emb.load_embedding(t)
+                if vec is None:
+                    counts["no_vector"] += 1
+                else:
+                    extra = _extras(t, bpms.get(t.id)) if head.get("inputs") else None
+                    opinion = gen.decide(vec, ana.MODEL_MIN_CONFIDENCE, ana.MODEL_MIN_MARGIN, extra)
+        if opinion:
+            row["model"] = {"label": opinion["style"], "conf": opinion["conf"],
+                            "level": opinion.get("level") or "label"}
+            if knows and reason is None:
+                if row["model"]["level"] == "family":
+                    differs = not family or opinion["style"] != family
+                else:
+                    differs = opinion["style"] != tag.name
+                if differs:
+                    reason = "model"
+        if reason:
+            counts["other_tag" if reason == "tag" else "model"] += 1
+        row["disagree"] = reason
+        out.append(row)
+    return jsonify({"tag": _tag_json(tag), "tracks": out, "counts": counts,
+                    "model": {"active": bool(head), "knows": knows}})
+
+
+@webapi.route("/genre/bulk", methods=["POST"])
+@login_required
+@admin_required
+def genre_bulk():
+    """Tag the tracks the admin kept after the preview. One tag per track, as
+    everywhere: a track wearing another tag is re-tagged only when it is listed
+    (the preview leaves those unticked). The verdicts are re-decided on a
+    worker — hundreds of rows through the head is not a request's work — and
+    the devices told once it is done."""
+    from ..db import db
+
+    data = request.get_json(silent=True) or {}
+    tag = _bulk_tag(data)
+    if tag is None:
+        return jsonify({"error": "unknown tag"}), 404
+    if data.get("artist") not in (None, ""):
+        # Applying is always to an explicit list: what was reviewed is what is
+        # tagged, never "whatever the artist's rows are by now".
+        return jsonify({"error": "tracks must be listed"}), 400
+    try:
+        rows, missing = _bulk_tracks(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    ids = [t.id for t in rows]
+    with db.atomic():
+        for i in range(0, len(ids), _IN_CHUNK):
+            TrackTag.delete().where(TrackTag.track.in_(ids[i : i + _IN_CHUNK])).execute()
+        if ids:
+            TrackTag.insert_many(
+                [{"track": i, "tag": tag.id, "created": now()} for i in ids]
+            ).execute()
+    _forget_centroids()
+    invalidate_predictions()
+    if ids:
+        _spawn(_run_redecide, current_app._get_current_object(), ids)
+    return jsonify({"tag": _tag_json(tag), "applied": len(ids), "missing": missing})
+
+
+def _run_redecide(app, ids):
+    """Re-decide the verdicts of tracks whose tag just changed, then tell the
+    devices (the generation) if any moved."""
+    from ..db import close_connection, open_connection
+    from ..deezer import analysis as ana
+
+    with app.app_context():
+        try:
+            open_connection(reuse=True)
+            changed = 0
+            for i in range(0, len(ids), _IN_CHUNK):
+                for row in TrackAnalysis.select(TrackAnalysis, Track).join(Track).where(
+                    TrackAnalysis.track.in_(ids[i : i + _IN_CHUNK])
+                ):
+                    # A tag decides the verdict by itself: no vector to read.
+                    changed += bool(ana.redecide(row, vec=None))
+            if changed:
+                ana.bump_verdict_generation()
+        except Exception:
+            logger.warning("genre: re-deciding a bulk tag failed", exc_info=True)
+        finally:
+            try:
+                close_connection()
+            except Exception:
+                pass
+
+
+# -- well-known recordings per genre (deezer/references.py) ------------------------
+
+#: A genre's lookups, kept a day: the catalogue does not move faster than that,
+#: and the list is a handful of searches per genre.
+REFERENCE_TTL = 24 * 3600.0
+_ref_cache: dict = {}
+_ref_lock = threading.Lock()
+
+
+def _reference_lookup(dzapi, genre):
+    """[(artist, title, hit or None)], [artist hits], complete?"""
+    from ..deezer import references as refs
+
+    complete = True
+    tracks = []
+    for artist, title in refs.REFERENCES.get(genre, ()):
+        try:
+            found = (dzapi.advanced_search(artist=refs.first_artist(artist), track=title, limit=10) or {}).get("data") or []
+            hit = refs.match(artist, title, found)
+        except Exception:
+            logger.info("genre: reference lookup failed for %s - %s", artist, title, exc_info=True)
+            hit, complete = None, False
+        tracks.append((artist, title, hit))
+    artists = []
+    for name in refs.SCENE_ARTISTS.get(genre, ()):
+        try:
+            found = (dzapi.search_artist(name, limit=5) or {}).get("data") or []
+        except Exception:
+            found, complete = [], False
+        # The name itself, not the nearest one: "Sefa" must not become "Sefano".
+        same = [a for a in found if isinstance(a, dict) and refs.fold(a.get("name")) == refs.fold(name)]
+        artists.append((name, same[0] if same else None))
+    return tracks, artists, complete
+
+
+@webapi.route("/genre/references")
+@login_required
+@admin_required
+def genre_references():
+    """A genre's well-known recordings, each looked up on Deezer now — or,
+    without ``genre``, which genres have a list at all.
+
+    A reference is offered only when Deezer's own catalogue has THAT artist and
+    THAT title (references.match); one it does not carry is listed as not found
+    rather than swapped for whatever the search returned. With Deezer out of
+    reach the list still comes back, unchecked (``offline``), and is not cached.
+    """
+    from ..deezer import references as refs
+    from . import _artist_api, _dz_api, _track_api
+
+    genre = str(request.args.get("genre") or "")
+    if not genre:
+        return jsonify({"genres": refs.genres_with_references()})
+    if genre not in refs.REFERENCES and genre not in refs.SCENE_ARTISTS:
+        return jsonify({"genre": genre, "tracks": [], "artists": [], "listed": False})
+    now_t = time.monotonic()
+    with _ref_lock:
+        hit = _ref_cache.get(genre)
+    if hit and now_t - hit[0] < REFERENCE_TTL:
+        tracks, artists, complete = hit[1]
+    else:
+        dzapi = _dz_api()
+        if dzapi is None:
+            tracks = [(a, t, None) for a, t in refs.REFERENCES.get(genre, ())]
+            artists = [(n, None) for n in refs.SCENE_ARTISTS.get(genre, ())]
+            complete = False
+        else:
+            tracks, artists, complete = _reference_lookup(dzapi, genre)
+            if complete:
+                with _ref_lock:
+                    _ref_cache[genre] = (now_t, (tracks, artists, complete))
+    # Which of them this library already has, and what they wear.
+    ids = [str(h["id"]) for _a, _t, h in tracks if h]
+    have = {}
+    if ids:
+        from ..deezer import ids as dz_ids
+
+        uuids = [dz_ids.track_uuid(i) for i in ids]
+        rows = list(Track.select(Track.id, Track.deezer_id).where(Track.id.in_(uuids)))
+        tags = _current_tags(rows)
+        for t in rows:
+            tag = tags.get(t.id)
+            have[str(t.deezer_id)] = tag.name if tag else ""
+    out = []
+    for artist, title, h in tracks:
+        row = {"artist": artist, "title": title, "match": _track_api(h) if h else None}
+        if h and str(h["id"]) in have:
+            row["in_library"] = True
+            row["tag"] = have[str(h["id"])] or None
+        out.append(row)
+    return jsonify({
+        "genre": genre,
+        "listed": True,
+        "offline": not complete,
+        "tracks": out,
+        "artists": [{"name": n, "match": _artist_api(a) if a else None} for n, a in artists],
+    })
+
+
+@webapi.route("/genre/references/import", methods=["POST"])
+@login_required
+@admin_required
+def genre_reference_import():
+    """Bring one reference into the library and tag it: the Track row is made
+    from Deezer's own record, the tag applied, and the audio queued for the
+    archive — where it gets the vector that makes it a training example."""
+    from ..deezer import library
+    from ..deezer.workload import Priority
+    from . import _dz_live, _ensure_track_row
+
+    data = request.get_json(silent=True) or {}
+    did = str(data.get("deezer_id") or "")
+    if not _valid_id(did):
+        return jsonify({"error": "a Deezer track id is required"}), 400
+    tag = _bulk_tag(data)
+    if tag is None:
+        return jsonify({"error": "unknown tag"}), 404
+    track = _resolve(did)
+    if track is None:
+        provider = _dz_live()
+        if provider is None:
+            return jsonify({"error": "Deezer is out of reach"}), 503
+        try:
+            root = library.get_root_folder(provider.archive_dir)
+            track = _ensure_track_row(provider, did, root, library.ImportCache())
+        except Exception:
+            logger.warning("genre: could not import reference %s", did, exc_info=True)
+            return jsonify({"error": "the track could not be imported"}), 502
+    TrackTag.delete().where(TrackTag.track == track).execute()
+    TrackTag.create(track=track, tag=tag)
+    _forget_centroids()
+    _redecide(track)
+    queued = False
+    pf = getattr(current_app, "deezer_prefetch", None)
+    if pf is not None and not track.last_modification:
+        queued = bool(pf.download_ids([did], priority=Priority.USER))
+    return jsonify({"track": _track_json(track), "tag": _tag_json(tag), "queued": queued})
+
+
+@webapi.route("/genre/construction")
+@login_required
+@admin_required
+def genre_construction():
+    """Which tagged tracks carry a construction summary (deezer/construction.py),
+    and which do not — with their served tempo, which the studio's measurer
+    seeds the analyser with, as the player does."""
+    import os
+
+    from ..deezer import construction as cx
+
+    # One statement: the tags, their tracks and the served tempo, joined.
+    tagged = list(
+        TrackTag.select(TrackTag, Track, TrackAnalysis.bpm)
+        .join(Track)
+        .join(
+            TrackAnalysis,
+            JOIN.LEFT_OUTER,
+            on=(TrackAnalysis.track == Track.id),
+            attr="served",
+        )
+    )
+    measured = 0
+    missing = []
+    for tt in tagged:
+        t = tt.track
+        if not t.path or not os.path.isfile(t.path):
+            continue
+        p = cx.sidecar_path(t)
+        if p and os.path.isfile(p):
+            measured += 1
+        else:
+            missing.append({"id": t.deezer_id or str(t.id), "bpm": _served_bpm(t)})
+    return jsonify({"labelled": len(tagged), "measured": measured, "missing": missing})
 
 
 @webapi.route("/genre/embeddings", methods=["POST"])
@@ -858,6 +1494,7 @@ def genre_embeddings():
     re-run since the aggregation changed, which the studio already offers as a
     button — so the honest answer is "not yet", not a padded vector.
     """
+    from ..deezer import construction as cx
     from ..deezer import embedding as emb
 
     data = request.get_json(silent=True) or {}
@@ -865,6 +1502,7 @@ def genre_embeddings():
     if not isinstance(raw, list):
         return jsonify({"error": "ids must be a list"}), 400
     out = {}
+    tracks = {}
     stale = 0
     for ident in list(dict.fromkeys(str(x) for x in raw))[:EMBED_BATCH_MAX]:
         track = _resolve(ident)
@@ -873,11 +1511,30 @@ def genre_embeddings():
         vec = emb.load_embedding(track)
         if vec is None:
             continue
-        if len(vec) != emb.EMBED_DIM:
+        # v3 and v2 are both served, each at its own width: the studio trains
+        # on one width (a v3 row's prefix IS its v2 vector). A v1 row lives in
+        # another space and is counted, not served.
+        if len(vec) not in emb.HEAD_DIMS:
             stale += 1
             continue
         out[ident] = emb.encode_embedding(vec)
-    return jsonify({"embeddings": out, "dim": emb.EMBED_DIM, "stale": stale})
+        tracks[ident] = track
+    # What the head can read next to each vector: the served tempo (one query
+    # for the batch) and the construction summary the player measured.
+    bpms = {}
+    if tracks:
+        for row in TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.bpm).where(
+            TrackAnalysis.track.in_([t.id for t in tracks.values()])
+        ):
+            bpms[row.track_id] = row.bpm
+    extras = {}
+    for ident, track in tracks.items():
+        summary = cx.load(track)
+        extras[ident] = {
+            "bpm": bpms.get(track.id),
+            "live": summary["features"] if summary else None,
+        }
+    return jsonify({"embeddings": out, "dim": emb.EMBED_DIM, "stale": stale, "extras": extras})
 
 
 @webapi.route("/genre/model", methods=["GET", "PUT", "DELETE"])
@@ -903,7 +1560,9 @@ def genre_model():
     if request.method == "DELETE":
         GenreModel.update(active=False).where(GenreModel.active == True).execute()  # noqa: E712
         gen.invalidate()
-        return jsonify({"deleted": True})
+        # Every verdict the head gave goes back to the rules, now.
+        start_relabel(current_app._get_current_object())
+        return jsonify({"deleted": True, "relabel": _relabel_json()})
 
     data = request.get_json(silent=True) or {}
     labels = data.get("labels")
@@ -935,12 +1594,25 @@ def genre_model():
         dim=dim,
         active=True,
     )
-    GenreModel.update(active=False).where(GenreModel.id != row.id).execute()
     gen.invalidate()
     # Refuse to keep a head that cannot be read back: a model stored but
-    # unusable would silently do nothing for ever.
-    if gen.active_head() is None:
+    # unusable would silently do nothing for ever. Checked BEFORE the previous
+    # head is retired — the other order left a refused upload with no model at
+    # all, the working one switched off on the way to finding out.
+    head = gen.active_head()
+    problem = None
+    if head is None or head["id"] != row.id:
+        problem = "weights do not match the labels and dim given"
+    elif isinstance(data.get("metrics"), dict) and "inputs" in data["metrics"] and not head["inputs"]:
+        # A head over the embedding AND extras whose description does not add up
+        # would be read as a head over a wider embedding nobody has: never used.
+        problem = "the inputs described do not add up to the head's width"
+    if problem:
         row.delete_instance()
         gen.invalidate()
-        return jsonify({"error": "weights do not match the labels and dim given"}), 400
-    return jsonify({"stored": True, "version": row.version})
+        return jsonify({"error": problem}), 400
+    GenreModel.update(active=False).where(GenreModel.id != row.id).execute()
+    gen.invalidate()
+    # The new head reaches the whole library from what is already measured.
+    start_relabel(current_app._get_current_object())
+    return jsonify({"stored": True, "version": row.version, "relabel": _relabel_json()})

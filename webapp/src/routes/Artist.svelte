@@ -1,6 +1,6 @@
 <script>
   import { api } from "../lib/api.js";
-  import { player } from "../lib/stores.js";
+  import { player, isAdmin, openGenreBulk } from "../lib/stores.js";
   import { toggleEntityFavorite } from "../lib/actions.js";
   import Cover from "../components/Cover.svelte";
   import Card from "../components/Card.svelte";
@@ -140,6 +140,14 @@
       <button class="pill" on:click={playTop}><Icon name="play" size={18} /> Lire</button>
       <button class="pill ghost" on:click={startRadio}><Icon name="radio" size={18} /> Radio</button>
       <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Suivre"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
+      {#if $isAdmin}
+        <!-- Every track of this artist the library holds, reviewed first. -->
+        <button
+          class="icon-btn"
+          on:click={() => openGenreBulk({ kind: "artist", artist: id, title: data.artist.name, cover: data.artist.picture })}
+          aria-label="Donner un genre à l'artiste"
+          title="Donner un genre à tous ses titres de la bibliothèque"><Icon name="tag" size={21} /></button>
+      {/if}
     </div>
 
     <div class="tabs">

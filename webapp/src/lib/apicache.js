@@ -55,13 +55,27 @@ export function isCacheable(path) {
   return CACHE_PREFIXES.some((pre) => p === pre || p.startsWith(pre));
 }
 
+// A record holds the response's JSON TEXT (`text`), or — written by an older
+// build — the parsed object (`data`). See cachePut for why text.
+export function decode(rec) {
+  if (!rec) return null;
+  if (typeof rec.text === "string") {
+    try {
+      return JSON.parse(rec.text);
+    } catch {
+      return null;
+    }
+  }
+  return rec.data ?? null;
+}
+
 export async function cacheGet(path) {
   try {
     const db = await openDB();
     const rec = await reqp(
       db.transaction("responses", "readonly").objectStore("responses").get(path)
     );
-    return rec ? rec.data : null;
+    return decode(rec);
   } catch {
     return null;
   }
@@ -81,11 +95,18 @@ export async function cacheAge(path) {
   }
 }
 
-export async function cachePut(path, data) {
+// `text` is the response body as it came off the wire. Storing it, rather than
+// the parsed object, is what keeps this off the main thread's bill: IndexedDB
+// structured-clones what it is given, SYNCHRONOUSLY, and a 4000-track list is
+// 4000 nested objects — 17-24 ms of cloning on every visit to the favourites
+// or a big playlist, measured, against a single string copy. Reading pays one
+// JSON.parse instead of the clone it replaces.
+export async function cachePut(path, data, text = null) {
   try {
     const db = await openDB();
     const t = db.transaction("responses", "readwrite");
-    t.objectStore("responses").put({ path, data, ts: Date.now() });
+    const body = typeof text === "string" ? text : JSON.stringify(data ?? null);
+    t.objectStore("responses").put({ path, text: body, ts: Date.now() });
     await new Promise((resolve, reject) => {
       t.oncomplete = resolve;
       t.onerror = () => reject(t.error);

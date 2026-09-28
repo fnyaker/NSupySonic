@@ -1,3 +1,7 @@
+// THE ORACLE. This is src/lib/genre/deep.js as it was, before the MLP moved
+// to Rust with the rest of the trainer (webapp/trainer). Its C kernel is kept
+// beside it in genre-kernel/. test/genre.test.mjs runs both on the same data.
+//
 // Deep training: an MLP head, on the WebAssembly kernel.
 //
 // The linear head in train.js is the right default — it trains in a second and
@@ -24,7 +28,7 @@
 // The temperature fit is shared with the linear trainer rather than duplicated:
 // the calibration argument is identical for an MLP and a linear head, and two
 // copies of a formula are two places for it to drift.
-import { fitTemperature } from "./train.js";
+import { fitTemperature } from "./genre-train.js";
 
 const ALIGN = 16;
 

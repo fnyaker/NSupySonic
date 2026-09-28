@@ -3,7 +3,8 @@
 # ---------------------------------------------------------------------------
 # Rhythm builder: compile the real-time rhythm analyser (webapp/rhythm, Rust)
 # to WebAssembly — a baseline build and a SIMD128 one, the SPA picks whichever
-# the browser supports. The output is the same bytes whatever the image's
+# the browser supports — and the app core (webapp/appcore) and the genre
+# studio's trainer (webapp/trainer) beside it. The output is the same bytes whatever the image's
 # architecture, so this runs on the BUILD platform: no emulation for arm64.
 # The crate has no dependencies, so nothing is fetched but the toolchain.
 # ---------------------------------------------------------------------------
@@ -15,6 +16,19 @@ COPY webapp/rhythm/ ./
 RUN cargo build --release --target wasm32-unknown-unknown --target-dir /out/base \
  && RUSTFLAGS="-C target-feature=+simd128" \
     cargo build --release --target wasm32-unknown-unknown --target-dir /out/simd
+# The app core (webapp/appcore): the clocks the listen party, the lyric line
+# and the animations share, and the track lists' index. Same rules: no
+# dependencies, one baseline build.
+WORKDIR /appcore
+COPY webapp/appcore/ ./
+RUN cargo build --release --target wasm32-unknown-unknown --target-dir /out/appcore
+# The genre studio's trainer (webapp/trainer): baseline and SIMD128, like the
+# analyser, computing the same bits.
+WORKDIR /trainer
+COPY webapp/trainer/ ./
+RUN cargo build --release --target wasm32-unknown-unknown --target-dir /out/trainer \
+ && RUSTFLAGS="-C target-feature=+simd128" \
+    cargo build --release --target wasm32-unknown-unknown --target-dir /out/trainer-simd
 
 # ---------------------------------------------------------------------------
 # Web builder: compile the Svelte discovery SPA (vite -> supysonic/webui/dist)
@@ -37,6 +51,9 @@ COPY webapp/ ./
 # copies (which exist so a checkout builds without Rust).
 COPY --from=wasmbuilder /out/base/wasm32-unknown-unknown/release/rhythm.wasm src/lib/audio/rhythm.wasm
 COPY --from=wasmbuilder /out/simd/wasm32-unknown-unknown/release/rhythm.wasm src/lib/audio/rhythm-simd.wasm
+COPY --from=wasmbuilder /out/appcore/wasm32-unknown-unknown/release/appcore.wasm src/lib/appcore/appcore.wasm
+COPY --from=wasmbuilder /out/trainer/wasm32-unknown-unknown/release/trainer.wasm src/lib/genre/trainer.wasm
+COPY --from=wasmbuilder /out/trainer-simd/wasm32-unknown-unknown/release/trainer.wasm src/lib/genre/trainer-simd.wasm
 RUN npm run build   # writes /web/supysonic/webui/dist
 
 # ---------------------------------------------------------------------------

@@ -68,6 +68,12 @@ export const MUSIC_SLOTS = [
   // beat (DENSITY, a full reading at sixteenths), z how long the kick rings
   // (TAIL), w how noisy it is (GRIT).
   ["uGenre", 2],
+  // THE CROSSOVER (rhythm/src/viz_scene.rs): how far each way of a rig's cones
+  // is thrown out right now, 0..1 — x the SUBS (20-160 Hz: the kick, the sub
+  // bass), y the MIDS (160 Hz-2 kHz: snare, chords, voice), z the HORNS
+  // (2-16 kHz: hats, the top of the leads). Each way against its own recent
+  // loud level, thrown out at once and falling back with the cone's mass.
+  ["uPump", 1],
   // The palette, in LINEAR light and luminance-normalised (so a pale sleeve and
   // a dark one expose the same). w carries the raw numbers: saturation,
   // lightness, hue / 360, spread / 360.

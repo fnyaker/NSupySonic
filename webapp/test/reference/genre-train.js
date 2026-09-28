@@ -1,3 +1,12 @@
+// THE ORACLE. This is src/lib/genre/train.js as it was in JavaScript, before
+// the genre studio's trainer moved to Rust (webapp/trainer, loaded through
+// src/lib/genre/core.js). It is kept, unchanged but for this header, for one
+// job: test/genre.test.mjs trains it side by side with the shipped Rust on the
+// same data and holds the two to the same scores — and the Rust to being
+// faster. One thing in it is deliberately NOT reproduced: its held-out logits
+// are the SUM of a bag's members while the head it ships is their average, so
+// its temperature was fitted `bag` times too large (see train.rs close_fit).
+//
 // Training the genre head, in the browser, in plain JavaScript.
 //
 // This is the part people expect to need a machine-learning framework and a

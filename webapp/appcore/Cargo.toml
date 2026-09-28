@@ -1,0 +1,26 @@
+[package]
+name = "appcore"
+version = "0.1.0"
+edition = "2021"
+description = "NSupySonic's app core: the time-sync estimators (listen party, output clock) and the track lists' index, for the page."
+license = "AGPL-3.0-only"
+publish = false
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+# No dependencies, on purpose, like the rhythm analyser next door: the Docker
+# image builds this with nothing but the toolchain.
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+[profile.dev]
+opt-level = 3

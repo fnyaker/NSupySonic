@@ -2,7 +2,7 @@
   import { onDestroy } from "svelte";
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
-  import { player, isAdmin, toasts, lastPlaylist, openExport } from "../lib/stores.js";
+  import { player, isAdmin, toasts, lastPlaylist, openExport, openGenreBulk } from "../lib/stores.js";
   import {
     toggleEntityFavorite,
     invalidatePlaylists,
@@ -10,7 +10,8 @@
     removePlaylistLocal,
     downloadTracks,
   } from "../lib/actions.js";
-  import { duration as fmtDuration, isLocalId, artistSearch } from "../lib/format.js";
+  import { duration as fmtDuration, isLocalId } from "../lib/format.js";
+  import { SORTS, createProjector } from "../lib/tracklist.js";
   import { reconcilePayload } from "../lib/reconcile.js";
   import Cover from "../components/Cover.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
@@ -40,41 +41,12 @@
   let plSort = "default";
   let plQuery = "";
   let plDir = 1;
-  const PL_SORTS = [
-    { key: "default", label: "Ordre d'origine" },
-    { key: "title", label: "Titre" },
-    { key: "artist", label: "Artiste" },
-    { key: "album", label: "Album" },
-    { key: "duration", label: "Durée" },
-    { key: "added", label: "Date d'ajout" },
-  ];
-  const _lc = (s) => (s || "").toLowerCase();
+  const PL_SORTS = SORTS;
   $: manualView = plSort === "default" && !plQuery.trim();
+  // The same index as every other list (lib/tracklist.js).
+  const projectTracks = createProjector();
+  onDestroy(() => projectTracks.free());
   $: sortedTracks = projectTracks(data?.tracks || [], plSort, plDir, plQuery);
-  function projectTracks(list, sort, dir, query) {
-    const q = _lc(query.trim());
-    if (q)
-      list = list.filter(
-        // artistSearch, not the artist name: a featured artist is findable too.
-        (t) => _lc(t.title).includes(q) || artistSearch(t).includes(q) || _lc(t.album?.title).includes(q)
-      );
-    if (sort !== "default") {
-      const key = {
-        title: (t) => _lc(t.title),
-        artist: (t) => _lc(t.artist?.name),
-        album: (t) => _lc(t.album?.title),
-        duration: (t) => t.duration || 0,
-        added: (t) => t.added || 0,
-      }[sort];
-      list = [...list].sort((a, b) => {
-        const ka = key(a), kb = key(b);
-        return ka < kb ? -dir : ka > kb ? dir : 0;
-      });
-    } else if (dir === -1) {
-      list = [...list].reverse();
-    }
-    return list;
-  }
 
   $: if (params.id && params.id !== id) {
     id = params.id;
@@ -308,6 +280,13 @@
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
       <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger la playlist" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
       <button class="icon-btn" on:click={() => openExport("playlist", id, data.playlist.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
+      {#if $isAdmin && data.tracks.length}
+        <button
+          class="icon-btn"
+          on:click={() => openGenreBulk({ kind: "playlist", title: data.playlist.title, cover: data.playlist.cover, tracks: data.tracks })}
+          aria-label="Donner un genre à la playlist"
+          title="Donner un genre à toute la playlist"><Icon name="tag" size={21} /></button>
+      {/if}
 
       {#if editable}
         <button class="icon-btn" on:click={() => (showAdd = true)} aria-label="Ajouter des titres" title="Ajouter des titres"><Icon name="plus" size={24} /></button>

@@ -139,6 +139,10 @@ export class Rhythm {
   setLiveRange(on) {
     this.x.rhythm_set_live_range(on ? 1 : 0);
   }
+  /** How a served genre builds its groove (style.js GROOVES); 0 = let the live reading say. */
+  setGroove(g) {
+    this.x.rhythm_set_groove(g | 0);
+  }
   setLevel(level) {
     this.x.rhythm_set_level(level | 0);
   }

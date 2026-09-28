@@ -12,10 +12,13 @@
   // Training runs in a Web Worker (lib/genre/trainer.js) because it is seconds
   // of solid arithmetic, and a frozen tab is not a progress bar.
   import { onMount, onDestroy } from "svelte";
-  import { pop } from "svelte-spa-router";
+  import { pop, push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { user, toasts, player, downloadQuality } from "../lib/stores.js";
-  import { decodeEmbedding, encodeHead } from "../lib/genre/train.js";
+  import { decodeEmbedding, encodeHead } from "../lib/genre/wire.js";
+  import { genreOf } from "../lib/audio/style.js";
+  import { EXTRAS, rawExtras, fitScaler, extrasBlock } from "../lib/genre/construction.js";
+  import { measureTrack, releaseMeasurer } from "../lib/genre/measure.js";
   import { train, release } from "../lib/genre/trainer.js";
   import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
@@ -119,6 +122,48 @@
     deep2: { hidden: 512, hidden2: 512, epochs: 180 },
   };
   let mode = "linear";
+  // Hold out whole ARTISTS when scoring (the trainer's artist folds). Off by
+  // default, remembered per device: it is a stricter question, not a better
+  // model, and its lower number needs the explanation next to the switch.
+  let byArtist = false;
+  try {
+    byArtist = localStorage.getItem("genre.byArtist") === "1";
+  } catch {
+    /* storage refused: the default it is */
+  }
+  $: {
+    try {
+      localStorage.setItem("genre.byArtist", byArtist ? "1" : "0");
+    } catch {
+      /* not remembered, still applied */
+    }
+  }
+  // Read the served tempo and the construction summaries next to the
+  // embedding — when a quick head says they help (INPUT_MIN_GAIN).
+  let useConstruction = true;
+  try {
+    useConstruction = localStorage.getItem("genre.construction") !== "0";
+  } catch {
+    /* default */
+  }
+  $: {
+    try {
+      localStorage.setItem("genre.construction", useConstruction ? "1" : "0");
+    } catch {
+      /* not remembered, still applied */
+    }
+  }
+  // Measured on synthetic genres that differ only in tempo and piep: 0.3 lets
+  // them be told apart (recall 1.0 on all four, three seeds) while genres the
+  // embedding separates stay at 1.0; 0.1 learns them only partly, 1.0 starts
+  // trading the embedding's genres for noise in the extras.
+  const EXTRA_SCALE = 0.3;
+  // An optional input is kept on a gain of a point of balanced accuracy.
+  const INPUT_MIN_GAIN = 0.01;
+  // The stored vectors' widths (supysonic/deezer/embedding.py): v2 is mean +
+  // spread, v3 adds the mean over the loud half of the track.
+  const V2_DIM = 2560;
+  const V3_DIM = 3840;
   let training = false;
   let progress = 0;
   let progressStage = "";
@@ -323,22 +368,27 @@
   // does pause the player, because two things playing at once is nobody's
   // intent. The volume is the player's own — one volume for the whole app.
   function togglePreview() {
-    if (!current) return;
-    if (previewing && previewId === current.id) {
+    if (current) previewTrack(current);
+  }
+  // Any track the studio shows: the candidate being tagged, or a genre's
+  // reference (which has no local id yet — its Deezer id is its key).
+  function previewTrack(t) {
+    const key = t.id || t.deezer_id;
+    if (previewing && previewId === key) {
       stopPreview();
       return;
     }
     if (!audio) return;
     player.pause();
-    previewId = current.id;
+    previewId = key;
     previewTime = 0;
     previewDuration = 0;
-    audio.src = api.streamUrl(current.deezer_id || current.id, $downloadQuality);
+    audio.src = api.streamUrl(t.deezer_id || t.id, $downloadQuality);
     // A third of the way in: past the intro, into whatever the track actually
     // is. A genre judged from the first eight bars is a genre judged wrong. The
     // stream may not be seekable yet (the server archives while it streams), so
     // this goes through the same chase as a user seek rather than being lost.
-    previewSeekTarget = current.duration ? current.duration * 0.33 : null;
+    previewSeekTarget = t.duration ? t.duration * 0.33 : null;
     audio.play().then(
       () => (previewing = true),
       () => (previewing = false)
@@ -426,27 +476,62 @@
 
     // Embeddings in batches: /genre/embeddings never extracts, so a track whose
     // vector is missing is simply left out rather than making the whole run wait.
+    // Each comes with what the head can read next to it: the served tempo and
+    // the construction summary (lib/genre/construction.js).
     const ids = keep.map((r) => r.deezer_id || r.id);
     const vectors = new Map();
+    const extras = new Map();
     const BATCH = 200;
     for (let i = 0; i < ids.length; i += BATCH) {
       progressStage = "vecteurs";
-      progress = (0.25 * i) / Math.max(1, ids.length);
+      progress = (0.2 * i) / Math.max(1, ids.length);
       const part = await api.genreEmbeddings(ids.slice(i, i + BATCH));
       for (const [k, v] of Object.entries(part.embeddings || {}))
         vectors.set(k, decodeEmbedding(v));
+      for (const [k, v] of Object.entries(part.extras || {})) extras.set(k, v);
     }
     const usable = keep.filter((r) => vectors.has(String(r.deezer_id || r.id)));
     if (!usable.length)
       throw new Error("aucun vecteur disponible — lancez « supysonic-cli deezer embed »");
-    const d = vectors.get(String(usable[0].deezer_id || usable[0].id)).length;
-    const X = new Float32Array(usable.length * d);
+    // v3 vectors carry the loud half of the track after the v2 ones (which they
+    // begin with, value for value). One matrix has one width: the loud block is
+    // a candidate only when EVERY row has it; otherwise all train on the v2 part.
+    const older = usable.filter((r) => vectors.get(String(r.deezer_id || r.id)).length < V3_DIM).length;
+    const d = older ? V2_DIM : V3_DIM;
     const y = new Int32Array(usable.length);
+    // Each row's artist as a small integer, for the artist folds.
+    const groups = new Int32Array(usable.length);
+    const artistIds = new Map();
+    const rowsV = [];
+    const raws = [];
     usable.forEach((r, i) => {
-      X.set(vectors.get(String(r.deezer_id || r.id)), i * d);
+      const key = String(r.deezer_id || r.id);
+      rowsV.push(vectors.get(key));
+      raws.push(rawExtras(extras.get(key)));
       y[i] = names.indexOf(r.tag.name);
+      const a = r.artist_id || null;
+      if (a && !artistIds.has(a)) artistIds.set(a, artistIds.size);
+      groups[i] = a ? artistIds.get(a) : -1;
     });
-    return { X, y, n: usable.length, d, labels: names, skipped: keep.length - usable.length };
+    return {
+      rowsV, raws, y, groups, n: usable.length, d, older, labels: names,
+      measured: raws.filter((r) => r.slice(1).some(Number.isFinite)).length,
+      skipped: keep.length - usable.length,
+    };
+  }
+
+  // The matrix a trainer gets, built fresh per call (the worker takes the
+  // buffers): the first `width` numbers of each embedding (a v3 vector's first
+  // 2560 ARE its v2 one), then the extras block when there is a scaler.
+  function pack(data, scaler, width = data.d) {
+    const k = scaler ? EXTRAS.length + 1 : 0;
+    const dim = width + k;
+    const X = new Float32Array(data.n * dim);
+    for (let i = 0; i < data.n; i++) {
+      X.set(data.rowsV[i].subarray(0, width), i * dim);
+      if (scaler) X.set(extrasBlock(data.raws[i], scaler, EXTRA_SCALE), i * dim + width);
+    }
+    return { X, y: data.y.slice(), groups: data.groups.slice(), n: data.n, d: dim, labels: data.labels };
   }
 
   async function runTraining() {
@@ -459,16 +544,71 @@
     try {
       const data = await buildMatrix();
       const skipped = data.skipped;
+      const seed = (Math.random() * 0x100000000) >>> 0;
+      const base = { grouped: byArtist, seed };
+      // Two optional inputs, each kept only if it MEASURABLY helps: a quick
+      // linear head with it and one without, on the same folds and seed. The
+      // loud half of the track first (a width), then tempo and construction on
+      // top of the width that won; the requested mode then trains once.
+      const quickHead = (scaler, width, from, to) =>
+        train(pack(data, scaler, width), "linear", (st, pct) => (progress = from + (to - from) * (pct || 0)), base);
+      let width = data.d;
+      let quick = null;
+      let loud = null;
+      if (data.d === V3_DIM) {
+        progressStage = "moitié forte";
+        const narrow = await quickHead(null, V2_DIM, 0.2, 0.3);
+        const wide = await quickHead(null, V3_DIM, 0.3, 0.4);
+        const used = wide.metrics.balanced >= narrow.metrics.balanced + INPUT_MIN_GAIN;
+        loud = { used, with: wide.metrics.balanced, without: narrow.metrics.balanced, older: 0 };
+        width = used ? V3_DIM : V2_DIM;
+        quick = used ? wide : narrow;
+      } else {
+        loud = { used: false, older: data.older };
+      }
+      let scaler = null;
+      let construction = null;
+      const hasExtras = data.raws.some((r) => r.some(Number.isFinite));
+      if (useConstruction && hasExtras) {
+        progressStage = "tempo et construction";
+        const fitted = fitScaler(data.raws);
+        const without = quick || (await quickHead(null, width, 0.4, 0.45));
+        const withX = await quickHead(fitted, width, 0.45, 0.5);
+        const used = withX.metrics.balanced >= without.metrics.balanced + INPUT_MIN_GAIN;
+        construction = {
+          used,
+          with: withX.metrics.balanced,
+          without: without.metrics.balanced,
+          measured: data.measured,
+          examples: data.n,
+        };
+        scaler = used ? fitted : null;
+        quick = used ? withX : without;
+      }
+      const from = quick ? 0.5 : 0.2;
       progressStage = mode === "linear" ? "entraînement" : "entraînement approfondi";
-      const trained = await train(
-        data,
-        mode === "linear" ? "linear" : "deep",
-        (stage, pct) => {
-          progressStage = stage === "done" ? "terminé" : progressStage;
-          progress = 0.25 + 0.75 * (pct || 0);
-        },
-        TRAIN_OPTS[mode] || {}
-      );
+      const trained =
+        mode === "linear" && quick
+          ? quick
+          : await train(
+              pack(data, scaler, width),
+              mode === "linear" ? "linear" : "deep",
+              (stage, pct) => {
+                progressStage = stage === "done" ? "terminé" : progressStage;
+                progress = from + (1 - from) * (pct || 0);
+              },
+              { ...(TRAIN_OPTS[mode] || {}), ...base }
+            );
+      if (construction) trained.metrics.construction = construction;
+      if (loud) trained.metrics.loud = loud;
+      if (scaler)
+        trained.metrics.inputs = {
+          embed: width,
+          extras: EXTRAS,
+          mean: scaler.mean,
+          std: scaler.std,
+          scale: EXTRA_SCALE,
+        };
       trained.skipped = skipped;
       head = trained;
       progress = 1;
@@ -479,19 +619,126 @@
     }
   }
 
+  // -- well-known recordings per genre ------------------------------------------
+  // Eight tagged tracks before a genre means anything, and the first eight are
+  // the hardest to find in a library nobody sorted by genre. A genre with a
+  // list opens it under its row; each entry is looked up on Deezer, listened
+  // to here, and tagged with one click (which also archives it, so it gets a
+  // vector). Scenes nobody has written a canon for list their artists instead.
+  let refGenres = new Set();
+  let refOpen = null; // genre name whose panel is open
+  let refData = null;
+  let refLoading = false;
+  let refBusy = null; // deezer id being imported
+  async function loadRefGenres() {
+    try {
+      refGenres = new Set((await api.genreReferenceGenres()).genres || []);
+    } catch {
+      refGenres = new Set();
+    }
+  }
+  async function toggleRefs(tag) {
+    if (refOpen === tag.name) {
+      refOpen = null;
+      refData = null;
+      return;
+    }
+    refOpen = tag.name;
+    refData = null;
+    refLoading = true;
+    try {
+      const d = await api.genreReferences(tag.name);
+      if (refOpen === tag.name) refData = d;
+    } catch (e) {
+      toasts.push(e?.message || "Références indisponibles", "error");
+      refOpen = null;
+    } finally {
+      refLoading = false;
+    }
+  }
+  async function importRef(tag, ref) {
+    if (refBusy || !ref.match) return;
+    refBusy = ref.match.deezer_id;
+    try {
+      const r = await api.genreReferenceImport(ref.match.deezer_id, tag.id);
+      ref.in_library = true;
+      ref.tag = tag.name;
+      refData = refData;
+      toasts.push(`« ${ref.title} » étiqueté ${tag.name}${r.queued ? " — archivage lancé" : ""}`);
+      await refresh();
+    } catch (e) {
+      toasts.push(e?.message || "Import impossible", "error");
+    } finally {
+      refBusy = null;
+    }
+  }
+
+  // -- construction: how many tagged tracks have been measured -----------------
+  let constr = null;
+  let measuring = false;
+  let measureDone = 0;
+  let measureTotal = 0;
+  let measureFailed = 0;
+  let measureAbort = null;
+  async function loadConstruction() {
+    try {
+      constr = await api.genreConstruction();
+    } catch {
+      constr = null;
+    }
+  }
+  async function measureMissing() {
+    if (measuring || !constr?.missing?.length) return;
+    measuring = true;
+    measureAbort = new AbortController();
+    const list = constr.missing.slice();
+    measureTotal = list.length;
+    measureDone = 0;
+    measureFailed = 0;
+    try {
+      for (const t of list) {
+        if (measureAbort.signal.aborted) break;
+        try {
+          await measureTrack(t.id, t.bpm, measureAbort.signal);
+        } catch {
+          if (measureAbort.signal.aborted) break;
+          measureFailed++;
+        }
+        measureDone++;
+      }
+    } finally {
+      measuring = false;
+      measureAbort = null;
+      await loadConstruction();
+    }
+  }
+  function stopMeasuring() {
+    measureAbort?.abort();
+  }
+
   async function sendModel() {
     if (!head || sending) return;
     sending = true;
     try {
-      await api.genreModelPut({
+      // Each label's FAMILY, as the analyser resolves it: when the head is
+      // unsure between two siblings (rawstyle / rawphase) the server serves the
+      // family it IS sure of instead of falling back to its rules.
+      const families = {};
+      for (const label of head.labels) {
+        const fam = genreOf(label)?.family;
+        if (fam) families[label] = fam;
+      }
+      const res = await api.genreModelPut({
         labels: head.labels,
         weights: encodeHead(head),
         dim: head.dim,
         kind: head.kind || "linear",
         hidden: head.hidden || 0,
-        metrics: head.metrics,
+        metrics: { ...head.metrics, families },
       });
-      toasts.push("Modèle envoyé au serveur");
+      toasts.push("Modèle envoyé — il est appliqué à toute la bibliothèque");
+      relabel = res?.relabel || null;
+      watchRelabel();
       await refresh();
     } catch (e) {
       toasts.push(e?.message || "envoi impossible", "error");
@@ -503,8 +750,38 @@
   async function disableModel() {
     if (!window.confirm("Désactiver le modèle actif ?")) return;
     try {
-      await api.genreModelDelete();
+      const res = await api.genreModelDelete();
+      relabel = res?.relabel || null;
+      watchRelabel();
       await refresh();
+    } catch (e) {
+      toasts.push(e?.message || "opération impossible", "error");
+    }
+  }
+
+  // -- the head re-applied to the library -------------------------------------
+  // Storing (or disabling) a head re-decides every stored verdict on the server
+  // from what is already measured: seconds to minutes, no ffmpeg. Followed here
+  // while it runs, then left as one quiet line under the active model.
+  let relabel = null;
+  let relabelTimer = null;
+  function stopRelabelPoll() {
+    clearTimeout(relabelTimer);
+    relabelTimer = null;
+  }
+  async function watchRelabel() {
+    stopRelabelPoll();
+    try {
+      relabel = await api.genreRelabel();
+    } catch {
+      return;
+    }
+    if (relabel?.running) relabelTimer = setTimeout(watchRelabel, 1200);
+  }
+  async function reapply() {
+    try {
+      relabel = await api.genreRelabelStart();
+      watchRelabel();
     } catch (e) {
       toasts.push(e?.message || "opération impossible", "error");
     }
@@ -761,6 +1038,9 @@
   onMount(() => {
     refresh();
     loadJobStatus();
+    watchRelabel();
+    loadConstruction();
+    loadRefGenres();
     // Unconditionally: the extractor is what MEASURES a track, and tagging only
     // needs what was already measured. An archive carried over from a server
     // that had onnxruntime is a perfectly good training set on one that does
@@ -773,6 +1053,9 @@
     stopExtPoll();
     stopEmbedPoll();
     stopAnalysisPoll();
+    stopRelabelPoll();
+    stopMeasuring();
+    releaseMeasurer();
     release();
   });
 
@@ -897,10 +1180,89 @@
               <span class="count" class:thin={(counts[tag.name] || 0) < 8}>
                 {counts[tag.name] || 0}
               </span>
-              <button class="icon-btn danger" on:click={() => removeTag(tag)} aria-label="Supprimer">
-                <Icon name="trash" size={16} />
-              </button>
+              <span class="row-actions">
+                {#if refGenres.has(tag.name)}
+                  <button
+                    class="icon-btn"
+                    class:on={refOpen === tag.name}
+                    on:click={() => toggleRefs(tag)}
+                    aria-label="Titres de référence"
+                    title="Titres de référence"
+                  >
+                    <Icon name="disc" size={16} />
+                  </button>
+                {/if}
+                <button class="icon-btn danger" on:click={() => removeTag(tag)} aria-label="Supprimer">
+                  <Icon name="trash" size={16} />
+                </button>
+              </span>
             </div>
+            {#if refOpen === tag.name}
+              <div class="refs">
+                {#if refLoading || !refData}
+                  <p class="muted small">Recherche des références sur Deezer…</p>
+                {:else}
+                  {#if refData.offline}
+                    <p class="muted small">
+                      Deezer ne répond pas : la liste n'a pas pu être vérifiée. Réessayez plus tard.
+                    </p>
+                  {/if}
+                  {#each refData.tracks as ref (ref.artist + ref.title)}
+                    <div class="ref" class:missing={!ref.match}>
+                      {#if ref.match}
+                        <button
+                          class="ref-play"
+                          on:click={() => previewTrack(ref.match)}
+                          aria-label={previewing && previewId === ref.match.deezer_id ? "Pause" : "Écouter"}
+                        >
+                          <Icon name={previewing && previewId === ref.match.deezer_id ? "pause" : "play"} size={14} />
+                        </button>
+                      {:else}
+                        <span class="ref-play off"><Icon name="close" size={12} /></span>
+                      {/if}
+                      <span class="ref-txt">
+                        <span class="ref-t">{ref.title}</span>
+                        <span class="ref-a muted">
+                          {ref.artist}{#if !ref.match && !refData.offline} · introuvable sur Deezer{/if}
+                        </span>
+                      </span>
+                      {#if ref.match}
+                        {#if ref.in_library && ref.tag === tag.name}
+                          <span class="ref-done muted"><Icon name="check" size={14} /> étiqueté</span>
+                        {:else}
+                          <button
+                            class="ghost small-btn"
+                            disabled={!!refBusy}
+                            on:click={() => importRef(tag, ref)}
+                            title={ref.tag ? `Porte déjà « ${ref.tag} »` : ""}
+                          >
+                            {refBusy === ref.match.deezer_id ? "…" : ref.tag ? `Remplacer ${ref.tag}` : "Étiqueter"}
+                          </button>
+                        {/if}
+                      {/if}
+                    </div>
+                  {/each}
+                  {#if refData.artists?.length}
+                    <p class="muted small ref-note">
+                      {refData.tracks.length ? "Et ses artistes phares" : "Pas de liste de titres fiable pour ce genre — ses artistes phares"}, à écouter puis
+                      étiqueter en masse depuis leur page&nbsp;:
+                    </p>
+                    <div class="ref-artists">
+                      {#each refData.artists as a (a.name)}
+                        {#if a.match}
+                          <button class="chip-btn" on:click={() => push("/artist/" + a.match.deezer_id)}>{a.name}</button>
+                        {:else}
+                          <span class="chip-btn off" title="Introuvable sur Deezer">{a.name}</span>
+                        {/if}
+                      {/each}
+                    </div>
+                  {/if}
+                  <p class="muted small ref-note">
+                    Des exemples reconnus du genre, pas une vérité&nbsp;: écoutez avant d'étiqueter.
+                  </p>
+                {/if}
+              </div>
+            {/if}
           {/each}
           {#if !tags.length}
             <p class="muted empty">Aucun genre. Commencez par en créer quelques-uns.</p>
@@ -1249,7 +1611,9 @@
       <section class="card">
         <h2><Icon name="activity" size={18} /> Extracteur</h2>
         <p class="sub muted">
-          Le modèle gelé qui transforme un titre en empreinte de 1280 nombres. Il a
+          Le modèle gelé qui transforme un titre en empreinte : 1280 nombres par
+          fenêtre de deux secondes, résumés sur tout le titre et sur sa moitié la
+          plus forte — le drop, le refrain, là où le genre se décide. Il a
           sa propre licence, alors le serveur ne le télécharge jamais tout seul :
           importez la copie que vous vous êtes procurée. Elle sert aussi bien ici
           qu'à <code>supysonic-cli deezer embed</code>.
@@ -1422,6 +1786,54 @@
           {/each}
         </div>
 
+        <label class="option" class:on={byArtist}>
+          <input type="checkbox" bind:checked={byArtist} />
+          <span class="option-text">
+            <strong>Tester sur des artistes inconnus</strong>
+            <span class="muted">
+              La note est mesurée sur des artistes que le modèle n'a jamais entendus :
+              deux titres d'un même album ne s'entraident plus. Le chiffre est plus
+              bas, mais c'est celui qui dit si le modèle a appris le genre ou
+              seulement reconnu des albums — et le serveur fera moins confiance à un
+              modèle qui ne sait que les seconds.
+            </span>
+          </span>
+        </label>
+
+        <label class="option" class:on={useConstruction}>
+          <input type="checkbox" bind:checked={useConstruction} />
+          <span class="option-text">
+            <strong>Lire aussi le tempo et la construction</strong>
+            <span class="muted">
+              Le modèle d'empreinte entend bien le timbre mais mal le tempo, et il n'a
+              jamais appris le Pieep ni le Deutscher Krach. L'analyseur du lecteur mesure,
+              lui, comment le morceau est construit : la hauteur du kick, le squeak du
+              pieep, les rolls, le buzz, le kick sur chaque temps. Ces mesures sont
+              gardées si elles améliorent réellement la note — l'entraînement le vérifie.
+            </span>
+          </span>
+        </label>
+        <!-- Outside the label: a button inside one would be a second control it
+             labels, and a click on it would tick the box. -->
+        {#if useConstruction && constr && constr.labelled}
+          <div class="measure">
+            <span class="muted small">
+              Construction mesurée pour <strong>{constr.measured}</strong> titre{constr.measured > 1 ? "s" : ""}
+              étiqueté{constr.measured > 1 ? "s" : ""} sur {constr.labelled}.
+            </span>
+            {#if measuring}
+              <span class="muted small">
+                Mesure… {measureDone} / {measureTotal}{#if measureFailed}, {measureFailed} en échec{/if}
+              </span>
+              <button class="ghost small-btn" on:click={stopMeasuring}>Arrêter</button>
+            {:else if constr.missing?.length}
+              <button class="ghost small-btn" on:click={measureMissing}>
+                <Icon name="activity" size={14} /> Mesurer les {constr.missing.length} restants
+              </button>
+            {/if}
+          </div>
+        {/if}
+
         <div class="run">
           <button class="primary big" on:click={runTraining} disabled={training || !trainable}>
             {#if training}
@@ -1456,7 +1868,8 @@
                 <span class="k">Justesse brute</span>
                 <span class="v">{pct(head.metrics.accuracy)} %</span>
                 <span class="muted small">
-                  validation croisée {head.metrics.folds} plis · {head.metrics.examples} titres
+                  validation croisée {head.metrics.folds} plis{head.metrics.grouped ? " par artiste" : ""} ·
+                  {head.metrics.examples} titres
                 </span>
               </div>
               {#if head.metrics.temperature && Math.abs(head.metrics.temperature - 1) > 0.03}
@@ -1467,6 +1880,33 @@
                     {head.metrics.temperature > 1
                       ? "le modèle était trop sûr de lui : ses confiances sont ramenées à ce qu'elles valent avant que le serveur ne s'en serve"
                       : "le modèle était trop timide : ses confiances sont relevées"}
+                  </span>
+                </div>
+              {/if}
+              {#if head.metrics.loud}
+                {@const l = head.metrics.loud}
+                <div class="score">
+                  <span class="k">Moitié forte du titre</span>
+                  {#if l.older}
+                    <span class="v">indisponible</span>
+                    <span class="muted small">
+                      {l.older} empreinte{l.older > 1 ? "s" : ""} antérieure{l.older > 1 ? "s" : ""} — relancez
+                      la mesure de la bibliothèque pour les refaire
+                    </span>
+                  {:else}
+                    <span class="v">{l.used ? "utilisée" : "écartée"}</span>
+                    <span class="muted small">tête rapide {pct(l.with)} % avec, {pct(l.without)} % sans</span>
+                  {/if}
+                </div>
+              {/if}
+              {#if head.metrics.construction}
+                {@const c = head.metrics.construction}
+                <div class="score">
+                  <span class="k">Tempo et construction</span>
+                  <span class="v">{c.used ? "utilisés" : "écartés"}</span>
+                  <span class="muted small">
+                    tête rapide {pct(c.with)} % avec, {pct(c.without)} % sans ·
+                    construction mesurée pour {c.measured} / {c.examples} titres
                   </span>
                 </div>
               {/if}
@@ -1484,19 +1924,32 @@
 
             <table class="per-class">
               <thead>
-                <tr><th>Genre</th><th>Titres</th><th>Rappel</th><th>Précision</th></tr>
+                <tr>
+                  <th>Genre</th><th>Titres</th>{#if head.metrics.grouped}<th>Artistes</th>{/if}<th>Rappel</th><th>Précision</th>
+                </tr>
               </thead>
               <tbody>
                 {#each head.metrics.perClass as c}
                   <tr class:weak={c.recall < 0.6}>
                     <td>{c.label}</td>
                     <td class="num">{c.examples}</td>
+                    {#if head.metrics.grouped}
+                      <td class="num" class:solo={c.artists < 2}>{c.artists ?? "–"}</td>
+                    {/if}
                     <td class="num">{pct(c.recall)} %</td>
                     <td class="num">{pct(c.precision)} %</td>
                   </tr>
                 {/each}
               </tbody>
             </table>
+            {#if head.metrics.grouped && head.metrics.perClass.some((c) => c.artists < 2)}
+              <p class="muted small">
+                Un genre dont tous les exemples viennent d'un seul artiste ne peut pas
+                être testé sur quelqu'un d'autre : son rappel dit zéro parce que rien ne
+                prouve encore que le modèle connaît le genre plutôt que cet artiste.
+                Quelques titres d'autres artistes suffisent.
+              </p>
+            {/if}
 
             <div class="confusion">
               <h3>Confusions</h3>
@@ -1590,6 +2043,32 @@
           </div>
         {:else}
           <p class="muted empty">Aucun modèle actif — l'analyse utilise ses règles par défaut.</p>
+        {/if}
+        {#if relabel && (relabel.running || relabel.scanned)}
+          <div class="relabel">
+            {#if relabel.running}
+              <div class="progress">
+                <i style={`width:${pct(relabel.total ? relabel.scanned / relabel.total : 0)}%`}></i>
+              </div>
+              <span class="muted small">
+                Application à la bibliothèque… {relabel.scanned} / {relabel.total} titres
+              </span>
+            {:else}
+              <span class="muted small">
+                Appliqué à <strong>{relabel.scanned}</strong> titres déjà mesurés,
+                sans nouvelle mesure : {relabel.changed} verdict{relabel.changed > 1 ? "s" : ""} changé{relabel.changed > 1 ? "s" : ""}
+                · {relabel.model} par le modèle{#if relabel.family}, dont {relabel.family} à la famille près{/if}
+                · {relabel.tag} étiqueté{relabel.tag > 1 ? "s" : ""} à la main
+                · {relabel.heuristic} par les règles.
+              </span>
+            {/if}
+            {#if relabel.error}<span class="bad small">{relabel.error}</span>{/if}
+          </div>
+        {/if}
+        {#if status.model && !relabel?.running}
+          <button class="ghost small-btn" on:click={reapply}>
+            <Icon name="refresh" size={14} /> Réappliquer à la bibliothèque
+          </button>
         {/if}
       </section>
     {/if}
@@ -1743,13 +2222,18 @@
   }
   .tag-row {
     display: grid;
-    grid-template-columns: 14px minmax(110px, 1fr) auto auto 40px 34px;
+    grid-template-columns: 14px minmax(110px, 1fr) auto auto 40px 72px;
     align-items: center;
     gap: 10px;
     background: var(--surface-2, #1b1d21);
     border-radius: 12px;
     padding: 8px 10px;
     transition: opacity 0.15s;
+  }
+  .row-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
   }
   .tag-row.busy {
     opacity: 0.5;
@@ -2282,6 +2766,152 @@
     border-color: var(--accent, #22d3ee);
     box-shadow: 0 0 0 1px var(--accent, #22d3ee) inset;
   }
+  .relabel {
+    display: grid;
+    gap: 6px;
+    margin: 12px 0 4px;
+  }
+  .relabel .progress {
+    margin: 0;
+  }
+  .small-btn {
+    margin-top: 10px;
+    font-size: 0.84rem;
+  }
+  .refs {
+    margin: -2px 0 10px 22px;
+    padding: 10px 12px;
+    border-left: 2px solid var(--border, #2a2d33);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ref {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+  }
+  .ref.missing .ref-txt {
+    opacity: 0.55;
+  }
+  .ref-play {
+    width: 30px;
+    height: 30px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--surface-2, #1b1d21);
+    border: 1px solid var(--border, #2a2d33);
+    color: var(--text);
+  }
+  .ref-play:hover {
+    border-color: var(--accent, #22d3ee);
+  }
+  .ref-play.off {
+    color: var(--text-dim);
+    background: transparent;
+  }
+  .ref-txt {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  .ref-t,
+  .ref-a {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ref-t {
+    font-weight: 600;
+    font-size: 0.88rem;
+  }
+  .ref-a {
+    font-size: 0.78rem;
+  }
+  .ref .ghost {
+    flex: none;
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    border-radius: 9px;
+  }
+  .ref-done {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+  }
+  .ref-note {
+    margin: 8px 0 2px;
+  }
+  .ref-artists {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chip-btn {
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border, #2a2d33);
+    background: var(--surface-2, #1b1d21);
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+  }
+  .chip-btn:hover {
+    border-color: var(--accent, #22d3ee);
+  }
+  .chip-btn.off {
+    opacity: 0.5;
+  }
+  .measure {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    /* Tucked under the option card, aligned with its text (the card's padding,
+       the checkbox and the gap). */
+    margin: -6px 0 14px 43px;
+  }
+  .measure .small-btn {
+    margin-top: 0;
+  }
+  .option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: var(--surface-2, #1b1d21);
+    border: 1px solid var(--border, #2a2d33);
+    border-radius: 14px;
+    padding: 13px 15px;
+    margin: 0 0 14px;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+  }
+  .option.on {
+    border-color: color-mix(in srgb, var(--accent, #22d3ee) 55%, var(--border, #2a2d33));
+  }
+  .option input {
+    accent-color: var(--accent, #22d3ee);
+    width: 18px;
+    height: 18px;
+    margin: 2px 0 0;
+    flex: none;
+  }
+  .option-text {
+    display: grid;
+    gap: 4px;
+  }
+  .option-text .muted {
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+  .per-class td.solo {
+    color: #fbbf24;
+  }
   .run {
     display: flex;
     align-items: center;
@@ -2570,8 +3200,18 @@
       font-size: 0.92rem;
     }
     .tag-row {
-      grid-template-columns: 14px 1fr 34px;
+      grid-template-columns: 14px 1fr 72px;
       grid-template-areas: "dot name del" "sw sw sw" "arch arch count";
+    }
+    .row-actions {
+      grid-area: del;
+    }
+    .refs {
+      margin-left: 6px;
+      padding: 8px 4px 8px 10px;
+    }
+    .ref {
+      gap: 10px;
     }
     .tag-row .dot {
       grid-area: dot;

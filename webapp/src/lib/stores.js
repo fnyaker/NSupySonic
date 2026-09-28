@@ -472,6 +472,17 @@ export function closeReplace() {
 // The studio is where a tagging pass happens; this is the other half of it, the
 // moment you are already listening and know the answer. Admin-only in effect
 // (the writes behind it are), and mounted once in App.svelte like the rest.
+// Tag a whole album / playlist / artist (components/GenreBulkSheet.svelte):
+// `{ kind, title, cover, tracks }`, or `{ kind: "artist", artist, title, cover }`
+// for every library track of that artist.
+export const genreBulkSheet = writable(null);
+export function openGenreBulk(scope) {
+  if (scope && (scope.artist || scope.tracks?.length)) genreBulkSheet.set(scope);
+}
+export function closeGenreBulk() {
+  genreBulkSheet.set(null);
+}
+
 export const genreTagSheet = writable(null);
 export function openGenreTag(track) {
   if (track && (track.deezer_id || track.id)) genreTagSheet.set({ track });

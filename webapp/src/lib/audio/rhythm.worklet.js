@@ -75,6 +75,9 @@ class NsRhythm extends AudioWorkletProcessor {
       case "liveRange":
         this.r.setLiveRange(!!m.on);
         break;
+      case "groove":
+        this.r.setGroove(m.g | 0);
+        break;
       case "level":
         this.r.setLevel(m.level | 0);
         break;

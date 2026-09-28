@@ -1,7 +1,7 @@
 <script>
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
-  import { player, toasts, isAdmin, openExport } from "../lib/stores.js";
+  import { player, toasts, isAdmin, openExport, openGenreBulk } from "../lib/stores.js";
   import { toggleEntityFavorite, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
@@ -101,6 +101,13 @@
       {/if}
       <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger l'album" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
       <button class="icon-btn" on:click={() => openExport("album", id, data.album.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
+      {#if $isAdmin}
+        <button
+          class="icon-btn"
+          on:click={() => openGenreBulk({ kind: "album", title: data.album.title, cover: data.album.cover, tracks: data.tracks })}
+          aria-label="Donner un genre à l'album"
+          title="Donner un genre à tout l'album"><Icon name="tag" size={21} /></button>
+      {/if}
     </div>
 
     <TrackList tracks={data.tracks} numbered showAlbum={false} showCover={false} context={{ kind: "album", id }} />

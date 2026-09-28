@@ -31,6 +31,8 @@ globalThis.window = { addEventListener() {}, removeEventListener() {}, location:
 // id -> (nth time this id is asked about) -> { verdict?, pending? }
 const script = new Map();
 const asked = new Map();
+// The server's verdict generation (supysonic/deezer/analysis.py).
+let serverGen = 0;
 globalThis.fetch = async (_url, opts) => {
   const { ids } = JSON.parse(opts.body);
   const analyses = {};
@@ -42,7 +44,7 @@ globalThis.fetch = async (_url, opts) => {
     if (r.verdict) analyses[id] = r.verdict;
     if (r.pending) pending.push(id);
   }
-  return { ok: true, status: 200, json: async () => ({ analyses, pending }) };
+  return { ok: true, status: 200, json: async () => ({ analyses, pending, gen: serverGen }) };
 };
 
 mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_780_000_000_000 });
@@ -141,4 +143,47 @@ test("a track with no published tempo and nothing to measure is asked about once
   primeAnalyses([id]);
   await settle();
   assert.equal(asked.get(id), 1, "a miss is remembered: no poll, no second ask this session");
+});
+
+test("a kept verdict is asked again after a day, and not before", async () => {
+  // A verdict kept on the device used to be kept for good: a genre head
+  // re-applied to the library on the server never reached it.
+  const id = "3101";
+  script.set(id, () => ({ verdict: measured(174, "dnb") }));
+  asked.delete(id);
+  primeAnalyses([id]);
+  await settle();
+  assert.equal(knownAnalysis(id).style, "dnb");
+  primeAnalyses([id]);
+  await settle();
+  assert.equal(asked.get(id), 1, "asked again within the day");
+  mock.timers.tick(23 * 3600 * 1000);
+  primeAnalyses([id]);
+  await settle();
+  assert.equal(asked.get(id), 1, "asked again within the day");
+  mock.timers.tick(2 * 3600 * 1000);
+  primeAnalyses([id]);
+  await settle();
+  assert.equal(asked.get(id), 2, "a day-old verdict must be asked again");
+});
+
+test("a new verdict generation drops every verdict kept on the device", async () => {
+  // The server re-decided the library under a new genre head: whatever this
+  // device kept was decided under the old one.
+  const a = "3201";
+  const b = "3202";
+  script.set(a, () => ({ verdict: measured(150, "hardstyle") }));
+  script.set(b, () => ({ verdict: measured(200, "frenchcore") }));
+  primeAnalyses([a]);
+  await settle();
+  assert.equal(knownAnalysis(a).style, "hardstyle");
+  serverGen += 1;
+  primeAnalyses([b]);
+  await settle();
+  assert.equal(knownAnalysis(a), null, "a verdict from the old generation survived");
+  assert.equal(knownAnalysis(b).style, "frenchcore", "the answer that carried the news was dropped with it");
+  const before = asked.get(a);
+  primeAnalyses([a]);
+  await settle();
+  assert.equal(asked.get(a), before + 1);
 });

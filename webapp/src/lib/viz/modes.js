@@ -29,14 +29,14 @@ export const MODES = [
   {
     id: "bars",
     label: "Barres",
-    hint: "Le spectre, avec une vraie résolution dans les graves.",
+    hint: "Le spectre en capsules de lumière, avec une vraie résolution dans les graves.",
     rhythm: false,
     fullBleed: false,
   },
   {
     id: "pulse",
     label: "Pulsations",
-    hint: "Couleurs au tempo, une lobe par bande de fréquence, ondes sur chaque temps.",
+    hint: "Des champs de couleur au tempo, un par bande de fréquence, sous un verre liquide qui ondule à chaque temps.",
     rhythm: true,
     fullBleed: true,
   },

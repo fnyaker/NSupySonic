@@ -30,7 +30,12 @@
   import GenreTagSheet from "./components/GenreTagSheet.svelte";
   import ExportSheet from "./components/ExportSheet.svelte";
   import { maybeResumeHosting } from "./lib/party/hostbridge.js";
-  import { partySheet } from "./lib/stores.js";
+  import { partySheet, genreBulkSheet } from "./lib/stores.js";
+  // Tagging a whole album is an admin's occasional act: its sheet is fetched
+  // the first time one is opened, then stays mounted.
+  let GenreBulkSheet = null;
+  $: if ($genreBulkSheet && !GenreBulkSheet)
+    import("./components/GenreBulkSheet.svelte").then((m) => (GenreBulkSheet = m.default)).catch(() => {});
   import NetworkIndicator from "./components/NetworkIndicator.svelte";
   import Login from "./routes/Login.svelte";
   import Home from "./routes/Home.svelte";
@@ -291,6 +296,7 @@
 <ShareSheet />
 <ReplaceSheet />
 <GenreTagSheet />
+{#if GenreBulkSheet}<svelte:component this={GenreBulkSheet} />{/if}
 <ExportSheet />
 {#if !partyId}
   {#if PartySheet}<svelte:component this={PartySheet} />{/if}

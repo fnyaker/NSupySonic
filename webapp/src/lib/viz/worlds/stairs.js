@@ -2,9 +2,9 @@
 //
 // Hardtekk, pieep and every genre built on a running lead share one gesture:
 // the arpeggio, a melody that walks up and down a chord a step at a time. So
-// the picture is a staircase — slabs of black glass floating in a helix round
-// a column of light, rising out of the fog below and vanishing into the fog
-// above — and the tune climbs it:
+// the picture is a staircase — slabs of stone floating in a helix round a
+// column of light that lights them, rising out of the fog below and vanishing
+// into the fog above — and the tune climbs it:
 //
 //   EVERY NOTE lights a step. A note higher than the last climbs, a lower one
 //   descends, a repeat stays put, so the light traces the melody's own contour
@@ -13,8 +13,8 @@
 //   THE CAMERA follows the climber round and up the tower, easing, so the lit
 //   step is always in view: the staircase turns past as the tune climbs, and
 //   sinks when it falls.
-//   THE KICK lights every edge at once and pulses the column; the DROP sends a
-//   run of light racing thirty-two steps up the stairs.
+//   THE KICK pulses the column, and with it the light on every slab; the DROP
+//   sends a run of light racing thirty-two steps up the stairs.
 //
 // It is raymarched, because what sells a staircase is its faces: a lit tread
 // on top, a riser in shadow, the underside of the step above, and fog eating
@@ -38,7 +38,7 @@ export default {
   id: "stairs",
   uses: ["sdf"],
   params: { steps: 16, rise: 0.13, trail: 1, march: 72 },
-  look: { exposure: 1.0, bloom: 1.25, threshold: 0.7, saturation: 1.2 },
+  look: { exposure: 1.05, bloom: 0.9, threshold: 0.78, saturation: 1.12, ca: 0.4 },
 
   fragment: `${SHARED}
 const float RMID = 1.02;
@@ -142,9 +142,14 @@ void main() {
     float mote = smoothstep(0.12 - fl * 0.02, 0.0, length(dm)) * step(0.72, hash12(cell + 3.1 + fl));
     col += mix(uPalMid.rgb, uPalHigh.rgb, h.x) * mote * (0.05 + 0.04 * uFlow.x) / (1.0 + fl);
   }
+  // The column is the light: how bright it burns now (the kick pulses it).
+  vec3 colC = mix(uPalHigh.rgb, vec3(1.0), 0.25);
+  float colPow = 0.55 + 0.35 * uFlow.x + 1.1 * uHit.y * amp;
   if (!hit && near < 2.0) {
-    vec3 edgeC = mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * (0.08 + 0.55 * uHit.y * amp + 0.15 * uFlow.x) + noteLight(kNear) * 1.6;
-    col += edgeC * exp(-near * near * 1.5) * 0.8;
+    // A ray that just missed a slab still owes its silhouette a little light
+    // (anti-aliasing, not an outline): the slab's own lit colour, faint.
+    vec3 rimC = fogC * 1.5 + noteLight(kNear) * 0.8;
+    col += rimC * exp(-near * near * 1.5) * 0.35;
   }
   if (hit) {
     vec3 pos = ro + rd * t;
@@ -158,27 +163,38 @@ void main() {
     vec3 ae = -e;
     float edgeD = nl.x != 0.0 ? min(ae.y, ae.z) : nl.y != 0.0 ? min(ae.x, ae.z) : min(ae.x, ae.y);
     float px = t * uFrame.w / 1.7;
-    float edge = exp(-pow(edgeD / (px * 1.3), 2.0)) + 0.1 * glow(edgeD, px * 5.0);
-    // Black glass: a fresnel sheen of the fog, and the column's light on it.
-    float fres = pow(1.0 - max(dot(n, -rd), 0.0), 4.0);
+    // A bevel: the slab's edge catches a hairline of light. It used to be the
+    // whole look — every slab a neon wireframe round a black void, flashed on
+    // every kick — which is a 2000s screensaver; now it is a detail.
+    float bevel = exp(-pow(edgeD / (px * 1.6), 2.0));
+    // Matte stone, LIT by the column: diffuse falling off with the distance
+    // from it, a sky from above and the fog from below, and a soft sheen where
+    // the column's light glances off a tread.
     vec3 toCol = normalize(vec3(-pos.x, 0.0, -pos.z));
-    float colLit = max(dot(n, toCol), 0.0) / (1.0 + dot(pos.xz, pos.xz) * 0.8);
-    vec3 glass = fogC * 2.0 * fres + mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * colLit * 0.12 * (0.5 + uHit.y);
-    // The notes light the tread from inside; the edges carry the kick.
+    float dist2 = dot(pos.xz, pos.xz);
+    float diff = max(dot(n, toCol), 0.0) / (1.0 + dist2 * 0.9);
+    float hemi = 0.5 + 0.5 * n.y;
+    vec3 albedo = mix(uPalBg.rgb * 2.2 + 0.02, uPalLow.rgb * 0.35, 0.25);
+    vec3 h = normalize(toCol - rd);
+    float sheen = pow(max(dot(n, h), 0.0), 36.0) / (1.0 + dist2 * 0.6);
+    vec3 stone = albedo * (colC * diff * colPow * 1.6 + mix(fogC * 1.4, fogC * 3.2, hemi));
+    stone += colC * sheen * 0.22 * colPow;
+    // The note sounding lights its tread from inside, and bleeds down the
+    // riser; the steps it left fade in their own colours behind it.
     vec3 lit = noteLight(kHit);
     float top = step(0.5, nl.y);
-    glass += lit * (top * 1.1 + 0.25);
-    vec3 edgeC = mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * (0.08 + 0.55 * uHit.y * amp + 0.15 * uFlow.x) + lit * 1.6;
-    col = glass + edgeC * edge;
+    stone += lit * (top * 1.2 + 0.28);
+    col = stone + (fogC * 1.2 + colC * 0.08 * colPow + lit * 0.6) * bevel * 0.5;
     // Fog: the turns above and below fade into it.
     float fog = 1.0 - exp(-max(t - 2.0, 0.0) * 0.16 - abs(pos.y - yc) * 0.22);
     col = mix(col, fogC, clamp(fog, 0.0, 1.0));
   }
   // The column of light the stairs turn round, pulsing with the kick.
-  vec3 colC = mix(uPalHigh.rgb, vec3(1.0), 0.25);
-  col += colC * colGlow * (0.35 + 0.5 * uFlow.x + 0.9 * uHit.y * amp) * (hit ? 0.5 : 1.0);
+  col += colC * colGlow * colPow * 0.75 * (hit ? 0.5 : 1.0);
   col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.25;
-  col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
+  // Centred on the artwork, and its brightest thing — the tread the tune is on
+  // — sits mid-frame: under the cover it dims harder than the house third.
+  col *= mix(0.2, 1.0, clearOfHole(p, 0.05));
   emit(col * mix(1.0, uEnergy, 0.5));
 }
 `,
