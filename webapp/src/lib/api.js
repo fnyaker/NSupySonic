@@ -254,6 +254,9 @@ export const api = {
   genreModelPut: (payload) =>
     req("/genre/model", { method: "PUT", body: body(payload) }),
   genreModelDelete: () => req("/genre/model", { method: "DELETE" }),
+  // Re-deciding the stored verdicts under the active head (no re-measure).
+  genreRelabel: () => req("/genre/relabel"),
+  genreRelabelStart: () => req("/genre/relabel", { method: "POST" }),
 
   // The frozen ONNX extractor: install the operator's own copy of the model
   // from the browser, remove it, or run the built-in sanity check on real

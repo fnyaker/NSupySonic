@@ -4491,13 +4491,25 @@ class GenreStudioTestCase(unittest.TestCase):
                 running=False, started=None, ok=None, result=None,
                 progress=[], error=None,
             )
+        # Storing or disabling a head starts a re-application of the library on
+        # a thread; here it is recorded instead, and the tests that are about it
+        # drive the worker themselves.
+        self.relabels = []
+        self._spawn = wg._spawn
+        wg._spawn = lambda fn, *args: self.relabels.append(args)
+        with wg._relabel_lock:
+            wg._relabel_job.update(running=False, again=False, error=None)
         # Mark the engine vocabulary as already seeded so the tests that predate
         # it start from an empty studio. The seeding tests clear this row.
         Meta.create(key=gen.SEED_META_KEY, value=gen.seed_signature())
 
     def tearDown(self):
         from supysonic.deezer import genre as gen
+        from supysonic.webui import genre as wg
 
+        wg._spawn = self._spawn
+        with wg._relabel_lock:
+            wg._relabel_job.update(running=False, again=False)
         gen.invalidate()
         gen.invalidate_centroids()
         release_database()
@@ -5659,6 +5671,154 @@ class GenreStudioTestCase(unittest.TestCase):
         gen.invalidate()
         self.assertIsNone(gen.active_head())
         self.assertFalse(self.client.get("/api/genre/model").json["ready"])
+
+    def test_a_refused_head_leaves_the_working_one_active(self):
+        """The old head was switched off BEFORE the new one was checked, so a
+        refused upload left the server with no model at all."""
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        self._put_linear(["a", "b"], [[1, 0], [0, 1]], [0, 0], 2)
+        r = self.client.put(
+            "/api/genre/model",
+            json={"labels": ["c", "d"], "weights": self._encode([1] * 5), "dim": 2, "kind": "linear"},
+        )
+        self.assertEqual(r.status_code, 400)
+        gen.invalidate()
+        self.assertEqual(gen.active_head()["labels"], ["a", "b"])
+
+    # -- re-applying a head to the library, from what is stored ---------------
+
+    MEASURES = {
+        "centroid": 2400.0, "rolloff": 6100.0, "spread": 2900.0, "flatness": 0.05,
+        "entropy": 0.41, "fluxPeak": 3.2, "lufs": -7.5, "lra": 4.0, "pulse": 0.62,
+    }
+
+    def _measured(self, sid, vec=None, style="electronic", source="heuristic"):
+        """An archived track with a stored verdict (and optionally a vector), as
+        a finished analysis leaves it."""
+        import json as _json
+
+        from supysonic.db import TrackAnalysis
+        from supysonic.deezer import analysis as ana
+
+        t = self._track(sid)
+        if vec is not None:
+            self._store_embedding(t, vec)
+        TrackAnalysis.create(
+            track=t, version=ana.ANALYSIS_VERSION, bpm=150.0, bpm_confidence=0.95,
+            bpm_source="deezer", style=style, style_confidence=0.3, archetype="groove",
+            data=_json.dumps({**self.MEASURES, "archetypes": {}, "styleSource": source}),
+        )
+        return t
+
+    def _row(self, track):
+        import json as _json
+
+        from supysonic.db import TrackAnalysis
+
+        row = TrackAnalysis.get(TrackAnalysis.track == track)
+        return row, _json.loads(row.data)
+
+    def test_a_stored_head_reaches_the_whole_library_without_measuring(self):
+        """A head's verdict was frozen at measure time: a model trained today
+        reached only what was archived after it. Storing one now re-decides
+        every stored verdict from the stored measures and vectors — and never
+        decodes a file to do it."""
+        from supysonic.deezer import analysis as ana
+        from supysonic.deezer import embedding as emb
+        from supysonic.webui import genre as wg
+
+        self._login()
+        dim = emb.EMBED_DIM
+        a = self._measured("8101", self._vec(dim, 0))
+        b = self._measured("8102", self._vec(dim, 1))
+        plain = self._measured("8103")  # no vector: stays with the rules
+        gen_before = self.client.post("/api/analyses", json={"ids": []}).json["gen"]
+
+        def no_ffmpeg(*_a, **_k):
+            raise AssertionError("re-applying a head must not measure anything")
+
+        spectral, ana._spectral = ana._spectral, no_ffmpeg
+        try:
+            self._head(["Frenchcore", "Techno"], dim)
+            self.assertEqual(len(self.relabels), 1, "storing a head must start the re-application")
+            wg._run_relabel(self.app)
+        finally:
+            ana._spectral = spectral
+
+        row, data = self._row(a)
+        self.assertEqual((row.style, data["styleSource"]), ("Frenchcore", "model"))
+        row, data = self._row(b)
+        self.assertEqual((row.style, data["styleSource"]), ("Techno", "model"))
+        heuristic = ana.classify({**ana._stored_features(row, self.MEASURES)})[0]
+        row, data = self._row(plain)
+        self.assertEqual((row.style, data["styleSource"]), (heuristic, "heuristic"))
+        job = self.client.get("/api/genre/relabel").json
+        self.assertEqual((job["scanned"], job["changed"], job["model"]), (3, 3, 2))
+        self.assertFalse(job["running"])
+        # Every device drops the verdicts it kept: the generation moved.
+        ana._gen_cache.update(at=0.0)
+        self.assertEqual(
+            self.client.post("/api/analyses", json={"ids": []}).json["gen"], gen_before + 1
+        )
+
+        # Disabling the head gives every verdict back to the rules.
+        self.assertEqual(self.client.delete("/api/genre/model").status_code, 200)
+        self.assertEqual(len(self.relabels), 2)
+        wg._run_relabel(self.app)
+        for t in (a, b):
+            row, data = self._row(t)
+            self.assertEqual((row.style, data["styleSource"]), (heuristic, "heuristic"))
+
+    def test_a_head_unsure_between_siblings_speaks_for_their_family(self):
+        """Rawstyle 0.45, Rawphase 0.40: 85% sure it is raw, unsure only which
+        raw. The label gate (margin 0.05 < 0.12) sent that to the heuristic, the
+        weakest source there is; the family it is sure of is served instead."""
+        import math
+
+        from supysonic.deezer import analysis as ana
+        from supysonic.deezer import genre as gen
+
+        self._login()
+        labels = ["Rawstyle", "Rawphase", "Techno"]
+        logits = [math.log(0.45), math.log(0.40), math.log(0.15)]
+        flat = logits + [0.0, 0.0, 0.0]  # a 1-wide head: W is the logits, b zero
+
+        def put(metrics):
+            r = self.client.put(
+                "/api/genre/model",
+                json={"labels": labels, "weights": self._encode(flat), "dim": 1,
+                      "kind": "linear", "metrics": metrics},
+            )
+            self.assertEqual(r.status_code, 200, r.data)
+            gen.invalidate()
+
+        put({})
+        self.assertIsNone(gen.decide([1.0], ana.MODEL_MIN_CONFIDENCE, ana.MODEL_MIN_MARGIN))
+        put({"families": {"Rawstyle": "rawstyle", "Rawphase": "rawstyle", "Techno": "techno"}})
+        verdict = gen.decide([1.0], ana.MODEL_MIN_CONFIDENCE, ana.MODEL_MIN_MARGIN)
+        self.assertEqual((verdict["style"], verdict["level"]), ("rawstyle", "family"))
+        self.assertAlmostEqual(verdict["conf"], 0.85, places=2)
+        # A family the server does not know votes for nothing.
+        put({"families": {"Rawstyle": "made-up", "Rawphase": "made-up"}})
+        self.assertIsNone(gen.decide([1.0], ana.MODEL_MIN_CONFIDENCE, ana.MODEL_MIN_MARGIN))
+
+    def test_removing_a_tag_gives_the_verdict_back(self):
+        """A tag removed left the row naming the tag's genre with source "tag" —
+        served as somebody's choice, by nobody, for ever."""
+        from supysonic.deezer import analysis as ana
+
+        self._login()
+        tag = self._tag("Hardtekk", "hard")
+        t = self._measured("8201")
+        self.client.post("/api/genre/label", json={"track": t.deezer_id, "tag": tag["id"]})
+        row, data = self._row(t)
+        self.assertEqual((row.style, data["styleSource"]), ("Hardtekk", "tag"))
+        self.client.post("/api/genre/label", json={"track": t.deezer_id, "tag": None})
+        row, data = self._row(t)
+        self.assertEqual(data["styleSource"], "heuristic")
+        self.assertEqual(row.style, ana.classify(ana._stored_features(row, self.MEASURES))[0])
 
     def test_predict_is_none_without_a_model(self):
         """No head is not an error — the heuristic classifier keeps its job."""

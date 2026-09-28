@@ -48,6 +48,26 @@ def _decode_f16(blob: str):
     return list(struct.unpack(f"<{len(raw) // 2}e", raw))
 
 
+def _families(metrics_json, labels):
+    """label -> the live classifier's family id, as the studio resolved it
+    (style.js#genreOf) and shipped it in the model's metrics. Only labels this
+    head has and families the server knows; anything else is left out, and a
+    label with no family simply never votes for one."""
+    try:
+        raw = (json.loads(metrics_json or "{}") or {}).get("families")
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    from .analysis import FAMILY_LABEL
+
+    known = set(labels)
+    return {
+        k: v for k, v in raw.items()
+        if isinstance(k, str) and isinstance(v, str) and k in known and v in FAMILY_LABEL
+    }
+
+
 def active_head():
     """The live head as {labels, dim, w, b}, or None."""
     now = time.monotonic()
@@ -56,7 +76,8 @@ def active_head():
     row = (
         GenreModel.select()
         .where(GenreModel.active == True)  # noqa: E712 — peewee needs ==
-        .order_by(GenreModel.created.desc())
+        # The id breaks a tie: two heads stored within the same clock tick.
+        .order_by(GenreModel.created.desc(), GenreModel.id.desc())
         .first()
     )
     if row is None:
@@ -91,6 +112,7 @@ def active_head():
                 head["temperature"] = temp
         except Exception:
             pass
+        head["families"] = _families(row.metrics, labels)
         if kind == "mlp2":
             want = (
                 hidden * dim + hidden
@@ -149,22 +171,47 @@ def invalidate():
     _cache.update(id=None, at=0.0, head=None)
 
 
-def predict(vec):
-    """(label, confidence, probabilities, margin) for one embedding, or None.
+def _numpy_layers(head):
+    """The head's layers as numpy arrays, built once per loaded head, or None
+    without numpy (an optional dependency: extracting needs it, using what was
+    extracted must not)."""
+    if "_np" in head:
+        return head["_np"]
+    try:
+        import numpy as np
+    except ImportError:
+        head["_np"] = None
+        return None
+    kind = head["kind"]
+    names = (("w1", "b1"), ("w2", "b2"), ("w3", "b3")) if kind == "mlp2" else (
+        (("w1", "b1"), ("w2", "b2")) if kind == "mlp" else (("w", "b"),))
+    head["_np"] = [
+        (np.asarray(head[w], dtype=np.float64), np.asarray(head[b], dtype=np.float64))
+        for w, b in names
+    ]
+    return head["_np"]
 
-    ``margin`` is top1 − top2. It is reported because it is the better gate on
-    whether a guess is worth acting on: a head can be 0.6 on the right label
-    with the rest spread over ten neighbours (genuinely unsure), or 0.5 with
-    everything else at 0.02 (genuinely sure). A threshold on the top probability
-    alone cannot tell those apart; a decision that needs both is the honest one.
+
+def _logits(head, x):
+    """The head's raw outputs for one input vector.
+
+    With numpy (it comes with the extractor) this is three matrix products.
+    Measured on a 2560-wide vector and thirty labels: a two-layer head 60.7 ms
+    in plain Python against 0.36 ms, a linear one 2.6 against 0.10, the same
+    logits to 1e-15. Re-applying a new head to a whole library is that times
+    every track. Without numpy, the plain loops.
     """
-    head = active_head()
-    if head is None or vec is None:
-        return None
+    layers = _numpy_layers(head)
+    if layers is not None:
+        import numpy as np
+
+        h = np.asarray(x, dtype=np.float64)
+        for k, (w, b) in enumerate(layers):
+            h = w @ h + b
+            if k + 1 < len(layers):
+                h = np.maximum(h, 0.0)  # relu
+        return [float(v) for v in h]
     dim = head["dim"]
-    x = list(vec)
-    if len(x) != dim:
-        return None
     if head["kind"] == "mlp2":
         h1 = []
         for row, bias in zip(head["w1"], head["b1"]):
@@ -186,7 +233,8 @@ def predict(vec):
                 if h:
                     acc += row[i] * h
             logits.append(acc)
-    elif head["kind"] == "mlp":
+        return logits
+    if head["kind"] == "mlp":
         hid = []
         for row, bias in zip(head["w1"], head["b1"]):
             acc = bias
@@ -200,13 +248,33 @@ def predict(vec):
                 if h:
                     acc += row[i] * h
             logits.append(acc)
-    else:
-        logits = []
-        for row, bias in zip(head["w"], head["b"]):
-            acc = bias
-            for i in range(dim):
-                acc += row[i] * x[i]
-            logits.append(acc)
+        return logits
+    logits = []
+    for row, bias in zip(head["w"], head["b"]):
+        acc = bias
+        for i in range(dim):
+            acc += row[i] * x[i]
+        logits.append(acc)
+    return logits
+
+
+def predict(vec):
+    """(label, confidence, probabilities, margin) for one embedding, or None.
+
+    ``margin`` is top1 − top2. It is reported because it is the better gate on
+    whether a guess is worth acting on: a head can be 0.6 on the right label
+    with the rest spread over ten neighbours (genuinely unsure), or 0.5 with
+    everything else at 0.02 (genuinely sure). A threshold on the top probability
+    alone cannot tell those apart; a decision that needs both is the honest one.
+    """
+    head = active_head()
+    if head is None or vec is None:
+        return None
+    dim = head["dim"]
+    x = list(vec)
+    if len(x) != dim:
+        return None
+    logits = _logits(head, x)
     # Temperature scaling, as loaded with the head. Dividing every logit by the
     # same T cannot reorder them, so the argmax — and therefore which label the
     # studio shows, and which the head would pick if the gate were open — is
@@ -226,6 +294,45 @@ def predict(vec):
     dist = {head["labels"][i]: round(probs[i], 4) for i in range(len(probs))}
     margin = round(max(0.0, probs[best] - second), 4)
     return head["labels"][best], round(probs[best], 4), dist, margin
+
+
+def decide(vec, min_conf, min_margin):
+    """What the head may say about a track, or None when it should keep quiet.
+
+    ``{"style", "conf", "dist", "level"}``: ``level`` is "label" when its own
+    top label passes the gate, "family" when only the FAMILY it is sure of
+    does. The second case is the one the label gate used to throw away: a head
+    that answers Rawstyle 0.40, Rawphase 0.35 is 75% sure the track is raw and
+    unsure only which raw, and it fell through to the heuristic — the weakest
+    of the three sources — for want of a margin between two siblings. The
+    families come from the studio (``_families``); a label without one is no
+    evidence for any family and competes on its own.
+    """
+    guess = predict(vec)
+    if not guess:
+        return None
+    label, conf, dist, margin = guess
+    if conf >= min_conf and margin >= min_margin:
+        return {"style": label, "conf": conf, "dist": dist, "level": "label"}
+    fams = (active_head() or {}).get("families") or {}
+    if not fams:
+        return None
+    mass = {}
+    loners = []
+    for lab, p in dist.items():
+        fam = fams.get(lab)
+        if fam is None:
+            loners.append(p)
+        else:
+            mass[fam] = mass.get(fam, 0.0) + p
+    if not mass:
+        return None
+    ranked = sorted(mass.items(), key=lambda kv: kv[1], reverse=True)
+    fam, top = ranked[0]
+    second = max([ranked[1][1] if len(ranked) > 1 else 0.0] + loners)
+    if top >= min_conf and top - second >= min_margin:
+        return {"style": fam, "conf": round(top, 4), "dist": dist, "level": "family"}
+    return None
 
 
 def archetype_for(label):

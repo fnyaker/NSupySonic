@@ -489,4 +489,15 @@ def track_analyses():
     hints, waiting = _tempo_hints(missing)
     found.update(hints)
     pending += [i for i in waiting if i not in pending]
-    return jsonify({"analyses": found, "pending": pending})
+    # The verdicts' generation: when a new head has been re-applied to the
+    # library, the player drops what it kept on the device (lib/analysis.js).
+    return jsonify({"analyses": found, "pending": pending, "gen": ana_gen()})
+
+
+def ana_gen():
+    from ..deezer import analysis as ana
+
+    try:
+        return ana.verdict_generation()
+    except Exception:
+        return 0

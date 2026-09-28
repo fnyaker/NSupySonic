@@ -1430,47 +1430,14 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         lufs=feats.get("lufs"),
     )
     try:
-        style, style_conf, arch, weights = classify(feats)
+        verdict = _decide_style(track, feats, vec)
     except Exception as exc:
         logger.warning(
             "analysis: classify failed for %s: %s", track.path, exc, exc_info=True
         )
         return None, f"classify: {exc}"
-    source = "heuristic"
-    model_dist = None
-    # A label the user applied by hand is the strongest signal there is, and the
-    # ONLY one that is not a guess: it is a person saying what this track is. It
-    # is applied before the head, so tagging a track also makes it a better
-    # training example rather than being argued with by the model it trained.
-    tag = manual_tag(track)
-    if tag is not None:
-        style = tag.name
-        style_conf = 1.0
-        source = "tag"
-        if tag.archetype in ARCHETYPES:
-            arch = tag.archetype
-    # Failing that, a head trained on the user's OWN vocabulary outranks the
-    # heuristic, and should: the rules below encode what genres tend to look
-    # like in general, while the head was taught what they look like in THIS
-    # library. It only speaks when it is reasonably sure, so an unfamiliar track
-    # still falls through to the rules rather than being forced into the nearest
-    # label.
-    elif vec is not None:
-        try:
-            from . import genre as gen
-
-            guess = gen.predict(vec)
-            if guess:
-                label, conf, dist, margin = guess
-                if conf >= MODEL_MIN_CONFIDENCE and margin >= MODEL_MIN_MARGIN:
-                    style, style_conf = label, conf
-                    arch = gen.archetype_for(label) or arch
-                    source = "model"
-                    model_dist = dist
-        except Exception as exc:
-            logger.warning(
-                "analysis: genre head failed for %s: %s", track.path, exc, exc_info=True
-            )
+    style, style_conf, arch = verdict["style"], verdict["conf"], verdict["arch"]
+    weights, source, model_dist = verdict["weights"], verdict["source"], verdict["model"]
 
     payload = {
         "centroid": round(feats["centroid"], 1),
@@ -1488,6 +1455,8 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         "embedded": vec is not None,
         "took": round(time.monotonic() - t0, 2),
     }
+    if verdict["level"]:
+        payload["styleLevel"] = verdict["level"]
     row = existing or TrackAnalysis(track=track)
     row.version = ANALYSIS_VERSION
     row.analyzed = now()
@@ -1511,6 +1480,233 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         track.path, bpm, bpm_source, style, style_conf, payload["took"],
     )
     return row, None
+
+
+_FAMILY_ARCH = {fid: arch for fid, _label, arch, _fn in FAMILIES}
+
+
+def _decide_style(track, feats, vec):
+    """A track's style from its measures, its embedding and its tag:
+    ``{style, conf, arch, weights, source, model, level}``.
+
+    One decision, three sources in order of authority — and the ONE place that
+    order is written, shared by the analysis (which measures first) and by
+    ``redecide`` (which re-reads what was measured when a head or a tag moves).
+    """
+    style, style_conf, arch, weights = classify(feats)
+    out = {"style": style, "conf": style_conf, "arch": arch, "weights": weights,
+           "source": "heuristic", "model": None, "level": None}
+    # A label the user applied by hand is the strongest signal there is, and the
+    # ONLY one that is not a guess: it is a person saying what this track is. It
+    # is applied before the head, so tagging a track also makes it a better
+    # training example rather than being argued with by the model it trained.
+    tag = manual_tag(track)
+    if tag is not None:
+        out.update(style=tag.name, conf=1.0, source="tag")
+        if tag.archetype in ARCHETYPES:
+            out["arch"] = tag.archetype
+        return out
+    # Failing that, a head trained on the user's OWN vocabulary outranks the
+    # heuristic, and should: the rules encode what genres tend to look like in
+    # general, while the head was taught what they look like in THIS library. It
+    # only speaks when it is reasonably sure — of a label, or failing that of the
+    # label's FAMILY (genre.decide) — so an unfamiliar track still falls through
+    # to the rules rather than being forced into the nearest label.
+    if vec is None:
+        return out
+    try:
+        from . import genre as gen
+
+        verdict = gen.decide(vec, MODEL_MIN_CONFIDENCE, MODEL_MIN_MARGIN)
+    except Exception as exc:
+        logger.warning(
+            "analysis: genre head failed for %s: %s", getattr(track, "path", track), exc, exc_info=True
+        )
+        return out
+    if verdict:
+        if verdict["level"] == "family":
+            fam_arch = _FAMILY_ARCH.get(verdict["style"])
+        else:
+            fam_arch = gen.archetype_for(verdict["style"])
+        out.update(style=verdict["style"], conf=verdict["conf"], source="model",
+                   model=verdict["dist"], level=verdict["level"], arch=fam_arch or out["arch"])
+    return out
+
+
+def _stored_features(row, data):
+    """The measures ``classify`` reads, back out of a stored verdict — so the
+    decision can be taken again without decoding the file. None for a row too
+    old to carry them (it will be re-measured by the backfill anyway)."""
+    try:
+        return {
+            "centroid": float(data["centroid"]),
+            "rolloff": float(data["rolloff"]),
+            "spread": float(data.get("spread") or 0.0),
+            "flatness": float(data["flatness"]),
+            "entropy": float(data["entropy"]),
+            "flux_peak": float(data["fluxPeak"]),
+            "lufs": data.get("lufs"),
+            "lra": float(data["lra"]) if data.get("lra") is not None else 7.0,
+            "pulse": float(data.get("pulse") or 0.0),
+            "bpm": float(row.bpm or 0.0),
+            "bpm_confidence": float(row.bpm_confidence or 0.0),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def redecide(row, vec=False):
+    """Take a stored row's style decision again, from what is stored: the
+    measures in its data, the track's current tag, the ACTIVE head on the
+    track's stored vector. No ffmpeg, no decode. Returns True when it changed.
+
+    ``vec``: the vector if the caller has it, None for none, or False (the
+    default) to read the sidecar when a head is active.
+    """
+    try:
+        data = json.loads(row.data) if row.data else {}
+    except (TypeError, ValueError):
+        return False
+    feats = _stored_features(row, data)
+    if feats is None:
+        return False
+    track = row.track
+    if vec is False:
+        vec = None
+        from . import genre as gen
+
+        if gen.active_head() is not None:
+            from . import embedding as emb
+
+            vec = emb.load_embedding(track)
+    try:
+        v = _decide_style(track, feats, vec)
+    except Exception:
+        logger.warning("analysis: re-deciding %s failed", row.track_id, exc_info=True)
+        return False
+    same = (
+        row.style == v["style"]
+        and row.archetype == v["arch"]
+        and abs((row.style_confidence or 0.0) - (v["conf"] or 0.0)) < 1e-4
+        and data.get("styleSource", "heuristic") == v["source"]
+        and data.get("styleLevel") == v["level"]
+    )
+    if same:
+        return False
+    row.style, row.style_confidence, row.archetype = v["style"], v["conf"], v["arch"]
+    data.update(archetypes=v["weights"], styleSource=v["source"], model=v["model"])
+    if v["level"]:
+        data["styleLevel"] = v["level"]
+    else:
+        data.pop("styleLevel", None)
+    row.data = json.dumps(data, separators=(",", ":"))
+    row.save()
+    return True
+
+
+def reapply_head(on_stats=None, should_stop=None, page_size=None):
+    """Re-decide every measured track's style under the head that is active
+    NOW (or under none), from what is stored. Returns the stats.
+
+    A head's verdict used to be frozen at the moment a track was measured, so a
+    model trained today only reached tracks archived after it — the rest took
+    "Reclasser tout", which re-runs ffmpeg over the whole library for an answer
+    that needs none of it: the measures and the vector are already on disk, and
+    the head is a few matrix products. Measured: 2 ms a track for a linear head,
+    52 ms for a two-layer one in plain Python, well under a millisecond with
+    numpy — a whole library in seconds to minutes, not hours.
+    """
+    from ..db import TrackAnalysis
+
+    stats = {"total": TrackAnalysis.select().count(), "scanned": 0, "changed": 0,
+             "model": 0, "family": 0, "tag": 0, "heuristic": 0}
+    size = page_size or PAGE_SIZE
+    last = None
+    while True:
+        if should_stop and should_stop():
+            break
+        q = TrackAnalysis.select().order_by(TrackAnalysis.track)
+        if last is not None:
+            q = q.where(TrackAnalysis.track > last)
+        page = list(q.limit(size))
+        if not page:
+            break
+        for row in page:
+            if redecide(row):
+                stats["changed"] += 1
+            try:
+                data = json.loads(row.data or "{}")
+            except (TypeError, ValueError):
+                data = {}
+            source = data.get("styleSource", "heuristic")
+            key = "family" if (source == "model" and data.get("styleLevel") == "family") else source
+            if key in stats:
+                stats[key] += 1
+            stats["scanned"] += 1
+        last = page[-1].track_id
+        if on_stats:
+            on_stats(dict(stats))
+    return stats
+
+
+#: Meta keys (Meta.key is 32 characters): the verdicts' generation, and the
+#: head the library was last re-decided under.
+VERDICT_GEN_KEY = "genre_gen"
+RELABEL_HEAD_KEY = "genre_relabeled"
+_gen_cache = {"at": 0.0, "value": 0}
+
+
+def verdict_generation():
+    """A number that moves whenever stored verdicts moved wholesale (a new head
+    re-applied to the library). The player keeps verdicts on the device and
+    never re-asks a track it has one for; this is what tells it to drop them."""
+    t = time.monotonic()
+    if t - _gen_cache["at"] < 5.0:
+        return _gen_cache["value"]
+    from ..db import Meta
+
+    try:
+        row = Meta.get_or_none(Meta.key == VERDICT_GEN_KEY)
+        value = int(row.value) if row is not None else 0
+    except (TypeError, ValueError):
+        value = 0
+    _gen_cache.update(at=t, value=value)
+    return value
+
+
+def bump_verdict_generation():
+    from ..db import Meta
+
+    value = verdict_generation() + 1
+    row = Meta.get_or_none(Meta.key == VERDICT_GEN_KEY)
+    if row is None:
+        Meta.create(key=VERDICT_GEN_KEY, value=str(value))
+    else:
+        row.value = str(value)
+        row.save()
+    _gen_cache.update(at=time.monotonic(), value=value)
+    return value
+
+
+def relabeled_head():
+    """The head id ("none" for no head) the library was last re-decided under,
+    or None if it never was."""
+    from ..db import Meta
+
+    row = Meta.get_or_none(Meta.key == RELABEL_HEAD_KEY)
+    return row.value if row is not None else None
+
+
+def mark_relabeled(head_id):
+    from ..db import Meta
+
+    value = str(head_id)
+    row = Meta.get_or_none(Meta.key == RELABEL_HEAD_KEY)
+    if row is None:
+        Meta.create(key=RELABEL_HEAD_KEY, value=value)
+    else:
+        row.value = value
+        row.save()
 
 
 def payload_for(row, tag=None):

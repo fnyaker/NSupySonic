@@ -248,6 +248,154 @@ def resume_if_interrupted(app):
     threading.Thread(target=start, name="genre-embed-resume", daemon=True).start()
 
 
+# -- re-applying the head to the whole library ---------------------------------
+# A verdict was frozen at the moment a track was measured, so a head trained
+# today reached only what was archived after it; everything else needed the full
+# re-measure (hours of ffmpeg) for an answer that needs none of it. So storing a
+# head — or disabling it — re-decides every stored verdict from what is stored
+# (analysis.reapply_head): the measures, the vector, the tag. Seconds to minutes.
+_relabel_lock = threading.Lock()
+_relabel_job = {
+    "running": False,
+    "again": False,
+    "started": None,
+    "finished": None,
+    "total": 0,
+    "scanned": 0,
+    "changed": 0,
+    "model": 0,
+    "family": 0,
+    "tag": 0,
+    "heuristic": 0,
+    "error": None,
+}
+
+
+def _relabel_json() -> dict:
+    with _relabel_lock:
+        return {k: v for k, v in _relabel_job.items() if k != "again"}
+
+
+def _spawn(fn, *args):
+    """Where the re-application's thread is started (a seam: the tests drive the
+    worker synchronously, like every other job here)."""
+    threading.Thread(target=fn, args=args, name="genre-relabel", daemon=True).start()
+
+
+def start_relabel(app) -> bool:
+    """Re-decide the library under the head active now. A run already going is
+    told to start over once it is through (a newer head just arrived), rather
+    than two runs racing over the same rows."""
+    with _relabel_lock:
+        if _relabel_job["running"]:
+            _relabel_job["again"] = True
+            return False
+        _relabel_job.update(
+            running=True, again=False, started=now().isoformat(), finished=None,
+            total=0, scanned=0, changed=0, model=0, family=0, tag=0, heuristic=0,
+            error=None,
+        )
+    _spawn(_run_relabel, app)
+    return True
+
+
+def _run_relabel(app):
+    from ..db import close_connection, open_connection
+    from ..deezer import analysis as ana
+    from ..deezer import genre as gen
+    from ..deezer.workload import renice
+
+    renice(12)
+    with app.app_context():
+        try:
+            open_connection(reuse=True)
+            while True:
+                gen.invalidate()
+                head = gen.active_head()
+                head_id = head["id"] if head else "none"
+
+                def on_stats(stats):
+                    with _relabel_lock:
+                        _relabel_job.update(stats)
+
+                def should_stop():
+                    with _relabel_lock:
+                        return _relabel_job["again"]
+
+                stats = ana.reapply_head(on_stats=on_stats, should_stop=should_stop)
+                with _relabel_lock:
+                    again = _relabel_job["again"]
+                    _relabel_job["again"] = False
+                    _relabel_job.update(stats)
+                if again:
+                    continue
+                ana.mark_relabeled(head_id)
+                if stats.get("changed"):
+                    # Devices keep verdicts and never re-ask one they have:
+                    # this is what tells them the library's answers moved.
+                    ana.bump_verdict_generation()
+                break
+        except Exception as exc:
+            logger.warning("Re-applying the genre head crashed", exc_info=True)
+            with _relabel_lock:
+                _relabel_job["error"] = str(exc)
+        finally:
+            with _relabel_lock:
+                _relabel_job["running"] = False
+                _relabel_job["finished"] = now().isoformat()
+            invalidate_predictions()
+            try:
+                close_connection()
+            except Exception:
+                pass
+
+
+def relabel_if_stale(app):
+    """On boot: if the library was never re-decided under the head active now
+    (a run cut short by a restart, or a head stored by an older version), do it."""
+
+    def start():
+        import time
+
+        time.sleep(RESUME_DELAY)
+        with app.app_context():
+            from ..db import close_connection, open_connection
+            from ..deezer import analysis as ana
+            from ..deezer import genre as gen
+
+            try:
+                open_connection(reuse=True)
+                head = gen.active_head()
+                want = str(head["id"]) if head else "none"
+                done = ana.relabeled_head()
+                # Never re-decided and no head: nothing to change.
+                stale = done != want and not (done is None and want == "none")
+            except Exception:
+                logger.debug("Could not read the relabel mark", exc_info=True)
+                return
+            finally:
+                try:
+                    close_connection()
+                except Exception:
+                    pass
+        if stale:
+            logger.info("Re-applying the genre head to the library")
+            start_relabel(app)
+
+    threading.Thread(target=start, name="genre-relabel-resume", daemon=True).start()
+
+
+@webapi.route("/genre/relabel", methods=["GET", "POST"])
+@login_required
+@admin_required
+def genre_relabel():
+    """The re-application's progress; POST starts one (the studio's button,
+    for after tags were changed in bulk)."""
+    if request.method == "POST":
+        start_relabel(current_app._get_current_object())
+    return jsonify(_relabel_json())
+
+
 # -- what the model thinks of a track, remembered ----------------------------
 # Running a trained head over one embedding is a few million multiply-adds in
 # plain Python, and the vector it runs on is a file on a disk. On a library of
@@ -678,6 +826,7 @@ def genre_label():
         # The prototype is a running average over the labelled set, so a label
         # removed has to leave it, not linger for the length of a TTL.
         _forget_centroids()
+        _redecide(track)
         return jsonify({"track": str(track.id), "tag": None})
     tag = GenreTag.get_or_none(GenreTag.id == raw) or GenreTag.get_or_none(
         GenreTag.name == str(raw)
@@ -689,7 +838,23 @@ def genre_label():
     # admin sees is the candidate list — showing them a prediction that ignores
     # the label they just applied would be worse than showing none.
     _forget_centroids()
+    _redecide(track)
     return jsonify({"track": str(track.id), "tag": _tag_json(tag)})
+
+
+def _redecide(track):
+    """The track's stored verdict, decided again now its tag changed. A tag
+    REMOVED used to leave the row naming the tag's genre with the source "tag"
+    — served as a choice somebody made, by nobody, for ever."""
+    from ..db import TrackAnalysis
+    from ..deezer import analysis as ana
+
+    try:
+        row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+        if row is not None:
+            ana.redecide(row)
+    except Exception:
+        logger.debug("genre: could not re-decide %s", track.id, exc_info=True)
 
 
 def _forget_centroids():
@@ -918,7 +1083,9 @@ def genre_model():
     if request.method == "DELETE":
         GenreModel.update(active=False).where(GenreModel.active == True).execute()  # noqa: E712
         gen.invalidate()
-        return jsonify({"deleted": True})
+        # Every verdict the head gave goes back to the rules, now.
+        start_relabel(current_app._get_current_object())
+        return jsonify({"deleted": True, "relabel": _relabel_json()})
 
     data = request.get_json(silent=True) or {}
     labels = data.get("labels")
@@ -950,12 +1117,18 @@ def genre_model():
         dim=dim,
         active=True,
     )
-    GenreModel.update(active=False).where(GenreModel.id != row.id).execute()
     gen.invalidate()
     # Refuse to keep a head that cannot be read back: a model stored but
-    # unusable would silently do nothing for ever.
-    if gen.active_head() is None:
+    # unusable would silently do nothing for ever. Checked BEFORE the previous
+    # head is retired — the other order left a refused upload with no model at
+    # all, the working one switched off on the way to finding out.
+    head = gen.active_head()
+    if head is None or head["id"] != row.id:
         row.delete_instance()
         gen.invalidate()
         return jsonify({"error": "weights do not match the labels and dim given"}), 400
-    return jsonify({"stored": True, "version": row.version})
+    GenreModel.update(active=False).where(GenreModel.id != row.id).execute()
+    gen.invalidate()
+    # The new head reaches the whole library from what is already measured.
+    start_relabel(current_app._get_current_object())
+    return jsonify({"stored": True, "version": row.version, "relabel": _relabel_json()})

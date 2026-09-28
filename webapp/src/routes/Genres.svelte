@@ -16,6 +16,7 @@
   import { api } from "../lib/api.js";
   import { user, toasts, player, downloadQuality } from "../lib/stores.js";
   import { decodeEmbedding, encodeHead } from "../lib/genre/wire.js";
+  import { genreOf } from "../lib/audio/style.js";
   import { train, release } from "../lib/genre/trainer.js";
   import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
@@ -505,15 +506,25 @@
     if (!head || sending) return;
     sending = true;
     try {
-      await api.genreModelPut({
+      // Each label's FAMILY, as the analyser resolves it: when the head is
+      // unsure between two siblings (rawstyle / rawphase) the server serves the
+      // family it IS sure of instead of falling back to its rules.
+      const families = {};
+      for (const label of head.labels) {
+        const fam = genreOf(label)?.family;
+        if (fam) families[label] = fam;
+      }
+      const res = await api.genreModelPut({
         labels: head.labels,
         weights: encodeHead(head),
         dim: head.dim,
         kind: head.kind || "linear",
         hidden: head.hidden || 0,
-        metrics: head.metrics,
+        metrics: { ...head.metrics, families },
       });
-      toasts.push("Modèle envoyé au serveur");
+      toasts.push("Modèle envoyé — il est appliqué à toute la bibliothèque");
+      relabel = res?.relabel || null;
+      watchRelabel();
       await refresh();
     } catch (e) {
       toasts.push(e?.message || "envoi impossible", "error");
@@ -525,8 +536,38 @@
   async function disableModel() {
     if (!window.confirm("Désactiver le modèle actif ?")) return;
     try {
-      await api.genreModelDelete();
+      const res = await api.genreModelDelete();
+      relabel = res?.relabel || null;
+      watchRelabel();
       await refresh();
+    } catch (e) {
+      toasts.push(e?.message || "opération impossible", "error");
+    }
+  }
+
+  // -- the head re-applied to the library -------------------------------------
+  // Storing (or disabling) a head re-decides every stored verdict on the server
+  // from what is already measured: seconds to minutes, no ffmpeg. Followed here
+  // while it runs, then left as one quiet line under the active model.
+  let relabel = null;
+  let relabelTimer = null;
+  function stopRelabelPoll() {
+    clearTimeout(relabelTimer);
+    relabelTimer = null;
+  }
+  async function watchRelabel() {
+    stopRelabelPoll();
+    try {
+      relabel = await api.genreRelabel();
+    } catch {
+      return;
+    }
+    if (relabel?.running) relabelTimer = setTimeout(watchRelabel, 1200);
+  }
+  async function reapply() {
+    try {
+      relabel = await api.genreRelabelStart();
+      watchRelabel();
     } catch (e) {
       toasts.push(e?.message || "opération impossible", "error");
     }
@@ -783,6 +824,7 @@
   onMount(() => {
     refresh();
     loadJobStatus();
+    watchRelabel();
     // Unconditionally: the extractor is what MEASURES a track, and tagging only
     // needs what was already measured. An archive carried over from a server
     // that had onnxruntime is a perfectly good training set on one that does
@@ -795,6 +837,7 @@
     stopExtPoll();
     stopEmbedPoll();
     stopAnalysisPoll();
+    stopRelabelPoll();
     release();
   });
 
@@ -1641,6 +1684,32 @@
         {:else}
           <p class="muted empty">Aucun modèle actif — l'analyse utilise ses règles par défaut.</p>
         {/if}
+        {#if relabel && (relabel.running || relabel.scanned)}
+          <div class="relabel">
+            {#if relabel.running}
+              <div class="progress">
+                <i style={`width:${pct(relabel.total ? relabel.scanned / relabel.total : 0)}%`}></i>
+              </div>
+              <span class="muted small">
+                Application à la bibliothèque… {relabel.scanned} / {relabel.total} titres
+              </span>
+            {:else}
+              <span class="muted small">
+                Appliqué à <strong>{relabel.scanned}</strong> titres déjà mesurés,
+                sans nouvelle mesure : {relabel.changed} verdict{relabel.changed > 1 ? "s" : ""} changé{relabel.changed > 1 ? "s" : ""}
+                · {relabel.model} par le modèle{#if relabel.family}, dont {relabel.family} à la famille près{/if}
+                · {relabel.tag} étiqueté{relabel.tag > 1 ? "s" : ""} à la main
+                · {relabel.heuristic} par les règles.
+              </span>
+            {/if}
+            {#if relabel.error}<span class="bad small">{relabel.error}</span>{/if}
+          </div>
+        {/if}
+        {#if status.model && !relabel?.running}
+          <button class="ghost small-btn" on:click={reapply}>
+            <Icon name="refresh" size={14} /> Réappliquer à la bibliothèque
+          </button>
+        {/if}
       </section>
     {/if}
   {/if}
@@ -2331,6 +2400,18 @@
   .mode.sel {
     border-color: var(--accent, #22d3ee);
     box-shadow: 0 0 0 1px var(--accent, #22d3ee) inset;
+  }
+  .relabel {
+    display: grid;
+    gap: 6px;
+    margin: 12px 0 4px;
+  }
+  .relabel .progress {
+    margin: 0;
+  }
+  .small-btn {
+    margin-top: 10px;
+    font-size: 0.84rem;
   }
   .option {
     display: flex;

@@ -821,6 +821,31 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   code path but defaults it OFF — measured, projecting to 384 cost ten points (0.890 against 0.998)
   to save five seconds, and five seconds is not worth ten points on the one path that exists
   *because* the accuracy was not enough.
+- **A stored head reaches the WHOLE library, without a re-measure** (`analysis.reapply_head`,
+  `webui/genre.py#start_relabel`, `/genre/relabel`). A verdict used to be frozen at the moment a
+  track was measured, so a model trained today reached only what was archived after it — the rest
+  took *Reclasser tout*, hours of ffmpeg for an answer that needs none of it. Every input of the
+  decision is stored (the measures `classify` reads are in the row's data, the vector is the
+  sidecar, the tag is a row), so storing or disabling a head re-decides every verdict from those
+  (`redecide`, one decision function `_decide_style` shared with the analysis) on a worker, resumed
+  on boot when the library was last re-decided under another head (`relabel_if_stale`, Meta
+  `genre_relabeled`). `genre.predict` runs on numpy when it is there (it comes with the extractor):
+  a two-layer head is 60.7 ms a track in plain Python and 0.36 ms in numpy (a linear one 2.6 → 0.10),
+  the same logits to 1e-15. A tag
+  set or removed re-decides its row at once — a removed tag used to leave the row naming the tag's
+  genre with the source "tag", served as somebody's choice by nobody. And a head the server cannot
+  read back no longer switches the working one off on the way (it was retired before the check).
+- **The DEVICES are told** (`analysis.verdict_generation`, `gen` on `/api/analyses`,
+  `lib/analysis.js`): the player keeps verdicts in localStorage and never re-asked one it had, so a
+  re-decided library never reached a phone. A re-application that changed anything bumps the
+  generation, and a device drops everything it kept the moment an answer carries a new one; any
+  kept verdict is also asked again after a day.
+- **When the head hesitates between SIBLINGS, it serves their family** (`genre.decide`). Rawstyle
+  0.45 / Rawphase 0.40 is 85% sure the track is raw and unsure only which raw; the label gate
+  (margin < 0.12) sent it to the heuristic, the weakest of the three sources. The studio ships each
+  label's family with the model (`metrics.families`, from `style.js#genreOf`); the server sums the
+  probabilities per family and serves the family id under the same gate (`styleLevel: "family"`).
+  A label with no family, or a family the server does not know, votes for nothing.
 - **The CSP had to be widened by exactly one token.** `script-src 'self' 'wasm-unsafe-eval'` permits
   WebAssembly compilation and nothing else — not `eval()`, not `new Function`, not inline script.
   Without it `WebAssembly.instantiate` is refused outright and deep training cannot run at all.

@@ -35,6 +35,13 @@ import { api } from "./api.js";
 const KEY = "audio.analysis";
 const MAX = 500; // a few tens of KB; the LRU drops the oldest half
 const mem = new Map(); // id -> verdict | null (null = asked, nothing there)
+// When each verdict was last heard from the server. A verdict kept on the
+// device used to be kept for good; now it is asked again after VERDICT_TTL, and
+// dropped at once when the server's GENERATION moves (a new genre head
+// re-applied to the whole library, supysonic/webui/genre.py#start_relabel).
+const stamps = new Map(); // id -> ms
+const VERDICT_TTL = 24 * 3600 * 1000;
+let generation = null;
 const pending = new Set();
 let dirty = false;
 let flushTimer = null;
@@ -53,8 +60,18 @@ const listeners = new Set();
 function load() {
   try {
     const raw = JSON.parse(localStorage.getItem(KEY) || "null");
-    if (raw && typeof raw === "object")
-      for (const [id, v] of Object.entries(raw)) mem.set(id, v);
+    if (raw && typeof raw === "object") {
+      // {g, v, t}; a cache written before the generation existed is a plain
+      // id -> verdict map, read as stamped long ago (so asked again soon).
+      const framed = raw.v && typeof raw.v === "object";
+      const verdicts = framed ? raw.v : raw;
+      const times = (framed && raw.t) || {};
+      for (const [id, v] of Object.entries(verdicts)) {
+        mem.set(id, v);
+        stamps.set(id, +times[id] || 0);
+      }
+      if (framed && Number.isFinite(raw.g)) generation = raw.g;
+    }
   } catch {
     /* a corrupt cache is just an empty one */
   }
@@ -74,9 +91,14 @@ function flush() {
         mem.delete(k);
       }
     }
-    const out = {};
-    for (const [k, v] of mem) if (v) out[k] = v;
-    localStorage.setItem(KEY, JSON.stringify(out));
+    const v = {};
+    const t = {};
+    for (const [k, val] of mem)
+      if (val) {
+        v[k] = val;
+        t[k] = stamps.get(k) || 0;
+      }
+    localStorage.setItem(KEY, JSON.stringify({ g: generation, v, t }));
   } catch {
     /* quota or private mode: the in-memory cache still works this session */
   }
@@ -114,9 +136,29 @@ function announce(id, verdict) {
   }
 }
 
+/**
+ * The server's verdict generation, from any answer that carries it. When it
+ * moves, every verdict kept here was decided under a head that is gone: drop
+ * them all (the answer in hand is stored right after this).
+ */
+function noteGeneration(g) {
+  if (!Number.isFinite(g)) return;
+  if (generation !== null && g !== generation) {
+    mem.clear();
+    stamps.clear();
+  }
+  if (g !== generation) {
+    generation = g;
+    schedule();
+  }
+}
+
+const fresh = (id) => Date.now() - (stamps.get(id) || 0) < VERDICT_TTL;
+
 function store(id, verdict) {
   const had = mem.get(id) || null;
   mem.set(id, verdict || null);
+  stamps.set(id, Date.now());
   // The re-ask clock runs from the last time the server could only offer the
   // published tempo: asking again sooner would get the same answer.
   if (provisional(verdict)) reasked.set(id, Date.now());
@@ -156,6 +198,7 @@ function pollDue() {
   api
     .trackAnalyses(ids)
     .then((r) => {
+      noteGeneration(r && r.gen);
       const got = (r && r.analyses) || {};
       // Back into `awaiting` only if the server still says it is working on it.
       const still = new Set((r && r.pending) || []);
@@ -217,7 +260,7 @@ export function primeAnalyses(ids) {
     // asking for one per play would be a request that can only ever answer no.
     if (!/^\d+$/.test(id)) continue;
     if (pending.has(id)) continue;
-    if (mem.has(id) && !(provisional(mem.get(id)) && reaskDue(id))) continue;
+    if (mem.has(id) && fresh(id) && !(provisional(mem.get(id)) && reaskDue(id))) continue;
     want.push(id);
   }
   if (!want.length) return;
@@ -225,6 +268,7 @@ export function primeAnalyses(ids) {
   api
     .trackAnalyses(want)
     .then((r) => {
+      noteGeneration(r && r.gen);
       const got = (r && r.analyses) || {};
       for (const id of want) {
         // Remember a miss as well as a hit: a track that has not been measured

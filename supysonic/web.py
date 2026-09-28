@@ -73,6 +73,7 @@ def setup_deezer(app):
 
             _wa.resume_if_interrupted(app)
             _wg.resume_if_interrupted(app)
+            _wg.relabel_if_stale(app)
     return app.deezer
 
 
