@@ -2,3 +2,5 @@ test/eval/.cache/
 rhythm/target/
 rhythm/target-simd/
 appcore/target/
+trainer/target/
+trainer/target-simd/

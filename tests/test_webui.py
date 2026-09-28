@@ -5048,6 +5048,38 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertFalse(body["truncated"])
         self.assertGreater(gweb.CANDIDATE_SCAN_MAX, gweb.CANDIDATE_MAX)
 
+    def test_labelled_is_the_whole_training_set_in_one_statement(self):
+        """Every tag, not the 500 newest, and not two statements a row.
+
+        The studio trains on exactly this list. Capped at 500, a studio past
+        that trained on a silently truncated set; each row also read its artist
+        and album back lazily. The count is the same for 3 tags and for 510.
+        """
+        from supysonic.db import GenreTag, TrackTag
+        from .test_deezer import count_statements
+
+        self._login()
+        tag = GenreTag.create(name="Frenchcore", archetype="hard")
+
+        def labelled():
+            with count_statements() as counts:
+                body = self.client.get("/api/genre/labelled").json
+            return body["labelled"], counts["SELECT"]
+
+        for i in range(3):
+            TrackTag.create(track=self._track(str(7000 + i)), tag=tag)
+        rows, few = labelled()
+        self.assertEqual(len(rows), 3)
+        for i in range(3, 510):
+            TrackTag.create(track=self._track(str(7000 + i)), tag=tag)
+        rows, many = labelled()
+        self.assertEqual(len(rows), 510)
+        self.assertEqual(many, few)
+        # What the artist folds group by, on every row.
+        self.assertTrue(all(r["artist_id"] for r in rows))
+        self.assertEqual(rows[0]["tag"]["name"], "Frenchcore")
+        self.assertEqual(rows[0]["artist"], "Artist")
+
     def test_candidates_stop_once_the_page_is_full(self):
         """In play-count order the answer IS the first `limit` rows.
 

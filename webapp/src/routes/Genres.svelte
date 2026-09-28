@@ -15,7 +15,7 @@
   import { pop } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { user, toasts, player, downloadQuality } from "../lib/stores.js";
-  import { decodeEmbedding, encodeHead } from "../lib/genre/train.js";
+  import { decodeEmbedding, encodeHead } from "../lib/genre/wire.js";
   import { train, release } from "../lib/genre/trainer.js";
   import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
@@ -119,6 +119,22 @@
     deep2: { hidden: 512, hidden2: 512, epochs: 180 },
   };
   let mode = "linear";
+  // Hold out whole ARTISTS when scoring (the trainer's artist folds). Off by
+  // default, remembered per device: it is a stricter question, not a better
+  // model, and its lower number needs the explanation next to the switch.
+  let byArtist = false;
+  try {
+    byArtist = localStorage.getItem("genre.byArtist") === "1";
+  } catch {
+    /* storage refused: the default it is */
+  }
+  $: {
+    try {
+      localStorage.setItem("genre.byArtist", byArtist ? "1" : "0");
+    } catch {
+      /* not remembered, still applied */
+    }
+  }
   let training = false;
   let progress = 0;
   let progressStage = "";
@@ -442,11 +458,17 @@
     const d = vectors.get(String(usable[0].deezer_id || usable[0].id)).length;
     const X = new Float32Array(usable.length * d);
     const y = new Int32Array(usable.length);
+    // Each row's artist as a small integer, for the artist folds.
+    const groups = new Int32Array(usable.length);
+    const artistIds = new Map();
     usable.forEach((r, i) => {
       X.set(vectors.get(String(r.deezer_id || r.id)), i * d);
       y[i] = names.indexOf(r.tag.name);
+      const a = r.artist_id || null;
+      if (a && !artistIds.has(a)) artistIds.set(a, artistIds.size);
+      groups[i] = a ? artistIds.get(a) : -1;
     });
-    return { X, y, n: usable.length, d, labels: names, skipped: keep.length - usable.length };
+    return { X, y, groups, n: usable.length, d, labels: names, skipped: keep.length - usable.length };
   }
 
   async function runTraining() {
@@ -467,7 +489,7 @@
           progressStage = stage === "done" ? "terminé" : progressStage;
           progress = 0.25 + 0.75 * (pct || 0);
         },
-        TRAIN_OPTS[mode] || {}
+        { ...(TRAIN_OPTS[mode] || {}), grouped: byArtist }
       );
       trained.skipped = skipped;
       head = trained;
@@ -1422,6 +1444,20 @@
           {/each}
         </div>
 
+        <label class="option" class:on={byArtist}>
+          <input type="checkbox" bind:checked={byArtist} />
+          <span class="option-text">
+            <strong>Tester sur des artistes inconnus</strong>
+            <span class="muted">
+              La note est mesurée sur des artistes que le modèle n'a jamais entendus :
+              deux titres d'un même album ne s'entraident plus. Le chiffre est plus
+              bas, mais c'est celui qui dit si le modèle a appris le genre ou
+              seulement reconnu des albums — et le serveur fera moins confiance à un
+              modèle qui ne sait que les seconds.
+            </span>
+          </span>
+        </label>
+
         <div class="run">
           <button class="primary big" on:click={runTraining} disabled={training || !trainable}>
             {#if training}
@@ -1456,7 +1492,8 @@
                 <span class="k">Justesse brute</span>
                 <span class="v">{pct(head.metrics.accuracy)} %</span>
                 <span class="muted small">
-                  validation croisée {head.metrics.folds} plis · {head.metrics.examples} titres
+                  validation croisée {head.metrics.folds} plis{head.metrics.grouped ? " par artiste" : ""} ·
+                  {head.metrics.examples} titres
                 </span>
               </div>
               {#if head.metrics.temperature && Math.abs(head.metrics.temperature - 1) > 0.03}
@@ -1484,19 +1521,32 @@
 
             <table class="per-class">
               <thead>
-                <tr><th>Genre</th><th>Titres</th><th>Rappel</th><th>Précision</th></tr>
+                <tr>
+                  <th>Genre</th><th>Titres</th>{#if head.metrics.grouped}<th>Artistes</th>{/if}<th>Rappel</th><th>Précision</th>
+                </tr>
               </thead>
               <tbody>
                 {#each head.metrics.perClass as c}
                   <tr class:weak={c.recall < 0.6}>
                     <td>{c.label}</td>
                     <td class="num">{c.examples}</td>
+                    {#if head.metrics.grouped}
+                      <td class="num" class:solo={c.artists < 2}>{c.artists ?? "–"}</td>
+                    {/if}
                     <td class="num">{pct(c.recall)} %</td>
                     <td class="num">{pct(c.precision)} %</td>
                   </tr>
                 {/each}
               </tbody>
             </table>
+            {#if head.metrics.grouped && head.metrics.perClass.some((c) => c.artists < 2)}
+              <p class="muted small">
+                Un genre dont tous les exemples viennent d'un seul artiste ne peut pas
+                être testé sur quelqu'un d'autre : son rappel dit zéro parce que rien ne
+                prouve encore que le modèle connaît le genre plutôt que cet artiste.
+                Quelques titres d'autres artistes suffisent.
+              </p>
+            {/if}
 
             <div class="confusion">
               <h3>Confusions</h3>
@@ -2281,6 +2331,39 @@
   .mode.sel {
     border-color: var(--accent, #22d3ee);
     box-shadow: 0 0 0 1px var(--accent, #22d3ee) inset;
+  }
+  .option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: var(--surface-2, #1b1d21);
+    border: 1px solid var(--border, #2a2d33);
+    border-radius: 14px;
+    padding: 13px 15px;
+    margin: 0 0 14px;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+  }
+  .option.on {
+    border-color: color-mix(in srgb, var(--accent, #22d3ee) 55%, var(--border, #2a2d33));
+  }
+  .option input {
+    accent-color: var(--accent, #22d3ee);
+    width: 18px;
+    height: 18px;
+    margin: 2px 0 0;
+    flex: none;
+  }
+  .option-text {
+    display: grid;
+    gap: 4px;
+  }
+  .option-text .muted {
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+  .per-class td.solo {
+    color: #fbbf24;
   }
   .run {
     display: flex;

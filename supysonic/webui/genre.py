@@ -825,17 +825,32 @@ def genre_candidates():
 @login_required
 @admin_required
 def genre_labelled():
-    """What has been tagged so far, newest first."""
+    """Everything tagged so far, newest first: the studio's training set.
+
+    ALL of it. This was capped at the 500 most recent tags, so a studio past
+    that trained on a silently truncated set — the older tags, often the ones
+    that took the most care, simply stopped counting. And every row lazily read
+    its artist and its album back (two statements a row); they are joined now,
+    so the whole set is one statement whatever its size.
+
+    ``artist_id`` is what the trainer's artist folds group by: two tracks off
+    one album must be held out together, or the held-out score measures
+    recognising the album.
+    """
     out = []
-    for tt in (
-        TrackTag.select(TrackTag, Track, GenreTag)
+    query = (
+        TrackTag.select(TrackTag, Track, GenreTag, Artist, Album)
         .join(Track)
+        .join(Artist, on=(Track.artist == Artist.id))
+        .switch(Track)
+        .join(Album, on=(Track.album == Album.id))
         .switch(TrackTag)
         .join(GenreTag)
         .order_by(TrackTag.created.desc())
-        .limit(500)
-    ):
+    )
+    for tt in query:
         row = _track_json(tt.track)
+        row["artist_id"] = str(tt.track.artist_id) if tt.track.artist_id else None
         row["tag"] = _tag_json(tt.tag)
         out.append(row)
     return jsonify({"labelled": out})

@@ -78,10 +78,12 @@ cd webapp && npm test                                # node --test: the shipped 
                                                      # its JavaScript oracles, the catalogue/skins/drivers, the genre trainers, the cover loader.
                                                      # No test framework — but run the npm install above first: the modules under
                                                      # test reach svelte/store via stores.js, and a pretest guard says so in one line.
-cd webapp && npm run wasm                            # rebuild rhythm.wasm + rhythm-simd.wasm from webapp/rhythm and appcore.wasm from
-                                                     # webapp/appcore (Rust, target wasm32-unknown-unknown). All three binaries are
-                                                     # COMMITTED; npm test fails if they were not built from the sources next to them.
+cd webapp && npm run wasm                            # rebuild rhythm.wasm + rhythm-simd.wasm from webapp/rhythm, appcore.wasm from
+                                                     # webapp/appcore and trainer.wasm + trainer-simd.wasm from webapp/trainer (Rust,
+                                                     # target wasm32-unknown-unknown). All five binaries are COMMITTED; npm test
+                                                     # fails if they were not built from the sources next to them.
 cd webapp/appcore && cargo test --release            # the app core's own unit tests (folding, the estimators' edge cases)
+cd webapp/trainer && cargo test --release            # the genre trainer's (artist folds never split an artist, a seed repeats a run)
 cd webapp && node test/eval/rhythm-eval.mjs          # the analyser on 28 arranged records with ground truth (beats, kicks, tempo, drops)
 cd webapp && node test/eval/family-eval.mjs          # ...which genre the live classifier names on each ([--explain <id>] rule by rule,
                                                      # [--features] the descriptors): analysed once, cached, the rules replayed in JS
@@ -774,15 +776,45 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   is plain Python. An archive copied from a server that had onnxruntime is a perfectly good training
   set on one that does not — and that is also why the studio's candidate list is never gated on the
   extractor.
-- **Training is the browser's job, in a Worker** (`lib/genre/trainer.js` → `worker.js`). Seconds of
-  solid arithmetic on the main thread is not a progress bar, it is a freeze. Three modes:
-  `train.js` is a linear softmax head (a second, the right default), and `deep.js` is an MLP on a
-  committed WebAssembly kernel (`wasm/kernel.c`, `build.sh`, ~4 KB) for the genres a plane cannot
-  separate — hardtekk against frenchcore, zaag against uptempo. The MLP is a **generic stack of
-  dense layers**, so the studio offers one hidden layer (256) or two (2×512): the second bends a
-  boundary the first only bent once. Measured against the identical loops in JavaScript, the
-  kernel's `fwd` is 8× and `accum_outer` 12×. The `.wasm` is committed on purpose: no toolchain is
-  needed to build this repository.
+- **Training is the browser's job, in a Worker, on RUST** (`lib/genre/trainer.js` → `worker.js` →
+  `core.js` → `webapp/trainer`, compiled to `trainer.wasm` / `trainer-simd.wasm`). Seconds of solid
+  arithmetic on the main thread is not a progress bar, it is a freeze. Three modes: a linear softmax
+  head (the right default), and a **generic stack of dense layers** for the genres a plane cannot
+  separate — hardtekk against frenchcore, zaag against uptempo — with one hidden layer (256) or two
+  (2×512): the second bends a boundary the first only bent once. The WHOLE run is in the crate —
+  folds, bags, the projection and its retry, the temperature, the confusion matrix — stepped an
+  epoch at a time so the worker reports progress, and SEEDED (one generator for the folds, every
+  shuffle and every initialisation), so a run repeats exactly. It replaced two JavaScript trainers
+  and a C kernel, kept as the ORACLE in `test/reference/genre-*` (`genre.test.mjs` holds the two to
+  the same scores, seed for seed). Three things came out of the port, each measured:
+  - **Loop minibatch-major.** The per-example loop re-read the whole weight matrix for every example
+    (300 KB for thirty genres over the full embedding, MB for a hidden layer) and was bound by
+    memory: each weight row is now dotted with four examples per read (`linalg::dot4`/`axpy4`, the
+    same sums in the same order), over the batch. Linear head, 12 genres × 15 tracks, full width:
+    **9.5 s → 0.66 s**; 30 × 20 with the full-width retry **136 s → 9.3 s**; the dense stack against
+    the SIMD C kernel **1.1 s → 0.62 s** (10 × 12, 128 hidden).
+  - **A softmax error under 1e-20 is flushed to zero** (`train.rs#TINY`). Once a head is sure, the
+    wrong classes' probabilities fall to ~1e-40: SUBNORMAL in f32, and every multiply-add touching
+    one takes the processor's slow path — 1 GMAC/s against 8, on exactly the noisy data that trains
+    longest. The JavaScript computed in f64 and never met them; each gradient also carries its L2
+    term (~1e-5), so nothing measurable is lost.
+  - **The bag's held-out logits are AVERAGED, as the shipped head is.** The JavaScript summed a bag's
+    members there, so the temperature was fitted on logits three times too large and the head the
+    server read came out that much too diffident — its good calls fell under the 0.45 gate. Measured:
+    the oracle's T went ~1.2 without a bag and 2.00 with one; the Rust stays at 1.11-1.15 either way.
+  Two builds, baseline and SIMD128, computing the SAME bits (the scalar loops keep their partial
+  sums where the vector lanes keep theirs; the test trains one head with each and compares weight
+  for weight); `build.rs` hashes `src/*.rs` and the test fails on a stale binary, like the analyser.
+- **Folds by ARTIST are an option** (*Tester sur des artistes inconnus*, `cv::grouped`, `artist_id`
+  on `/genre/labelled`). Two tracks off one album share a production and a mastering chain; with
+  plain stratified folds one trains the head and the other then "tests" it, so the score measures
+  recognising albums — and the temperature fitted on those easy calls leaves the head over-confident,
+  which is what the server gates on. Measured on artists whose own sound outweighs their genre's:
+  stratified 0.96-0.98, by artist 0.74-0.83, T 0.60-0.68 against 1.00-1.23. The table then shows
+  how many ARTISTS each genre's examples come from; a genre with one cannot be tested on anyone else
+  and says so with a recall of zero. `/genre/labelled` is the WHOLE labelled set in one statement:
+  it was capped at the 500 newest tags (training silently ignored the rest) and read each row's
+  artist and album back lazily (1 022 statements for 510 tags, now 8).
 - The linear trainer's **random projection is decided by the score**, not assumed: it is free on
   clustered data (1.000 at 4× the speed) and costly on marginal data, so it trains projected and
   re-runs at full width when balanced accuracy comes back under 0.8. The deep trainer keeps the same
