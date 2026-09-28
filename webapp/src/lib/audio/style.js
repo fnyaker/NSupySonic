@@ -859,8 +859,8 @@ export const FAMILY_LIST = FAMILIES.map(({ id, label, a }) => ({ id, label, arch
  * switched off. Exactly backwards: knowing the genre for certain is when the
  * look should be most confident.
  */
-export function familyLook(id) {
-  return FAMILY_LOOK.get(id) || null;
+export function familyLook(name) {
+  return FAMILY_LOOK.get(name) || FAMILY_LOOK.get(genreOf(name)?.family) || null;
 }
 
 /**
@@ -884,10 +884,10 @@ export function familyLook(id) {
  * music still decides inside them. What they are for is making the octave
  * either side implausible, which is all the tracker needs.
  *
- * MAINTAINING THIS: add a row when a family is added to FAMILIES above, or when
- * a served genre name turns out to be read often and to sit outside its
- * family's range. A missing row is not a bug — the tracker falls back to the
- * default plateau, which is what it always used to have.
+ * MAINTAINING THIS: add a row when a family is added to FAMILIES above. A
+ * sub-genre written outside its family's range gets its own band in
+ * GENRE_ALIASES below, not a row here. A missing row is not a bug — the tracker
+ * falls back to the default plateau, which is what it always used to have.
  */
 const TEMPO_BANDS = {
   // --- the hard end, which is the whole reason this table exists -------------
@@ -897,9 +897,6 @@ const TEMPO_BANDS = {
   krach: [170, 260],
   hardcore: [160, 250],
   tribecore: [170, 230],
-  gabber: [160, 230],
-  terrorcore: [190, 280],
-  extratone: [220, 300],
   zaag: [140, 200],
   hardstyle: [140, 165],
   rawstyle: [145, 170],
@@ -953,126 +950,318 @@ const TEMPO_BANDS = {
 };
 
 /**
- * Look a genre name up in the table above, tolerating whatever shape it
- * arrives in: a family id from the live classifier, a served genre, a
- * hand-typed tag with spaces, accents or hyphens.
+ * WHICH FAMILY A GENRE NAME BELONGS TO, and the tempo it is written at.
  *
- * Returns null when nothing matches, which means "use the default plateau" —
- * never a guess, because a wrong range is worse than no range.
+ * A name reaches the engine in one of three shapes: a family id (the live
+ * classifier, the server's rules), a family's French label, and — from the
+ * genre studio — any of the ~170 sub-genres an admin can tag with and the
+ * trained model then predicts (`analysis.EXTRA_GENRES`). That last shape is the
+ * one that matters most, since a tag or the model is a genre somebody CHOSE,
+ * and it used to reach almost nothing: the look and the bar model were written
+ * for family ids only, so a track the model named "Schranz" or "Gabber" had its
+ * bar read the generic way and no genre look at all, and guessing from the
+ * words in a name gave "Garage rock" UK garage's tempo and "Drumfunk" funk's.
+ *
+ * So every name resolves to `{ family, band, groove, by }`:
+ *   family — whose look and groove it takes;
+ *   band   — its own tempo range where it is written at a tempo of its own,
+ *            its family's otherwise, null where it spans octaves (a wrong range
+ *            is worse than none);
+ *   groove — set only where it builds its beat unlike its family (gqom's
+ *            broken kick under afro house, hardbass's plain four under hard
+ *            techno);
+ *   by     — "name" when the whole name is known, "word" / "part" when it was
+ *            read from a piece of it (a hand-typed tag). Every name the studio
+ *            offers is known by name: `test/viz.test.mjs` reads the Python list
+ *            and holds it to that.
+ *
+ * Keys are flattened (lowercase, accents and everything but letters and digits
+ * dropped). A value is a family id, or [family, band?, groove?] with band
+ * undefined for the family's own and null for none.
  */
-export function tempoRangeFor(name) {
-  if (!name) return null;
-  const raw = String(name);
-  if (TEMPO_BANDS[raw]) return TEMPO_BANDS[raw];
-  const flatten = (v) =>
-    v
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/[^a-z0-9]/g, "");
-  const id = flatten(raw);
-  const direct = TEMPO_BANDS[id] || TEMPO_BANDS[TEMPO_ALIASES[id]];
-  if (direct) return direct;
-  // A compound name puts the SPECIFIC genre first and its family after it —
-  // "uptempo hardcore", "raw hardstyle", "melodic dubstep", "tech house" — so
-  // the first word that names something wins. Taking the longest match instead
-  // reads "uptempo hardcore" as hardcore, which is a different record.
-  for (const word of raw.split(/[^\p{L}\p{N}]+/u)) {
-    const w = flatten(word);
-    if (!w) continue;
-    const hit = TEMPO_BANDS[w] || TEMPO_BANDS[TEMPO_ALIASES[w]];
-    if (hit) return hit;
-  }
-  // Last resort, for a name written without separators. Longest match, so
-  // "hardtechno" is not read as "techno".
-  let best = null;
-  let bestLen = 0;
-  for (const key of Object.keys(TEMPO_BANDS))
-    if (key.length > bestLen && id.includes(key)) {
-      best = TEMPO_BANDS[key];
-      bestLen = key.length;
-    }
-  return best;
-}
-
-// Names that are read often and are spelled nothing like their family.
-const TEMPO_ALIASES = {
+const GENRE_ALIASES = {
+  // --- spellings -------------------------------------------------------------
   drumandbass: "dnb",
   drumnbass: "dnb",
   drumbass: "dnb",
+  hardcoretechno: "hardcore",
+  hardrockband: "hardrock",
+  // --- techno & machines -----------------------------------------------------
+  minimal: "techno",
+  detroit: "techno",
+  acidtechno: "techno",
+  peaktime: "techno",
+  dubtechno: "techno",
+  // Body music is a sequenced four-to-the-floor, and it sits under techno.
+  ebm: ["techno", [110, 135]],
+  schranz: "hardtechno",
+  hardgroove: "hardtechno",
+  industrialtechno: ["industrial", [125, 155]],
+  idm: ["breakbeat", null],
+  glitch: ["breakbeat", null],
+  experimental: ["electronic", null],
+  noise: ["industrial", null, "unknown"],
+  // --- house & disco -----------------------------------------------------------
+  deephouse: "house",
+  techhouse: "house",
+  progressivehouse: "house",
+  proghouse: "house",
+  melodichouse: "house",
+  electrohouse: "house",
+  frenchhouse: "house",
+  ghettohouse: "house",
+  witchhouse: ["electronic", null],
+  hardhouse: ["house", [135, 155]],
+  gqom: ["afrohouse", [115, 130], "broken"],
+  afrobeat: "afrohouse",
+  afrobeats: "afrohouse",
+  italodisco: "disco",
+  nudisco: "disco",
+  boogie: "disco",
+  futurefunk: "disco",
+  bigroom: "dance",
+  hardance: "dance",
+  eurodance: "dance",
+  future: "dance",
+  futurebass: ["dance", [130, 165], "broken"],
+  hyperpop: ["dance", null],
+  chiptune: "dance",
+  eightbit: "dance",
+  hardbass: ["hardtechno", [140, 175], "four"],
+  // --- garage & breaks -----------------------------------------------------------
+  ukgarage: "garage",
+  twostep: "garage",
+  speedgarage: "garage",
+  bassline: "garage",
+  grime: "garage",
+  jerseyclub: "garage",
+  nubreaks: "breakbeat",
+  bigbeat: ["breakbeat", [95, 140]],
+  glitchhop: ["breakbeat", [85, 115]],
+  footwork: ["breakbeat", [150, 170]],
+  breakcore: ["breakbeat", [150, 250]],
+  lolicore: ["breakbeat", [150, 250]],
+  // --- drum & bass -------------------------------------------------------------
   jungle: "dnb",
   liquid: "dnb",
+  liquiddnb: "dnb",
   neurofunk: "dnb",
   jumpup: "dnb",
+  darkstep: "dnb",
+  drumfunk: "dnb",
+  crossbreed: "dnb",
+  // --- dubstep & trap ----------------------------------------------------------
+  riddim: "dubstep",
+  brostep: "dubstep",
+  melodicdubstep: "dubstep",
+  trapedm: "trap",
+  hardtrap: "trap",
+  drill: "trap",
+  ukdrill: "trap",
+  cloudrap: "trap",
+  // --- trance & psy ---------------------------------------------------------------
+  upliftingtrance: "trance",
+  progtrance: "trance",
+  vocaltrance: "trance",
+  hardtrance: ["trance", [138, 160]],
+  goa: "psytrance",
+  fullon: "psytrance",
+  forest: ["psytrance", [140, 165]],
+  darkpsy: ["psytrance", [145, 175]],
+  hitech: ["psytrance", [160, 220]],
+  psydub: ["psytrance", null, "unknown"],
+  // --- hardcore -----------------------------------------------------------------
+  gabber: ["hardcore", [160, 230]],
   happyhardcore: "hardcore",
   ukhardcore: "hardcore",
-  hardcoretechno: "hardcore",
   makina: "hardcore",
+  bouncy: "hardcore",
+  doomcore: ["hardcore", [130, 170]],
+  industrialhardcore: ["industrial", [140, 200]],
+  terrorcore: ["speedcore", [190, 280]],
+  extratone: ["speedcore", [220, 300]],
+  splittercore: ["speedcore", [220, 300]],
+  flashcore: "speedcore",
   hardtek: "tribecore",
   tribe: "tribecore",
   raggatek: "tribecore",
   acidcore: "tribecore",
-  tekk: "hardtekk",
-  tekno: "hardtekk",
-  schranz: "hardtechno",
-  hardgroove: "hardtechno",
-  splittercore: "extratone",
-  flashcore: "speedcore",
   frenchtek: "frenchcore",
+  // --- hardstyle & tekk ----------------------------------------------------------
+  euphoric: "hardstyle",
+  euphorichardstyle: "hardstyle",
+  jumpstyle: "hardstyle",
   rawphase: "rawstyle",
   xtraraw: "rawstyle",
-  euphoric: "hardstyle",
-  dubtechno: "techno",
-  minimal: "techno",
-  deephouse: "house",
-  techhouse: "house",
-  progressivehouse: "house",
-  bigroom: "dance",
-  hardance: "dance",
-  eurodance: "dance",
-  hyperpop: "dance",
-  future: "dance",
-  riddim: "dubstep",
-  brostep: "dubstep",
-  grime: "garage",
-  ukgarage: "garage",
-  jerseyclub: "garage",
-  footwork: "breakbeat",
-  breakcore: "breakbeat",
-  bassline: "garage",
+  tekk: "hardtekk",
+  tekno: "hardtekk",
+  // --- hip-hop & latin ------------------------------------------------------------
   boombap: "hiphop",
-  drill: "trap",
-  cloudrap: "trap",
-  afrobeat: "afrohouse",
-  afrobeats: "afrohouse",
-  salsa: "funk",
-  samba: "funk",
-  ska: "reggae",
-  dub: "reggae",
+  gfunk: "hiphop",
+  emorap: "rap",
+  lofihiphop: "lofi",
+  afroswing: "dancehall",
+  moombahton: ["reggaeton", [100, 118]],
+  // Dominican dembow runs at 115-130, reggaeton's at 90-100: the name alone
+  // cannot say which octave.
+  dembow: ["reggaeton", null],
+  // --- rock & metal ---------------------------------------------------------------
+  garagerock: "rock",
+  psychrock: "rock",
+  progrock: "rock",
+  grunge: "rock",
+  emo: "rock",
+  gothic: ["rock", null],
+  hardcorepunk: ["punk", [150, 250]],
+  postpunk: ["punk", [110, 170]],
+  poppunk: "punk",
+  skapunk: "punk",
+  heavymetal: "metal",
+  thrash: "metal",
+  metalcore: "metal",
+  deathcore: "metal",
+  djent: "metal",
+  powermetal: "metal",
+  symphonicmetal: "metal",
+  // Nu metal grooves at hip-hop tempi: metal's 120-200 would double a 100.
+  numetal: ["metal", [80, 125]],
+  doom: ["metal", [50, 100]],
+  sludge: ["metal", [55, 110]],
+  deathmetal: "brutal",
+  blackmetal: "brutal",
+  // --- pop, soul & song ---------------------------------------------------------------
+  synthpop: "synthwave",
+  citypop: "pop",
+  kpop: "pop",
+  jpop: "pop",
+  latinpop: "pop",
+  dreampop: "pop",
+  chanson: "vocalPop",
+  schlager: ["vocalPop", null],
+  bollywood: ["vocalPop", null],
+  neosoul: "soul",
+  gospel: "soul",
+  motown: ["soul", null],
+  kizomba: "rnb",
+  // --- chill, dub & reggae ---------------------------------------------------------------
   triphop: "lofi",
   downtempo: "lofi",
+  vaporwave: "lofi",
+  chillhop: "lofi",
   chillout: "ambient",
   drone: "ambient",
+  darkambient: "ambient",
+  newage: "ambient",
   shoegaze: "ambient",
-  vaporwave: "lofi",
-  citypop: "pop",
-  synthpop: "synthwave",
-  italodisco: "disco",
-  orchestral: "strings",
+  dub: "reggae",
+  rocksteady: "reggae",
+  // Ska's offbeat is counted as the beat: 100-160, not reggae's one-drop.
+  ska: ["reggae", [100, 160]],
+  // --- synth ---------------------------------------------------------------------------
+  retrowave: "synthwave",
+  outrun: "synthwave",
+  darksynth: "synthwave",
+  darkwave: ["synthwave", null],
+  coldwave: ["synthwave", null],
+  // --- jazz, folk & the world ----------------------------------------------------------
+  bebop: "jazz",
+  swing: "jazz",
+  bigband: "jazz",
+  smoothjazz: "jazz",
+  jazzfusion: "jazz",
+  bossanova: "jazz",
+  deltablues: "blues",
+  bluegrass: "country",
+  singersongwriter: "folk",
+  celtic: "folk",
+  flamenco: ["folk", null],
+  tango: ["folk", null],
+  arabic: ["folk", null],
+  salsa: "funk",
+  samba: "funk",
+  cumbia: "funk",
+  highlife: "funk",
+  // --- classical -------------------------------------------------------------------------
   classical: "strings",
+  orchestral: "strings",
   choral: "strings",
   opera: "strings",
   filmscore: "strings",
-  gospel: "soul",
-  chiptune: "dance",
-  idm: "breakbeat",
-  glitch: "breakbeat",
-  deathmetal: "brutal",
-  blackmetal: "brutal",
-  doom: "metal",
-  thrash: "metal",
-  hardrockband: "hardrock",
+  soundtrack: "strings",
+  baroque: "strings",
+  romantic: "strings",
+  minimalism: "strings",
+  piano: "strings",
 };
+
+const flatten = (v) =>
+  String(v)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+const FAMILY_BY_FLAT = new Map();
+for (const f of FAMILIES) {
+  FAMILY_BY_FLAT.set(flatten(f.id), f.id);
+  FAMILY_BY_FLAT.set(flatten(f.label), f.id);
+}
+// What the last-resort substring pass may find inside a name written without
+// separators: the family ids, and the aliases long enough not to turn up by
+// accident ("emo", "dub" and "ska" are inside far too many words).
+const PARTS = [...new Set([...FAMILIES.map((f) => flatten(f.id)), ...Object.keys(GENRE_ALIASES)])].filter(
+  (k) => k.length >= 5,
+);
+
+function genreEntry(key, by) {
+  const fam = FAMILY_BY_FLAT.get(key);
+  if (fam) return { family: fam, band: TEMPO_BANDS[fam] || null, groove: null, by };
+  const a = GENRE_ALIASES[key];
+  if (a == null) return null;
+  const [family, band, groove] = typeof a === "string" ? [a] : a;
+  return { family, band: band === undefined ? TEMPO_BANDS[family] || null : band, groove: groove || null, by };
+}
+
+const RESOLVED = new Map();
+
+/**
+ * Resolve any genre name (see above). Null when nothing matches, which means
+ * "the generic reading": the default plateau, the generic bar, no look.
+ */
+export function genreOf(name) {
+  if (!name) return null;
+  const raw = String(name);
+  if (RESOLVED.has(raw)) return RESOLVED.get(raw);
+  let hit = genreEntry(flatten(raw), "name");
+  // A compound name puts the SPECIFIC genre first and its family after it —
+  // "uptempo hardcore", "raw hardstyle", "melodic dubstep" — so the first word
+  // that names something wins. Taking the longest match instead reads
+  // "uptempo hardcore" as hardcore, which is a different record.
+  if (!hit)
+    for (const word of raw.split(/[^\p{L}\p{N}]+/u)) {
+      const w = flatten(word);
+      if (w && (hit = genreEntry(w, "word"))) break;
+    }
+  // Last resort, for a name written without separators. Longest match, so
+  // "hardtechno" is not read as "techno".
+  if (!hit) {
+    const id = flatten(raw);
+    let best = "";
+    for (const k of PARTS) if (k.length > best.length && id.includes(k)) best = k;
+    if (best) hit = genreEntry(best, "part");
+  }
+  if (RESOLVED.size > 512) RESOLVED.clear();
+  RESOLVED.set(raw, hit);
+  return hit;
+}
+
+/**
+ * The tempo range a genre name is written in, [lo, hi] BPM, or null for "use
+ * the default plateau" — never a guess, because a wrong range is worse than no
+ * range.
+ */
+export function tempoRangeFor(name) {
+  return genreOf(name)?.band || null;
+}
 
 // --- the rules, as data -------------------------------------------------------
 //
@@ -1153,12 +1342,13 @@ const GROOVE_OF = {
 const GROOVE_BY_ID = new Map();
 for (const [g, ids] of Object.entries(GROOVE_OF)) for (const id of ids) GROOVE_BY_ID.set(id, GROOVES[g]);
 
-/** The groove class of a family id, or of a served genre NAME (0 unknown). */
+/** The groove class of any genre name (genreOf), 0 for the generic reading. */
 export function grooveOf(name) {
-  const id = FAMILY_BY_ID.has(name) ? name : FAMILY_LIST.find((f) => f.label === name)?.id || name;
-  if (GROOVE_BY_ID.has(id)) return GROOVE_BY_ID.get(id);
-  const fam = FAMILY_BY_ID.get(id);
-  return fam?.a === "hard" ? GROOVES.hard : GROOVES.unknown;
+  const g = genreOf(name);
+  if (!g) return GROOVES.unknown;
+  if (g.groove) return GROOVES[g.groove];
+  if (GROOVE_BY_ID.has(g.family)) return GROOVE_BY_ID.get(g.family);
+  return FAMILY_BY_ID.get(g.family)?.a === "hard" ? GROOVES.hard : GROOVES.unknown;
 }
 
 /**

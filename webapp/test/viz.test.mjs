@@ -27,7 +27,7 @@ import { vizCoreFromBytes } from "../src/lib/viz/core.js";
 import { createScene, createFallback, MODES, effectiveMode, levelFor } from "../src/lib/viz/index.js";
 import { tierPreset, TIERS } from "../src/lib/viz/quality.js";
 import { createPalette } from "../src/lib/viz/palette.js";
-import { FAMILY_LIST } from "../src/lib/audio/style.js";
+import { FAMILY_LIST, GROOVES, genreOf, grooveOf, familyLook, tempoRangeFor } from "../src/lib/audio/style.js";
 import { WORLD_META, GROUPS, worldFor } from "../src/lib/viz/worlds/catalogue.js";
 import { worldIds, loadWorld, hasWorld, instrumentIds } from "../src/lib/viz/worlds/index.js";
 import { SKINS, ALIASES, skinId, skinFor, skinCount } from "../src/lib/viz/skins.js";
@@ -874,6 +874,59 @@ test("every genre the studio offers is a genre the animation can dress", () => {
   assert.deepEqual(orphans, [], `no skin for: ${orphans.join(", ")}`);
   const arches = new Set(EXTRA.map((r) => r[1]));
   for (const a of arches) assert.ok(skinId("a name nothing will ever match", a), `no fallback for ${a}`);
+});
+
+test("every genre the studio offers reaches the analyser by its name", () => {
+  // The studio's labels are what a tag and the trained model hand back, and a
+  // genre somebody chose has to steer the analysis: its family's look, its bar
+  // model, its tempo band. Resolving by a WORD of the name is what used to
+  // happen, and it read "Garage rock" as UK garage and "Drumfunk" as funk, so
+  // every label must be known whole.
+  const all = [...FAMILY_LIST.map((f) => [f.label, f.archetype]), ...EXTRA];
+  for (const [label] of all) {
+    const g = genreOf(label);
+    assert.ok(g && g.by === "name", `"${label}" is not known by name (${JSON.stringify(g)})`);
+    assert.ok(familyLook(label), `"${label}" carries no look`);
+    if (g.band) assert.ok(g.band[0] >= 40 && g.band[0] < g.band[1] && g.band[1] <= 320, `"${label}" band ${g.band}`);
+  }
+  for (const f of FAMILY_LIST) {
+    assert.equal(genreOf(f.id).family, f.id);
+    assert.equal(genreOf(f.label).family, f.id, `label "${f.label}"`);
+  }
+});
+
+test("a sub-genre keeps its family's groove unless it is built otherwise, and its own tempo where it has one", () => {
+  // Tagged hard dance reads its bar from the rolls, as its family does.
+  for (const n of ["Schranz", "Gabber", "Rawphase", "Tekk", "Terrorcore", "Euphoric hardstyle"])
+    assert.equal(grooveOf(n), GROOVES.hard, n);
+  assert.equal(grooveOf("Deep house"), GROOVES.four);
+  assert.equal(grooveOf("Liquid DnB"), GROOVES.broken);
+  assert.equal(grooveOf("Hardcore punk"), GROOVES.live, "a punk band, not a hardcore kick");
+  // ...and the exceptions are exceptions: gqom breaks afro house's kick, and
+  // hardbass is a plain four under a hard techno sound.
+  assert.equal(grooveOf("Gqom"), GROOVES.broken);
+  assert.equal(grooveOf("Hardbass"), GROOVES.four);
+  // The bands exist to rule an octave out, so the traps are octaves. A 100 BPM
+  // nu metal groove under metal's 120-200 would be read at 200.
+  const inside = (n, bpm) => {
+    const r = tempoRangeFor(n);
+    return !!r && bpm >= r[0] && bpm <= r[1];
+  };
+  assert.ok(inside("Nu metal", 100) && !inside("Nu metal", 200));
+  assert.ok(inside("Doom", 70) && !inside("Doom", 140));
+  assert.ok(inside("Hard house", 145) && !inside("Hard house", 125));
+  assert.ok(inside("Hitech", 190) && !inside("Psytrance", 190));
+  assert.ok(inside("Garage rock", 150) && !inside("UK garage", 150));
+  assert.ok(inside("Drumfunk", 172) && !inside("Funk", 172));
+  // A name that spans octaves gets no band rather than a wrong one.
+  assert.equal(tempoRangeFor("Dembow"), null);
+  assert.equal(tempoRangeFor("IDM"), null);
+  // A hand-typed tag still resolves from its words: the specific one first...
+  assert.equal(genreOf("uptempo hardcore").family, "uptempo");
+  // ...and a name without separators by its longest known part.
+  assert.equal(genreOf("hardtechnoedit").family, "hardtechno");
+  assert.equal(genreOf("a name nothing will ever match"), null);
+  assert.equal(grooveOf("a name nothing will ever match"), GROOVES.unknown);
 });
 
 test("every skin names a real world, with parameters that world reads", () => {

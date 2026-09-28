@@ -1654,6 +1654,16 @@ live classifier honestly separates ~54 families, so a *tag* is where a sub-genre
 and a label the studio offers that the animation cannot resolve is a track somebody tagged carefully
 and then watched get animated generically. The two lists are written in different languages; a test
 reads the Python one and requires every label to reach a row of its own, not the archetype floor.
+The ANALYSER has to hear them too: a tag or the trained head's verdict is served under the label's
+own name ("Schranz", "Deutscher Krach"), and the look, the bar model and the tempo band were keyed by
+family id only — so a track the model named "Gabber" had its bar read the generic way and no genre
+look, and a word-by-word guess gave "Garage rock" UK garage's tempo and "Drumfunk" funk's.
+`style.js#genreOf` now resolves every name once to `{ family, band, groove }` (`GENRE_ALIASES`: a
+sub-genre's own band where it is written at a tempo of its own — hitech, hard house, nu metal, doom
+—, null where the name spans octaves, and a groove only where it builds its beat unlike its family),
+and `familyLook`, `grooveOf` and `tempoRangeFor` all read it. `viz.test.mjs` holds every studio label
+to being known BY NAME, never from a word in it. A chosen genre (tag or model) sets the groove even
+where it has no band.
 
 **Nothing hard-switches.** style.rs refuses to rename the dominant family until a challenger has led
 by a clear margin for a second and a half, and a change of world is a **dissolve**: the new world is
