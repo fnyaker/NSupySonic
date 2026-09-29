@@ -4089,5 +4089,6 @@ from . import edges  # noqa: E402,F401  isort:skip
 from . import analysis  # noqa: E402,F401  isort:skip
 from . import genre  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip
+from . import credits  # noqa: E402,F401  isort:skip
 from . import party  # noqa: E402,F401  isort:skip
 from . import remote  # noqa: E402,F401  isort:skip

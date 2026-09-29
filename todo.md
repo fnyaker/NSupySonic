@@ -28,13 +28,12 @@ le code.
 - [ ] **Mode voiture** — écran plein format, très gros boutons (précédent / lecture / suivant,
   file, favori), lisible d'un coup d'œil et sans geste fin.
 - [ ] **Panneau « sous le lecteur »** — dans le lecteur plein écran, glisser vers le haut fait
-  monter une page (fait pour les titres similaires et l'artiste ; les crédits attendent
-  les crédits complets) :
+  monter une page (crédits, artiste, puis titres similaires tout à la fin) :
   - [x] titres similaires (via l'API Deezer aujourd'hui — `/radio/track/<id>` ; à terme via nos
     propres embeddings, voir « Lecture aléatoire intelligente ») ;
   - [x] à propos de l'artiste (photo, fans, titres populaires, artistes similaires — l'API
     publique de Deezer ne donne pas de biographie) ;
-  - [ ] crédits du titre, quand les crédits complets seront là.
+  - [x] crédits complets du titre (auteur, compositeur, producteur, label, ISRC…).
 
 ## Niveau 2 — une journée, un petit endpoint ou un petit écran
 
@@ -47,10 +46,9 @@ le code.
   contexte), pas seulement `play_count` / `last_play`. **Prérequis du Récap** (niveau 3) : à faire
   avant, et à faire proprement (nouvelle table, migration `SCHEMA_VERSION`, purge possible).
   Écran « Historique » dans la bibliothèque.
-- [ ] **Crédits complets** (compositeur, producteur, paroles…) — si la source le permet. Les rôles
-  sont déjà dans le `<titre>.json` archivé à côté de chaque fichier ; il manque l'endpoint et le
-  panneau. À vérifier : que le sidecar les porte bien pour tous les titres, sinon les demander à
-  `song.getData`.
+- [x] **Crédits complets** (auteur, compositeur, producteur, label, ISRC…) — `GET /api/track/<id>/credits` :
+  le sidecar d'abord, Deezer ensuite (et alors écrit dans le sidecar), la base en dernier recours.
+  Affichés dans le panneau sous le lecteur.
 - [ ] **Phrase de paroles en carte image** — choisir une ou plusieurs lignes des paroles
   synchronisées et en tirer une image à partager (pochette + couleurs dérivées + texte). Rendu
   canvas dans le `ShareSheet` existant, à partir du `.lrc`.

@@ -580,6 +580,139 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(data["artists"][0]["name"], "Foo")
         self.assertEqual(data["playlists"][0]["title"], "P")
 
+    # -- credits ---------------------------------------------------------
+
+    def _credits_setup(self, payload=None, fail=False):
+        from supysonic.webui import credits
+
+        with credits._lock:
+            credits._cache.clear()
+        gw = self.app.deezer._dz.gw
+        gw.credit_calls = []
+        payload = payload if payload is not None else {
+            "SNG_ID": "3135556",
+            "ISRC": "GBDUW0000059",
+            "PHYSICAL_RELEASE_DATE": "2001-03-12",
+            "COPYRIGHT": "(P) 2001 Some Label",
+            "ALB_TITLE": "Discovery",
+            "SNG_CONTRIBUTORS": {
+                "composer": ["Thomas Bangalter", "Guy-Manuel de Homem-Christo"],
+                "author": ["Thomas Bangalter"],
+                "main_artist": ["Artist"],
+                "producer": ["Daft Punk"],
+                "sound_designer": ["Zed"],
+                "publisher": ["Warner Chappell"],
+            },
+        }
+
+        def get_track(sng_id):
+            gw.credit_calls.append(str(sng_id))
+            if fail:
+                raise RuntimeError("Deezer is down")
+            return dict(payload)
+
+        gw.get_track = get_track
+        return gw
+
+    def test_credits_in_the_order_of_a_sleeve(self):
+        self._credits_setup()
+        self._login()
+        data = self.client.get("/api/track/3135556/credits").get_json()
+        self.assertEqual(
+            [c["label"] for c in data["credits"]],
+            ["Artiste principal", "Auteur", "Compositeur", "Producteur", "Éditeur", "Sound designer"],
+            "known roles in a sleeve's order, an unknown one under its own name, last",
+        )
+        by = {c["role"]: [p["name"] for p in c["people"]] for c in data["credits"]}
+        self.assertEqual(by["composer"], ["Thomas Bangalter", "Guy-Manuel de Homem-Christo"])
+        self.assertEqual(
+            data["info"],
+            {"isrc": "GBDUW0000059", "released": "2001-03-12", "copyright": "(P) 2001 Some Label", "album": "Discovery"},
+        )
+
+    def test_credits_are_asked_once(self):
+        gw = self._credits_setup()
+        self._login()
+        self.client.get("/api/track/3135556/credits")
+        self.client.get("/api/track/3135556/credits")
+        self.assertEqual(gw.credit_calls, ["3135556"], "the second visit costs Deezer nothing")
+
+    def test_an_archived_track_keeps_its_credits_on_disk(self):
+        from supysonic.deezer import library
+        from supysonic.webui import credits
+
+        gw = self._credits_setup()
+        self._login()
+        with self.app.app_context():
+            root = library.get_root_folder(self.archive)
+            t = library.upsert_track(
+                {"SNG_ID": "555", "SNG_TITLE": "Song", "ART_ID": "1", "ART_NAME": "A",
+                 "ALB_ID": "10", "ALB_TITLE": "Alb", "ALB_PICTURE": "c", "DURATION": 100,
+                 "TRACK_NUMBER": 1, "DISK_NUMBER": 1}, root, "FLAC")
+            os.makedirs(os.path.dirname(t.path), exist_ok=True)
+            with open(t.path, "wb") as fh:
+                fh.write(b"\x00")
+        first = self.client.get("/api/track/555/credits").get_json()
+        self.assertEqual(gw.credit_calls, ["555"])
+        self.assertTrue(any(c["role"] == "composer" for c in first["credits"]))
+        # Forget everything in memory and let Deezer fail: the file answers.
+        with credits._lock:
+            credits._cache.clear()
+        self._credits_setup(fail=True)
+        again = self.client.get("/api/track/555/credits").get_json()
+        self.assertEqual(again, first, "read back from the sidecar, no Deezer involved")
+        self.assertEqual(self.app.deezer._dz.gw.credit_calls, [])
+
+    def test_credits_survive_a_deezer_outage(self):
+        gw = self._credits_setup(fail=True)
+        self._login()
+        rv = self.client.get("/api/track/3135556/credits")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.get_json(), {"credits": [], "info": {}})
+        self.assertEqual(gw.credit_calls, ["3135556"])
+
+    def test_credits_of_an_import_without_them_still_name_the_performers(self):
+        from supysonic.deezer import library
+
+        self._credits_setup(fail=True)
+        self._login()
+        with self.app.app_context():
+            root = library.get_root_folder(self.archive)
+            library.upsert_track(
+                {"SNG_ID": "777", "SNG_TITLE": "Song", "ART_ID": "1", "ART_NAME": "Main One",
+                 "ALB_ID": "10", "ALB_TITLE": "Alb", "ALB_PICTURE": "c", "DURATION": 100,
+                 "TRACK_NUMBER": 1, "DISK_NUMBER": 1}, root, "FLAC")
+        data = self.client.get("/api/track/777/credits").get_json()
+        main = [c for c in data["credits"] if c["role"] == "main_artist"]
+        self.assertEqual([p["name"] for p in main[0]["people"]], ["Main One"])
+        self.assertEqual(main[0]["people"][0]["deezer_id"], "1", "and links to the artist")
+
+    def test_credits_refuse_ids_and_bound_what_deezer_sends(self):
+        self._credits_setup(payload={
+            "SNG_CONTRIBUTORS": {
+                "composer": ["N%d" % i for i in range(500)] + [{"nested": 1}, None, 7],
+                "author": "One Person",
+                "junk": {"a": 1},
+                "x" * 500: ["Long role"],
+                "": ["No role"],
+            },
+            "ISRC": "x" * 5000,
+        })
+        self._login()
+        for bad in ("abc", "1%2E2", "9" * 30 + "x"):
+            self.assertEqual(self.client.get("/api/track/%s/credits" % bad).status_code, 404, bad)
+        data = self.client.get("/api/track/3135556/credits").get_json()
+        by = {c["role"]: c for c in data["credits"]}
+        self.assertLessEqual(len(by["composer"]["people"]), 40)
+        self.assertEqual([p["name"] for p in by["author"]["people"]], ["One Person"])
+        self.assertNotIn("junk", by)
+        self.assertLessEqual(len(data["info"]["isrc"]), 160)
+        self.assertTrue(all(len(c["label"]) <= 160 for c in data["credits"]))
+
+    def test_credits_need_a_login(self):
+        self._credits_setup()
+        self.assertEqual(self.client.get("/api/track/3135556/credits").status_code, 401)
+
     # -- explore ---------------------------------------------------------
 
     def _explore_reset(self):
