@@ -2,35 +2,37 @@
 
 <img src="docs/screenshots/banner.svg" alt="NSupySonic" width="820">
 
-**A fast, modern web player for your Deezer library — backed by a self-hosted Subsonic server.**
+**Your Deezer library as a self-hosted music app — lossless, offline-first, and yours to keep.**
 
-Deezer playlists, favorites, Flow and new releases as native library entries in a snappy
-Svelte web player *and* any Subsonic client. Tracks are fetched in **FLAC**, archived once,
-and **transcoded to Opus** on demand.
+A fast web player (and an Android app) for your Deezer account. Every track you play is fetched
+once in **FLAC**, archived on your own disk and served from there forever, transcoded to **Opus**
+on demand. Playlists, favourites, Flow, podcasts and new releases are all there — and nothing
+stops working the day Deezer does.
 
 [![Container](https://img.shields.io/badge/ghcr.io-nsupysonic%3Alatest-2496ED?logo=docker&logoColor=white)](https://github.com/fnyaker/NSupySonic/pkgs/container/nsupysonic)
 [![Docker build](https://github.com/fnyaker/NSupySonic/actions/workflows/docker.yaml/badge.svg)](https://github.com/fnyaker/NSupySonic/actions/workflows/docker.yaml)
 [![Tests](https://github.com/fnyaker/NSupySonic/actions/workflows/tests.yaml/badge.svg)](https://github.com/fnyaker/NSupySonic/actions/workflows/tests.yaml)
-![Python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue.svg)
-![Subsonic API](https://img.shields.io/badge/Subsonic%20API-1.12.0-orange.svg)
+[![Web app](https://github.com/fnyaker/NSupySonic/actions/workflows/webapp.yaml/badge.svg)](https://github.com/fnyaker/NSupySonic/actions/workflows/webapp.yaml)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)
 
-[Quick start](#-quick-start-with-ghcr) · [Screenshots](#screenshots) · [Features](#features) · [Configuration](#configuration) · [Android](#android-app)
+[Quick start](#quick-start) · [What it does](#what-it-does) · [Configuration](#configuration) · [Android](#android-app) · [Development](#development) · [Roadmap](todo.md)
 
 </div>
 
 ---
 
-NSupySonic (**N**yaker's **Supysonic**) is a fork of [supysonic][] wired to Deezer. The headline
-is the **web player**: a custom single-page app that makes your Deezer library feel quick and
-pleasant to browse — the part most people are actually here for, since Deezer's own web client is
-sluggish and clumsy. Because it's built on a full [Subsonic][] API server, that same library (and
-any local files) is also available in any Subsonic app — you get a great browser experience *and*
-native mobile/desktop clients, from one server.
+NSupySonic (**N**yaker's **Supysonic**) started as a fork of [supysonic][], a Python Subsonic
+server, and has become a music app of its own: a **Svelte web player at `/app`**, a native
+**Android app**, and a **Deezer proxy** underneath that turns your account into an ordinary library
+on your disk. The server still speaks the Subsonic API at `/rest`, so any Subsonic client can play
+the same library — but that is a side door now, not the point.
+
+The interface is in French.
 
 > [!NOTE]
-> For personal use with your own Deezer account. FLAC requires a Deezer HiFi/Premium
-> subscription. Respect Deezer's Terms of Service.
+> For personal use with your own Deezer account. FLAC needs a Deezer HiFi / Premium subscription.
+> Respect Deezer's Terms of Service.
 
 ## Screenshots
 
@@ -38,68 +40,71 @@ native mobile/desktop clients, from one server.
 
 <img src="docs/screenshots/home.svg" alt="Home — mixes, playlists and albums picked for you" width="900">
 
-<em>Home — card-based, fast: your mixes, recommended playlists and albums, with Flow one tap away.</em>
+<em>Home — mixes, playlists, albums and artists picked for you, with Flow one tap away.</em>
 
 <br><br>
 
-<img src="docs/screenshots/now-playing.svg" alt="Immersive now-playing with synced lyrics and visualizer" width="900">
+<img src="docs/screenshots/now-playing.svg" alt="Full-screen player with synced lyrics and an animated backdrop" width="900">
 
-<em>Immersive now-playing — big art, a color backdrop pulled from the cover, synced lyrics and a live visualizer.</em>
+<em>Full-screen player — a backdrop pulled from the cover, synced lyrics, and an animation that plays to the music.</em>
 
 </div>
 
-## 🚀 Quick start with GHCR
+<sub>Screenshots are representative mockups; the artwork is illustrative, not real album art.</sub>
 
-Every push to `master` publishes a **prebuilt, multi-arch (amd64 + arm64) image** to the GitHub
-Container Registry: **`ghcr.io/fnyaker/nsupysonic:latest`**. It's public — nothing to log into — so
-you can be up and running in one command, no clone and no build.
+## Quick start
 
-**Requirements:** Docker, a Deezer account (HiFi/Premium for FLAC), and your Deezer `arl` cookie
-([how to get it](#getting-your-arl)).
+Every push to `master` publishes a prebuilt multi-arch (amd64 + arm64) image to the GitHub
+Container Registry: **`ghcr.io/fnyaker/nsupysonic:latest`**. It is public — nothing to log into.
 
-### Option A — one `docker run`
+**You need:** Docker, a Deezer account, and your Deezer `arl` cookie ([how to get it](#getting-your-arl)).
+
+### Docker Compose (recommended)
+
+```sh
+git clone https://github.com/fnyaker/NSupySonic.git
+cd NSupySonic
+cp .env.example .env          # set SUPYSONIC_ADMIN_PASSWORD and DEEZER_ARL
+docker compose up -d          # pulls the image, starts the app and its PostgreSQL
+```
+
+### One `docker run`
 
 ```sh
 docker run -d --name nsupysonic -p 5722:5722 \
   -e SUPYSONIC_ADMIN_PASSWORD=change-me \
   -e DEEZER_ARL=your_arl_cookie \
   -e DEEZER_SYNC_USER=admin \
+  -e DATABASE_URI=sqlite:////data/supysonic.db \
   -v nsupysonic-data:/data \
   ghcr.io/fnyaker/nsupysonic:latest
 ```
 
-### Option B — Docker Compose (recommended)
+The image's built-in default points at the compose file's PostgreSQL service, so a standalone
+`docker run` needs a `DATABASE_URI` — SQLite on the volume, as above, is fine to try it out.
 
-```sh
-git clone https://github.com/fnyaker/NSupySonic.git
-cd NSupySonic
-cp .env.example .env          # edit: set SUPYSONIC_ADMIN_PASSWORD and DEEZER_ARL
-docker compose up -d          # pulls ghcr.io/fnyaker/nsupysonic:latest — no build
-```
-
-Then open:
+### Then open
 
 | | |
 | --- | --- |
-| 🎧 **Web player** | <http://localhost:5722/app> |
-| 📡 **Subsonic API** | point any Subsonic client at <http://localhost:5722/rest> |
-| ⚙️ **Admin UI** | <http://localhost:5722/> |
+| **Web player** | <http://localhost:5722/app> |
+| **Subsonic API** | <http://localhost:5722/rest> — for any Subsonic client |
+| **Admin pages** | <http://localhost:5722/> |
 
-Log in with the admin user from your `.env` (created automatically on first boot). A first Deezer
-sync runs ~20 s after startup; your playlists, favorites and new releases appear shortly after.
+Log in with the admin user from your `.env` (created on first boot). A first Deezer sync starts
+about 20 seconds after startup; your playlists, favourites and new releases show up shortly after.
+The web player installs like an app on a phone or a desktop (*Add to home screen*).
 
 > [!TIP]
-> **Update** any time with `docker compose pull && docker compose up -d` (or, for `docker run`,
-> `docker pull ghcr.io/fnyaker/nsupysonic:latest` then recreate the container). Persistent state —
-> the database, caches and the Deezer FLAC archive — lives in the `nsupysonic-data` volume and
-> survives updates. Pin a specific build with `ghcr.io/fnyaker/nsupysonic:<sha>` if you prefer.
+> **Update** with `docker compose pull && docker compose up -d`. Everything that matters — the
+> database, the caches and the FLAC archive — lives in volumes and survives updates.
 
-### Deploy with Portainer
+<details>
+<summary><strong>Deploy with Portainer</strong></summary>
 
-In Portainer a deployment is a **Stack**. The image is public, so there's nothing to authenticate —
-you don't even need the repo or an `.env` file. Just paste a stack and set the variables in the UI.
+In Portainer a deployment is a **Stack**. The image is public, so there is nothing to authenticate.
 
-1. **Stacks → Add stack**, name it (e.g. `nsupysonic`), and paste this into the **Web editor**:
+1. **Stacks → Add stack**, name it `nsupysonic`, and paste this into the web editor:
 
    ```yaml
    services:
@@ -117,279 +122,305 @@ you don't even need the repo or an `.env` file. Just paste a stack and set the v
          DEEZER_QUALITY: ${DEEZER_QUALITY:-FLAC}
        volumes:
          - nsupysonic-data:/data
-         # Optional existing local library (hybrid with Deezer):
-         # - /host/path/to/music:/data/music:ro
    volumes:
      nsupysonic-data:
    ```
 
-2. Under **Environment variables**, add at least `SUPYSONIC_ADMIN_PASSWORD` (a password you choose)
-   and `DEEZER_ARL` (your `arl` cookie, [below](#getting-your-arl)). Optionally
-   `SUPYSONIC_ADMIN_USER` (default `admin`) and `DEEZER_QUALITY`.
+2. Under **Environment variables**, add `SUPYSONIC_ADMIN_PASSWORD` and `DEEZER_ARL`.
+3. **Deploy the stack.** To update later: open the stack → **Pull and redeploy** (re-pull the image).
 
-3. **Deploy the stack.** Open `http://<host>:5722/app` and log in. To update later: open the stack →
-   **Pull and redeploy** (tick *re-pull image*).
+</details>
 
-### Building the image locally instead
+<details>
+<summary><strong>Build the image yourself</strong></summary>
 
-To run un-released changes, build from source — edit `docker-compose.yml` (comment the `image:`
-line, uncomment `build: .`) then `docker compose up -d --build`. The build also compiles the Svelte
-web UI and bundles it into the image, so there are no extra steps.
+In `docker-compose.yml`, comment the `image:` line and uncomment `build: .`, then
+`docker compose up -d --build`. The build compiles the Rust analysers to WebAssembly, builds the
+Svelte app and bundles both into the image.
 
-## Features
+</details>
 
-- **A web player that's actually fast** at `/app` — a custom Svelte single-page app: card-based
-  home, search, artist / album / playlist pages, a real queue, synced lyrics, an immersive
-  full-screen now-playing view with a visualizer, gapless quality switching, and Flow. The quick,
-  clean Deezer front-end you wish Deezer shipped.
-- **Deezer in your Subsonic client too** — your playlists (created *and* favorited), favorites,
-  *Nouveautés* / *Découverte* and charts appear as native library entries. Works with any Subsonic
-  app (Symfonium, DSub, play:Sub, Tempo, …).
-- **Archive once, keep forever** — the first time a track is played it's fetched in FLAC from
-  Deezer, decrypted, tagged and stored under `archive_dir`. Every later play is served from disk.
-- **FLAC + Opus, everywhere** — tracks are *always* archived as FLAC and transcoded to **Opus
-  (320 / 128 / 64)** on the fly. The web player has a quality menu; Subsonic clients get the
-  original FLAC when they request lossless, or Opus at the bitrate they ask for.
-- **Podcasts** — subscribe to Deezer shows and play episodes; they get their own pages in the web
-  player and appear through the Subsonic podcast endpoints.
-- **Listen party** — share a link (or a QR code) and whoever opens it hears what you play, at the
-  same instant, synchronised to the millisecond — no account needed. In one room, every phone
-  becomes another speaker.
-- **Two-way sync** — Deezer → your library on a schedule; starring a track or creating/editing a
-  playlist in your client is mirrored back to your Deezer account.
-- **Fully automatic** — a full sync runs on startup and then daily (04:00 by default). No cron, no
-  manual command.
-- **Customizable Flow** — enable or disable genre/style clusters from the web UI (Deezer's GraphQL
-  Flow tuner).
-- **Hybrid library** — your existing local music sits alongside Deezer; the normal supysonic
-  browsing/scanning still works.
-- **Download ahead** — pre-archive a whole playlist or album in one click, without waiting for
-  playback.
-- **PostgreSQL out of the box** — `docker compose up` starts a bundled Postgres alongside the app;
-  any legacy SQLite data on the volume is migrated across automatically on the next boot.
+## What it does
 
-## How it works
+### The core idea: archive FLAC once, transcode to Opus
 
-Deezer entities are imported as ordinary library rows under a dedicated `Deezer` root folder, so
-supysonic's normal browse / search / playlist / star endpoints work **unchanged**. Only streaming
-is intercepted: on first play the FLAC is fetched from Deezer, decrypted (Blowfish-CBC stripe
-cipher), archived, tagged and served; lower qualities are produced by the transcoder and cached.
-Upcoming tracks of the current album/playlist are pre-fetched in the background.
+Deezer tracks are never streamed straight from Deezer. The first time you play one, the FLAC is
+fetched, decrypted, tagged (with its cover, its lyrics and a small metadata sidecar) and stored under
+`archive_dir`. Every later play comes from your disk. Lower qualities are produced from that FLAC by
+`ffmpeg` (Opus 320 / 128 / 64) and cached; the web player has a quality menu, and Subsonic clients
+get FLAC when they ask for lossless or Opus at the bitrate they request.
 
-This means the same data powers your Subsonic client and the web player — there is no separate
-"Deezer mode", it's just your library.
+An archived track carries its whole identity with it — audio, cover, lyrics, tags and Deezer's ids
+and credits — so it stays playable, findable and complete whatever happens to your Deezer account.
 
-## Podcasts
+**Archiving is event-driven.** A track is archived when it becomes yours: you play it, star it,
+favourite its album, playlist or artist (the whole discography), add it to a playlist, or subscribe
+to a show. Priorities are strict — a person waiting to hear a track always jumps ahead of
+background downloads. Archive rules in **Réglages → Archive** decide which events archive what, and
+an optional, off-by-default cleanup can free space (never touching favourites or playlists unless you
+allow it, and never touching uploads).
 
-Deezer *shows* are subscribable channels and their *episodes* stream like any other track. In the
-web player, **Podcasts** has its own grid and per-show episode list; in Subsonic clients they show
-up through the standard podcast endpoints (`getPodcasts`, `getNewestPodcasts`, …). Unlike music,
-episodes are plain MP3 straight from the podcast host (no FLAC/Opus pipeline) and are archived under
-`archive_dir/Podcasts/<Show>/` on first play.
+### Deezer is optional to the app running
 
-## Listen party
+Playing archived music, browsing, playlists, favourites, uploads and the app itself keep working at
+full speed while Deezer is unreachable. The parts that need Deezer fail fast, without a verdict about
+your data: a network error never marks a track as gone. If your `arl` dies, the app says so and you
+paste a new one in **Réglages → Compte** — no restart. A track Deezer really removed is flagged, and
+you can replace it, upload your own copy, or delete it.
 
-Press the headphones button in the player, then **Démarrer la party**: you get a link and a QR code
-to share. Guests need no account — they open the link, type a name, tap **Rejoindre l'écoute**, and
-hear exactly what you play, where you are in it: your tracks, your pauses, your seeks and your
-crossfades. Each device syncs its clock with the server and schedules the audio itself, so phones
-in the same room play as one (measured within a millisecond of each other). A speaker the browser
-can't see into — Bluetooth, a soundbar — adds its own delay; each guest can correct it with
-**Décalage**. Guests can only hear what you are playing: the link opens nothing else in your
-library, and **Terminer la party** closes it for everyone.
+### The web player
+
+A single-page app built for speed, at `/app`:
+
+- **Home, search, artist / album / playlist pages**, a real queue, and a library with favourites,
+  playlists, downloads and your own files. Long lists are windowed, so a 4 000-track favourites page
+  scrolls and filters instantly, and accents don't get in the way (*beyonce* finds *Beyoncé*).
+- **Two-way Deezer sync**: your playlists, favourites, Flow and new releases come in on a schedule
+  (on startup, then daily); starring a track or editing a playlist here is mirrored back to your
+  account.
+- **Flow and mixes**, with **customizable Flow clusters**, track and artist radio, and an endless
+  queue you can reorder by dragging and clear in one tap.
+- **Explore**: what is charting worldwide, by genre and by country, and the new releases.
+- **Under the full-screen player**, swipe up for tracks that sound like the one playing and the
+  artist behind it.
+- **Sleep timer** (minutes, or the end of the track, with a fade-out) and **podcast speed**
+  remembered per show.
+- **Synced lyrics** in the full-screen player, from Deezer first and [LRCLIB](https://lrclib.net)
+  after, archived beside the audio.
+- **Podcasts** — subscribe to Deezer shows; episodes are archived on first play, positions are saved
+  on the server and synced with Deezer, and you can drop markers in an episode.
+- **Sharing** — send the whole file or an excerpt you select on a zoomable waveform.
+- **Bulk export** of a playlist, an album or your favourites as one streamed ZIP, in the format you
+  choose.
+- **Uploads** of your own files next to your Deezer library.
+- **Back goes to the screen, not just the route**: coming back from an album returns you to your
+  search, scroll position included.
+- **Offline and instant**: the app shell is served from a service worker, downloads and covers live
+  on the device, and updates are staged in full in the background before the app swaps to them.
+
+### Sound
+
+- **Crossfade** with **silence trimming**, so the gap between tracks is really gone — and it never
+  starts a download just to look at the next track.
+- **Volume normalization** (ReplayGain) applied per track and preloaded, never changed under a
+  playing song.
+- **10-band equalizer** with presets of your own, bass enhancement.
+- An output **latency model** (Bluetooth, TV, receiver) shared by the animations, the lyrics and the
+  listen party, with one per-device offset for what no API reports.
+
+### Animations
+
+Full-screen animations that play to the music, drawn as WebGL2 shaders: **50 worlds** on eleven
+shelves (hard dance, techno, trance, urban, rock, calm, retro…), an oscilloscope, and a **projector
+window** (`#/viz`) you drag onto a beamer while the music plays in another tab. The analysis runs in
+Rust compiled to WebAssembly, on the audio thread: kick, beat, bar and drop detection, tempo, and a
+genre reading. The genre picks the world, so a frenchcore drop and a jazz trio don't look alike.
+Everything degrades gracefully — pick a lighter tier, or **eco mode** to switch every animation off.
+Flashing has a photosensitivity guard, and `prefers-reduced-motion` always wins.
+
+### Genre analysis and the genre studio
+
+The server measures each archived track once — tempo (Deezer's own where it has one, measured from the
+file otherwise), spectral descriptors, loudness range — and serves a verdict the player uses to lock
+its beat grid immediately. On top of that, the **genre studio** teaches it *your* genres: you tag a
+few hundred tracks by confirming guesses with the keyboard, a small model trains in your browser
+(in Rust/WebAssembly, in a worker), and the server applies it to the whole library. It needs an
+optional audio feature extractor you supply yourself; without it the built-in classifier keeps
+working.
+
+### Listen party
+
+Share a link or a QR code and anyone who opens it hears what you play at the same instant, to within
+about a millisecond, on their own device — no account needed. In one room, every phone becomes
+another speaker. Guests can only hear what you are playing.
+
+### Remote control
+
+Make a link on the device that plays, hand it over as a URL or QR code, and whoever opens it drives
+that player from their own phone — in the same app, with the same screens. Four levels: queue only,
+read-only browsing, everything but administration, or admin. You can see who is driving, cut one link
+or all of them, and the links expire.
+
+### Android app
+
+A native Kotlin app that wraps the web player and adds what a browser can't: a foreground service and
+media session for lockscreen, notification and Bluetooth controls, survival of long background stays,
+and **Deezer sign-in from inside the app** (you log in on Deezer's own page; only the `arl` comes back,
+never your password). See [Android app](#android-app).
+
+### Subsonic, on the side
+
+Deezer entities are stored as ordinary library rows, so any Subsonic client (Symfonium, DSub, Tempo,
+play:Sub…) can browse, search and play the same library at `/rest`, with the same FLAC/Opus rules.
+Local music can sit alongside it (mount a folder on `/data/music`).
 
 ## Configuration
 
-There are two ways to configure the server; pick one.
+Two ways; pick one.
 
-**1. Environment variables** (simplest — edit `.env`, or pass `-e` flags to `docker run`):
+**1. Environment variables** (simplest — `.env`, or `-e` flags):
 
-| Variable                   | Default    | Description                                                       |
-| -------------------------- | ---------- | ---------------------------------------------------------------- |
-| `SUPYSONIC_ADMIN_USER`     | `admin`    | Admin/login user, created on first boot.                         |
-| `SUPYSONIC_ADMIN_PASSWORD` | `changeme` | **Change this.** Admin password.                                 |
-| `DEEZER_ARL`               | *(empty)*  | Your Deezer ARL cookie. Empty = run without Deezer.              |
-| `DEEZER_SYNC_USER`         | `admin`    | User the auto-sync writes to (compose sets it to the admin).     |
-| `DEEZER_QUALITY`           | `FLAC`     | Archive quality (`FLAC` recommended; needs HiFi).                |
-| `DEEZER_SYNC_AT`           | `04:00`    | Daily auto-sync time (HH:MM).                                    |
-| `DEEZER_REPORT_LISTENS`    | *(off)*    | Report plays back to Deezer so recommendations/Flow keep learning. Set `yes` to enable. |
-| `ANDROID_VERSION_NAME`     | *(image release)* | Android app version clients should run; older ones are offered the update at startup. Empty = never claim one. |
-| `ANDROID_DOWNLOAD_URL`     | *(releases page)* | Where that update is downloaded from.                    |
-| `DATABASE_URI`             | *(bundled Postgres)* | Empty = the bundled `db` Postgres service. Set a URI to point at an external database. |
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SUPYSONIC_ADMIN_USER` | `admin` | Admin / login user, created on first boot. |
+| `SUPYSONIC_ADMIN_PASSWORD` | `changeme` | **Change this.** |
+| `DEEZER_ARL` | *(empty)* | Your Deezer `arl` cookie. Empty = run without Deezer. |
+| `DEEZER_SYNC_USER` | `admin` | The user auto-sync writes to (compose sets it to the admin). |
+| `DEEZER_QUALITY` | `FLAC` | Archive quality. Keep `FLAC`. |
+| `DEEZER_SYNC_AT` | `04:00` | Daily sync time (HH:MM). |
+| `DEEZER_REPORT_LISTENS` | *(off)* | `yes` reports your plays to Deezer so Flow and recommendations keep learning. |
+| `DATABASE_URI` | *(bundled PostgreSQL)* | Point at an external database. |
+| `ANDROID_VERSION_NAME` | *(image release)* | The Android version clients should run; older ones are offered the update. |
+| `ANDROID_DOWNLOAD_URL` | *(releases page)* | Where that update is downloaded from. |
 
-Advanced knobs (web-server concurrency `GUNICORN_THREADS` / `GUNICORN_TIMEOUT`, reverse-proxy
-hardening `SUPYSONIC_PROXY_HOPS` / `SUPYSONIC_SESSION_COOKIE_SECURE`, and the bundled `POSTGRES_PASSWORD`)
-are documented inline in [`.env.example`](.env.example) and [`docker-compose.yml`](docker-compose.yml).
+Also available: `POSTGRES_PASSWORD` (the bundled database), `GUNICORN_THREADS` / `GUNICORN_TIMEOUT`
+(concurrency), and `SUPYSONIC_PROXY_HOPS` / `SUPYSONIC_SESSION_COOKIE_SECURE` (behind a reverse
+proxy and HTTPS). They are documented inline in [`.env.example`](.env.example) and
+[`docker-compose.yml`](docker-compose.yml).
 
-**2. A mounted config file** (full control — sync options, smart tracklists, transcoders,
-Postgres, …): copy `config/supysonic.conf.example` to `config/supysonic.conf`, edit it, and
-uncomment the volume line in `docker-compose.yml`. That file is gitignored because it holds your ARL.
+**2. A mounted config file**, for full control (sync options, transcoders, archive paths…): copy
+`config/supysonic.conf.example` to `config/supysonic.conf`, edit it, and uncomment the volume line in
+`docker-compose.yml`. The full annotated option set is in [`config.sample`](config.sample). The file
+is gitignored because it holds your `arl`.
 
-The full set of options (with comments) lives in [`config.sample`](config.sample) and
-[`config/supysonic.conf.example`](config/supysonic.conf.example).
+Most day-to-day settings — archive rules, cleanup, quality, downloads, the `arl` itself — are in
+**Réglages** in the app, and take effect without a restart.
 
 ### Getting your ARL
 
-The ARL is the session cookie that authenticates you with Deezer:
+The `arl` is the session cookie that authenticates you with Deezer.
 
 1. Log in at <https://www.deezer.com> in your browser.
-2. Open the developer tools → **Application** (or **Storage**) → **Cookies** →
-   `https://www.deezer.com`.
-3. Copy the value of the cookie named **`arl`** into `DEEZER_ARL`.
+2. Open the developer tools → **Application** (or **Storage**) → **Cookies** → `https://www.deezer.com`.
+3. Copy the value of the cookie named **`arl`**.
 
-An ARL expires every few months. When it does you don't have to edit any file: the web player tells
-you (a banner, and the state is shown in **Réglages → Compte**), and an admin can paste a new one
-right there. It is verified against Deezer before being saved, stored in the database, **overrides
-`DEEZER_ARL` / the config file**, and takes effect immediately — no restart. The value is never
-displayed again, only its last four characters.
+On Android you can skip this: **Réglages → Compte Deezer** opens Deezer's own login page inside the app
+and picks the cookie up for you.
+
+An `arl` expires every few months. When it does, the app tells you and an admin pastes a new one in
+**Réglages → Compte**; it is verified against Deezer before being saved, overrides `DEEZER_ARL`, and
+applies immediately.
 
 > [!WARNING]
-> **Treat the ARL like a password.** It grants full access to your Deezer account. Never commit it
-> or share it. `.env`, `config/supysonic.conf` and `*.har` captures are gitignored and excluded
-> from the Docker build context for exactly this reason.
+> **Treat the `arl` like a password.** It grants full access to your Deezer account. Never commit it
+> or share it. `.env`, `config/supysonic.conf` and `*.har` captures are gitignored and excluded from
+> the Docker build context for exactly this reason.
 
-### PostgreSQL
+### Database
 
-Postgres is the default: `docker compose up` starts a bundled `db` service alongside the app and the
-app connects to it out of the box. The only thing to set is `POSTGRES_PASSWORD` in `.env` (single
-source of truth — the `DATABASE_URI` reuses it). To use an external Postgres instead, remove the `db`
-service from `docker-compose.yml` and point `DATABASE_URI` at your server in `.env`. If a legacy
-SQLite database is still on the `/data` volume, its data is migrated across automatically on the next
-boot, one-shot and transparent.
-
-## Streaming quality
-
-The rule: **always archive FLAC, transcode to Opus.** Deezer audio is never streamed as MP3
-directly.
-
-- **Web player** — a quality menu cycles **FLAC · Opus 320 · Opus 128 · Opus 64**. The archived
-  FLAC is transcoded with `ffmpeg`/`libopus` through supysonic's transcode cache (so repeats are
-  cached and seekable).
-- **Subsonic clients** — request *lossless* to get the original FLAC, or set a max bitrate (e.g.
-  320 / 128 / 64) to receive Opus at that rate. This is the standard `default_transcode_target =
-  opus` + `transcoder_flac_opus` setup, already configured in the image.
-
-## Auto-sync
-
-When a `sync_user` is set (compose sets it to the admin), a full sync runs **on startup** and then
-**daily** at `sync_at` (default 04:00) — or every `sync_interval` minutes if you prefer. It
-refreshes your playlists, favorites and the *Nouveautés* / *Découverte* smart-tracklist playlists.
-No cron or `supysonic-cli deezer sync` needed.
-
-## Flow customization
-
-Open the web player, go to the home page and click **Personnaliser** on the Flow card. You get
-Deezer's genre/style clusters as tiles — enable the ones you want in your Flow, disable the rest,
-and save. (Uses Deezer's GraphQL Flow tuner; requires an account where Flow customization is
-available.)
+PostgreSQL is the default: `docker compose up` starts a bundled `db` service and the app connects to
+it. To use an external one, remove the `db` service and set `DATABASE_URI`. SQLite and MySQL are also
+supported by the code. A legacy SQLite database found on the data volume is migrated to PostgreSQL
+automatically on the next boot.
 
 ## Android app
 
-A native Kotlin app (`android/`) wraps the web player in a fullscreen WebView and adds what a mobile
-browser can't provide: a **foreground media service + MediaSession**, so playback survives long
-pauses in the background and gets real lockscreen / notification / Bluetooth controls. On first
-launch you enter your server URL, an optional port, and whether to verify the SSL certificate
-(untick for self-signed setups).
+`android/` is a native Kotlin app: a fullscreen WebView hosts the player from your server, while a
+foreground service keeps the process alive and owns the media notification, lockscreen and Bluetooth
+controls. Audio stays in the WebView, so the app behaves exactly like the web player and works with
+any server version.
 
-The APK is built by CI (`android.yaml` workflow) alongside the Docker image: grab the
-`nsupysonic-apk` artifact from any run, or the APK attached to releases on `v*` tags. See
-[android/README.md](android/README.md) for details (including stable-signature setup via repo
-secrets).
+On first launch you enter your server URL, an optional port, and whether to verify the SSL certificate
+(untick for self-signed setups). If Android kills the WebView while the app is in the background, it is
+rebuilt when you come back and resumes on the same track at the same position.
 
-**Update notice.** At startup — and only then — the web player compares the installed app's version
-with the one the server publishes ([webapp] `android_version`, set automatically from the release tag
-in the official image, or via `ANDROID_VERSION_NAME`) and offers the download when the app is older.
-A server that declares no version never claims an update exists.
-
-### Web app updates
-
-The SPA is a real install: the service worker serves the shell from disk, so a launch is instant
-whether you're online, offline or on a terrible link. Freshness comes from an explicit version check
-instead of a network race — the running app knows its own build id and asks the server
-(`/app/version.json`) which build it serves. When they differ the new build is downloaded **in full,
-in the background**, and only then does the app swap to it: automatically if you've just opened it,
-otherwise with a "Nouvelle version prête" notice so it never yanks the page away mid-song. An
-interrupted download changes nothing — the previous, complete build stays in place.
+The APK is built by CI: take the `nsupysonic-apk` artifact from any run, or the file attached to a
+`v*` release. At startup — and only then — the app compares its version with the one your server
+publishes and offers the download when it is older. Details, including stable signing keys, are in
+[android/README.md](android/README.md).
 
 ## Running without Docker
 
-NSupySonic is a normal Python package (3.10+).
+NSupySonic is a Python package (3.10+) with a few runtime tools.
 
 ```sh
 pip install .
 pip install gunicorn
 
-# create the admin user
 supysonic-cli user add MyUser -p MyPassword
 supysonic-cli user setroles MyUser -A
 
 # add a [deezer] section to your config (see config.sample), then:
-supysonic-cli deezer login-test            # check the ARL works
-supysonic-cli deezer import <deezer-url>   # import a track / album / playlist
-supysonic-cli deezer sync                  # import playlists / favorites / new releases
+supysonic-cli deezer login-test            # check the arl works
+supysonic-cli deezer import <deezer-url>   # a track, album or playlist
+supysonic-cli deezer sync                  # playlists, favourites, new releases
 
-# build the web UI (optional; the Docker image does this for you)
-cd webapp && npm install && npm run build && cd ..
+cd webapp && npm install && npm run build && cd ..   # the web player (Docker does this for you)
 
 supysonic-server                           # serves on :5722
 ```
 
+You need `ffmpeg` (with `libopus`) on the machine. Optional extras:
+`pip install 'supysonic[embedding]'` adds the audio feature extractor's runtime for the genre studio.
+
+Handy batch commands: `supysonic-cli deezer lyrics` (archive lyrics for what you already have),
+`deezer analyze` (measure tempo and style), `deezer bpm-audit` (Deezer's published BPM against the
+measured one), `deezer embed` (extract genre embeddings).
+
 ## Development
 
 ```sh
-# Python tests (no network required)
-python -m unittest                    # whole suite
-python -m unittest tests.test_deezer  # one module
+# Python tests (offline, mocked)
+python -m unittest                        # whole suite
+python tools/partest.py                   # the same suite across processes — what CI runs
 
-# Web UI dev server (hot reload; proxies /api -> localhost:5000)
-cd webapp && npm install && npm run dev
+# Web player
+cd webapp && npm install
+npm run dev                               # hot reload; proxies /api to localhost:5000
+npm test                                  # the SPA suite (audio analysis, animations, party, remote…)
+npm run build                             # -> supysonic/webui/dist
+
+# The Rust crates behind the analyser, the app core and the genre trainer
+cd webapp && npm run wasm                 # rebuilds all five committed .wasm binaries
 ```
 
-The Flask development server is handy for the backend:
+The compiled `.wasm` files are committed so a checkout builds without a Rust toolchain; the tests fail
+if one was not built from the sources beside it. The Flask development server is handy for the backend:
 
 ```sh
-export FLASK_APP="supysonic.web:create_application()"
-flask run
+export FLASK_APP="supysonic.web:create_application()"; flask run
 ```
+
+[CLAUDE.md](CLAUDE.md) is the long-form engineering guide — architecture, the rules each subsystem
+learned the hard way, and the measurements behind them. [todo.md](todo.md) is the roadmap.
 
 ## Project layout
 
 ```
-deezerpy/             Deezer client (private gateway + public API + GraphQL), based on deezer-py
-supysonic/deezer/     The proxy: provider, archive, importer, prefetch, scheduler, push
-supysonic/webui/      The custom /api blueprint + the bundled SPA server (/app)
-webapp/               The Svelte single-page web player (built into supysonic/webui/dist)
-android/              Native Kotlin WebView wrapper (foreground media service + MediaSession)
-docker/               Entrypoint + baked default config
-docs/screenshots/     README artwork
+deezerpy/             The Deezer client: public API, private gateway, GraphQL (based on deezer-py)
+supysonic/deezer/     The proxy: provider, archive, sync, prefetch, analysis, genre embeddings, cleanup
+supysonic/webui/      The /api blueprint and the server for the bundled web player (/app)
+supysonic/api/        The Subsonic API (/rest), with streaming intercepted for Deezer tracks
+webapp/               The Svelte web player, plus the Rust crates compiled to WebAssembly
+android/              The native Kotlin app
+docker/               Entrypoint and baked default config
+tools/                Parallel test runner, tempo evaluation, API performance bench
+tests/                Python test suite
+docs/                 Notes, plans and README artwork
 ```
 
-## Security & privacy
+## Security and privacy
 
-- Your **ARL** lives only in `.env` or `config/supysonic.conf`, both gitignored; the Docker build
-  context excludes them too.
-- All custom `/api` routes require a logged-in session; session cookies are `HttpOnly` +
-  `SameSite=Lax` (set `SUPYSONIC_SESSION_COOKIE_SECURE=yes` behind HTTPS).
-- API exploration captures (`*.har`) contain real session tokens and are gitignored — never commit
-  them.
-- This is meant for **personal use** with your own account.
+- Your `arl` lives only in `.env`, `config/supysonic.conf` or the database. It is never shown again
+  after saving (only its last four characters), and never written into a file that outlives the session.
+- Every `/api` route requires a login. Party, remote-control and share links are capabilities: an
+  unguessable id that opens only what its owner published, and nothing else.
+- Sessions use `HttpOnly` + `SameSite=Lax` cookies; set `SUPYSONIC_SESSION_COOKIE_SECURE=yes` behind HTTPS.
+- Podcast episodes come from third-party feeds, so their URLs are restricted to public http(s)
+  addresses, and the connection is pinned to the address that was checked.
+- `*.har` captures contain real session tokens and are gitignored — never commit them.
 
 ## Credits
 
-- [supysonic][] by Louis-Philippe Véronneau / Alban Féron — the Subsonic server this is built on
-  (AGPL-3.0).
-- [deezer-py][] by RemixDev — the basis for the bundled Deezer client.
+- [supysonic][] by Louis-Philippe Véronneau and Alban Féron — the Subsonic server this began as (AGPL-3.0).
+- [deezer-py][] by RemixDev — the basis of the bundled Deezer client.
+- [LRCLIB](https://lrclib.net) for open synced lyrics.
+- [beatsync](https://github.com/freeman-jiang/beatsync) — the model for the listen party's clock.
 
 ## License
 
-Distributed under the terms of the **GNU AGPL-3.0-only** license, inherited from supysonic. See
-[LICENSE](LICENSE).
-
-<sub>Screenshots are representative mockups of the web player; cover artwork shown is illustrative,
-not real album art.</sub>
+Distributed under the **GNU AGPL-3.0-only** license, inherited from supysonic. See [LICENSE](LICENSE).
 
 [subsonic]: http://www.subsonic.org/
 [supysonic]: https://github.com/spl0k/supysonic
 [deezer-py]: https://gitlab.com/RemixDev/deezer-py
-</content>
-</invoke>

@@ -27,6 +27,8 @@
   import ImmersivePlayer from "./ImmersivePlayer.svelte";
   import PartyButton from "./PartyButton.svelte";
   import RemoteButton from "./RemoteButton.svelte";
+  import SleepButton from "./SleepButton.svelte";
+  import SpeedButton from "./SpeedButton.svelte";
 
   const QUALITIES = ["FLAC", "OPUS_320", "OPUS_256", "OPUS_192", "OPUS_128", "OPUS_64"];
   const QUALITY_LABEL = {
@@ -168,9 +170,12 @@
         {/if}
       </div>
     {/if}
+    {#if canKeep}<SpeedButton />{/if}
     <!-- A remote control lends neither: the party plays from THIS device's
-         engine, and links are the owner's to make. -->
+         engine, and links are the owner's to make (and the sleep timer runs
+         where the audio is). -->
     {#if !REMOTE}
+      <SleepButton size={17} />
       <PartyButton size={17} />
       <RemoteButton size={17} />
     {/if}

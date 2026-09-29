@@ -108,6 +108,32 @@
     scroller.scrollTo({ top: Math.max(0, target), behavior: smooth ? "smooth" : "auto" });
   }
 
+  // The row under a viewport y, computed from geometry — not from the DOM — so
+  // it is right for rows that are not mounted (drag-and-drop over a long list).
+  export function indexAt(clientY) {
+    if (!listEl || total === 0) return -1;
+    const lr = listEl.getBoundingClientRect();
+    return Math.max(0, Math.min(total - 1, Math.floor((clientY - lr.top) / rowH)));
+  }
+
+  // Nudge the scroller when `clientY` is within `edge` px of its top or bottom
+  // (the harder toward the edge, the faster). Called once per frame while an
+  // item is being dragged; returns whether anything moved.
+  export function autoScroll(clientY, edge = 56, max = 18) {
+    if (!scroller) return false;
+    const sr = viewport(scroller);
+    const bottom = sr.top + sr.height;
+    // A short list must keep a middle that is not an edge.
+    edge = Math.min(edge, sr.height / 4);
+    let dy = 0;
+    if (clientY < sr.top + edge) dy = -max * Math.min(1, (sr.top + edge - clientY) / edge);
+    else if (clientY > bottom - edge) dy = max * Math.min(1, (clientY - (bottom - edge)) / edge);
+    if (!dy) return false;
+    const before = scroller.scrollTop;
+    scroller.scrollTop = before + dy;
+    return scroller.scrollTop !== before;
+  }
+
   onMount(() => {
     scroller = findScroller(listEl);
     end = Math.min(total, Math.ceil((scroller?.clientHeight || 800) / rowH) + buffer);

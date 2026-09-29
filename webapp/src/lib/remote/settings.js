@@ -48,6 +48,7 @@ export const MIRRORED = [
   "fade.trim",
   "fade.trimDb",
   "player.quality",
+  "podcast.speeds",
   "cache.prefetch",
   "cache.prefetchCount",
   "cache.limit",

@@ -291,11 +291,46 @@ class MockApi:
     def get_editorial_releases(self, limit=25, **kw):
         return self.search_album("", limit)
 
-    def get_chart_artists(self, limit=25, **kw):
+    def get_chart_artists(self, genre_id=0, limit=25, **kw):
         return self.search_artist("", limit)
 
-    def get_chart_playlists(self, limit=25, **kw):
+    def get_chart_playlists(self, genre_id=0, limit=25, **kw):
         return self.search_playlist("", limit)
+
+    # -- explore -------------------------------------------------------
+    # `calls` records what was asked, so a test can tell a cached answer from a
+    # fresh one; `fail` makes every explore call raise (Deezer not answering).
+    calls = []
+    fail = False
+
+    def _explore(self, name, *a, **kw):
+        MockApi.calls.append((name, a, tuple(sorted(kw))))
+        if MockApi.fail:
+            raise RuntimeError("Deezer is down")
+
+    def get_chart_tracks(self, genre_id=0, limit=10, **kw):
+        self._explore("tracks", genre_id)
+        return {"data": [api_track(i) for i in range(1, 4)]}
+
+    def get_chart_albums(self, genre_id=0, limit=10, **kw):
+        self._explore("albums", genre_id)
+        return self.search_album("", limit)
+
+    def get_genres(self, index=0, limit=10, **kw):
+        self._explore("genres")
+        return {"data": [
+            {"id": 0, "name": "All", "picture_medium": "https://img/g0.jpg"},
+            {"id": 132, "name": "Pop", "picture_medium": "https://img/g132.jpg"},
+            {"id": 116, "name": "Rap/Hip Hop", "picture_medium": "https://img/g116.jpg"},
+        ]}
+
+    def get_genre(self, genre_id=0):
+        self._explore("genre", genre_id)
+        return {"id": int(genre_id), "name": "Pop", "picture_medium": "https://img/g132.jpg"}
+
+    def get_countries_charts(self):
+        self._explore("countries")
+        return [{"id": 1, "title": "Top France", "picture_medium": "https://img/fr.jpg", "nb_tracks": 100}]
 
     def get_artist(self, artist_id):
         return {"id": int(artist_id) if str(artist_id).isdigit() else artist_id,
@@ -544,6 +579,76 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(data["albums"][0]["title"], "Bar")
         self.assertEqual(data["artists"][0]["name"], "Foo")
         self.assertEqual(data["playlists"][0]["title"], "P")
+
+    # -- explore ---------------------------------------------------------
+
+    def _explore_reset(self):
+        from supysonic import webui
+
+        MockApi.calls.clear()
+        MockApi.fail = False
+        with webui._explore_lock:
+            webui._explore_cache.clear()
+        self.addCleanup(setattr, MockApi, "fail", False)
+
+    def test_explore_home(self):
+        self._explore_reset()
+        self._login()
+        data = self.client.get("/api/explore").get_json()
+        self.assertEqual([g["name"] for g in data["genres"]], ["Pop", "Rap/Hip Hop"], "\"All\" is the page itself")
+        self.assertEqual(data["genres"][0]["deezer_id"], "132")
+        self.assertEqual(len(data["tracks"]), 3)
+        self.assertEqual(data["tracks"][0]["album"]["title"], api_track(1)["album"]["title"])
+        self.assertEqual(data["albums"][0]["title"], "Bar")
+        self.assertEqual(data["artists"][0]["name"], "Foo")
+        self.assertEqual(data["playlists"][0]["title"], "P")
+        self.assertEqual(data["releases"][0]["title"], "Bar")
+
+    def test_explore_is_kept_for_a_while_but_never_an_outage(self):
+        self._explore_reset()
+        self._login()
+        self.client.get("/api/explore")
+        asked = len(MockApi.calls)
+        self.assertGreater(asked, 0)
+        self.client.get("/api/explore")
+        self.assertEqual(len(MockApi.calls), asked, "the second visit costs Deezer nothing")
+        # A Deezer that does not answer gives an empty screen — which must not be
+        # remembered, or the screen stays empty for the length of the cache.
+        self._explore_reset()
+        MockApi.fail = True
+        empty = self.client.get("/api/explore").get_json()
+        self.assertEqual(empty["tracks"], [])
+        self.assertEqual(self.client.get("/api/explore").status_code, 200)
+        MockApi.fail = False
+        self.assertEqual(len(self.client.get("/api/explore").get_json()["tracks"]), 3)
+
+    def test_explore_genre(self):
+        self._explore_reset()
+        self._login()
+        data = self.client.get("/api/explore/genre/132").get_json()
+        self.assertEqual(data["genre"]["name"], "Pop")
+        self.assertEqual(len(data["tracks"]), 3)
+        self.assertIn(("tracks", (132,), ("limit",)) if False else "tracks", [c[0] for c in MockApi.calls])
+        asked = {c[1] for c in MockApi.calls if c[0] == "tracks"}
+        self.assertEqual(asked, {("132",)}, "the genre id reaches the chart call")
+
+    def test_explore_genre_refuses_what_is_not_an_id(self):
+        self._explore_reset()
+        self._login()
+        for bad in ("abc", "12a", "%D9%A1%D9%A2", "-5", "9" * 30):
+            self.assertEqual(self.client.get("/api/explore/genre/" + bad).status_code, 400, bad)
+        self.assertEqual(MockApi.calls, [], "and nothing was asked of Deezer")
+
+    def test_explore_countries(self):
+        self._explore_reset()
+        self._login()
+        data = self.client.get("/api/explore/countries").get_json()
+        self.assertEqual(data["playlists"][0]["title"], "Top France")
+
+    def test_explore_needs_a_login(self):
+        self._explore_reset()
+        for path in ("/api/explore", "/api/explore/genre/132", "/api/explore/countries"):
+            self.assertEqual(self.client.get(path).status_code, 401, path)
 
     # -- lyrics / playlist / discography --------------------------------
 

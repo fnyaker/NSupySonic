@@ -26,6 +26,8 @@ export const OPS = {
   shuffle: "read",
   repeat: "read",
   remove: "read",
+  move: "read",
+  clear: "read",
   add: "read",
   play_next: "read",
   play_queue: "read",
@@ -128,6 +130,13 @@ export function commandFor(method, args, state) {
       if (!t || !playableId(t)) return null;
       return { op: method === "jump" ? "jump" : "remove", args: { i: a, id: String(t.deezer_id) } };
     }
+    case "move": {
+      const t = queue[a];
+      if (!t || !playableId(t) || !Number.isInteger(b) || b < 0) return null;
+      return { op: "move", args: { i: a, id: String(t.deezer_id), to: b } };
+    }
+    case "clearUpcoming":
+      return { op: "clear", args: {} };
     case "setVolume":
       return { op: "volume", args: { v: Math.max(0, Math.min(1, +a || 0)) } };
     case "toggleMute":
@@ -221,6 +230,18 @@ export function runCommand(cmd, env) {
       else player.removeAt(i);
       return `${cmd.op} ${i}`;
     }
+    case "move": {
+      // Named by index AND id like a removal; the destination is an index in
+      // the controller's view, carried over by however far the row itself moved.
+      const i = resolveIndex(s.queue, a.i | 0, String(a.id || ""));
+      if (i < 0) return null;
+      const to = Math.max(0, Math.min(s.queue.length - 1, (a.to | 0) + (i - (a.i | 0))));
+      player.move(i, to);
+      return `move ${i} -> ${to}`;
+    }
+    case "clear":
+      player.clearUpcoming();
+      return "clear";
     case "volume":
       player.setVolume(Math.max(0, Math.min(1, +a.v || 0)));
       return `volume ${(+a.v || 0).toFixed(2)}`;

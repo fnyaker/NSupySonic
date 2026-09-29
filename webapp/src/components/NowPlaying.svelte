@@ -8,12 +8,11 @@
     nowPlayingOpen,
   } from "../lib/stores.js";
   import { toggleFavorite } from "../lib/actions.js";
-  import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import Cover from "./Cover.svelte";
   import Lyrics from "./Lyrics.svelte";
   import Icon from "./Icon.svelte";
   import ArtistLine from "./ArtistLine.svelte";
-  import VirtualList from "./VirtualList.svelte";
+  import QueueList from "./QueueList.svelte";
 
   let tab = "queue"; // queue | lyrics
 
@@ -56,21 +55,7 @@
     <div class="body">
       {#if tab === "queue"}
         <div class="queue">
-          <VirtualList items={queue} let:item let:index>
-            <div class="qitem" class:now={index === idx} class:past={index < idx}>
-              <button class="qrow" on:click={() => player.jump(index)}>
-                <Cover src={item.album?.cover} alt={item.title} size={40} kind="track" fallbackId={item.deezer_id} />
-                <span class="qmeta">
-                  <span class="qt">{item.title}</span>
-                  <span class="qa muted">{artistLine(item)}</span>
-                </span>
-                <span class="qd muted">{fmtDuration(item.duration)}</span>
-              </button>
-              {#if index > idx}
-                <button class="qx" on:click={() => player.removeAt(index)} aria-label="Retirer"><Icon name="close" size={15} /></button>
-              {/if}
-            </div>
-          </VirtualList>
+          <QueueList items={queue} {idx} showDuration />
         </div>
       {:else}
         <Lyrics />
@@ -189,62 +174,10 @@
   .queue {
     margin: 0;
     padding: 0;
-  }
-  .qitem {
-    display: flex;
-    align-items: center;
-    border-radius: 8px;
-  }
-  .qitem:hover {
-    background: var(--bg-hover);
-  }
-  .qitem.now .qt {
-    color: var(--accent);
-  }
-  .qitem.past {
-    opacity: 0.5;
-  }
-  .qrow {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px;
-    flex: 1;
-    min-width: 0;
-    text-align: left;
-  }
-  .qmeta {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    flex: 1;
-  }
-  .qt,
-  .qa {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .qt {
-    font-weight: 600;
-    font-size: 0.9rem;
-  }
-  .qa {
-    font-size: 0.78rem;
-  }
-  .qd {
-    font-size: 0.78rem;
-    font-variant-numeric: tabular-nums;
-  }
-  .qx {
-    color: var(--text-dim);
-    padding: 0 10px;
-    opacity: 0;
-  }
-  .qitem:hover .qx {
-    opacity: 1;
-  }
-  .qx:hover {
+    --ql-dim: var(--text-dim);
+    --ql-hover: var(--bg-hover);
+    --ql-bg: var(--bg-elev);
+    --ql-ghost: var(--bg-hover);
     color: var(--text);
   }
   .empty {

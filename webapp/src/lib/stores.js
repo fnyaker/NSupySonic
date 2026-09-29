@@ -214,6 +214,10 @@ export const flashLevel = derived([vizFlash, vizFlashAck], ([$f, $ack]) =>
 // not just the curve, because that's what "my setup for headphones" or "my
 // setup for the car" actually means.
 //   [{ id, name, eq: bool, bands: number[10], bass: number, norm: string }]
+// How fast each podcast is played, by show (channel id -> rate). A show you
+// listen to at 1.5x is at 1.5x the next time too; music is never touched.
+export const podcastSpeeds = persisted("podcast.speeds", {});
+
 export const fxPresets = persisted("fx.presets", []);
 
 export function saveFxPreset(name) {
@@ -745,7 +749,9 @@ function createPlayer() {
     muted: get(savedMuted),
     shuffle: get(savedShuffle),
     repeat: get(savedRepeat),
-    autoplay: true, // autoplay is always on (no toggle)
+    // Keep going past the end of the queue (radio / Flow). On until the user
+    // clears the queue (clearUpcoming), off until they start a new one.
+    autoplay: true,
     context: sess.context || null,
     _orig: Array.isArray(sess._orig) ? sess._orig : null,
   });
@@ -928,7 +934,7 @@ function createPlayer() {
           queue = [cur, ...shuffled(queue.filter((_, i) => i !== index))];
           index = 0;
         }
-        return { ...s, queue, index, playing: true, context, _orig, seq: s.seq + 1 };
+        return { ...s, queue, index, playing: true, context, _orig, autoplay: true, seq: s.seq + 1 };
       });
     },
 
@@ -948,6 +954,7 @@ function createPlayer() {
         playing: true,
         context,
         _orig: q,
+        autoplay: true,
         seq: s.seq + 1,
       }));
     },
@@ -1039,6 +1046,55 @@ function createPlayer() {
         if (i < s.index) index--;
         else if (i === s.index) index = Math.min(index, queue.length - 1);
         return { ...s, queue, index };
+      });
+    },
+
+    // Move the track at `from` so that it ends up at index `to` (both indices
+    // into the queue as it is now). The playing track keeps playing: only its
+    // index follows, and `seq` is deliberately NOT bumped, or the audio owner
+    // would take it for a deliberate navigation and restart the track.
+    // Under shuffle `_orig` is left alone: it is the order un-shuffling goes
+    // back to, and a hand-made reorder of the shuffled run is not part of it.
+    move(from, to) {
+      const s = get({ subscribe });
+      const n = s.queue.length;
+      if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || from >= n) return;
+      to = Math.max(0, Math.min(n - 1, to));
+      // Nothing to do is decided BEFORE touching the store: an update that
+      // returns the same state still notifies, and the queue top-up listens.
+      if (from === to) return;
+      update((cur) => {
+        const queue = cur.queue.slice();
+        const [t] = queue.splice(from, 1);
+        queue.splice(to, 0, t);
+        let index = cur.index;
+        if (from === index) index = to;
+        else if (from < index && to >= index) index--;
+        else if (from > index && to <= index) index++;
+        return { ...cur, queue, index };
+      });
+    },
+
+    // Drop everything after the playing track. It also ends the endless
+    // continuation: clearing the queue and having a radio refill it five
+    // seconds later would be the opposite of what was asked. A new queue
+    // (playQueue / shufflePlay) turns it back on.
+    clearUpcoming() {
+      update((s) => {
+        const queue = s.index < 0 ? [] : s.queue.slice(0, s.index + 1);
+        return { ...s, queue, _orig: null, autoplay: false };
+      });
+    },
+
+    // Line up the next track and stop there: what a sleep timer set to "end of
+    // the track" does when the track ends. Bumping `seq` makes the audio owner
+    // load the new source, and playing:false has it wait paused instead of
+    // starting it.
+    advancePaused() {
+      update((s) => {
+        if (s.repeat !== "one" && s.index < s.queue.length - 1)
+          return { ...s, index: s.index + 1, playing: false, currentTime: 0, seq: s.seq + 1 };
+        return { ...s, playing: false };
       });
     },
 
