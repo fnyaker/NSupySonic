@@ -257,6 +257,10 @@ _KEEP_FIELDS = (
     "LYRICS_ID",
     "PROVIDER_ID",
     "RANK_SNG",
+    # Everybody else on the record (author, composer, producer…) and who
+    # released it: the credits panel reads them from here, offline.
+    "SNG_CONTRIBUTORS",
+    "LABEL_NAME",
 )
 
 

@@ -942,8 +942,8 @@
       {#if CAN_KEEP}<QualityMenu />{/if}
     </div>
     {#if moreAvailable}
-      <button class="peek" on:click={openMore} aria-label="Titres similaires et artiste">
-        <Icon name="chevronUp" size={16} /> Titres similaires
+      <button class="peek" on:click={openMore} aria-label="Crédits, artiste et titres similaires">
+        <Icon name="chevronUp" size={16} /> Crédits, artiste et similaires
       </button>
     {/if}
   </div>
@@ -954,7 +954,7 @@
       class:revealing
       style={`transform:translateY(${panelH() - reveal}px)`}
       role="dialog"
-      aria-label="Titres similaires et artiste"
+      aria-label="Crédits, artiste et titres similaires"
       aria-hidden={!more}
     >
       <div
@@ -966,7 +966,7 @@
       >
         <span class="grab" aria-hidden="true"></span>
         <div class="under-t">
-          <span>Sous le lecteur</span>
+          <span>À propos de ce titre</span>
           <button class="ic" on:click={closeMore} aria-label="Fermer"><Icon name="chevronDown" size={22} /></button>
         </div>
       </div>

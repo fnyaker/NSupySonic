@@ -330,6 +330,7 @@ export const api = {
 
   // radios
   trackRadio: (id) => req("/radio/track/" + id),
+  trackCredits: (id) => req("/track/" + id + "/credits"),
   artistRadio: (id) => req("/radio/artist/" + id),
 
   // podcasts

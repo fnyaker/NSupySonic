@@ -31,6 +31,18 @@ await ctx.route(/\/api\/radio\/track\//, (r) => {
   asked.push(new URL(r.request().url()).pathname);
   return json(r, { tracks: Array.from({ length: 12 }, (_, i) => tr(i + 1)) });
 });
+await ctx.route(/\/api\/track\/[^/]+\/credits$/, (r) => {
+  asked.push(new URL(r.request().url()).pathname);
+  return json(r, {
+    credits: [
+      { role: "main_artist", label: "Artiste principal", people: [{ name: "Le Groupe", deezer_id: "9" }] },
+      { role: "author", label: "Auteur", people: [{ name: "Ada Lovelace" }, { name: "Alan Turing" }] },
+      { role: "composer", label: "Compositeur", people: [{ name: "Ada Lovelace" }] },
+      { role: "producer", label: "Producteur", people: [{ name: "Grace Hopper" }] },
+    ],
+    info: { isrc: "FRZ111200001", released: "2001-03-12", label: "Un Label", album: "Un Album" },
+  });
+});
 await ctx.route(/\/api\/artist\/\d+$/, (r) => {
   asked.push(new URL(r.request().url()).pathname);
   return json(r, {
@@ -66,12 +78,34 @@ const shown = () => page.evaluate(() => {
   return Math.max(0, Math.min(innerHeight, innerHeight - r.top));
 });
 const H = 915;
+// The panel reads top to bottom: credits, the artist, and — last, it is the long
+// one — the similar tracks.
+async function checkOrder(root) {
+  const y = (sel) => page.locator(`${root} ${sel}`).first().evaluate((el) => el.getBoundingClientRect().top + scrollY + (el.closest(".under-b, .side-body")?.scrollTop || 0)).catch(() => null);
+  const c = await y(".credits");
+  const a = await y(".artist");
+  const t = await y("h3:has-text('Titres similaires')");
+  check(c !== null && a !== null && t !== null && c < a && a < t, "credits, then the artist, then the similar tracks at the very end", `credits ${Math.round(c)} < artist ${Math.round(a)} < similar ${Math.round(t)}`);
+}
+async function checkCredits(root) {
+  await page.waitForSelector(`${root} .crow`, { timeout: 8000 }).catch(() => {});
+  const rows = await page.locator(`${root} .crow`).allTextContents();
+  check(rows.length === 4, "one row per role", `${rows.length}`);
+  check(/Auteur\s*Ada Lovelace,\s*Alan Turing/.test(rows[1] || ""), "with every name of the role", (rows[1] || "").replace(/\s+/g, " "));
+  check((await page.locator(`${root} .credits a[href="#/artist/9"]`).count()) === 1, "a credited artist is a link to their page");
+  check(/12 mars 2001/.test(await page.locator(`${root} .release`).textContent()) && /FRZ111200001/.test(await page.locator(`${root} .release`).textContent()), "and the release details: date, label, ISRC");
+}
 
 if (DESKTOP) {
   await page.locator('button[aria-label="Plein écran"]').first().click();
   await page.waitForTimeout(600);
-  await page.locator(".side .tabs button", { hasText: "Similaires" }).click();
+  await page.locator(".side .tabs button", { hasText: "À propos" }).click();
   await page.waitForSelector(".more .row.track", { timeout: 8000 });
+  await checkCredits(".more");
+  await checkOrder(".more");
+  await page.waitForTimeout(2500); // the player ticks four times a second meanwhile
+  check(asked.filter((u) => /\/credits$/.test(u)).length === 1, "the credits are asked once, not on every tick of the player", `${asked.filter((u) => /\/credits$/.test(u)).length} request(s)`);
+  check(asked.filter((u) => /radio\/track/.test(u)).length === 1 && asked.filter((u) => /artist\/\d+$/.test(u)).length === 1, "and neither is the rest");
   check(asked.some((u) => /radio\/track\/\d+$/.test(u)), "the tab asks for the mix of the playing track", asked.join(" "));
   check((await page.locator(".more .row.track").count()) >= 5, "and lists similar tracks");
   check((await page.locator(".more .aname").textContent()).trim() === "Le Groupe", "with the artist under them");
@@ -99,7 +133,9 @@ if (DESKTOP) {
   await page.waitForTimeout(500);
   check((await shown()) >= H - 2, "and settles fully open past the threshold", `${await shown()} px`);
   await page.waitForSelector(".under .row.track", { timeout: 8000 });
-  check((await page.locator(".under .row.track").count()) >= 3, "with similar tracks in it");
+  await checkCredits(".under");
+  await checkOrder(".under");
+  check((await page.locator(".under .row.track").count()) >= 1, "with tracks in it");
   check((await page.locator(".under .aname").textContent()).trim() === "Le Groupe", "and the artist");
   if (process.env.SHOTS) await page.screenshot({ path: join(process.env.SHOTS, "panel-phone.png") });
 

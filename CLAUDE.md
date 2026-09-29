@@ -559,13 +559,27 @@ API only — the world and per-genre charts, editorial releases, the per-country
 calls, run side by side; the answer is kept ten minutes but ONLY WHEN COMPLETE (`_explore_cached`): a call that
 failed is a hole in the answer, not something to remember. The account owner's (admin) screen, like the home.
 
-**Under the full-screen player** (`components/NowPlayingMore.svelte`): tracks that sound like the playing one (the
-radio's mix — one call to swap for our own embeddings later) and the artist (photo, fans, top titles, similar
-artists; the public API has no biography, so the card does not pretend to). On the phone a swipe UP is the mirror
-of the swipe down that dismisses (`MobileNowPlaying`: `revealMove` / `revealEnd` beside `dismissMove` /
-`dismissEnd`, from the sheet or forwarded from the cover; the panel follows the finger and settles open or shut;
-its header drags it back down; a cancelled gesture decides nothing). On the desktop it is the *Similaires* tab.
-Following any link from in there leaves the player (a `hashchange` listener).
+**Under the full-screen player** (`components/NowPlayingMore.svelte`), top to bottom: the track's **credits**, the
+artist (photo, fans, top titles, similar artists; the public API has no biography, so the card does not pretend to)
+and — LAST, because it is the long one — tracks that sound like the playing one (the radio's mix: one call to swap
+for our own embeddings later). On the phone a swipe UP is the mirror of the swipe down that dismisses
+(`MobileNowPlaying`: `revealMove` / `revealEnd` beside `dismissMove` / `dismissEnd`, from the sheet or forwarded
+from the cover; the panel follows the finger and settles open or shut; its header drags it back down; a cancelled
+gesture decides nothing). On the desktop it is the *À propos* tab. Following any link from in there leaves the
+player (a `hashchange` listener). Its requests are keyed on the track's id as a STRING: `track` is the store's
+object, handed over again on every progress tick, and a reactive statement reading it asked for the credits four
+times a second (the browser test counts requests).
+
+**Full credits** (`supysonic/webui/credits.py`, `GET /api/track/<id>/credits`): the listing calls only carry the
+performers; everybody else (author, composer, producer, publisher…) is the gateway's `SNG_CONTRIBUTORS`, a
+role → names map, next to the ISRC, the release date, the label and the copyright. Where it comes from, best
+first: the `<track>.json` sidecar of an archived track (`SNG_CONTRIBUTORS` and `LABEL_NAME` are in `_KEEP_FIELDS`
+now); Deezer, asked once, kept a day in memory and — for an archived track — WRITTEN INTO the sidecar, so it is
+the last time anyone asks (an archived track carries its whole identity on disk, including for archives made
+before the field was kept); the database's performers, so the panel still says who is on the record while Deezer
+is out. Deezer not answering is never an answer about the track: the missing credits are simply missing. Known
+roles come in a sleeve's order and French labels (`ROLES`), a role Deezer invents is shown under its own name after
+them, and everything is bounded (40 names a role, 160 characters a string) since it is third-party text.
 
 **Back goes to the SCREEN, not the route** (`lib/nav.js`): hash routing gives real history, but the
 router destroys a page's component state on the way out and rebuilds it empty on the way in — so

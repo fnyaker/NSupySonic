@@ -178,6 +178,7 @@ POLICY = {
     "track_analysis": "read",
     "track_analyses": "read",  # a POST, and a read
     "probe_track": "read",
+    "track_credits": "read",
     "unavailable_tracks": "read",
     "replacement_candidates": "read",
     "replace_status": "read",

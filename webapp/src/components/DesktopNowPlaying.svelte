@@ -314,7 +314,7 @@
         <!-- A queue-only link lends the transport and the queue, not the
              library's reading (the lyrics are served at the "read" level). -->
         {#if CAN_BROWSE}<button class:active={tab === "lyrics"} on:click={() => (tab = "lyrics")}>Paroles</button>{/if}
-        {#if CAN_BROWSE && !$current.podcast}<button class:active={tab === "more"} on:click={() => (tab = "more")}>Similaires</button>{/if}
+        {#if CAN_BROWSE && !$current.podcast}<button class:active={tab === "more"} on:click={() => (tab = "more")}>À propos</button>{/if}
       </div>
       <div class="side-body">
         {#if tab === "queue"}
