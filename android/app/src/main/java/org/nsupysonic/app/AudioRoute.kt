@@ -68,10 +68,10 @@ class AudioRoute(context: Context, private val onChange: (String) -> Unit) {
 
     /** The route as JSON: {"kind": "bluetooth"|"usb"|"wired"|"hdmi"|"speaker"|"unknown", "name": …}. */
     fun current(): String {
-        val devices = try {
-            am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS) ?: emptyArray()
+        val devices: Array<AudioDeviceInfo> = try {
+            am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS) ?: emptyArray<AudioDeviceInfo>()
         } catch (_: Exception) {
-            emptyArray()
+            emptyArray<AudioDeviceInfo>()
         }
         var best: AudioDeviceInfo? = null
         var bestRank = Int.MAX_VALUE
