@@ -207,6 +207,10 @@ A single-page app built for speed, at `/app`:
 - **10-band equalizer** with presets of your own, bass enhancement.
 - An output **latency model** (Bluetooth, TV, receiver) shared by the animations, the lyrics and the
   listen party, with one per-device offset for what no API reports.
+- A **direct output** for Bluetooth (car radios included): the music goes straight to the system's
+  media output instead of through the browser's audio processor, which drops pieces of the sound on
+  Android Bluetooth links. Automatic on Bluetooth, and on any output where the player measures the
+  processed path losing time; the animations keep running on a copy of the sound.
 
 ### Animations
 

@@ -37,6 +37,27 @@
 //  - the analysers tap BEFORE the look-ahead delay. That delay is what lets
 //    the animation engine see the audio slightly before the listener hears it,
 //    which is the whole point of it (see setLookahead).
+//
+// THE DIRECT PATH (lib/audio/output.js decides when): no element is routed at
+// all. The browser's media pipeline plays it, and what the graph would have
+// done is done without touching the sound on its way out:
+//
+//   elA ──────────────────────────────→ the system's media output
+//    └ captureStream() → capA ─┐
+//   elB ─→ … the same ─ capB ──┼→ analysisBus → analysers, scope, rhythm tap
+//                   outputNode ┘               (nothing reaches destination)
+//
+//  - the normalization and the fade envelope ride on element.volume (the
+//    `vols` strips below): the same equal-power curve, driven from a timer, and
+//    a gain that can only go DOWN, since volume stops at 1;
+//  - the analysis reads a COPY of the sound (a MediaStream the element tees
+//    off its own renderer), so an animation that stutters costs a picture,
+//    never a piece of the music;
+//  - the context is suspended whenever nothing is analysing, so a phone in a
+//    car with its screen off has exactly one audio stream open: the element's.
+// Elements routed before the path went direct keep playing through the graph
+// until the player hands them over to fresh ones (Player.svelte#renewElements):
+// a routed element cannot be taken back out.
 
 import {
   eqEnabled,
@@ -47,6 +68,7 @@ import {
   vizLookahead,
   vizLookaheadMode,
 } from "../stores.js";
+import { directOutput } from "./output.js";
 
 let ctx = null;
 let analyserLo = null; // fine frequency resolution — the low end
@@ -55,6 +77,9 @@ let analyserHi = null; // fine TIME resolution — transients and the high end
 // The DSP nodes, built once with the context.
 let inputNode = null; // every source sums here
 let outputNode = null;
+// What every reader of the sound taps: the processed output, and on the direct
+// path the captured copies of the elements.
+let analysisBus = null;
 let lookaheadNode = null; // DelayNode, 0 s unless the user asks for compensation
 let eqFilters = [];
 let bassNode = null;
@@ -76,9 +101,15 @@ let limiterNode = null;
 const strips = new Map();
 
 // Whichever <audio> element is currently active, and whether any visualizer
-// view actually needs the analysers yet.
+// view actually needs the analysers yet. `analyserWanted` is sticky (once a
+// view has asked, every later element is routed, so re-opening the player never
+// re-routes a playing element); `analysisActive` is whether the engine is
+// running right now, which is what the direct path's capture follows.
 let currentEl = null;
 let analyserWanted = false;
+let analysisActive = false;
+// The direct path is in force (lib/audio/output.js#directOutput).
+let direct = false;
 
 // Fixed graphic-EQ centre frequencies (Hz), low→high. 10 bands.
 const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -387,13 +418,16 @@ function ensureGraph() {
     node.connect(outputNode);
     outputNode.connect(lookaheadNode);
     lookaheadNode.connect(ctx.destination);
-    outputNode.connect(analyserLo);
-    outputNode.connect(analyserHi);
+    analysisBus = ctx.createGain();
+    outputNode.connect(analysisBus);
+    analysisBus.connect(analyserLo);
+    analysisBus.connect(analyserHi);
 
     applyEffects();
     return true;
   } catch {
     ctx = null;
+    analysisBus = null;
     return false;
   }
 }
@@ -429,6 +463,7 @@ function applyEffects() {
   // on a LEVEL change (or an EQ/bass tweak) that happens mid-track, where an
   // instant jump would click. A track HANDOVER snaps instead — see setTrackGain.
   for (const el of strips.keys()) applyNorm(el, false);
+  applyDirectVolumes();
 }
 
 // Push a source's normalization gain onto its live node. `snap` sets it
@@ -466,6 +501,8 @@ export function setElementGain(el, db, snap = true) {
     applyNorm(el, snap);
   } else {
     pendingGain.set(el, v);
+    // Played direct: the gain is part of the element's volume.
+    if (vols.has(el)) applyVol(el);
   }
 }
 
@@ -499,9 +536,12 @@ function equalPowerCurve(from, to) {
 }
 
 // Ramp an element's fade gain to `to` over `seconds`. Returns false when the
-// element isn't wired (no graph → no crossfade; the caller falls back).
+// element isn't wired (no graph → no crossfade; the caller falls back). On the
+// direct path the envelope is the element's volume (see `vols`).
 export function fadeElement(el, to, seconds) {
+  if (!el) return false;
   const strip = strips.get(el);
+  if (!strip && (direct || vols.has(el))) return fadeVol(el, to, seconds);
   if (!ctx || !strip) return false;
   const g = strip.fade.gain;
   // Read where the envelope actually IS before cancelling, so interrupting a
@@ -516,7 +556,9 @@ export function fadeElement(el, to, seconds) {
 // an incoming source at 0 before it starts, and to reset one after a fade was
 // cancelled.
 export function setFade(el, v) {
+  if (!el) return false;
   const strip = strips.get(el);
+  if (!strip && (direct || vols.has(el))) return setVolFade(el, v);
   if (!ctx || !strip) return false;
   setParam(strip.fade.gain, Math.max(0, Math.min(1, v)), ctx.currentTime);
   return true;
@@ -531,9 +573,19 @@ export function isWired(el) {
 }
 
 // True when a crossfade is actually possible right now: the graph exists and
-// both elements are wired through it.
+// both elements are wired through it — or, on the direct path, neither is and
+// their volumes carry the fade. One of each (the moment between the path going
+// direct and the player handing its routed element over) cannot blend: one
+// envelope would run on the audio clock and the other on a timer.
 export function canCrossfade(a, b) {
+  if (!a || !b) return false;
+  if (direct && !strips.has(a) && !strips.has(b)) return true;
   return !!(ctx && strips.has(a) && strips.has(b));
+}
+
+/** Whether the player's sound must stay off Web Audio (lib/audio/output.js). */
+export function isDirect() {
+  return direct;
 }
 
 // -- share-sheet preview ----------------------------------------------------
@@ -553,6 +605,11 @@ let previewGainDb = null;
 // the element then plays raw, still audible.
 export function wirePreview(el) {
   if (!el) return;
+  // The direct path routes nothing, the preview included: it plays as it is.
+  if (direct) {
+    releasePreview();
+    return;
+  }
   if (previewEl === el) {
     resumeAudio();
     return;
@@ -602,6 +659,10 @@ function disconnectSource(el) {
 // wires the current element so they take effect immediately.
 function onFxChange() {
   applyEffects();
+  if (direct) {
+    applyDirectVolumes(); // a normalization level change moves the volumes
+    return;
+  }
   if (effectsOn() && currentEl) {
     wireAudio(currentEl);
     resumeAudio();
@@ -613,7 +674,12 @@ function onFxChange() {
 // it — otherwise the pure audio path is preserved (see the file header).
 export function registerSource(el) {
   currentEl = el;
-  if (el && (analyserWanted || effectsOn())) wireAudio(el);
+  if (!el) return;
+  if (direct) {
+    manage(el);
+    return;
+  }
+  if (analyserWanted || effectsOn()) wireAudio(el);
 }
 
 // The element the player last registered: the one the listener is hearing.
@@ -626,14 +692,37 @@ export function activeSource() {
 // so wire the current element (and future ones) and make sure the context runs.
 export function requestAnalyser() {
   analyserWanted = true;
-  if (currentEl) wireAudio(currentEl);
+  analysisActive = true;
+  if (direct) {
+    // Read a copy; route nothing.
+    if (ensureGraph()) captureAll();
+  } else if (currentEl) wireAudio(currentEl);
   resumeAudio();
+}
+
+/**
+ * The engine stopped (no view left, or the page hidden). On the processed path
+ * this changes nothing — later elements are still routed, so re-opening the
+ * player never re-routes one mid-song. On the direct path the copies are let
+ * go and the context is suspended: nothing else is reading it.
+ */
+export function releaseAnalyser() {
+  analysisActive = false;
+  if (!direct) return;
+  dropCaptures();
+  maybeSuspend();
 }
 
 // A crossfade has to arm the element that ISN'T active yet, so wiring can't wait
 // for registerSource. Wiring an idle, silent element costs nothing.
 export function wireAudio(el) {
   if (!el || strips.has(el)) return;
+  if (direct) {
+    // Nothing is routed on the direct path. The caller (a crossfade arming its
+    // incoming element) gets the element's volume as its envelope instead.
+    manage(el);
+    return;
+  }
   if (!ensureGraph()) return;
   try {
     // The chain (input→…→destination) is already connected, so the audible path
@@ -647,6 +736,15 @@ export function wireAudio(el) {
     norm.connect(fade);
     fade.connect(inputNode);
     const gainDb = pendingGain.has(el) ? pendingGain.get(el) : null;
+    // An element that was played direct hands its envelope over to the nodes:
+    // from here the volume is only the player's.
+    const was = vols.get(el);
+    if (was) {
+      fade.gain.value = currentFade(was, performance.now());
+      vols.delete(el);
+      el.volume = clamp01(baseVolume);
+      if (!vols.size) stopRampTimer();
+    }
     strips.set(el, { source, norm, fade, gainDb });
     pendingGain.delete(el);
     // Land the gain on the node NOW, snapped: the strip may have been created
@@ -657,9 +755,13 @@ export function wireAudio(el) {
   }
 }
 
-// AudioContexts start suspended until a user gesture; call this on play.
+// AudioContexts start suspended until a user gesture; call this on play. On the
+// direct path a context nobody is reading stays suspended: the player calls this
+// on every progress tick, and it must not wake a context just to render silence.
 export function resumeAudio() {
-  if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+  if (!ctx || ctx.state !== "suspended") return;
+  if (direct && !analysisActive && !strips.size) return;
+  ctx.resume().catch(() => {});
 }
 
 export function getAnalysers() {
@@ -680,7 +782,7 @@ export function getContext() {
 // a ChannelSplitter after the output and one analyser per channel, read with
 // getFloatTimeDomainData rather than getFloatFrequencyData.
 //
-// It taps `outputNode`, BEFORE the look-ahead delay, exactly like the spectrum
+// It taps the analysis bus, BEFORE the look-ahead delay, exactly like the spectrum
 // analysers: the scope has to be drawing the same instant of audio the rest of
 // the engine is reading, or a scene showing both would show them a third of a
 // second apart.
@@ -727,7 +829,7 @@ function buildScope() {
       // others: nothing here wants the analyser's own opinion.
       a.smoothingTimeConstant = 0;
     }
-    outputNode.connect(scopeSplitter);
+    analysisBus.connect(scopeSplitter);
     scopeSplitter.connect(scopeAnL, 0);
     scopeSplitter.connect(scopeAnR, 1);
     allocScope();
@@ -747,13 +849,13 @@ function allocScope() {
 }
 
 function teardownScope() {
-  // The connection INTO the splitter belongs to `outputNode`, so the splitter
-  // disconnecting itself only drops its own outputs and leaves the output node
-  // still feeding it. Opening and closing the scope a few times would then
-  // leave a chain of splitters hanging off it, each one still being rendered
-  // into. Drop it from the source side first.
+  // The connection INTO the splitter belongs to `analysisBus`, so the splitter
+  // disconnecting itself only drops its own outputs and leaves the bus still
+  // feeding it. Opening and closing the scope a few times would then leave a
+  // chain of splitters hanging off it, each one still being rendered into.
+  // Drop it from the source side first.
   try {
-    if (scopeSplitter) outputNode?.disconnect(scopeSplitter);
+    if (scopeSplitter) analysisBus?.disconnect(scopeSplitter);
   } catch {
     /* already gone */
   }
@@ -821,7 +923,7 @@ export function readScope() {
 // --- the rhythm analyser's tap -----------------------------------------------
 //
 // lib/audio/engine.js runs the analysis in an AudioWorklet (rhythm.worklet.js)
-// and hands its node here to be fed. It taps `outputNode`, BEFORE the
+// and hands its node here to be fed. It taps the analysis bus, BEFORE the
 // look-ahead delay, like every other reader of the graph — with a look-ahead
 // configured it hears the music before the listener does, which is what lets
 // the engine deliver each frame exactly when its audio is heard. A node that
@@ -830,12 +932,12 @@ export function readScope() {
 let rhythmTap = null; // { node, mute }
 
 export function tapRhythm(node) {
-  if (!ctx || !outputNode || !node) return false;
+  if (!ctx || !analysisBus || !node) return false;
   untapRhythm();
   try {
     const mute = ctx.createGain();
     mute.gain.value = 0;
-    outputNode.connect(node);
+    analysisBus.connect(node);
     node.connect(mute);
     mute.connect(ctx.destination);
     rhythmTap = { node, mute };
@@ -850,7 +952,7 @@ export function untapRhythm() {
   const { node, mute } = rhythmTap;
   rhythmTap = null;
   try {
-    outputNode?.disconnect(node);
+    analysisBus?.disconnect(node);
   } catch {
     /* already gone */
   }
@@ -863,6 +965,9 @@ export function untapRhythm() {
 }
 
 export function lookaheadSeconds() {
+  // On the direct path nothing audible goes through the delay: what the
+  // analysis reads is a copy of what the element is already playing.
+  if (direct && !strips.size) return 0;
   return lookaheadNode ? lookaheadNode.delayTime.value : 0;
 }
 
@@ -893,13 +998,18 @@ function applyLookahead() {
   }
 }
 
-/** Whether the look-ahead is the engine's to set (the "auto" mode). */
+/**
+ * Whether the look-ahead is the engine's to set (the "auto" mode). Never on the
+ * direct path: there is no delay in front of the listener to set, and a frame
+ * that arrives late there is late whatever the engine asks for.
+ */
 export function lookaheadIsAuto() {
-  return fx.lookaheadAuto;
+  return fx.lookaheadAuto && !direct;
 }
 
 /** Where the look-ahead is heading (seconds), ramps included. */
 export function lookaheadTarget() {
+  if (direct && !strips.size) return 0;
   return scheduledLead ?? wantedLead();
 }
 
@@ -913,6 +1023,7 @@ export function lookaheadSettled() {
  * slow ramp, and remembered for this device's next graph.
  */
 export function setAutoLookahead(seconds) {
+  if (direct) return; // measured against a path the listener is not hearing
   const v = Math.max(0, Math.min(AUTO_LOOKAHEAD_MAX / 1000, +seconds || 0));
   autoLead = v;
   try {
@@ -921,6 +1032,334 @@ export function setAutoLookahead(seconds) {
     /* private mode */
   }
   if (fx.lookaheadAuto) applyLookahead();
+}
+
+// --- the direct path ----------------------------------------------------------
+//
+// See the file header and lib/audio/output.js for why it exists. Everything
+// here keeps the player's calls (setElementGain, fadeElement, setFade,
+// canCrossfade, registerSource) meaning what they mean on the processed path,
+// with the element's volume standing in for the nodes.
+
+// The player's own level (its volume, mute and sleep fade), which every direct
+// element's volume is a fraction of.
+let baseVolume = 1;
+// el -> { fade, ramp }: the fade envelope of an element played direct. `ramp`
+// is { from, to, t0, ms } while a fade runs, driven by one shared timer.
+const vols = new Map();
+let rampTimer = 0;
+// A volume ramp is a staircase: 25 ms steps along a 6 s equal-power curve are
+// changes of under 1% each, below anything a listener can hear as a step. The
+// envelope is computed from the wall clock at each step, so a late step lands
+// where the curve IS rather than where it was — and since a backgrounded
+// WebView may throttle timers hard, the player also steps it on every
+// `timeupdate` (tickVolumes), which the media pipeline fires four times a
+// second whatever the page's timers are doing. A fade can come out coarser in
+// the background; it can never stall with the incoming track silent.
+const RAMP_TICK = 25;
+
+const clamp01 = (v) => (v > 1 ? 1 : v > 0 ? v : 0);
+
+function angleOf(v) {
+  return Math.asin(clamp01(v));
+}
+
+// Where an envelope is at `now` (performance.now() ms): the same quarter
+// circle equalPowerCurve samples for the audio clock.
+function currentFade(v, now) {
+  const r = v.ramp;
+  if (!r) return v.fade;
+  const x = r.ms > 0 ? (now - r.t0) / r.ms : 1;
+  if (x >= 1) return r.to;
+  if (x <= 0) return r.from;
+  return Math.sin(angleOf(r.from) * (1 - x) + angleOf(r.to) * x);
+}
+
+// The normalization a direct element can carry: element.volume stops at 1, so
+// a gain can only turn a track DOWN. A quiet master stays as quiet as it is,
+// which is the honest failure — the alternative (lowering everything else to
+// make room) would make the whole player quieter than the device's own volume.
+function directNorm(el) {
+  return Math.min(1, normLinearFor(pendingGain.has(el) ? pendingGain.get(el) : null));
+}
+
+function applyVol(el, now = performance.now()) {
+  const v = vols.get(el);
+  if (!v) return;
+  const g = clamp01(baseVolume * directNorm(el) * currentFade(v, now));
+  // Assigning an unchanged volume still fires `volumechange` and costs a trip
+  // to the media thread; skip it.
+  if (Math.abs(el.volume - g) > 1e-4) el.volume = g;
+}
+
+function applyDirectVolumes() {
+  const now = performance.now();
+  for (const el of vols.keys()) applyVol(el, now);
+}
+
+// Take an element's volume in charge (idempotent). It starts at full fade.
+function manage(el) {
+  if (!el || strips.has(el)) return;
+  if (!vols.has(el)) vols.set(el, { fade: 1, ramp: null });
+  applyVol(el);
+  if (direct && analysisActive) captureElement(el);
+}
+
+function stopRampTimer() {
+  if (rampTimer) clearInterval(rampTimer);
+  rampTimer = 0;
+}
+
+function tickRamps() {
+  const now = performance.now();
+  let live = 0;
+  for (const [el, v] of vols) {
+    if (!v.ramp) continue;
+    if (now - v.ramp.t0 >= v.ramp.ms) {
+      v.fade = v.ramp.to;
+      v.ramp = null;
+    } else live++;
+    applyVol(el, now);
+  }
+  if (!live) stopRampTimer();
+}
+
+/** Step the direct elements' fades now (the player calls it on timeupdate). */
+export function tickVolumes() {
+  if (rampTimer) tickRamps();
+}
+
+function fadeVol(el, to, seconds) {
+  manage(el);
+  const v = vols.get(el);
+  if (!v) return false;
+  const now = performance.now();
+  // From where the envelope audibly IS, so an interrupted fade continues.
+  const from = currentFade(v, now);
+  const target = clamp01(to);
+  if (!(seconds > 0.01)) {
+    v.fade = target;
+    v.ramp = null;
+  } else {
+    v.fade = from;
+    v.ramp = { from, to: target, t0: now, ms: seconds * 1000 };
+    if (!rampTimer && typeof setInterval === "function") rampTimer = setInterval(tickRamps, RAMP_TICK);
+  }
+  applyVol(el, now);
+  return true;
+}
+
+function setVolFade(el, value) {
+  manage(el);
+  const v = vols.get(el);
+  if (!v) return false;
+  v.fade = clamp01(value);
+  v.ramp = null;
+  applyVol(el);
+  return true;
+}
+
+/**
+ * The player's level, for the elements it names (the playing one, and the
+ * outgoing one of a crossfade). A routed element takes it as its volume, as it
+ * always has; a direct one takes it times its normalization and its fade.
+ */
+export function setPlayerVolume(v, elements = []) {
+  baseVolume = clamp01(+v || 0);
+  for (const el of elements) {
+    if (!el) continue;
+    if (vols.has(el)) applyVol(el);
+    else el.volume = baseVolume;
+  }
+}
+
+// The copies the analysis reads on the direct path: el -> { stream, node,
+// trackId, refresh }. HTMLMediaElement.captureStream() tees the element's
+// decoded sound into a MediaStream WITHOUT taking it off the speakers (unlike
+// createMediaElementSource), and a MediaStreamAudioSourceNode brings it into
+// the context — onto the analysis bus only, never toward the destination.
+//
+// A MediaStreamAudioSourceNode is bound to the track it was built on, and an
+// element replaces its tracks whenever its source changes (every track change),
+// so the node is rebuilt whenever the live track differs.
+const captures = new Map();
+// Off for the rest of the session when a copy was measured disturbing the
+// playback it copies (timekeeper.js): the animations go quiet, the music stays.
+let captureOff = false;
+
+function captureElement(el) {
+  if (!el || captureOff || captures.has(el) || !ctx || !analysisBus) return;
+  if (typeof el.captureStream !== "function") return; // Firefox reroutes, Safari has none
+  let stream;
+  try {
+    stream = el.captureStream();
+  } catch {
+    return;
+  }
+  const cap = { stream, node: null, trackId: null, refresh: null };
+  cap.refresh = () => refreshCapture(el, cap);
+  try {
+    stream.addEventListener("addtrack", cap.refresh);
+    stream.addEventListener("removetrack", cap.refresh);
+  } catch {
+    /* a stream without events: the element's own events below still cover it */
+  }
+  el.addEventListener("playing", cap.refresh);
+  el.addEventListener("loadeddata", cap.refresh);
+  captures.set(el, cap);
+  cap.refresh();
+}
+
+function refreshCapture(el, cap) {
+  if (captures.get(el) !== cap || !ctx || !analysisBus) return;
+  let track = null;
+  try {
+    track = cap.stream.getAudioTracks().find((t) => t.readyState === "live") || null;
+  } catch {
+    track = null;
+  }
+  const id = track ? track.id : null;
+  if (id === cap.trackId && cap.node) return;
+  if (cap.node) {
+    try {
+      cap.node.disconnect();
+    } catch {
+      /* already gone */
+    }
+    cap.node = null;
+  }
+  cap.trackId = id;
+  if (!track) return;
+  try {
+    cap.node = ctx.createMediaStreamSource(new MediaStream([track]));
+    cap.node.connect(analysisBus);
+  } catch {
+    cap.node = null;
+  }
+}
+
+function dropCapture(el) {
+  const cap = captures.get(el);
+  if (!cap) return;
+  captures.delete(el);
+  try {
+    cap.stream.removeEventListener("addtrack", cap.refresh);
+    cap.stream.removeEventListener("removetrack", cap.refresh);
+  } catch {
+    /* ignore */
+  }
+  el.removeEventListener("playing", cap.refresh);
+  el.removeEventListener("loadeddata", cap.refresh);
+  if (cap.node) {
+    try {
+      cap.node.disconnect();
+    } catch {
+      /* ignore */
+    }
+  }
+  // Ending the copy's tracks releases the tee in the element's renderer; the
+  // element itself plays on untouched.
+  try {
+    for (const t of cap.stream.getTracks()) t.stop();
+  } catch {
+    /* ignore */
+  }
+}
+
+function dropCaptures() {
+  for (const el of [...captures.keys()]) dropCapture(el);
+}
+
+function captureAll() {
+  if (captureOff) return;
+  if (currentEl && !strips.has(currentEl)) manage(currentEl);
+  for (const el of vols.keys()) captureElement(el);
+}
+
+// Nothing is reading the context and nothing plays through it: let it stop.
+function maybeSuspend() {
+  if (!ctx || !direct || analysisActive || strips.size) return;
+  if (ctx.state === "running") ctx.suspend().catch(() => {});
+}
+
+/** Whether the animations are reading a copy of the sound right now. */
+export function isCapturing() {
+  return captures.size > 0;
+}
+
+/**
+ * Stop copying the sound for the rest of the session: the timekeeper measured
+ * the direct element losing time while a copy was being taken. The animations
+ * lose their input; the music is what matters.
+ */
+export function disableCapture() {
+  captureOff = true;
+  dropCaptures();
+}
+
+/**
+ * The player is discarding an element for good (a routed one it replaced to go
+ * direct): drop everything the graph holds for it. Once no routed element is
+ * left on the direct path, the context is suspended unless the analysis runs.
+ */
+export function releaseElement(el) {
+  if (!el) return;
+  disconnectSource(el);
+  dropCapture(el);
+  vols.delete(el);
+  pendingGain.delete(el);
+  if (!vols.size) stopRampTimer();
+  if (currentEl === el) currentEl = null;
+  maybeSuspend();
+}
+
+/**
+ * What the audio path is doing, for diagnostics (window.__nsAudioPath, the
+ * browser tests): whether `el` is routed, how many elements the graph routes or
+ * steers by volume, whether the animations read a copy, the context's state and
+ * the loudest bin the fast analyser sees (dB; -Infinity on silence).
+ */
+export function pathState(el) {
+  let level = null;
+  if (analyserHi && ctx && ctx.state === "running") {
+    const a = new Float32Array(analyserHi.frequencyBinCount);
+    analyserHi.getFloatFrequencyData(a);
+    level = -Infinity;
+    for (let i = 0; i < a.length; i++) if (a[i] > level) level = a[i];
+  }
+  return {
+    direct,
+    wired: isWired(el),
+    routed: strips.size,
+    steered: vols.size,
+    capturing: captures.size,
+    captureOff,
+    context: ctx ? ctx.state : null,
+    analysis: analysisActive,
+    level,
+  };
+}
+
+function setDirect(v) {
+  v = !!v;
+  if (v === direct) return;
+  direct = v;
+  if (direct) {
+    // Routed elements keep their strips (they are audible through them) until
+    // the player replaces them; the element it registers from now on is taken
+    // in charge here. The copies start if the engine is running.
+    if (currentEl && !strips.has(currentEl)) manage(currentEl);
+    if (analysisActive && ensureGraph()) captureAll();
+    maybeSuspend();
+  } else {
+    // Back to the processed path: the copies go (the engine reads the graph's
+    // own output again), and the current element is routed as before whenever
+    // something wants it. Direct elements keep their volume envelopes until
+    // they are routed, so a fade in flight still lands.
+    dropCaptures();
+    if (currentEl && (analyserWanted || effectsOn())) wireAudio(currentEl);
+    resumeAudio();
+  }
 }
 
 // Drive the graph from the effect stores. Each subscribe fires immediately with
@@ -954,6 +1393,7 @@ vizLookaheadMode.subscribe((v) => {
   fx.lookaheadAuto = v !== "manual";
   applyLookahead();
 });
+directOutput.subscribe(setDirect);
 
 // Exposed for the settings UI: the fixed EQ centre frequencies, so the sliders
 // can label themselves without hard-coding the list twice.

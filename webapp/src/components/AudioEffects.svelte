@@ -15,13 +15,76 @@
     crossfadeOnSkip,
     trimSilence,
     trimThresholdDb,
+    audioOutput,
+    glitchRoutes,
     saveFxPreset,
     applyFxPreset,
     deleteFxPreset,
     toasts,
   } from "../lib/stores.js";
   import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/audio/graph.js";
+  import { outputPlan, forgetGlitch, activeGlitches } from "../lib/audio/output.js";
   import Icon from "./Icon.svelte";
+
+  // -- where the sound goes (lib/audio/output.js) ------------------------------
+  const OUTPUT_MODES = [
+    { id: "auto", label: "Automatique", short: "Auto" },
+    { id: "direct", label: "Directe" },
+    { id: "graph", label: "Traitée" },
+  ];
+  const OUTPUT_HINTS = {
+    auto:
+      "Directe en Bluetooth (autoradio, casque, enceinte) et sur toute sortie où le traitement a perdu des morceaux ; traitée ailleurs.",
+    direct:
+      "Le son part tel quel vers le système, comme dans n'importe quelle application de musique : la lecture la plus robuste. Les animations suivent une copie du son ; l'égaliseur et les basses sont inactifs, et la normalisation ne fait que baisser les titres trop forts.",
+    graph:
+      "Tout passe par le moteur audio du navigateur : égaliseur, basses, normalisation complète. Déconseillé en Bluetooth sur Android, où ce moteur peut couper des morceaux du son.",
+  };
+  const KIND_LABEL = {
+    bluetooth: "Bluetooth",
+    wired: "Filaire",
+    usb: "USB",
+    speaker: "Haut-parleur",
+    hdmi: "HDMI",
+    other: "Autre sortie",
+  };
+  $: plan = $outputPlan;
+  $: route = plan.route;
+  $: routeText =
+    route.kind === "unknown"
+      ? ""
+      : route.source === "latency"
+        ? "Bluetooth probable (latence de sortie)"
+        : `${KIND_LABEL[route.kind] || "Sortie"}${route.name ? " · " + route.name : ""}`;
+  $: whyText = {
+    setting: "choisie ici",
+    bluetooth: routeText || "Bluetooth",
+    glitch: "le traitement perdait des morceaux sur cette sortie",
+    dsp: "Bluetooth, mais l'égaliseur ou les basses demandent le traitement",
+    default: routeText || "sortie non identifiée — passera en directe si le traitement perd des morceaux",
+  }[plan.why];
+  $: remembered = activeGlitches($glitchRoutes);
+  // What the equalizer and the bass lift do on the direct path: nothing — except
+  // in automatic mode on Bluetooth, where switching one on is what hands the
+  // output back to the processed path.
+  $: dspNote = !plan.direct
+    ? ""
+    : plan.why === "bluetooth"
+      ? "L'activer fait passer cette sortie en lecture traitée."
+      : "Inactif en lecture directe.";
+  function routeName(g) {
+    if (g.name) return g.name;
+    if (g.key === "latency:high") return "Sortie Bluetooth (navigateur)";
+    if (g.key === "default") return "Cet appareil";
+    return KIND_LABEL[g.kind] || g.key;
+  }
+  function fmtDay(ts) {
+    try {
+      return new Date(ts).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+    } catch {
+      return "";
+    }
+  }
 
   const NORM_LEVELS = [
     { id: "off", label: "Désactivée", hint: "Volume d'origine" },
@@ -125,6 +188,47 @@
 </script>
 
 <section class="card">
+  <h2><Icon name="speaker" size={18} /> Sortie audio</h2>
+  <p class="muted sub">
+    Le chemin du son jusqu'à vos écouteurs, votre enceinte ou l'autoradio.
+  </p>
+  <div class="seg out-seg" role="radiogroup" aria-label="Sortie audio">
+    {#each OUTPUT_MODES as m}
+      <button
+        class="seg-btn"
+        class:sel={$audioOutput === m.id}
+        role="radio"
+        aria-checked={$audioOutput === m.id}
+        aria-label={m.label}
+        on:click={() => audioOutput.set(m.id)}
+      >
+        {#if m.short}<span class="long">{m.label}</span><span class="short">{m.short}</span>{:else}{m.label}{/if}
+      </button>
+    {/each}
+  </div>
+  <p class="muted out-hint">{OUTPUT_HINTS[$audioOutput] || OUTPUT_HINTS.auto}</p>
+  <div class="out-status" class:direct={plan.direct}>
+    <span class="out-ico"><Icon name={route.kind === "bluetooth" ? "bluetooth" : "speaker"} size={16} /></span>
+    <span class="out-txt">
+      <span class="out-mode">{plan.direct ? "Lecture directe" : "Lecture traitée"}</span>
+      <span class="muted out-why">{whyText}</span>
+    </span>
+  </div>
+  {#if remembered.length}
+    <div class="glitches">
+      <span class="g-title">Sorties où le traitement perdait des morceaux</span>
+      {#each remembered as g (g.key)}
+        <div class="g-row">
+          <span class="g-name">{routeName(g)}</span>
+          <span class="muted g-when">{fmtDay(g.at)}</span>
+          <button class="g-retry" on:click={() => forgetGlitch(g.key)}>Réessayer le traitement</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+</section>
+
+<section class="card">
   <h2><Icon name="sliders" size={18} /> Audio</h2>
   <p class="muted sub">
     Ces effets traitent le son dans le navigateur. Ils sont désactivés par
@@ -159,6 +263,7 @@
         Gain fixe par titre (selon sa loudness ReplayGain analysée par Deezer)
         pour que tous jouent au même niveau — sans compression ni ajustement
         pendant la lecture.
+        {#if plan.direct}En lecture directe, elle ne fait que baisser les titres trop forts.{/if}
       </span>
     </div>
     <div class="seg">
@@ -174,7 +279,10 @@
   <div class="block">
     <div class="block-head">
       <span class="block-title">Amélioration des basses</span>
-      <span class="muted block-hint">Renforce le grave. Un limiteur automatique évite la saturation.</span>
+      <span class="muted block-hint">
+        Renforce le grave. Un limiteur automatique évite la saturation.
+        {#if dspNote}<span class="off-note">{dspNote}</span>{/if}
+      </span>
     </div>
     <div class="slider-row">
       <input type="range" min="0" max="1" step="0.01" value={$bassBoost} on:input={(e) => bassBoost.set(+e.target.value)} />
@@ -187,7 +295,10 @@
     <button class="toggle" role="switch" aria-checked={$eqEnabled} on:click={() => eqEnabled.set(!$eqEnabled)}>
       <span class="tg-txt">
         <span class="tg-title">Égaliseur 10 bandes</span>
-        <span class="tg-hint muted">Ajustez chaque bande de fréquence (±16 dB).</span>
+        <span class="tg-hint muted">
+          Ajustez chaque bande de fréquence (±16 dB).
+          {#if dspNote}<span class="off-note">{dspNote}</span>{/if}
+        </span>
       </span>
       <span class="sw" class:on={$eqEnabled}><span class="knob"></span></span>
     </button>
@@ -291,8 +402,10 @@
       <span class="tg-txt">
         <span class="tg-title">Fondu enchaîné</span>
         <span class="tg-hint muted">
-          Les deux titres se superposent en fin de morceau. Comme les effets, cela
-          fait passer la lecture par le processeur audio.
+          Les deux titres se superposent en fin de morceau.
+          {plan.direct
+            ? "En lecture directe, le fondu se fait sur le volume de chacun."
+            : "Comme les effets, cela fait passer la lecture par le moteur audio."}
         </span>
       </span>
       <span class="sw" class:on={$crossfadeEnabled}><span class="knob"></span></span>
@@ -371,6 +484,113 @@
 </section>
 
 <style>
+  /* One row of three, whatever the width: a mode switch that wraps reads as
+     two unrelated groups. */
+  .out-seg {
+    flex-wrap: nowrap;
+    max-width: 480px;
+  }
+  .out-seg .seg-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 40px;
+    white-space: nowrap;
+  }
+  .out-seg .short {
+    display: none;
+  }
+  @media (max-width: 420px) {
+    .out-seg .long {
+      display: none;
+    }
+    .out-seg .short {
+      display: inline;
+    }
+  }
+  .out-hint {
+    font-size: 0.8rem;
+    line-height: 1.45;
+    margin: 12px 0 0;
+  }
+  .out-status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 14px;
+    padding: 11px 14px;
+    border-radius: 12px;
+    background: var(--bg);
+    border: 1px solid var(--bg-hover);
+  }
+  .out-status.direct {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--bg-hover));
+  }
+  .out-ico {
+    flex: none;
+    display: flex;
+    color: var(--text-dim);
+  }
+  .out-status.direct .out-ico {
+    color: var(--accent);
+  }
+  .out-txt {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .out-mode {
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .out-why {
+    font-size: 0.78rem;
+    overflow-wrap: anywhere;
+  }
+  .glitches {
+    margin-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .g-title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .g-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+  .g-name {
+    font-weight: 600;
+    font-size: 0.88rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .g-when {
+    font-size: 0.78rem;
+  }
+  .g-retry {
+    margin-left: auto;
+    padding: 8px 14px;
+    min-height: 36px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.8rem;
+  }
+  .g-retry:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .off-note {
+    color: var(--accent);
+    font-weight: 600;
+  }
   .s-label {
     min-width: 58px;
     font-size: 0.82rem;

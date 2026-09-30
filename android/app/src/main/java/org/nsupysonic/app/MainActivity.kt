@@ -97,6 +97,9 @@ class MainActivity : AppCompatActivity() {
     // settings from hours in the background.
     private var leftAt = 0L
     private var pingToken = 0
+    // Which output the music goes to, pushed to the page as it changes (the
+    // page plays direct on Bluetooth — see AudioRoute).
+    private var audioRoute: AudioRoute? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -154,6 +157,8 @@ class MainActivity : AppCompatActivity() {
         )
 
         configureWebView(webView)
+
+        audioRoute = AudioRoute(this) { json -> pushAudioRoute(json) }.also { it.start() }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -701,6 +706,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Tell the page where the music is going. A page that is not listening yet
+     * (still loading, or rebuilt) reads it through Bridge.audioRoute instead.
+     * `json` is AudioRoute's own output: built by JSONObject from a device name
+     * already reduced to printable characters.
+     */
+    private fun pushAudioRoute(json: String) {
+        if (webViewDead || !::webView.isInitialized) return
+        if (!isServerUrl(webView.url)) return
+        try {
+            webView.evaluateJavascript(
+                "window.__nsAudioRoute && window.__nsAudioRoute($json)", null
+            )
+        } catch (_: Exception) {
+            /* WebView torn down under us */
+        }
+    }
+
     private fun runJsCommand(cmd: String, value: Double?) {
         // A media-button command is posted to the main looper, so it can land
         // AFTER the activity tore its WebView down (or after the renderer died).
@@ -761,6 +784,19 @@ class MainActivity : AppCompatActivity() {
                 packageManager.getPackageInfo(packageName, 0).versionName ?: ""
             } catch (_: Exception) {
                 ""
+            }
+
+        /**
+         * The output the music is going to right now, as JSON (AudioRoute):
+         * read once by the page at startup (lib/audio/output.js); later changes
+         * are pushed to window.__nsAudioRoute.
+         */
+        @JavascriptInterface
+        fun audioRoute(): String =
+            try {
+                this@MainActivity.audioRoute?.current() ?: "{\"kind\":\"unknown\",\"name\":\"\"}"
+            } catch (_: Exception) {
+                "{\"kind\":\"unknown\",\"name\":\"\"}"
             }
 
         @JavascriptInterface
@@ -835,6 +871,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        audioRoute?.stop()
+        audioRoute = null
         service?.commandSink = null
         if (bound) {
             try {

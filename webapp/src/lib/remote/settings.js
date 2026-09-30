@@ -11,6 +11,8 @@
 //    room watching its projector accepted nothing). A controller may choose
 //    `viz.flash`, and without that acceptance "unleashed" plays as "full".
 //  - `viz.lookahead`: a latency of this device's own output path.
+//  - `audio.output` and `audio.glitchRoutes`: which path THIS device's sound
+//    takes to THIS device's speakers or car radio (lib/audio/output.js).
 //  - UI state and history (`ui.*`, `recent.*`, `playlist.lastUsed`) and the
 //    transport (`player.volume`/`muted`/`shuffle`/`repeat`), which travel as
 //    commands of their own.
