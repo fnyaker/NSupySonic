@@ -71,6 +71,8 @@ import {
 import { directOutput } from "./output.js";
 
 let ctx = null;
+// How many contexts this page has built: a new number is a fresh context.
+let ctxSerial = 0;
 let analyserLo = null; // fine frequency resolution — the low end
 let analyserHi = null; // fine TIME resolution — transients and the high end
 
@@ -338,6 +340,7 @@ function ensureGraph() {
     // buffers and audibly underruns (sub-100ms dropouts) on busy main threads —
     // and for music playback the extra output latency is imperceptible.
     ctx = new AC({ latencyHint: "playback" });
+    ctxSerial++;
     inputNode = ctx.createGain();
     outputNode = ctx.createGain();
 
@@ -424,6 +427,9 @@ function ensureGraph() {
     analysisBus.connect(analyserHi);
 
     applyEffects();
+    // A context rebuilt under a scope that is still on screen (resetContext)
+    // gets its tap back.
+    if (scopeRefs > 0 && !scopeAnL) buildScope();
     return true;
   } catch {
     ctx = null;
@@ -1310,7 +1316,66 @@ export function releaseElement(el) {
   pendingGain.delete(el);
   if (!vols.size) stopRampTimer();
   if (currentEl === el) currentEl = null;
+  if (resetWanted && !strips.size) closeContext();
   maybeSuspend();
+}
+
+// --- starting again on a fresh context --------------------------------------
+//
+// A context the timekeeper caught losing audio is not trusted again: whatever
+// state it is in (its output stream opened on another device, a render thread
+// that fell behind a Bluetooth sink) is exactly what a reconnection cured when
+// it was reported. Once no routed element plays through it, it is closed, and
+// whatever needs a context next — the animations' copy now, the processed path
+// when it is retried — builds a new one against the output as it is now.
+let resetWanted = false;
+const resetListeners = new Set();
+
+/** Close the context as soon as nothing audible goes through it any more. */
+export function requestContextReset() {
+  if (!ctx) return;
+  resetWanted = true;
+  if (!strips.size) closeContext();
+}
+
+/** Called after the context was closed and forgotten (the engine starts over). */
+export function onContextReset(fn) {
+  resetListeners.add(fn);
+  return () => resetListeners.delete(fn);
+}
+
+function closeContext() {
+  resetWanted = false;
+  const old = ctx;
+  if (!old) return;
+  dropCaptures();
+  teardownScope();
+  untapRhythm();
+  ctx = null;
+  analyserLo = analyserHi = null;
+  inputNode = outputNode = analysisBus = lookaheadNode = null;
+  eqFilters = [];
+  bassNode = bassComp = limiterNode = null;
+  scheduledLead = null;
+  leadSettlesAt = 0;
+  try {
+    old.close().catch(() => {});
+  } catch {
+    /* already closed */
+  }
+  for (const fn of resetListeners) {
+    try {
+      fn();
+    } catch {
+      /* a listener never stops the reset */
+    }
+  }
+  // What was reading the sound goes on reading it, from a fresh context.
+  if (analysisActive && ensureGraph()) {
+    if (direct) captureAll();
+    else if (currentEl) wireAudio(currentEl);
+    resumeAudio();
+  }
 }
 
 /**
@@ -1335,6 +1400,7 @@ export function pathState(el) {
     capturing: captures.size,
     captureOff,
     context: ctx ? ctx.state : null,
+    serial: ctxSerial,
     analysis: analysisActive,
     level,
   };

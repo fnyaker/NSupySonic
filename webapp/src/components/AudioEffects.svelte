@@ -23,7 +23,7 @@
     toasts,
   } from "../lib/stores.js";
   import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/audio/graph.js";
-  import { outputPlan, forgetGlitch, activeGlitches } from "../lib/audio/output.js";
+  import { outputPlan, retryNow } from "../lib/audio/output.js";
   import Icon from "./Icon.svelte";
 
   // -- where the sound goes (lib/audio/output.js) ------------------------------
@@ -34,7 +34,7 @@
   ];
   const OUTPUT_HINTS = {
     auto:
-      "Directe en Bluetooth (autoradio, casque, enceinte) et sur toute sortie où le traitement a perdu des morceaux ; traitée ailleurs.",
+      "Traitée, et directe seulement quand le lecteur mesure que le son se hache (un autoradio Bluetooth, parfois), le temps que ça dure.",
     direct:
       "Le son part tel quel vers le système, comme dans n'importe quelle application de musique : la lecture la plus robuste. Les animations suivent une copie du son ; l'égaliseur et les basses sont inactifs, et la normalisation ne fait que baisser les titres trop forts.",
     graph:
@@ -56,31 +56,24 @@
       : route.source === "latency"
         ? "Bluetooth probable (latence de sortie)"
         : `${KIND_LABEL[route.kind] || "Sortie"}${route.name ? " · " + route.name : ""}`;
+  // The verdict on the output playing now (lib/audio/output.js), if any.
+  $: verdict = $glitchRoutes[route.key] || null;
   $: whyText = {
     setting: "choisie ici",
-    bluetooth: routeText || "Bluetooth",
-    glitch: "le traitement perdait des morceaux sur cette sortie",
-    dsp: "Bluetooth, mais l'égaliseur ou les basses demandent le traitement",
-    default: routeText || "sortie non identifiée — passera en directe si le traitement perd des morceaux",
+    glitch: "le son se hachait en lecture traitée sur cette sortie",
+    probing: "nouvel essai après un son haché — le lecteur écoute",
+    default: routeText || "",
   }[plan.why];
-  $: remembered = activeGlitches($glitchRoutes);
-  // What the equalizer and the bass lift do on the direct path: nothing — except
-  // in automatic mode on Bluetooth, where switching one on is what hands the
-  // output back to the processed path.
-  $: dspNote = !plan.direct
-    ? ""
-    : plan.why === "bluetooth"
-      ? "L'activer fait passer cette sortie en lecture traitée."
-      : "Inactif en lecture directe.";
-  function routeName(g) {
-    if (g.name) return g.name;
-    if (g.key === "latency:high") return "Sortie Bluetooth (navigateur)";
-    if (g.key === "default") return "Cet appareil";
-    return KIND_LABEL[g.kind] || g.key;
-  }
-  function fmtDay(ts) {
+  $: retryText =
+    plan.why === "glitch" && plan.retryAt
+      ? `Nouvel essai vers ${fmtTime(plan.retryAt)}, ou dès que la sortie se reconnecte.`
+      : "Nouvel essai au prochain titre.";
+  // The equalizer and the bass lift change the sound on its way THROUGH the
+  // processor, which the direct path does not go through.
+  $: dspNote = plan.direct ? "Inactif en lecture directe." : "";
+  function fmtTime(ts) {
     try {
-      return new Date(ts).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+      return new Date(ts).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
     } catch {
       return "";
     }
@@ -211,19 +204,14 @@
     <span class="out-ico"><Icon name={route.kind === "bluetooth" ? "bluetooth" : "speaker"} size={16} /></span>
     <span class="out-txt">
       <span class="out-mode">{plan.direct ? "Lecture directe" : "Lecture traitée"}</span>
-      <span class="muted out-why">{whyText}</span>
+      {#if whyText}<span class="muted out-why">{whyText}</span>{/if}
+      {#if plan.why === "glitch" && routeText}<span class="muted out-why">{routeText}</span>{/if}
     </span>
   </div>
-  {#if remembered.length}
-    <div class="glitches">
-      <span class="g-title">Sorties où le traitement perdait des morceaux</span>
-      {#each remembered as g (g.key)}
-        <div class="g-row">
-          <span class="g-name">{routeName(g)}</span>
-          <span class="muted g-when">{fmtDay(g.at)}</span>
-          <button class="g-retry" on:click={() => forgetGlitch(g.key)}>Réessayer le traitement</button>
-        </div>
-      {/each}
+  {#if plan.why === "glitch" && verdict}
+    <div class="out-next">
+      <span class="muted">{retryText}</span>
+      <button class="g-retry" on:click={() => retryNow(route.key)}>Réessayer maintenant</button>
     </div>
   {/if}
 </section>
@@ -547,33 +535,20 @@
     font-size: 0.78rem;
     overflow-wrap: anywhere;
   }
-  .glitches {
-    margin-top: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .g-title {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--text-dim);
-  }
-  .g-row {
+  .out-next {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 6px 12px;
-  }
-  .g-name {
-    font-weight: 600;
-    font-size: 0.88rem;
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-  .g-when {
+    gap: 8px 14px;
+    margin-top: 10px;
     font-size: 0.78rem;
+    line-height: 1.4;
+  }
+  .out-next span {
+    flex: 1 1 220px;
   }
   .g-retry {
+    flex: none;
     margin-left: auto;
     padding: 8px 14px;
     min-height: 36px;

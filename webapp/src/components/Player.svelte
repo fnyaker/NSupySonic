@@ -50,9 +50,17 @@
     disableCapture,
     pathState,
     tickVolumes,
+    requestContextReset,
   } from "../lib/audio/graph.js";
-  import { directOutput, outputPlan, reportGlitch, noteContextLatency } from "../lib/audio/output.js";
-  import { startTimekeeper } from "../lib/audio/timekeeper.js";
+  import {
+    directOutput,
+    outputPlan,
+    reportGlitch,
+    retryIfDue,
+    noteGoodWindow,
+    noteContextLatency,
+  } from "../lib/audio/output.js";
+  import { startTimekeeper, judge } from "../lib/audio/timekeeper.js";
   import { primeEdges, knownEdges } from "../lib/edges.js";
   import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
   import { primeAnalyses } from "../lib/analysis.js";
@@ -152,6 +160,11 @@
       // context reports can say "Bluetooth" (lib/audio/output.js).
       onTick: (ctx) => noteContextLatency(ctx),
       onVerdict: onPaceVerdict,
+      // A clean window on the processed path while a verdict is being retried
+      // counts toward forgetting it (lib/audio/output.js#noteGoodWindow).
+      onWindow: (w) => {
+        if (w.wired && !judge(w)) noteGoodWindow();
+      },
     });
     // One call from a remote devtools session (or a browser test) says which
     // path the music takes right now and why.
@@ -945,6 +958,11 @@
     }
     setBlobUrl(src.blob ? src.url : null);
     curIsBlob = src.blob;
+    // A track change is where the processed path is tried again after a
+    // measured fault, once its retry is due (lib/audio/output.js): the source
+    // is being replaced anyway, so routing the element now is inaudible, and
+    // the context it goes into is a fresh one.
+    retryIfDue();
     // The path went direct while this element was routed through Web Audio,
     // which it can never leave: the new track goes onto a fresh element. The
     // outgoing sound is being cut here anyway (a new source), so this is the
@@ -1541,7 +1559,12 @@
         null,
         { important: true }
       );
-      if (acted) toasts.push("Lecture directe activée sur cette sortie : le traitement audio y perdait des morceaux", "info", 5000);
+      if (acted) {
+        // The context that lost the audio is not used again: closed once the
+        // hand-over is done, a fresh one built for whatever needs it next.
+        requestContextReset();
+        toasts.push("Son haché détecté : lecture directe activée", "info", 5000);
+      }
       else if (!pinnedWarned) {
         pinnedWarned = true;
         toasts.push(

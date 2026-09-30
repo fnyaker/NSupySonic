@@ -4,15 +4,20 @@
 //
 // Why this exists: played through an AAC car radio over Bluetooth, the app's
 // music "sounded sped up, as if pieces were being cut out", whatever was
-// switched off. The processed path (the element routed through Web Audio,
-// rendered on an AudioWorklet's thread) loses audio on Android Bluetooth
-// sinks; the fix plays such outputs DIRECT and watches the pace everywhere
-// else. What is pinned here:
-//  - the policy: which output plays direct, and why;
+// switched off — and after the phone was reconnected to the same radio, it
+// played cleanly again. The processed path (the element routed through Web
+// Audio, rendered on an AudioWorklet's thread) can lose audio on an Android
+// Bluetooth sink, and it comes and goes; so the correction is applied only
+// while the fault is MEASURED. What is pinned here:
+//  - the policy: processed by default, direct on a measured fault for THIS
+//    connection of the output, tried again later (twice as late each time the
+//    fault is still there), forgotten after enough clean playback or on a new
+//    connection;
 //  - the timekeeper stays silent on a HEALTHY processed path as Chromium was
 //    measured running it (373 ppm of drift, a currentTime that moves in render
 //    bursts, a 21.6 ms output-clock step, throttled ticks, seeks and stalls),
-//    and convicts the three ways a broken one keeps bad time;
+//    and convicts the three ways a broken one keeps bad time — a clear fault in
+//    one eight-second window;
 //  - on the direct path the graph routes nothing, and the normalization and
 //    the crossfade still do what they do, on the element's volume.
 
@@ -28,11 +33,17 @@ import {
   audioRoute,
   outputPlan,
   reportGlitch,
+  retryIfDue,
+  retryNow,
+  noteGoodWindow,
   forgetGlitch,
-  GLITCH_TTL,
+  RETRY_FIRST,
+  RETRY_MAX,
+  GOOD_TO_CLEAR,
+  VERDICT_MAX_AGE,
   UNKNOWN_ROUTE,
 } from "../src/lib/audio/output.js";
-import { PaceMeter, judge, strike, WINDOW_MS, JITTER_MAX } from "../src/lib/audio/timekeeper.js";
+import { PaceMeter, judge, strike, fault, WINDOW_MS, JITTER_MAX, SEVERE } from "../src/lib/audio/timekeeper.js";
 import {
   registerSource,
   setElementGain,
@@ -47,49 +58,50 @@ import {
   releaseElement,
 } from "../src/lib/audio/graph.js";
 
-const BT = normalizeRoute({ kind: "bluetooth", name: "KMM-BT309", source: "native" });
-const SPEAKER = normalizeRoute({ kind: "speaker", name: "", source: "native" });
+const BT = normalizeRoute({ kind: "bluetooth", name: "KMM-BT309", conn: "1700000000000-3", source: "native" });
+const BT_AGAIN = normalizeRoute({ kind: "bluetooth", name: "KMM-BT309", conn: "1700000000000-5", source: "native" });
+const SPEAKER = normalizeRoute({ kind: "speaker", name: "", conn: "1700000000000-4", source: "native" });
+const MIN = 60_000;
 
 // --- the policy -------------------------------------------------------------------
 
-test("auto plays a Bluetooth output direct, and everything else processed", () => {
-  assert.deepEqual(decideOutput("auto", BT, {}, null, false), { direct: true, why: "bluetooth" });
-  assert.deepEqual(decideOutput("auto", SPEAKER, {}, null, false), { direct: false, why: "default" });
-  assert.deepEqual(decideOutput("auto", UNKNOWN_ROUTE, {}, null, false), { direct: false, why: "default" });
+test("auto plays every output processed until a fault is measured — Bluetooth included", () => {
+  assert.deepEqual(decideOutput("auto", BT, {}), { direct: false, why: "default" });
+  assert.deepEqual(decideOutput("auto", SPEAKER, {}), { direct: false, why: "default" });
+  assert.deepEqual(decideOutput("auto", UNKNOWN_ROUTE, {}), { direct: false, why: "default" });
 });
 
-test("on Bluetooth, an effect only the processor can apply keeps it processed — until it is measured failing", () => {
-  assert.deepEqual(decideOutput("auto", BT, {}, null, true), { direct: false, why: "dsp" });
-  const glitches = { [BT.key]: { at: Date.now() - 1000 } };
-  assert.deepEqual(decideOutput("auto", BT, glitches, null, true), { direct: true, why: "glitch" });
+test("a measured fault sends that connection direct, and only that connection", () => {
+  const now = Date.parse("2026-09-30T18:00:00Z");
+  const glitches = { [BT.key]: { at: now - 1000, conn: BT.conn, retryAt: now + RETRY_FIRST, probing: false } };
+  assert.deepEqual(decideOutput("auto", BT, glitches, now), { direct: true, why: "glitch", retryAt: now + RETRY_FIRST });
+  // The same radio, reconnected: a clean slate (it is what cured it when reported).
+  assert.equal(decideOutput("auto", BT_AGAIN, glitches, now).direct, false);
+  // Another output entirely.
+  assert.equal(decideOutput("auto", SPEAKER, glitches, now).direct, false);
+  // Being retried: processed, and says so.
+  assert.deepEqual(decideOutput("auto", BT, { [BT.key]: { ...glitches[BT.key], probing: true } }, now), {
+    direct: false,
+    why: "probing",
+  });
+  // A week-old verdict, or one dated in the future (a clock that jumped), is not believed.
+  assert.equal(decideOutput("auto", BT, { [BT.key]: { ...glitches[BT.key], at: now - VERDICT_MAX_AGE - 1 } }, now).direct, false);
+  assert.equal(decideOutput("auto", BT, { [BT.key]: { ...glitches[BT.key], at: now + 86400e3 } }, now).direct, false);
 });
 
-test("a measured failure sends ANY output direct, for GLITCH_TTL and not a day longer", () => {
-  const now = Date.parse("2026-09-30T12:00:00Z");
-  const fresh = { default: { at: now - 3 * 86400e3 } };
-  assert.equal(decideOutput("auto", UNKNOWN_ROUTE, fresh, null, false, now).direct, true);
-  const stale = { default: { at: now - GLITCH_TTL - 1 } };
-  assert.equal(decideOutput("auto", UNKNOWN_ROUTE, stale, null, false, now).direct, false);
-  // A verdict dated in the future (a clock that jumped) is not believed.
-  const future = { default: { at: now + 86400e3 } };
-  assert.equal(decideOutput("auto", UNKNOWN_ROUTE, future, null, false, now).direct, false);
-  // One output's verdict says nothing about another's.
-  assert.equal(decideOutput("auto", SPEAKER, { [BT.key]: { at: now } }, null, false, now).direct, false);
-  // This session's verdict counts before it is stored.
-  assert.equal(decideOutput("auto", SPEAKER, {}, { key: SPEAKER.key }, false, now).direct, true);
-});
-
-test("the setting pins the path whatever the output says", () => {
-  const glitches = { [BT.key]: { at: Date.now() } };
-  assert.deepEqual(decideOutput("direct", SPEAKER, {}, null, true), { direct: true, why: "setting" });
-  assert.deepEqual(decideOutput("graph", BT, glitches, { key: BT.key }, false), { direct: false, why: "setting" });
+test("the setting pins the path whatever was measured", () => {
+  const now = Date.now();
+  const glitches = { [BT.key]: { at: now, conn: BT.conn, retryAt: now + RETRY_FIRST } };
+  assert.deepEqual(decideOutput("direct", SPEAKER, {}), { direct: true, why: "setting" });
+  assert.deepEqual(decideOutput("graph", BT, glitches, now), { direct: false, why: "setting" });
 });
 
 test("a route from the native side is bounded before anything reads it", () => {
-  const r = normalizeRoute({ kind: "<script>", name: "x".repeat(500) + "\n\tend" });
+  const r = normalizeRoute({ kind: "<script>", name: "x".repeat(500) + "\n\tend", conn: "c".repeat(200) });
   assert.equal(r.kind, "other");
   assert.ok(r.name.length <= 60);
   assert.ok(!/[\n\t]/.test(r.name));
+  assert.ok(r.conn.length <= 40);
   assert.equal(normalizeRoute(null), UNKNOWN_ROUTE);
   assert.equal(normalizeRoute("bluetooth"), UNKNOWN_ROUTE);
   // Two devices of one kind are two outputs; the same device is one.
@@ -97,26 +109,90 @@ test("a route from the native side is bounded before anything reads it", () => {
   assert.equal(normalizeRoute({ kind: "bluetooth", name: "kmm-bt309" }).key, BT.key);
 });
 
-test("a verdict is remembered for the output it was measured on, and can be forgotten", () => {
+test("the correction lasts as long as the fault: direct, retried later and later, forgotten once clean", () => {
   audioOutput.set("auto");
   glitchRoutes.set({});
-  audioRoute.set(SPEAKER);
+  audioRoute.set(BT);
+  const t0 = Date.now();
   assert.equal(get(outputPlan).direct, false);
-  assert.equal(reportGlitch({ why: "pace 1.043", ratio: 1.0431 }), true);
+
+  // Measured: direct at once, first retry RETRY_FIRST later.
+  assert.equal(reportGlitch({ why: "pace 1.043", ratio: 1.0431 }, t0), true);
   assert.equal(get(outputPlan).direct, true);
-  assert.equal(get(outputPlan).why, "glitch");
-  const kept = activeGlitches(get(glitchRoutes));
-  assert.equal(kept.length, 1);
-  assert.equal(kept[0].key, SPEAKER.key);
-  assert.equal(kept[0].ratio, 1.0431);
-  forgetGlitch(SPEAKER.key);
+  let v = get(glitchRoutes)[BT.key];
+  assert.equal(v.retryAt, t0 + 15 * MIN);
+  assert.equal(v.ratio, 1.0431);
+  // Not due yet: a track change changes nothing.
+  assert.equal(retryIfDue(t0 + 14 * MIN), false);
+  assert.equal(get(outputPlan).direct, true);
+  // Due: the next track change tries the processed path again.
+  assert.equal(retryIfDue(t0 + 15 * MIN), true);
   assert.equal(get(outputPlan).direct, false);
-  // Pinned processed: the verdict is reported, and changes nothing.
+  assert.equal(get(outputPlan).why, "probing");
+
+  // Still there: direct again, and the next retry waits twice as long.
+  reportGlitch({ why: "underruns 4.1%" }, t0 + 16 * MIN);
+  v = get(glitchRoutes)[BT.key];
+  // (Read at that moment: the live store reads the real clock, and a verdict
+  // dated in its future is — rightly — not believed.)
+  assert.equal(decideOutput("auto", BT, get(glitchRoutes), t0 + 16 * MIN).direct, true);
+  assert.equal(v.retryAt - (t0 + 16 * MIN), 30 * MIN);
+  assert.equal(v.count, 2);
+  // ...doubling up to the ceiling, never past it.
+  for (let i = 0; i < 10; i++) {
+    retryIfDue(v.retryAt);
+    reportGlitch({ why: "pace 1.05" }, v.retryAt + MIN);
+    v = get(glitchRoutes)[BT.key];
+  }
+  assert.equal(v.backoff, RETRY_MAX);
+  assert.equal(RETRY_MAX, 4 * 3600 * 1000);
+
+  // Gone: GOOD_TO_CLEAR clean windows on the processed path forget it.
+  retryIfDue(v.retryAt);
+  for (let i = 0; i < GOOD_TO_CLEAR - 1; i++) noteGoodWindow(v.retryAt + i * 8000);
+  assert.ok(get(glitchRoutes)[BT.key], "not yet: one window short");
+  noteGoodWindow(v.retryAt + GOOD_TO_CLEAR * 8000);
+  assert.equal(get(glitchRoutes)[BT.key], undefined);
+  assert.equal(get(outputPlan).direct, false);
+  assert.equal(GOOD_TO_CLEAR, 6);
+});
+
+test("a reconnection starts clean, and a fault on it starts the retries from the first delay", () => {
+  audioOutput.set("auto");
+  glitchRoutes.set({});
+  audioRoute.set(BT);
+  const t0 = Date.now();
+  reportGlitch({ why: "pace 1.05" }, t0);
+  retryIfDue(t0 + RETRY_FIRST);
+  reportGlitch({ why: "pace 1.05" }, t0 + RETRY_FIRST + MIN); // backoff now 30 min
+  audioRoute.set(BT_AGAIN);
+  assert.equal(get(outputPlan).direct, false, "a new connection plays processed");
+  // Clean windows on the new connection do not touch the old connection's entry...
+  noteGoodWindow(t0 + 2 * 3600e3);
+  // ...and a fault on it is a FIRST fault.
+  reportGlitch({ why: "pace 1.05" }, t0 + 3 * 3600e3);
+  const v = get(glitchRoutes)[BT.key];
+  assert.equal(v.conn, BT_AGAIN.conn);
+  assert.equal(v.backoff, RETRY_FIRST);
+  assert.equal(v.count, 1);
+  glitchRoutes.set({});
+  audioRoute.set(UNKNOWN_ROUTE);
+});
+
+test("pinned processed: a fault is reported and changes nothing; Réessayer probes at once", () => {
+  glitchRoutes.set({});
+  audioRoute.set(SPEAKER);
   audioOutput.set("graph");
   assert.equal(reportGlitch({ why: "pace 1.05" }), false);
   assert.equal(get(outputPlan).direct, false);
-  forgetGlitch(SPEAKER.key);
+  assert.equal(retryIfDue(Date.now() + RETRY_MAX), false, "no retries to schedule when the path is pinned");
   audioOutput.set("auto");
+  assert.equal(get(outputPlan).direct, true);
+  retryNow(SPEAKER.key);
+  assert.equal(get(outputPlan).why, "probing");
+  assert.equal(activeGlitches(get(glitchRoutes)).length, 1);
+  forgetGlitch(SPEAKER.key);
+  assert.equal(activeGlitches(get(glitchRoutes)).length, 0);
   audioRoute.set(UNKNOWN_ROUTE);
 });
 
@@ -178,13 +254,14 @@ const healthyMap = (rnd) => (t) => (t > 3.2 ? -0.0216 : 0) + (rnd() - 0.5) * 0.0
 test("a healthy processed path is never convicted: drift, bursts, a clock step, late ticks", () => {
   const rnd = lcg(11);
   const { windows, verdicts } = run({ seconds: 600, media: healthyMedia, map: healthyMap(rnd), ctxT: (t) => t * (1 + 12e-6) });
-  assert.ok(windows.length >= 35, `only ${windows.length} windows in ten minutes`);
+  assert.ok(windows.length >= 60, `only ${windows.length} windows in ten minutes`);
   assert.equal(verdicts.length, 0);
   const worst = Math.max(...windows.map((w) => Math.abs(w.pace - 1)));
-  const jitter = Math.max(...windows.map((w) => w.jitter));
-  // Measured on this model: worst pace error 0.0014, worst window jitter 22 ms.
+  const jitter = Math.max(...windows.map((w) => w.jitter / w.span));
+  // Measured on this model: worst pace error 0.0025 (a render burst over eight
+  // seconds), worst output-clock movement 2.4 ms/s (the one 21.6 ms step).
   assert.ok(worst < 0.005, `pace off by ${worst}`);
-  assert.ok(jitter < 0.05, `output clock moved ${jitter} s in one window`);
+  assert.ok(jitter < JITTER_MAX / 2, `output clock moved ${jitter} s/s`);
   assert.equal(windows.filter((w) => judge(w)).length, 0);
 });
 
@@ -212,14 +289,19 @@ test("a stall the element does not report (position frozen, readyState fine) is 
 
 // The three ways a broken processed path keeps bad time.
 
-test("frames dropped (the context pulls the element faster than the device plays): convicted in two windows", () => {
-  // 4% of the music cut out: the element is pulled 1.04x real time.
-  const media = (t) => healthyMedia(t * 1.04);
-  const { verdicts, windows } = run({ seconds: 120, media, map: healthyMap(lcg(9)), ctxT: (t) => t * 1.04 });
-  assert.ok(verdicts.length >= 1);
-  assert.ok(verdicts[0].t < 2 * WINDOW_MS / 1000 + 8, `first verdict only at ${verdicts[0].t} s`);
-  assert.match(verdicts[0].why, /pace 1\.04/);
-  assert.ok(windows.every((w) => w.pace > 1.03));
+test("frames dropped (the context pulls the element faster than the device plays): one window when it is clear", () => {
+  // 8% of the music cut out — "sped up, pieces missing": the element is
+  // pulled 1.08x real time. A verdict on the first window, eight-odd seconds in.
+  const clear = run({ seconds: 60, media: (t) => healthyMedia(t * 1.08), map: healthyMap(lcg(9)), ctxT: (t) => t * 1.08 });
+  assert.ok(clear.verdicts.length >= 1);
+  assert.ok(clear.verdicts[0].t < WINDOW_MS / 1000 + 3, `first verdict only at ${clear.verdicts[0].t} s`);
+  assert.match(clear.verdicts[0].why, /pace 1\.08/);
+  // 3%: subtler, so two windows in a row.
+  const mild = run({ seconds: 60, media: (t) => healthyMedia(t * 1.03), map: healthyMap(lcg(9)), ctxT: (t) => t * 1.03 });
+  assert.ok(mild.verdicts.length >= 1);
+  assert.ok(mild.verdicts[0].t > WINDOW_MS / 1000 + 3, "a mild fault is confirmed by a second window");
+  assert.ok(mild.verdicts[0].t < 2 * WINDOW_MS / 1000 + 4, `first verdict only at ${mild.verdicts[0].t} s`);
+  assert.ok(!fault(mild.windows[0]).severe && fault(clear.windows[0]).severe);
 });
 
 test("silence padded in (an underrunning FIFO): convicted by the pace, or by playbackStats where it exists", () => {
@@ -237,6 +319,10 @@ test("silence padded in (an underrunning FIFO): convicted by the pace, or by pla
   });
   assert.ok(padded.verdicts.length >= 1);
   assert.match(padded.verdicts[0].why, /underruns 2\.0%/);
+  // 5% of the time in underrun is a verdict on the first window.
+  const hard = run({ seconds: 40, media: healthyMedia, map: healthyMap(lcg(4)), under: (t) => t * 0.05 });
+  assert.ok(hard.verdicts[0].t < WINDOW_MS / 1000 + 3, `first verdict only at ${hard.verdicts[0].t} s`);
+  assert.ok(SEVERE.underrun < 0.05);
 });
 
 test("gaps padded then dropped, with no underrun counter: the output clock gives it away", () => {
@@ -249,14 +335,14 @@ test("gaps padded then dropped, with no underrun counter: the output clock gives
   const { verdicts, windows } = run({ seconds: 90, media: healthyMedia, map });
   assert.ok(verdicts.length >= 1);
   assert.match(verdicts[0].why, /output clock moved/);
-  const least = Math.min(...windows.map((w) => w.jitter));
-  // Measured on this model: 0.33-0.43 s a window, against 0.022 s healthy.
-  assert.ok(least > JITTER_MAX, `least jitter ${least}`);
+  const least = Math.min(...windows.map((w) => w.jitter / w.span));
+  // Measured on this model: 13-31 ms/s, against 2.4 ms/s healthy at worst.
+  assert.ok(least > JITTER_MAX, `least jitter ${least} s/s`);
 });
 
-test("one bad window on a loaded phone is not a verdict", () => {
-  // Pace 1.05 for 15 s at t=60..75, healthy otherwise.
-  const media = (t) => healthyMedia(t) + Math.max(0, Math.min(t, 75) - 60) * 0.05;
+test("one mildly bad window on a loaded phone is not a verdict", () => {
+  // Pace 1.03 for 8 s at t=60..68, healthy otherwise.
+  const media = (t) => healthyMedia(t) + Math.max(0, Math.min(t, 68) - 60) * 0.03;
   const { verdicts, windows } = run({ seconds: 300, media, map: healthyMap(lcg(21)) });
   assert.ok(windows.some((w) => judge(w)), "the bad stretch should show in a window");
   assert.equal(verdicts.length, 0);

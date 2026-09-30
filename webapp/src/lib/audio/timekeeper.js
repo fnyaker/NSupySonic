@@ -23,22 +23,30 @@
 // A window is WINDOW_MS of uninterrupted playback: a seek, a pause, a stall,
 // a track change or a rate change starts a new one, and a tick whose position
 // moved implausibly (a reload, a recovery) does too — none of those is a pace.
-// Two bad windows in a row are a verdict, so one bad moment on a loaded phone
-// is not; a good window clears the count.
+// The fault it exists for comes and goes (it vanished once when the phone was
+// reconnected to the car radio), so the correction is only ever applied while
+// it is MEASURED, and it has to be measured fast: a window that is far out
+// (SEVERE) is a verdict on its own, eight seconds after it started; a mild one
+// needs a second bad window in a row, so one bad moment on a loaded phone is
+// not a verdict; a good window clears the count.
 
 import { getContext, isCapturing, isWired } from "./graph.js";
 import { logInfo } from "../log.js";
 
-export const WINDOW_MS = 15000;
+export const WINDOW_MS = 8000;
 export const TICK_MS = 1000;
 // |pace - 1| past this is music audibly running at the wrong speed (2% is a
 // third of a semitone's worth of tempo, and far past any clock drift).
 export const PACE_TOL = 0.02;
-// Seconds of output-mapping movement in one window. A healthy context steps a
-// burst now and then; a padded-and-dropped one moves by its gaps, many a second.
-export const JITTER_MAX = 0.2;
+// How far the output mapping moves, in seconds per second of playback. A
+// healthy context steps a burst now and then (21.6 ms once in a window is
+// 2.7 ms/s over eight seconds); a padded-and-dropped one moves by its gaps,
+// several a second (22 ms/s on the model the tests hold it to).
+export const JITTER_MAX = 0.01;
 // Share of a window spent in underrun (playbackStats).
 export const UNDERRUN_MAX = 0.01;
+// Past these a single window is a verdict: nothing healthy comes near them.
+export const SEVERE = { pace: 0.04, underrun: 0.03, jitter: 0.025 };
 export const STRIKES = 2;
 
 /**
@@ -125,28 +133,43 @@ export class PaceMeter {
 
 /** What is wrong with a window, or null when it kept time. */
 export function judge(w) {
+  const f = fault(w);
+  return f ? f.why : null;
+}
+
+/** { why, severe } for a window that did not keep time, else null. */
+export function fault(w) {
   if (!w) return null;
-  if (Math.abs(w.pace - 1) > PACE_TOL) return `pace ${w.pace.toFixed(3)}`;
-  if (w.ctxPace != null && Math.abs(w.ctxPace - 1) > PACE_TOL) return `context pace ${w.ctxPace.toFixed(3)}`;
-  if (w.underrun != null && w.underrun > UNDERRUN_MAX) return `underruns ${(w.underrun * 100).toFixed(1)}%`;
-  if (w.jitter > JITTER_MAX) return `output clock moved ${Math.round(w.jitter * 1000)} ms`;
+  const pace = Math.abs(w.pace - 1);
+  const ctxPace = w.ctxPace != null ? Math.abs(w.ctxPace - 1) : 0;
+  const jitterRate = w.span > 0 ? w.jitter / w.span : 0;
+  if (pace > PACE_TOL) return { why: `pace ${w.pace.toFixed(3)}`, severe: pace > SEVERE.pace };
+  if (ctxPace > PACE_TOL) return { why: `context pace ${w.ctxPace.toFixed(3)}`, severe: ctxPace > SEVERE.pace };
+  if (w.underrun != null && w.underrun > UNDERRUN_MAX)
+    return { why: `underruns ${(w.underrun * 100).toFixed(1)}%`, severe: w.underrun > SEVERE.underrun };
+  if (jitterRate > JITTER_MAX)
+    return {
+      why: `output clock moved ${Math.round(w.jitter * 1000)} ms in ${w.span.toFixed(0)} s`,
+      severe: jitterRate > SEVERE.jitter,
+    };
   return null;
 }
 
 /**
  * Count strikes over successive windows. Returns the verdict (a reason
- * string) on the STRIKES-th bad window in a row, else null.
+ * string) on a SEVERE window, or on the STRIKES-th bad window in a row, else
+ * null.
  */
 export function strike(meter, w) {
-  const why = judge(w);
-  if (!why) {
+  const f = fault(w);
+  if (!f) {
     meter.strikes = 0;
     return null;
   }
   meter.strikes++;
-  if (meter.strikes < STRIKES) return null;
+  if (!f.severe && meter.strikes < STRIKES) return null;
   meter.strikes = 0;
-  return why;
+  return f.why;
 }
 
 // --- the watch -------------------------------------------------------------------
@@ -227,7 +250,7 @@ export function startTimekeeper({ element, busy = () => false, onVerdict, onWind
     // are the evidence. Every bad one, and one healthy one a minute — the log
     // is a bounded ring, and a long drive must not evict everything else.
     const bad = judge(w);
-    if (bad || windows++ % 4 === 0)
+    if (bad || windows++ % 8 === 0)
       logInfo(
       "pace",
       `${wired ? "processed" : capturing ? "direct+copy" : "direct"} pace=${w.pace.toFixed(4)}` +

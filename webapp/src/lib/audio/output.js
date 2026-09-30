@@ -8,52 +8,64 @@
 // element is routed, its sound only ever reaches the speakers through the
 // context, for the element's whole life.
 //
-// The processed path is the fragile one, and on one kind of output it is broken
-// outright. On Android, a context with an AudioWorklet renders on the worklet
-// thread and hands its audio to the device through a FIFO; a Bluetooth sink
-// asks for audio in large, irregular bursts, and when a burst finds the FIFO
-// short it is padded with silence while the frames rendered late are dropped
-// when they arrive (Chromium issue 40133762, and the "Bluetooth + WebAudio +
-// background tab = stutter" report every PWA that meters its audio has filed).
-// Heard through an AAC car radio it is exactly what was reported: the music
-// sounds sped up, as if pieces were being cut out. Switching the analysis off
-// changed nothing, and could not have: the element was already routed, and the
-// worklet had already moved the context's rendering onto its thread.
+// The processed path is the fragile one. On Android, a context with an
+// AudioWorklet renders on the worklet thread and hands its audio to the device
+// through a FIFO; a Bluetooth sink asks for audio in large, irregular bursts,
+// and when a burst finds the FIFO short it is padded with silence while the
+// frames rendered late are dropped when they arrive (Chromium issue 40133762,
+// and the "Bluetooth + WebAudio + background tab = stutter" report every PWA
+// that meters its audio has filed). Heard through an AAC car radio it is
+// exactly what was reported: the music sounds sped up, as if pieces were being
+// cut out. Switching the analysis off changed nothing, and could not have: the
+// element was already routed, and the worklet had already moved the context's
+// rendering onto its thread.
 //
-// So the route is a POLICY, decided here and applied by graph.js (which refuses
-// to route an element while it says direct) and Player.svelte (which hands a
-// routed element's playback over to a fresh one — the only way out):
+// AND IT COMES AND GOES. The same phone on the same car radio, reconnected,
+// played cleanly again — a context, a link, a codec session in a bad state,
+// not the output as such. So playing every Bluetooth output direct up front
+// would take the equalizer, the full normalization and the animations' timing
+// away from every headset that never had the problem, for a fault that is not
+// even there most of the time. The policy is therefore MEASURED:
 //
+//   "auto"    processed, as always — and DIRECT the moment the timekeeper
+//             (timekeeper.js) measures the processed path losing audio, for as
+//             long as the fault can be expected to last: THIS connection of
+//             this output (the Android app numbers them, AudioRoute.kt), and
+//             only until a retry. At a track change after RETRY_FIRST the
+//             processed path is tried again, on a fresh context; if the fault
+//             is back, the next retry waits twice as long (up to RETRY_MAX);
+//             if GOOD_TO_CLEAR windows in a row keep time, it is forgotten. A
+//             new connection starts with a clean slate.
 //   "direct"  always direct. The animations still run, off a copy of the sound
 //             (graph.js#captureElement); the equalizer and the bass lift, which
 //             need the sound to go THROUGH the processor, are off; the
 //             normalization can only turn a track down (element.volume <= 1);
 //             the crossfade rides the elements' volumes.
-//   "graph"   always processed, as before this module existed.
-//   "auto"    direct on a Bluetooth output — the Android app reports the route
-//             (MainActivity: AudioManager's output devices); a browser on
-//             Android is recognised by the latency its context reports — unless
-//             the equalizer or the bass lift is on, which only the processed
-//             path can do. And direct, whatever the output, wherever the
-//             processed path was MEASURED losing audio (timekeeper.js): that
-//             verdict is remembered per output for GLITCH_TTL.
+//   "graph"   always processed, as before this module existed; a measured
+//             fault is only reported.
 
 import { derived, get, writable } from "svelte/store";
-import { audioOutput, bassBoost, eqBands, eqEnabled, glitchRoutes } from "../stores.js";
+import { audioOutput, glitchRoutes } from "../stores.js";
 
 export const OUTPUT_MODES = ["auto", "direct", "graph"];
 
-// How long a measured failure keeps an output on the direct path. Long enough
-// that a car radio is not re-tested on every drive; short enough that a browser
-// update that fixes the bug is given a chance within a season.
-export const GLITCH_TTL = 45 * 24 * 3600 * 1000;
+// The first retry of the processed path after a verdict, and the ceiling the
+// doubling stops at. Every retry that finds the fault again costs the listener
+// one window of it (eight seconds), so they get rarer while the fault lasts.
+export const RETRY_FIRST = 15 * 60 * 1000;
+export const RETRY_MAX = 4 * 3600 * 1000;
+// Clean windows in a row, on the processed path, that close a verdict.
+export const GOOD_TO_CLEAR = 6;
+// A verdict nobody has touched in this long is dropped from storage.
+export const VERDICT_MAX_AGE = 7 * 24 * 3600 * 1000;
 
 // A context that reports this much output latency on Android is on a wireless
 // link: measured, a phone's own speaker or a wired headset sits at 20-60 ms,
-// Bluetooth at 150-300 ms (A2DP buffers a whole codec frame queue).
+// Bluetooth at 150-300 ms (A2DP buffers a whole codec frame queue). Used only
+// to NAME the output where nothing else can (a browser, an older app).
 export const BT_LATENCY = 0.15;
 
-export const UNKNOWN_ROUTE = Object.freeze({ kind: "unknown", name: "", key: "default", source: "none" });
+export const UNKNOWN_ROUTE = Object.freeze({ kind: "unknown", name: "", key: "default", conn: "", source: "none" });
 
 const KINDS = new Set(["bluetooth", "wired", "usb", "speaker", "hdmi", "other", "unknown"]);
 
@@ -69,7 +81,16 @@ export function normalizeRoute(r) {
       : kind === "unknown"
         ? "default"
         : `${kind}:${name.toLowerCase()}`;
-  return { kind, name, key, source: r.source === "latency" ? "latency" : r.source === "native" ? "native" : "none" };
+  // Which connection of that output this is (AudioRoute.kt changes it every
+  // time the output comes back): a verdict is about one connection.
+  const conn = r.conn == null ? "" : String(r.conn).slice(0, 40);
+  return {
+    kind,
+    name,
+    key,
+    conn,
+    source: r.source === "latency" ? "latency" : r.source === "native" ? "native" : "none",
+  };
 }
 
 /** The output the sound is going to, as far as anything can tell. */
@@ -116,88 +137,123 @@ export function noteContextLatency(ctx) {
   else if (lag < BT_LATENCY * 0.6 && cur.source === "latency") audioRoute.set(UNKNOWN_ROUTE);
 }
 
-/** Only the processed path can do these: they change the sound on its way through. */
-export const dspWanted = derived(
-  [eqEnabled, eqBands, bassBoost],
-  ([$eq, $bands, $bass]) =>
-    (!!$eq && Array.isArray($bands) && $bands.some((g) => Math.abs(+g || 0) > 0.01)) || (+$bass || 0) > 0.01
-);
-
-/** A glitch measured in THIS session, for an output whose verdict is not stored yet. */
-export const sessionGlitch = writable(null);
-
-function freshVerdict(v, now) {
-  return !!v && typeof v.at === "number" && now - v.at < GLITCH_TTL && v.at <= now + 60_000;
+// A stored verdict still describes the output playing now: same output, same
+// connection of it, and not stale.
+function sameConnection(v, route, now) {
+  return (
+    !!v &&
+    typeof v.at === "number" &&
+    now - v.at < VERDICT_MAX_AGE &&
+    v.at <= now + 60_000 &&
+    (v.conn || "") === (route?.conn || "")
+  );
 }
 
 /**
- * The decision, as a value: `direct`, and `why` — "setting", "bluetooth",
- * "glitch", "dsp" (Bluetooth, but an effect needs the processor) or "default".
- * Pure, so the rule is testable without a browser.
+ * The decision, as a value: `direct`, and `why` — "setting", "glitch" (the
+ * fault was measured on this connection and is not being retried) or
+ * "default". Pure, so the rule is testable without a browser.
  */
-export function decideOutput(mode, route, glitches, session, dsp, now = Date.now()) {
+export function decideOutput(mode, route, glitches, now = Date.now()) {
   if (mode === "direct") return { direct: true, why: "setting" };
   if (mode === "graph") return { direct: false, why: "setting" };
-  const key = route?.key || "default";
-  if (freshVerdict(glitches && glitches[key], now) || (session && session.key === key))
-    return { direct: true, why: "glitch" };
-  if (route?.kind === "bluetooth") return dsp ? { direct: false, why: "dsp" } : { direct: true, why: "bluetooth" };
-  return { direct: false, why: "default" };
+  const v = glitches && glitches[route?.key || "default"];
+  if (sameConnection(v, route, now) && !v.probing) return { direct: true, why: "glitch", retryAt: v.retryAt };
+  return { direct: false, why: sameConnection(v, route, now) ? "probing" : "default" };
 }
 
-export const outputPlan = derived(
-  [audioOutput, audioRoute, glitchRoutes, sessionGlitch, dspWanted],
-  ([$mode, $route, $glitches, $session, $dsp]) => ({
-    ...decideOutput(OUTPUT_MODES.includes($mode) ? $mode : "auto", $route, $glitches, $session, $dsp),
-    route: $route,
-  })
-);
+export const outputPlan = derived([audioOutput, audioRoute, glitchRoutes], ([$mode, $route, $glitches]) => ({
+  ...decideOutput(OUTPUT_MODES.includes($mode) ? $mode : "auto", $route, $glitches),
+  route: $route,
+}));
 
 /** true while the player must keep its elements off Web Audio. */
 export const directOutput = derived(outputPlan, ($p) => $p.direct);
 
+// Write one output's verdict, dropping every expired one on the way.
+function writeVerdict(key, entry) {
+  glitchRoutes.update((m) => {
+    const next = {};
+    const now = Date.now();
+    for (const [k, v] of Object.entries(m || {}))
+      if (v && typeof v.at === "number" && now - v.at < VERDICT_MAX_AGE) next[k] = v;
+    if (entry) next[key] = entry;
+    else delete next[key];
+    return next;
+  });
+}
+
 /**
  * The timekeeper's verdict: the processed path lost audio on the current
- * output. Remembered for this output, so the next session starts direct.
- * Returns true when that changes what plays (auto mode), false when the
- * setting pins the path and the verdict is only reported.
+ * output. Direct for this connection until a retry; a fault found again by a
+ * retry waits twice as long for the next one. Returns true when that changes
+ * what plays (auto mode), false when the setting pins the path and the verdict
+ * is only reported.
  */
-export function reportGlitch(info = {}) {
+export function reportGlitch(info = {}, now = Date.now()) {
   const route = get(audioRoute);
-  const entry = {
-    at: Date.now(),
+  const prev = get(glitchRoutes)[route.key];
+  const again = sameConnection(prev, route, now);
+  const backoff = again ? Math.min(RETRY_MAX, Math.max(RETRY_FIRST, (prev.backoff || RETRY_FIRST) * 2)) : RETRY_FIRST;
+  writeVerdict(route.key, {
+    at: now,
+    conn: route.conn || "",
     name: route.name || "",
     kind: route.kind,
     why: String(info.why || "").slice(0, 120),
     ratio: Number.isFinite(info.ratio) ? Math.round(info.ratio * 10000) / 10000 : null,
-  };
-  glitchRoutes.update((m) => {
-    const next = {};
-    const now = Date.now();
-    // Keep the map small and current: expired verdicts go on every write.
-    for (const [k, v] of Object.entries(m || {})) if (freshVerdict(v, now)) next[k] = v;
-    next[route.key] = entry;
-    return next;
+    count: again ? (prev.count || 1) + 1 : 1,
+    backoff,
+    retryAt: now + backoff,
+    probing: false,
+    good: 0,
   });
-  sessionGlitch.set({ key: route.key, at: entry.at });
   return get(audioOutput) === "auto";
 }
 
-/** Give the processed path another chance on one output (Réglages). */
-export function forgetGlitch(key) {
-  glitchRoutes.update((m) => {
-    const next = { ...(m || {}) };
-    delete next[key];
-    return next;
-  });
-  const s = get(sessionGlitch);
-  if (s && s.key === key) sessionGlitch.set(null);
+/**
+ * At a track change: if the current output's verdict is due for a retry, try
+ * the processed path again (the verdict stays, marked as being probed, until
+ * the timekeeper either clears it or finds the fault again). Returns true when
+ * it flipped the path.
+ */
+export function retryIfDue(now = Date.now()) {
+  if (get(audioOutput) !== "auto") return false;
+  const route = get(audioRoute);
+  const v = get(glitchRoutes)[route.key];
+  if (!sameConnection(v, route, now) || v.probing || !(now >= v.retryAt)) return false;
+  writeVerdict(route.key, { ...v, probing: true, good: 0 });
+  return true;
 }
 
-/** The verdicts still in force, newest first, for the settings screen. */
+/**
+ * A window that kept time on the processed path. While a verdict is being
+ * probed, GOOD_TO_CLEAR of them in a row close it: the fault is gone.
+ */
+export function noteGoodWindow(now = Date.now()) {
+  const route = get(audioRoute);
+  const v = get(glitchRoutes)[route.key];
+  if (!sameConnection(v, route, now) || !v.probing) return;
+  const good = (v.good || 0) + 1;
+  writeVerdict(route.key, good >= GOOD_TO_CLEAR ? null : { ...v, good });
+}
+
+/** "Réessayer maintenant" in Réglages: probe the processed path at once. */
+export function retryNow(key) {
+  const v = get(glitchRoutes)[key];
+  if (!v) return;
+  writeVerdict(key, { ...v, probing: true, good: 0 });
+}
+
+/** Forget one output's verdict altogether. */
+export function forgetGlitch(key) {
+  writeVerdict(key, null);
+}
+
+/** The verdicts still on record, newest first, for the settings screen. */
 export function activeGlitches(map, now = Date.now()) {
   return Object.entries(map || {})
-    .filter(([, v]) => freshVerdict(v, now))
+    .filter(([, v]) => v && typeof v.at === "number" && now - v.at < VERDICT_MAX_AGE && v.at <= now + 60_000)
     .map(([key, v]) => ({ key, ...v }))
     .sort((a, b) => b.at - a.at);
 }

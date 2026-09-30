@@ -4,22 +4,24 @@
 //   npm run build && node test/output/run.mjs        (SHOTS=<dir> keeps pictures)
 //
 // What was reported: through a Bluetooth car radio (AAC), the music "sounded
-// sped up, as if pieces were being cut out", and switching features off did
-// nothing — the element had been routed into Web Audio by the full-screen
-// player's animation, and a routed element stays routed. The fix plays a
-// Bluetooth output DIRECT. This drives exactly that in headless Chromium:
+// sped up, as if pieces were being cut out", switching features off did
+// nothing — and after the phone was reconnected to the same radio, it played
+// cleanly again. So the correction is applied only while the fault is
+// MEASURED. This drives that in headless Chromium:
 //
-//  1. play, open the full-screen player: the element is routed, the analysers
-//     hear the tone;
-//  2. the car radio connects (the Android app's route message, window.__nsAudioRoute):
-//     within a couple of seconds the track is playing on a FRESH, unrouted
-//     element, from where the old one was, and the old ones are silent;
-//  3. the animations keep reading the sound — a copy of it — and when the
-//     player is closed the context is suspended: one audio stream left, the
-//     element's own;
-//  4. the next track, and a crossfade, play direct (the fade on the volumes);
-//  5. the car radio goes, the phone speaker is back: routed again, lazily;
-//  6. Réglages says which path, and why.
+//  1. play, open the full-screen player: the element is routed through Web
+//     Audio, the analysers hear the tone — and a Bluetooth radio connecting
+//     changes nothing by itself;
+//  2. the fault: the routed element's clock runs 8% fast, which is what a
+//     context that drops the frames it rendered late does to it. Within one
+//     window the timekeeper convicts it; the track carries on DIRECT on a
+//     fresh element, the context that lost the audio is closed, and the
+//     animations read a copy of the sound from a NEW one;
+//  3. Réglages says so, and when the next try is;
+//  4. the radio reconnected: a clean slate, processed again;
+//  5. a retry that has come due happens at the next track change, on a fresh
+//     context, and enough clean playback forgets the fault;
+//  6. pinned "Directe": the crossfade runs on the volumes, no context is made.
 //
 // Chromium's audio output here is a fake device, so what reaches a speaker is
 // not measured; what is measured is which path each element is on, where it
@@ -86,6 +88,30 @@ await ctx.route(/\/api\/stream\//, (r) => {
     headers: { "Content-Type": "audio/wav", "Accept-Ranges": "bytes", "Content-Length": String(total) },
   });
 });
+// The fault, as the timekeeper sees it: an element whose clock runs FAST (a
+// context that renders more than the device plays, and drops the excess).
+// While window.__skew is set, every element's currentTime reads that much
+// faster than it plays.
+await ctx.addInitScript(() => {
+  const d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "currentTime");
+  Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
+    configurable: true,
+    get() {
+      const t = d.get.call(this);
+      const k = window.__skew || 0;
+      if (!k) {
+        this.__sk = null;
+        return t;
+      }
+      if (!this.__sk) this.__sk = { t, off: 0 };
+      return t + (t - this.__sk.t) * (k - 1);
+    },
+    set(v) {
+      this.__sk = null;
+      d.set.call(this, v);
+    },
+  });
+});
 await ctx.addInitScript(() => {
   const Native = window.Audio;
   window.__els = [];
@@ -146,78 +172,118 @@ const title = () => page.locator("footer.player .info .t").first().textContent()
 const route = (r) => page.evaluate((x) => window.__nsAudioRoute(x), r);
 
 await login(page, base);
+const RADIO = (conn) => ({ kind: "bluetooth", name: "KMM-BT309", type: 8, conn });
 
 // -- 1. processed, as the full-screen player's animation leaves it ---------------
-await boot([song("s1"), song("s2"), song("s3")], { "audio.output": "auto", "viz.mode": "bars", "viz.eco": false });
+await boot([song("s1"), song("s2"), song("s3")], { "audio.output": "auto", "viz.mode": "bars", "viz.eco": false, "audio.glitchRoutes": {} });
 await page.locator("footer.player .pp").click();
 await page.waitForFunction(() => window.__els.some((e) => e.src && !e.paused), null, { timeout: 15000 });
 await page.locator("footer.player button.max").click();
 await page.waitForTimeout(2500);
 let p = await path();
-check(p.plan.direct === false && p.plan.why === "default", "no output reported: the processed path", `${p.plan.why}`);
-check(p.wired === true && p.context === "running", "the full-screen player routes the element through Web Audio", JSON.stringify(p));
+check(p.wired === true && p.context === "running", "the full-screen player routes the element through Web Audio", JSON.stringify({ wired: p.wired, context: p.context }));
 check(p.level > -80, "and the analysers hear the tone", `${p.level?.toFixed(1)} dB`);
-if (SHOTS) await page.screenshot({ path: join(SHOTS, "1-processed.png") });
-
-// -- 2. the car radio connects ------------------------------------------------------
-const before = await path();
-const wall0 = Date.now();
-await route({ kind: "bluetooth", name: "KMM-BT309", type: 8 });
-await page.waitForFunction(() => window.__nsAudioPath().wired === false, null, { timeout: 8000 }).catch(() => {});
-const wall1 = Date.now();
-p = await path();
-check(p.plan.direct === true && p.plan.why === "bluetooth", "a Bluetooth output plays direct", `${p.plan.why}`);
-check(p.wired === false && p.routed === 0, "the playing element is no longer routed, nor is any other", JSON.stringify({ wired: p.wired, routed: p.routed }));
-check(p.active >= 0 && p.paused === false, "and it is playing");
-const list = await els();
-const playing = list.filter((e) => e.src && !e.paused);
-// Only what was routed is replaced: the idle element had never been, and
-// keeps its place.
-check(
-  playing.length === 1 && playing[0].i >= 2,
-  "on a fresh element (a routed one cannot be taken out of the graph)",
-  `${list.length} made, playing: ${playing.map((e) => e.i).join(",")}`
-);
-check(list[0].paused && !list[0].src, "the routed one is stopped and emptied", JSON.stringify(list[0]));
-const expected = before.t + (wall1 - wall0) / 1000;
-check(Math.abs(p.t - expected) < 0.6, "the track carried on from where it was", `${p.t.toFixed(2)} s, expected ~${expected.toFixed(2)} s`);
+await route(RADIO("c1"));
 await page.waitForTimeout(1500);
 p = await path();
-check(p.capturing >= 1 && p.context === "running", "the animations read a copy of the sound", JSON.stringify({ capturing: p.capturing, context: p.context }));
-check(p.level > -80, "and the copy reaches the analysers", `${p.level?.toFixed(1)} dB`);
+check(p.plan.direct === false && p.wired === true, "a Bluetooth radio connecting changes nothing by itself", `${p.plan.why}`);
+if (SHOTS) await page.screenshot({ path: join(SHOTS, "1-processed.png") });
+
+// -- 2. the fault ---------------------------------------------------------------------
+const serial0 = p.serial;
+const faultAt = Date.now();
+await page.evaluate(() => (window.__skew = 1.08));
+await page.waitForFunction(() => window.__nsAudioPath().wired === false, null, { timeout: 30000 }).catch(() => {});
+const detectedIn = (Date.now() - faultAt) / 1000;
+await page.evaluate(() => (window.__skew = 0));
+p = await path();
+check(p.plan.direct === true && p.plan.why === "glitch", "the fault is measured and the output goes direct", `${p.plan.why}, after ${detectedIn.toFixed(1)} s`);
+check(detectedIn < 14, "within one window of the fault", `${detectedIn.toFixed(1)} s`);
+check(p.wired === false && p.routed === 0 && p.paused === false, "the track carries on, on an element no longer routed", JSON.stringify({ wired: p.wired, routed: p.routed, paused: p.paused }));
+const list = await els();
+const playing = list.filter((e) => e.src && !e.paused);
+check(playing.length === 1 && playing[0].i >= 2, "a fresh one (a routed element cannot be taken out of the graph)", `playing: ${playing.map((e) => e.i).join(",")}`);
+check(list[0].paused && !list[0].src, "the routed one is stopped and emptied");
+const toast = await page.locator("text=Son haché détecté").count();
+check(toast > 0, "and the listener is told");
+await page.waitForTimeout(1500);
+p = await path();
+check(p.serial > serial0 && p.context === "running", "the context that lost the audio is replaced by a fresh one", `serial ${serial0} → ${p.serial}`);
+check(p.capturing >= 1 && p.level > -80, "which the animations read a copy of the sound from", JSON.stringify({ capturing: p.capturing, level: p.level?.toFixed(1) }));
 const t1 = p.t;
 await page.waitForTimeout(2000);
 p = await path();
-check(p.t - t1 > 1.7 && p.t - t1 < 2.4, "it keeps time", `${(p.t - t1).toFixed(2)} s in 2 s`);
-if (SHOTS) await page.screenshot({ path: join(SHOTS, "2-direct.png") });
+check(p.t - t1 > 1.7 && p.t - t1 < 2.4, "and the music keeps time", `${(p.t - t1).toFixed(2)} s in 2 s`);
+const verdict = await page.evaluate(() => JSON.parse(localStorage.getItem("audio.glitchRoutes"))["bluetooth:kmm-bt309"]);
+check(!!verdict && verdict.conn === "c1" && Math.abs(verdict.retryAt - verdict.at - 15 * 60000) < 1000, "remembered for this connection, retried in 15 min", JSON.stringify(verdict && { conn: verdict.conn, why: verdict.why }));
 
-// -- 3. nobody watching: one stream left ----------------------------------------------
+// -- 3. Réglages says so -----------------------------------------------------------
 await page.locator('button[aria-label="Réduire"]').first().click();
+await page.goto(base + "/app/#/settings");
+await page.waitForTimeout(800);
+await page.getByRole("tab", { name: "Audio" }).click().catch(() => {});
+await page.waitForTimeout(500);
+const card = page.locator("section.card", { hasText: "Sortie audio" }).first();
+const text = ((await card.textContent().catch(() => "")) || "").replace(/\s+/g, " ");
+check(/Lecture directe/.test(text) && /se hachait/.test(text) && /Nouvel essai vers/.test(text), "Réglages names the path, why, and the next try", text.slice(0, 220));
+if (SHOTS) {
+  await card.screenshot({ path: join(SHOTS, "3-settings.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(400);
+  await card.screenshot({ path: join(SHOTS, "3-settings-phone.png") });
+  await page.setViewportSize({ width: 1280, height: 900 });
+}
+await page.goBack();
+await page.waitForTimeout(500);
+
+// -- 4. the radio reconnected: a clean slate -------------------------------------------
+await route(RADIO("c2"));
+await page.waitForTimeout(1000);
+p = await path();
+check(p.plan.direct === false && p.plan.why === "default", "a new connection of the same radio plays processed again", `${p.plan.why}`);
+
+// -- 5. a retry that has come due, at the next track change ------------------------------
+const past = Date.now() - 20 * 60000;
+await boot([song("s1"), song("s2"), song("s3")], {
+  "audio.output": "auto",
+  "viz.mode": "bars",
+  "audio.glitchRoutes": {
+    "bluetooth:kmm-bt309": { at: past, conn: "c3", name: "KMM-BT309", kind: "bluetooth", why: "pace 1.080", backoff: 15 * 60000, retryAt: past + 15 * 60000, probing: false, good: 0, count: 1 },
+  },
+});
+await route(RADIO("c3"));
+await page.locator("footer.player .pp").click();
+await page.waitForFunction(() => window.__els.some((e) => e.src && !e.paused), null, { timeout: 15000 });
+await page.locator("footer.player button.max").click();
 await page.waitForTimeout(1500);
 p = await path();
-check(p.analysis === false, "the full-screen player closed: the analysis stops", JSON.stringify({ analysis: p.analysis }));
-check(p.capturing === 0 && p.context === "suspended", "the copy goes and the context is suspended", JSON.stringify({ capturing: p.capturing, context: p.context }));
-check(p.paused === false, "the music plays on");
-
-// -- 4. the next track, and a crossfade, stay direct ------------------------------------
+check(p.plan.why === "glitch" && p.wired === false, "a fault measured on this connection keeps it direct until the retry", `${p.plan.why}`);
+await page.locator('button[aria-label="Réduire"]').first().click();
 await page.locator("footer.player .next").click();
 await page.waitForFunction(() => document.querySelector("footer.player .info .t")?.textContent === "Song s2");
 await page.waitForFunction(() => window.__nsAudioPath().paused === false, null, { timeout: 10000 });
+await page.locator("footer.player button.max").click();
+await page.waitForTimeout(1500);
 p = await path();
-check(p.wired === false && p.routed === 0 && p.context === "suspended", "the next track plays direct too", JSON.stringify(p));
+check(p.plan.why === "probing" && p.wired === true, "the retry is due: the next track plays processed again", JSON.stringify({ why: p.plan.why, wired: p.wired }));
+check(p.context === "running" && p.level > -80, "and the analysers hear it", `${p.level?.toFixed(1)} dB`);
+// Six clean windows of eight seconds forget the fault.
+await page.waitForFunction(() => window.__nsAudioPath().plan.why === "default", null, { timeout: 75000 }).catch(() => {});
+p = await path();
+check(p.plan.why === "default" && p.wired === true, "enough clean playback forgets it", `${p.plan.why}`);
 
+// -- 6. pinned direct: the crossfade on the volumes ---------------------------------------
+await page.locator('button[aria-label="Réduire"]').first().click();
 wav = tone(9);
 await boot([song("x1", 9), song("x2", 9)], {
-  "audio.output": "auto",
+  "audio.output": "direct",
   "fade.enabled": true,
   "fade.seconds": 3,
   "fade.trim": false,
   "fx.normalize": "off",
 });
-await route({ kind: "bluetooth", name: "KMM-BT309", type: 8 });
 await page.locator("footer.player .pp").click();
 await page.waitForFunction(() => window.__els.some((e) => e.src && !e.paused), null, { timeout: 15000 });
-// Sample every element's volume through the end of the first track.
 const samples = [];
 const tEnd = Date.now() + 11000;
 while (Date.now() < tEnd) {
@@ -234,39 +300,6 @@ if (mid) check(Math.abs(mid[0] ** 2 + mid[1] ** 2 - 1) < 0.15, "whose power sums
 check((await title()) === "Song x2", "and the queue moved on", await title());
 p = await path();
 check(p.routed === 0 && p.context === null, "with no AudioContext ever made", JSON.stringify({ routed: p.routed, context: p.context }));
-
-// -- 5. back on the speaker ----------------------------------------------------------------
-wav = tone(40);
-await boot([song("s1"), song("s2")], { "audio.output": "auto", "viz.mode": "bars" });
-await route({ kind: "bluetooth", name: "KMM-BT309", type: 8 });
-await page.locator("footer.player .pp").click();
-await page.waitForFunction(() => window.__els.some((e) => e.src && !e.paused), null, { timeout: 15000 });
-await page.locator("footer.player button.max").click();
-await page.waitForTimeout(1500);
-p = await path();
-check(p.wired === false && p.capturing >= 1, "Bluetooth from the start: direct, with the animations on a copy", JSON.stringify({ wired: p.wired, capturing: p.capturing }));
-await route({ kind: "speaker", name: "", type: 2 });
-await page.waitForTimeout(800);
-p = await path();
-check(p.plan.direct === false && p.wired === true && p.capturing === 0, "the car radio gone: routed again, the copy dropped", JSON.stringify({ direct: p.plan.direct, wired: p.wired, capturing: p.capturing }));
-check(p.paused === false, "without stopping the music");
-
-// -- 6. Réglages says which path, and why ---------------------------------------------------
-await route({ kind: "bluetooth", name: "KMM-BT309", type: 8 });
-await page.locator('button[aria-label="Réduire"]').first().click().catch(() => {});
-await page.goto(base + "/app/#/settings");
-await page.waitForTimeout(800);
-await page.getByRole("tab", { name: "Audio" }).click().catch(() => {});
-await page.waitForTimeout(500);
-const card = page.locator("section.card", { hasText: "Sortie audio" }).first();
-const text = (await card.textContent().catch(() => "")) || "";
-check(/Lecture directe/.test(text) && /KMM-BT309/.test(text), "Réglages names the path and the device", text.replace(/\s+/g, " ").slice(0, 160));
-if (SHOTS) {
-  await card.screenshot({ path: join(SHOTS, "6-settings.png") });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.waitForTimeout(400);
-  await card.screenshot({ path: join(SHOTS, "6-settings-phone.png") });
-}
 
 await browser.close();
 stop();

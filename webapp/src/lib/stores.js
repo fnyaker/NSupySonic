@@ -99,12 +99,12 @@ export const normalization = persisted("fx.normalize", "off");
 // "auto" | "direct" | "graph". DIRECT keeps the <audio> element on the
 // browser's own media output and never routes it through Web Audio; GRAPH
 // routes it through the processor whenever something asks for it (the
-// animations, an effect, the crossfade); AUTO is direct on a Bluetooth output
-// and wherever the processed path was measured losing audio, graph elsewhere.
+// animations, an effect, the crossfade); AUTO is GRAPH, and DIRECT only while
+// the processed path is measured losing audio on the current output.
 export const audioOutput = persisted("audio.output", "auto");
-// The outputs on which the processed path was MEASURED dropping or stretching
-// audio (lib/audio/timekeeper.js), by route key: { at, name, ratio, why }.
-// Auto mode plays those direct until the entry ages out or is forgotten.
+// The faults measured on the processed path (lib/audio/timekeeper.js), by
+// route key: { at, conn, why, ratio, backoff, retryAt, probing, good, count }.
+// One connection of one output each; lib/audio/output.js owns the rules.
 export const glitchRoutes = persisted("audio.glitchRoutes", {});
 
 // -- crossfade between tracks ------------------------------------------------

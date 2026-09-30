@@ -20,6 +20,12 @@ import org.json.JSONObject
  * sounds sped up, with pieces cut out. The WebView cannot see what it is
  * playing to, so it is told from here.
  *
+ * The fault comes and goes — the same phone on the same radio played cleanly
+ * again once reconnected — so the page only plays direct while it MEASURES the
+ * fault, and forgets it on a new connection. Each time the output changes (a
+ * device comes or goes), [current] reports a new `conn`, which is how the page
+ * tells "the radio I measured the fault on" from "the radio, reconnected".
+ *
  * No permission is needed: AudioManager lists output devices to any app, and
  * a Bluetooth device's product name is its advertised name ("KMM-BT309").
  * Media goes to the most recently connected external sink by Android's routing
@@ -32,6 +38,11 @@ class AudioRoute(context: Context, private val onChange: (String) -> Unit) {
     private val main = Handler(Looper.getMainLooper())
     private var last = ""
     private var started = false
+    // Connection numbering: unique across process restarts (a stored verdict
+    // must not match a later process's first connection by accident).
+    private val boot = System.currentTimeMillis()
+    private var connCount = 0
+    private var connDevice = Int.MIN_VALUE
 
     private val callback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) = changed()
@@ -66,7 +77,12 @@ class AudioRoute(context: Context, private val onChange: (String) -> Unit) {
         }
     }
 
-    /** The route as JSON: {"kind": "bluetooth"|"usb"|"wired"|"hdmi"|"speaker"|"unknown", "name": …}. */
+    /**
+     * The route as JSON: {"kind": "bluetooth"|"usb"|"wired"|"hdmi"|"speaker"|"unknown",
+     * "name": …, "type": …, "conn": …}. Called from the main thread (device
+     * callbacks) and from the JavaScript bridge's thread.
+     */
+    @Synchronized
     fun current(): String {
         val devices: Array<AudioDeviceInfo> = try {
             am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS) ?: emptyArray<AudioDeviceInfo>()
@@ -82,10 +98,19 @@ class AudioRoute(context: Context, private val onChange: (String) -> Unit) {
                 bestRank = r
             }
         }
+        // A different device than last time is a new connection — and so is
+        // the same radio gone and back, since the speaker was the output in
+        // between (and Android usually gives it a new id anyway).
+        val id = best?.id ?: -1
+        if (id != connDevice) {
+            connDevice = id
+            connCount++
+        }
         val o = JSONObject()
         o.put("kind", if (best == null) "unknown" else kindOf(best.type))
         o.put("name", best?.let { clean(it.productName?.toString()) } ?: "")
         o.put("type", best?.type ?: 0)
+        o.put("conn", "$boot-$connCount")
         return o.toString()
     }
 

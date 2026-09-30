@@ -101,8 +101,8 @@ cd webapp && node test/ui/run.mjs                    # the lists' main-thread co
 cd webapp && node test/queue/run.mjs [--phone]       # the queue's editing in headless Chromium on a 4000-track queue: drag a row (mouse, or real touch
                                                      # events), drag to the far end with the list scrolling under the finger, the keyboard, clear
 cd webapp && node test/player/run.mjs                # the sleep timer and the podcast speed on the audio elements the browser really plays (a fake page clock)
-cd webapp && node test/output/run.mjs                # the audio path: routed by the full-screen player, a Bluetooth car radio connects (the app's route
-                                                     # message), the track carries on DIRECT on a fresh element, animations on a copy, crossfade on the volumes
+cd webapp && node test/output/run.mjs                # the audio path: routed by the full-screen player, the fault simulated (the element's clock 8% fast): convicted
+                                                     # in one window, DIRECT on a fresh element and a fresh context, retried at a track change, forgotten when clean
 cd webapp && node test/explore/run.mjs [--phone]     # the Explore screen: front page, into a genre, play a chart, back (Deezer's answers put in by the test)
 cd webapp && node test/panel/run.mjs [--desktop]     # what is under the full-screen player: the swipe up (touch events), the desktop tab
                                                      # (the four browser tests above start tools/perf_api.py --serve; PYTHON=<venv python>, SHOTS=<dir> keeps pictures)
@@ -179,14 +179,17 @@ rebuilt page comes back on the same track at the same position. Having actually 
 doing it is also the only moment the app offers the battery-optimization exemption
 (`offerBatteryExemptionOnce`, once ever) — the setup screen keeps the same button.
 
-**Naming the audio output** (`AudioRoute`): the page plays DIRECT on a Bluetooth output (see *Where
-the sound goes* below), and a WebView cannot see what it plays to, so the activity lists
-AudioManager's output devices (no permission needed; a Bluetooth device's product name is its
-advertised name), ranks them the way Android routes media — Bluetooth (A2DP, LE, hearing aid), USB,
-wired, HDMI, speaker — and pushes `{kind, name}` to `window.__nsAudioRoute` on every change
-(`registerAudioDeviceCallback`); the page reads the first one through `NSNative.audioRoute()`. The
-name is reduced to printable characters before it reaches a page. An older APK simply reports
-nothing, and the page then falls back to the latency its context reports.
+**Naming the audio output** (`AudioRoute`): a fault measured on the processed path sends ONE
+CONNECTION of an output direct (see *Where the sound goes* below), and a WebView cannot see what it
+plays to, so the activity lists AudioManager's output devices (no permission needed; a Bluetooth
+device's product name is its advertised name), ranks them the way Android routes media — Bluetooth
+(A2DP, LE, hearing aid), USB, wired, HDMI, speaker — and pushes `{kind, name, conn}` to
+`window.__nsAudioRoute` on every change (`registerAudioDeviceCallback`); the page reads the first one
+through `NSNative.audioRoute()`. `conn` changes whenever the chosen device does (the radio gone and
+back is two changes), prefixed with the process's start time so a stored verdict never matches a
+later process's connection by accident. The name is reduced to printable characters before it
+reaches a page. An older APK reports nothing: verdicts are then per page's own guess of the output
+(the latency its context reports) and live until their retry.
 
 **Linking the Deezer account from the app** (`DeezerLoginActivity`): there is no email/password
 endpoint left that a server could call — Deezer's web one (`ajax/action.php` + reCAPTCHA) answers
@@ -2023,19 +2026,24 @@ the rhythm analysis or the automatic latency off changed nothing. Nothing COULD:
 player's animation had routed the element through `createMediaElementSource`, which is one-way for
 the element's whole life, and the analyser's `addModule` had moved the context's rendering onto the
 AudioWorklet thread for the context's whole life. On Android that thread hands the device its audio
-through a FIFO, and an A2DP sink pulls in bursts large and irregular enough that the FIFO is padded
-with silence and then drops what arrives late (Chromium 40133762 — AudioWorklet + `latencyHint:
+through a FIFO, and an A2DP sink pulls in bursts large and irregular enough that the FIFO can be
+padded with silence and then drop what arrives late (Chromium 40133762 — AudioWorklet + `latencyHint:
 "playback"` on Android; and the "Bluetooth + WebAudio + background = stutter" every metering PWA has
-filed). The browser's own media pipeline — what every other music app uses — has none of it. So the
-route is a POLICY, `audio.output`:
+filed). The browser's own media pipeline — what every other music app uses — has none of it. **And it
+comes and goes**: the same phone on the same radio, reconnected, played cleanly again. So the route
+is a policy, `audio.output`, and in its default it is MEASURED rather than assumed:
 
-- **auto** (default): DIRECT on a Bluetooth output, processed elsewhere — unless the equalizer or the
-  bass lift is on (only the processor can do those), and DIRECT on ANY output where the timekeeper
-  measured the processed path losing audio, remembered per output for 45 days (`audio.glitchRoutes`,
-  listed in Réglages → Audio with "Réessayer le traitement"). The Android app names the output
-  (`AudioRoute`: AudioManager's output devices, no permission, pushed on every change to
-  `window.__nsAudioRoute`, read at boot through `NSNative.audioRoute()`); a browser on Android is
-  recognised by the ≥150 ms its context reports.
+- **auto** (default): processed everywhere, Bluetooth included — and DIRECT the moment the timekeeper
+  measures the processed path losing audio, for as long as the fault can be expected to last: THIS
+  connection of this output (`audio.glitchRoutes[routeKey]`, whose `conn` the Android app changes every
+  time the output comes back), until a retry. The retry happens at a TRACK CHANGE (`retryIfDue` in
+  `loadTrack`: the source is being replaced anyway, so routing the element then is inaudible) 15 min
+  later, then 30, 60… up to 4 h while the fault keeps coming back (each retry that finds it costs one
+  eight-second window of it); six clean windows in a row on the processed path forget it
+  (`noteGoodWindow`), and a new connection starts clean. The context that lost the audio is never
+  used again (`requestContextReset`: closed once no routed element plays through it, the engine
+  starting over on a fresh one — the state a reconnection cured when it was reported). Réglages →
+  Audio says which path, why, and when the next try is, with "Réessayer maintenant".
 - **direct**: nothing is ever routed. The normalization and the crossfade ride on `element.volume`
   (the gain can only turn a track DOWN — volume stops at 1 — and the fade is stepped by a 25 ms timer
   AND by every `timeupdate`, since a background WebView may throttle timers: coarser, never stalled);
@@ -2045,7 +2053,8 @@ route is a POLICY, `audio.output`:
   point the context is SUSPENDED — a phone in a car with its screen off has one stream open, the
   element's. The copy's timing is the context's, not the element's, so the animations are only as
   close as the two output latencies are (no look-ahead: nothing audible goes through the delay).
-- **graph**: always processed, as before.
+  Auto uses the same machinery while a fault is being corrected.
+- **graph**: always processed, as before; a measured fault is only reported (a toast, the log).
 
 Leaving the graph needs a NEW element: the idle one is replaced at once, the playing one hands its
 track over to a fresh one at the position it has reached (seek at metadata and again at `canplay`,
@@ -2053,18 +2062,22 @@ measured 3.78 s landed for 3.79 s expected), and where that cannot land (a live 
 that cannot seek) the next track's load does it, since its new source goes onto a fresh element
 anyway. A failed mid-song hand-over is not retried on the same track (each try is a stream request).
 
-The **timekeeper** watches the playing element once a second, in windows of 15 s of uninterrupted
+The **timekeeper** watches the playing element once a second, in windows of 8 s of uninterrupted
 playback (a seek, a stall, a track change or an implausible tick starts a new one), against four
 clocks: the element's own position (a routed element is pulled by the context: dropped frames make
-it run FAST, padded silence slow — healthy is a few hundred ppm, "sped up" a few percent), the
-context's clock, how far the output timestamp's mapping moves (a healthy one steps a burst now and
-then: 22 ms a window at most on the model of what Chromium measured; padded-then-dropped gaps move it
-0.33-0.43 s), and `AudioContext.playbackStats` underruns where Chrome has them. Two bad windows in a
-row are a verdict: auto goes direct and says so in a toast; a pinned "graph" is only warned. On the
-direct path a verdict while the animations copy the sound stops the copy for the session. Every bad
-window (and one good one a minute) goes to the diagnostic log; `window.__nsAudioPath()` says which
-path the music takes and why. `test/output.test.mjs` pins the policy, the detector on healthy and
-broken readings, and the volume envelopes; `test/output/run.mjs` drives the whole thing in Chromium.
+it run FAST, padded silence slow — healthy is a few hundred ppm plus a render burst of quantization,
+0.25% worst on the model of what Chromium measured; "sped up" is a few percent), the context's clock,
+how fast the output timestamp's mapping moves (healthy: one 21.6 ms burst step now and then, 2.4 ms/s
+worst; padded-then-dropped gaps: 13-31 ms/s; the bar is 10), and `AudioContext.playbackStats`
+underruns where Chrome has them (1% of the time). A window past 4% pace, 3% underrun or 25 ms/s is a
+verdict on its own — the simulated fault in `test/output/run.mjs` was convicted 5.2 s after it began;
+a milder one needs a second bad window in a row, so one bad moment on a loaded phone is not a
+verdict. On the direct path a verdict while the animations copy the sound stops the copy for the
+session. Every bad window (and one good one a minute) goes to the diagnostic log;
+`window.__nsAudioPath()` says which path the music takes, why, and which context (`serial`).
+`test/output.test.mjs` pins the policy (the connection scope, the doubling, the clearing), the
+detector on healthy and broken readings, and the volume envelopes; `test/output/run.mjs` drives the
+whole thing in Chromium.
 
 **THE APP CORE IS RUST TOO** (`webapp/appcore`, compiled to `src/lib/appcore/appcore.wasm`, reached
 through `lib/appcore/core.js`). The interface's own logic — not the DOM, the logic — where the
