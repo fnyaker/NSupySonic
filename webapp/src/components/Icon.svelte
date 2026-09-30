@@ -20,6 +20,12 @@
   {#if name === "home"}
     <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
     <path d="M9 22V12h6v10" />
+  {:else if name === "bluetooth"}
+    <path d="m7 7 10 10-5 5V2l5 5L7 17" />
+  {:else if name === "speaker"}
+    <rect x="4" y="2" width="16" height="20" rx="2" />
+    <circle cx="12" cy="14" r="4" />
+    <path d="M12 6h.01" />
   {:else if name === "search"}
     <circle cx="11" cy="11" r="8" />
     <path d="m21 21-4.3-4.3" />

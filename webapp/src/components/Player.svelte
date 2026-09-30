@@ -43,7 +43,24 @@
     setFade,
     canCrossfade,
     wireAudio,
+    isWired,
+    isDirect,
+    releaseElement,
+    setPlayerVolume,
+    disableCapture,
+    pathState,
+    tickVolumes,
+    requestContextReset,
   } from "../lib/audio/graph.js";
+  import {
+    directOutput,
+    outputPlan,
+    reportGlitch,
+    retryIfDue,
+    noteGoodWindow,
+    noteContextLatency,
+  } from "../lib/audio/output.js";
+  import { startTimekeeper, judge } from "../lib/audio/timekeeper.js";
   import { primeEdges, knownEdges } from "../lib/edges.js";
   import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
   import { primeAnalyses } from "../lib/analysis.js";
@@ -87,31 +104,40 @@
   // this flag makes onTime ignore those stale, previous-track positions.
   let loadingTrack = false;
 
+  // Every listener an element carries, so one discarded for good (renewElements)
+  // can be stripped of them.
+  const EL_EVENTS = [
+    ["timeupdate", onTime],
+    ["ended", onEnded],
+    ["play", onElPlay],
+    ["pause", onElPause],
+    ["error", onElError],
+    ["stalled", onElStall],
+    ["waiting", onElWaiting],
+    ["progress", onProgress],
+    // Position discontinuities: the OS media session interpolates the playhead
+    // itself from the last snapshot, so setPositionState only needs to fire on
+    // jumps — not on every timeupdate (see onPosJump / updatePositionState).
+    ["loadedmetadata", onPosJump],
+    ["durationchange", onPosJump],
+    ["seeked", onPosJump],
+    ["ratechange", onPosJump],
+    // A listen party republishes on these at once instead of at its next look.
+    ["seeked", partyPoke],
+    ["play", partyPoke],
+    ["pause", partyPoke],
+  ];
   function makeEl() {
     const el = new Audio();
     el.preload = "auto";
     // A podcast at 1.5x must still sound like the same voice.
     el.preservesPitch = true;
     el.webkitPreservesPitch = true;
-    el.addEventListener("timeupdate", onTime);
-    el.addEventListener("ended", onEnded);
-    el.addEventListener("play", onElPlay);
-    el.addEventListener("pause", onElPause);
-    el.addEventListener("error", onElError);
-    el.addEventListener("stalled", onElStall);
-    el.addEventListener("waiting", onElWaiting);
-    el.addEventListener("progress", onProgress);
-    // Position discontinuities: the OS media session interpolates the playhead
-    // itself from the last snapshot, so setPositionState only needs to fire on
-    // jumps — not on every timeupdate (see onPosJump / updatePositionState).
-    el.addEventListener("loadedmetadata", onPosJump);
-    el.addEventListener("durationchange", onPosJump);
-    el.addEventListener("seeked", onPosJump);
-    el.addEventListener("ratechange", onPosJump);
-    // A listen party republishes on these at once instead of at its next look.
-    el.addEventListener("seeked", partyPoke);
-    el.addEventListener("play", partyPoke);
-    el.addEventListener("pause", partyPoke);
+    // The rate the player wants, from birth: an element made to replace another
+    // (renewElements) must not play a podcast at 1x until the next change.
+    el.defaultPlaybackRate = wantedRate || 1;
+    el.playbackRate = wantedRate || 1;
+    for (const [ev, fn] of EL_EVENTS) el.addEventListener(ev, fn);
     return el;
   }
   onMount(() => {
@@ -127,6 +153,29 @@
       plan: partyPlan,
     });
     startWatchdog();
+    stopPace = startTimekeeper({
+      element: () => audio,
+      busy: () => switching || recovering || loadingTrack || chasing || !!xfade,
+      // A browser (or an older app) cannot name its output: the latency its
+      // context reports can say "Bluetooth" (lib/audio/output.js).
+      onTick: (ctx) => noteContextLatency(ctx),
+      onVerdict: onPaceVerdict,
+      // A clean window on the processed path while a verdict is being retried
+      // counts toward forgetting it (lib/audio/output.js#noteGoodWindow).
+      onWindow: (w) => {
+        if (w.wired && !judge(w)) noteGoodWindow();
+      },
+    });
+    // One call from a remote devtools session (or a browser test) says which
+    // path the music takes right now and why.
+    window.__nsAudioPath = () => ({
+      ...pathState(audio),
+      plan: get(outputPlan),
+      active: els.indexOf(audio),
+      t: audio ? audio.currentTime : null,
+      paused: audio ? audio.paused : null,
+      volume: audio ? audio.volume : null,
+    });
     document.addEventListener("visibilitychange", onVisibility);
     // Last reliable moment before the tab is discarded: report the current
     // track's play time (reportListen uses keepalive, so it survives unload).
@@ -139,6 +188,7 @@
   onDestroy(() => {
     savePodcastProgress(true);
     stopWatchdog();
+    if (stopPace) stopPace();
     cancelCrossfade(false);
     cancelRecovery();
     cancelSwitch();
@@ -256,6 +306,9 @@
     stopWatchdog();
     lastAdvance = Date.now();
     watchdog = setInterval(() => {
+      // A hand-over off Web Audio that had to wait (a switch, a crossfade, a
+      // load in flight) is retried here, once the player is between states.
+      if (renewWanted) renewElements("retry");
       if (!audio || switching || recovering || loadingTrack || chasing) return;
       const s = get(player);
       if (!s.playing) {
@@ -905,6 +958,16 @@
     }
     setBlobUrl(src.blob ? src.url : null);
     curIsBlob = src.blob;
+    // A track change is where the processed path is tried again after a
+    // measured fault, once its retry is due (lib/audio/output.js): the source
+    // is being replaced anyway, so routing the element now is inaudible, and
+    // the context it goes into is a fresh one.
+    retryIfDue();
+    // The path went direct while this element was routed through Web Audio,
+    // which it can never leave: the new track goes onto a fresh element. The
+    // outgoing sound is being cut here anyway (a new source), so this is the
+    // one hand-over that costs nothing.
+    if (isDirect() && isWired(audio)) swapToFresh("track change");
     // A paused session-restore boot must not buffer audio in the background —
     // that silently burned data on EVERY app launch. preload=none defers the
     // fetch until the user actually presses play (play() triggers the load).
@@ -1167,6 +1230,9 @@
       switchCleanup();
       switchCleanup = null;
     }
+    // A hand-over off Web Audio is a switch too (renewElements): a pause drops
+    // it, and the watchdog moves the source across quietly instead.
+    if (renewCleanup) renewCleanup();
     switching = false;
   }
 
@@ -1250,6 +1316,9 @@
       audio = incoming; // make it active BEFORE play so the handlers accept it
       curQ = newQ;
       registerSource(incoming);
+      // The idle element still carries the gain of whatever it last played (a
+      // crossfade's incoming track, two songs ago): this is the same track.
+      setTrackGain(gainFor(cur));
       resumeAudio();
       // Recompute intent at SWAP time — a pause made during the preload must not
       // be undone by a stale `wasPlaying` captured when the switch started.
@@ -1269,6 +1338,249 @@
     // Deadline: a preload that can't get ready in time is abandoned (it used to
     // force-swap onto a possibly broken element and kill playback).
     failTimer = setTimeout(abort, 8000);
+  }
+
+
+  // --- leaving Web Audio (lib/audio/output.js) --------------------------------
+  //
+  // On some outputs the processed path loses audio (a Bluetooth car radio: the
+  // music sounds sped up, with pieces cut out), and the policy then says
+  // DIRECT. But an element routed through createMediaElementSource stays routed
+  // for its whole life, so the only way off the graph is a NEW element: the idle
+  // one is simply replaced, and the playing one hands its track over to its
+  // replacement at the position it has reached, the way a quality switch does.
+  // Where that cannot land cleanly (a live first-play stream that cannot seek)
+  // it waits for the next track, whose new source goes onto a fresh element
+  // anyway (loadTrack → swapToFresh).
+  let renewWanted = false;
+  let renewCleanup = null;
+  // The track a mid-song hand-over already failed on: not tried again while it
+  // plays (each try is a new request for the stream), only once it is paused or
+  // when the next track loads.
+  let renewDeferredFor = null;
+  let stopPace = null;
+
+  // An element discarded for good: no listener of ours left on it, nothing
+  // playing, and nothing the graph keeps for it.
+  function disposeEl(el) {
+    if (!el) return;
+    for (const [ev, fn] of EL_EVENTS) el.removeEventListener(ev, fn);
+    stopElement(el);
+    releaseElement(el);
+  }
+
+  function bufferedAt(el, t) {
+    try {
+      const b = el.buffered;
+      for (let i = 0; i < b.length; i++) if (t >= b.start(i) && t <= b.end(i)) return true;
+    } catch {
+      /* not ready */
+    }
+    return false;
+  }
+
+  // The idle element, if routed and not in use, is replaced at once: nothing
+  // is playing on it.
+  function renewIdle() {
+    const idle = els.find((e) => e !== audio);
+    if (!idle || !isWired(idle) || switching) return;
+    if (xfade && (xfade.el === idle || xfade.old === idle)) return;
+    const el = makeEl();
+    els = els.map((e) => (e === idle ? el : e));
+    disposeEl(idle);
+  }
+
+  // Put a fresh element in the active one's place, with no hand-over — for the
+  // moments its sound is being cut anyway (a new track) or is not playing.
+  function swapToFresh(reason) {
+    const old = audio;
+    if (pendingSeek && pendingSeek.el === old) cancelPendingSeek();
+    const el = makeEl();
+    els = els.map((e) => (e === old ? el : e));
+    audio = el;
+    registerSource(el);
+    disposeEl(old);
+    renewIdle();
+    renewWanted = els.some((e) => isWired(e));
+    logInfo("audio", `playing off Web Audio from here (${reason})`, null, { important: true });
+    return el;
+  }
+
+  function currentSourceUrl(cur) {
+    if (curIsBlob && curBlobUrl) return curBlobUrl;
+    return cur ? api.streamUrl(cur.deezer_id, curQ) : null;
+  }
+
+  function renewElements(reason) {
+    if (!audio || !isDirect() || !els.some((e) => isWired(e))) {
+      renewWanted = false;
+      return;
+    }
+    renewWanted = true;
+    // Mid-transition states own the elements; the watchdog tries again.
+    if (switching || recovering || chasing || loadingTrack || xfade) return;
+    renewIdle();
+    if (!isWired(audio)) {
+      renewWanted = false;
+      return;
+    }
+    const cur = get(current);
+    if (!cur || !curId) {
+      swapToFresh(reason);
+      return;
+    }
+    // Nothing is being heard from it: move the source across quietly.
+    const quiet = !get(player).playing || audio.readyState < 2;
+    if (!quiet && renewDeferredFor === curId) return;
+    if (quiet) {
+      const old = audio;
+      const pos = old.readyState >= 1 ? old.currentTime : get(player).currentTime || 0;
+      const preload = old.preload;
+      const url = currentSourceUrl(cur);
+      const el = swapToFresh(reason);
+      el.preload = preload;
+      if (detachLadder) {
+        detachLadder();
+        detachLadder = watchAudio(el, curId);
+      }
+      el.src = url;
+      el.load();
+      setTrackGain(gainFor(cur));
+      if (pos > 0) seekOnceLoaded(pos);
+      if (get(player).playing) startPlayback("renew");
+      return;
+    }
+    handOverToFresh(cur, reason);
+  }
+
+  function handOverToFresh(cur, reason) {
+    const old = audio;
+    const incoming = makeEl();
+    switching = true;
+    incoming.preload = "auto";
+    // Its gain before its first sample: on the direct path it is part of the
+    // element's volume, which registerSource applies at the swap.
+    setElementGain(incoming, gainFor(cur));
+    incoming.src = currentSourceUrl(cur);
+    incoming.load();
+    let done = false;
+    let failTimer = null;
+    // Aim where the playing element is NOW, and again at the swap: the preload
+    // takes a moment, and replaying that moment would be heard as a stutter.
+    const onMeta = () => {
+      try {
+        incoming.currentTime = old.currentTime;
+      } catch {
+        /* not seekable yet */
+      }
+    };
+    const cleanup = () => {
+      clearTimeout(failTimer);
+      renewCleanup = null;
+      incoming.removeEventListener("loadedmetadata", onMeta);
+      incoming.removeEventListener("canplay", swap);
+      incoming.removeEventListener("error", onErr);
+    };
+    const abandon = (why) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      disposeEl(incoming);
+      switching = false;
+      renewWanted = true; // the next track change, or a quiet moment, does it
+      if (why !== "cancelled") renewDeferredFor = cur.deezer_id;
+      logInfo("audio", `hand-over off Web Audio postponed (${why})`, null, { important: true });
+    };
+    const onErr = () => abandon("the fresh element failed to load");
+    renewCleanup = () => abandon("cancelled");
+    function swap() {
+      if (done) return;
+      if (audio !== old || get(current)?.deezer_id !== cur.deezer_id) {
+        abandon("the track changed");
+        return;
+      }
+      const target = old.currentTime;
+      if (Math.abs(incoming.currentTime - target) > 0.08) {
+        if (bufferedAt(incoming, target)) {
+          try {
+            incoming.currentTime = target;
+          } catch {
+            /* keep where it is */
+          }
+        } else if (Math.abs(incoming.currentTime - target) > 1.5) {
+          // A stream that cannot seek there (a live first play): swapping now
+          // would jump. The next track's load does it cleanly.
+          abandon("the source cannot seek to the position");
+          return;
+        }
+      }
+      done = true;
+      cleanup();
+      els = els.map((e) => (e === old ? incoming : e));
+      audio = incoming;
+      registerSource(incoming);
+      setTrackGain(gainFor(cur));
+      if (detachLadder) {
+        detachLadder();
+        detachLadder = watchAudio(incoming, cur.deezer_id);
+      }
+      lastAdvance = Date.now();
+      if (get(player).playing) startPlayback("renew");
+      disposeEl(old);
+      switching = false;
+      renewWanted = els.some((e) => isWired(e));
+      logInfo("audio", `playing off Web Audio from here (${reason}, handed over at ${target.toFixed(2)} s)`, null, {
+        important: true,
+      });
+    }
+    incoming.addEventListener("loadedmetadata", onMeta);
+    incoming.addEventListener("canplay", swap);
+    incoming.addEventListener("error", onErr);
+    failTimer = setTimeout(() => abandon("the fresh element took too long"), 8000);
+  }
+
+  $: onDirectChange($directOutput);
+  function onDirectChange(d) {
+    if (!els.length) return;
+    if (d) renewElements("direct output");
+    else renewWanted = false;
+  }
+
+  // The timekeeper's verdict (lib/audio/timekeeper.js): the music is not keeping
+  // time on this output.
+  let pinnedWarned = false;
+  function onPaceVerdict({ why, wired, capturing, window: w }) {
+    if (wired) {
+      const acted = reportGlitch({ why, ratio: w && w.pace });
+      logInfo(
+        "audio",
+        `the processed path is losing audio on this output (${why})` +
+          (acted ? " — going direct" : " — the setting keeps it processed"),
+        null,
+        { important: true }
+      );
+      if (acted) {
+        // The context that lost the audio is not used again: closed once the
+        // hand-over is done, a fresh one built for whatever needs it next.
+        requestContextReset();
+        toasts.push("Son haché détecté : lecture directe activée", "info", 5000);
+      }
+      else if (!pinnedWarned) {
+        pinnedWarned = true;
+        toasts.push(
+          "Le traitement audio perd des morceaux sur cette sortie — Réglages › Audio › Sortie audio : Automatique",
+          "error",
+          8000
+        );
+      }
+    } else if (capturing) {
+      // Direct, and still off time while the animations copy the sound: the
+      // copy goes, the music stays.
+      disableCapture();
+      logInfo("audio", `direct playback lost time while copied for the animations (${why}) — copy stopped`, null, {
+        important: true,
+      });
+    }
   }
 
   // Apply a target time once the freshly-loaded source can seek. Cached/archived
@@ -1335,10 +1647,11 @@
     // The sleep timer's fade-out rides on top of the volume, so the level the
     // user chose is never touched and never has to be put back.
     const v = ($player.muted ? 0 : $player.volume) * $sleepFade;
-    audio.volume = v;
     // The outgoing element of a crossfade is still audible: a volume change
-    // mid-fade has to reach it too, or the two tracks drift apart in level.
-    if (xfade?.old) xfade.old.volume = v;
+    // mid-fade has to reach it too, or the two tracks drift apart in level. On
+    // the direct path the graph folds each element's normalization and fade
+    // into its volume (graph.js#setPlayerVolume).
+    setPlayerVolume(v, [audio, xfade?.old]);
   }
 
   // Podcast speed: remembered per show, and music always plays at 1. It goes on
@@ -1371,6 +1684,9 @@
   }
 
   function onTime(e) {
+    // A direct crossfade's envelope steps on the media pipeline's clock too
+    // (graph.js#tickVolumes): timers may be throttled in the background.
+    tickVolumes();
     if (e && e.target !== audio) return; // ignore the idle/preloading element
     if (loadingTrack) return; // a track change is mid-flight — position is stale
     if (chasing) return; // chasing a seek — hold the bar at the target

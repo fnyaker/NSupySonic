@@ -95,6 +95,18 @@ export const bassBoost = persisted("fx.bass", 0);
 // dynamics compressor + make-up gain that evens out loud/quiet tracks.
 export const normalization = persisted("fx.normalize", "off");
 
+// -- where the sound goes (lib/audio/output.js) ------------------------------
+// "auto" | "direct" | "graph". DIRECT keeps the <audio> element on the
+// browser's own media output and never routes it through Web Audio; GRAPH
+// routes it through the processor whenever something asks for it (the
+// animations, an effect, the crossfade); AUTO is GRAPH, and DIRECT only while
+// the processed path is measured losing audio on the current output.
+export const audioOutput = persisted("audio.output", "auto");
+// The faults measured on the processed path (lib/audio/timekeeper.js), by
+// route key: { at, conn, why, ratio, backoff, retryAt, probing, good, count }.
+// One connection of one output each; lib/audio/output.js owns the rules.
+export const glitchRoutes = persisted("audio.glitchRoutes", {});
+
 // -- crossfade between tracks ------------------------------------------------
 // Off by default: crossfading needs the Web Audio graph, and the default (pure
 // element playback) is what keeps a backgrounded tab from ever being silenced

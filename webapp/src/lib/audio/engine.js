@@ -49,6 +49,8 @@ import {
   getAnalysers,
   getContext,
   requestAnalyser,
+  releaseAnalyser,
+  onContextReset,
   requestScope,
   releaseScope,
   setScopeWindow,
@@ -484,7 +486,9 @@ async function startRhythm() {
       addedTo.set(ctx, added);
     }
     await added;
-    if (!running || rh) return;
+    // The context was closed and replaced while the module loaded
+    // (graph.js#resetContext): this start belongs to a context that is gone.
+    if (!running || rh || getContext() !== ctx) return;
     const options = {
       numberOfInputs: 1,
       numberOfOutputs: 1,
@@ -524,6 +528,24 @@ async function startRhythm() {
     rhStarting = false;
   }
 }
+
+// The graph closed its context (it was caught losing audio) and will build a
+// fresh one: the node lived in the old one. Start over — the fallback reads the
+// new analysers at once, and starts the analyser on the new context as soon as
+// there is one.
+onContextReset(() => {
+  if (rh) {
+    try {
+      rh.node.port.postMessage({ t: "close" });
+    } catch {
+      /* its context is closed */
+    }
+  }
+  rh = null;
+  rhFailed = false;
+  pending.length = 0; // their buffers belonged to the node that just went
+  if (running) startFallback();
+});
 
 function failRhythm(r) {
   if (rh !== r) return;
@@ -1164,6 +1186,9 @@ function stop() {
   // grid and the style it has learnt, so pausing the music (which is what
   // stops the views) and playing on resumes locked instead of from nothing.
   sleepRhythm(true);
+  // On the direct path this lets the copies go and suspends the context: a
+  // phone with its screen off keeps one audio stream open, the music's.
+  releaseAnalyser();
   for (const q of pending) recycle(q.buf);
   pending.length = 0;
   if (pumpTimer) clearTimeout(pumpTimer);

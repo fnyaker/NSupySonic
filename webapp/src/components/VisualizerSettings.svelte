@@ -45,6 +45,7 @@
   import { LEVEL, subscribeFrames, readout, delivery } from "../lib/audio/engine.js";
   import { LOOKAHEAD_MAX, getContext } from "../lib/audio/graph.js";
   import { reportedLag } from "../lib/audio/latency.js";
+  import { outputPlan } from "../lib/audio/output.js";
   import { openProjector } from "../lib/viz/host.js";
   import { FAMILY_LIST } from "../lib/audio/style.js";
   import Visualizer from "./Visualizer.svelte";
@@ -474,7 +475,13 @@
       <div class="ro">
         <span class="ro-k">Avance</span>
         <span class="ro-v">{$delivery.measured ? ($delivery.lead ? `${$delivery.lead} ms` : "aucune") : "—"}</span>
-        <span class="ro-s muted">{autoLead ? "mesurée sur cet appareil" : "réglée à la main"}</span>
+        <span class="ro-s muted">
+          {$outputPlan.direct
+            ? "aucune en lecture directe : le son ne passe pas par le moteur"
+            : autoLead
+              ? "mesurée sur cet appareil"
+              : "réglée à la main"}
+        </span>
       </div>
       <div class="ro">
         <span class="ro-k">À l'heure</span>
