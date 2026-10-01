@@ -227,25 +227,42 @@
     }, 320);
   }
   onDestroy(() => clearTimeout(hideTimer));
-  // The panel's own header drags it back down.
-  let panelDrag = null; // { y0 }
+  // A swipe down anywhere on the panel drags it back down: on its header always,
+  // on its body when the body is scrolled to the top and the finger's first
+  // move is DOWN. A gesture that commits to anything else (a scroll, a
+  // horizontal shelf) belongs to whatever it started on, for its whole length.
+  let panelDrag = null; // { x0, y0, head, top, axis: null | "y" | "no" }
+  let panelBody;
+  let swallowClick = false;
   function panelStart(e) {
     if (e.touches.length !== 1) return;
-    panelDrag = { y0: e.touches[0].clientY };
+    const t = e.touches[0];
+    const head = !!e.target.closest?.(".under-h");
+    panelDrag = { x0: t.clientX, y0: t.clientY, head, top: head || !panelBody || panelBody.scrollTop <= 0, axis: head ? "y" : null };
   }
   function panelMove(e) {
-    if (!panelDrag) return;
-    const dy = e.touches[0].clientY - panelDrag.y0;
-    if (dy <= 0) return;
+    if (!panelDrag || panelDrag.axis === "no") return;
+    const t = e.touches[0];
+    const dx = t.clientX - panelDrag.x0;
+    const dy = t.clientY - panelDrag.y0;
+    if (!panelDrag.axis) {
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      panelDrag.axis = panelDrag.top && dy > 0 && dy > Math.abs(dx) ? "y" : "no";
+      if (panelDrag.axis === "no") return;
+    }
+    if (dy <= 0 && !revealing) return;
     if (e.cancelable) e.preventDefault();
     revealing = true;
-    reveal = Math.max(0, panelH() - dy);
+    reveal = Math.max(0, Math.min(panelH(), panelH() - dy));
   }
   function panelEnd() {
     if (!panelDrag) return;
     panelDrag = null;
     if (!revealing) return;
     revealing = false;
+    // The browser may still synthesise a click from the drag: it opened nothing.
+    swallowClick = true;
+    setTimeout(() => (swallowClick = false), 400);
     if (panelH() - reveal > 90) closeMore();
     else reveal = panelH();
   }
@@ -956,21 +973,25 @@
       role="dialog"
       aria-label="Crédits, artiste et titres similaires"
       aria-hidden={!more}
+      on:touchstart={panelStart}
+      on:touchmove|nonpassive={panelMove}
+      on:touchend={panelEnd}
+      on:touchcancel={panelCancel}
+      on:click|capture={(e) => {
+        if (swallowClick) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
     >
-      <div
-        class="under-h"
-        on:touchstart={panelStart}
-        on:touchmove={panelMove}
-        on:touchend={panelEnd}
-        on:touchcancel={panelCancel}
-      >
+      <div class="under-h">
         <span class="grab" aria-hidden="true"></span>
         <div class="under-t">
           <span>À propos de ce titre</span>
           <button class="ic" on:click={closeMore} aria-label="Fermer"><Icon name="chevronDown" size={22} /></button>
         </div>
       </div>
-      <div class="under-b">
+      <div class="under-b" bind:this={panelBody}>
         <NowPlayingMore track={$current} />
       </div>
     </div>

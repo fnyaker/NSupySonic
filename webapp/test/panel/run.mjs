@@ -144,6 +144,29 @@ if (DESKTOP) {
   check((await shown()) >= H - 2, "scrolling its list leaves it open");
   check((await page.locator(".m").count()) === 1, "and the player is still there");
 
+  // Down on its body while it is scrolled scrolls it back: it stays open.
+  await swipe(206, 400, 700);
+  check((await shown()) >= H - 2, "a swipe down on a scrolled list scrolls it, the panel stays");
+  await page.evaluate(() => (document.querySelector(".under-b").scrollTop = 0));
+  // Sideways is never a close, wherever it starts.
+  await swipe(206, 500, 520, 6);
+  await touch("touchStart", [{ x: 100, y: 500 }]);
+  for (let k = 1; k <= 8; k++) { await touch("touchMove", [{ x: 100 + k * 25, y: 500 + k * 4 }]); await page.waitForTimeout(16); }
+  await touch("touchEnd", []);
+  await page.waitForTimeout(450);
+  check((await shown()) >= H - 2, "a sideways swipe on its body leaves it open");
+  // At the top, down from the middle of the body follows the finger and closes it.
+  await touch("touchStart", [{ x: 206, y: 450 }]);
+  for (let k = 1; k <= 8; k++) { await touch("touchMove", [{ x: 206, y: 450 + k * 30 }]); await page.waitForTimeout(16); }
+  const down = H - (await shown());
+  check(down > 200 && down < 260, "from the body the panel follows the finger down", `${down} px for a 240 px drag`);
+  await touch("touchEnd", []);
+  await page.waitForTimeout(500);
+  check((await shown()) === 0 || (await page.locator(".under").count()) === 0, "a swipe down on its body at the top closes it");
+  check((await page.locator(".m .scroller").count()) === 1, "the player is still open under it");
+  await page.locator(".peek").click();
+  await page.waitForTimeout(500);
+
   // Down from the header closes the panel, not the player.
   await swipe(206, 40, 420);
   check((await shown()) === 0 || (await page.locator(".under").count()) === 0, "a swipe down on its header closes it");

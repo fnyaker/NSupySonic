@@ -578,8 +578,9 @@ artist (photo, fans, top titles, similar artists; the public API has no biograph
 and — LAST, because it is the long one — tracks that sound like the playing one (the radio's mix: one call to swap
 for our own embeddings later). On the phone a swipe UP is the mirror of the swipe down that dismisses
 (`MobileNowPlaying`: `revealMove` / `revealEnd` beside `dismissMove` / `dismissEnd`, from the sheet or forwarded
-from the cover; the panel follows the finger and settles open or shut; its header drags it back down; a cancelled
-gesture decides nothing). On the desktop it is the *À propos* tab. Following any link from in there leaves the
+from the cover; the panel follows the finger and settles open or shut; a swipe down drags it back down from anywhere
+on it — the header always, the body once it is scrolled to the top and the finger's first move is down, so a
+scroll or a sideways shelf keeps its gesture; a cancelled gesture decides nothing). On the desktop it is the *À propos* tab. Following any link from in there leaves the
 player (a `hashchange` listener). Its requests are keyed on the track's id as a STRING: `track` is the store's
 object, handed over again on every progress tick, and a reactive statement reading it asked for the credits four
 times a second (the browser test counts requests).
