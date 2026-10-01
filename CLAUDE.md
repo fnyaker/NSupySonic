@@ -105,6 +105,11 @@ cd webapp && node test/output/run.mjs                # the audio path: routed by
                                                      # in one window, DIRECT on a fresh element and a fresh context, retried at a track change, forgotten when clean
 cd webapp && node test/explore/run.mjs [--phone]     # the Explore screen: front page, into a genre, play a chart, back (Deezer's answers put in by the test)
 cd webapp && node test/panel/run.mjs [--desktop]     # what is under the full-screen player: the swipe up (touch events), the desktop tab
+cd webapp && node test/repeat/run.mjs               # repeat one / all on a 4 s track: an ARCHIVED file served by the real server (byte ranges,
+                                                     # tools/perf_api.py --audio) and a live first-play stream, with the trim and the crossfade:
+                                                     # every pass reaches its end, none jumps back from the middle, no dead air
+cd webapp && node test/fullscreen/run.mjs           # the desktop full-screen player from 700x900 to 1920x1080: every control on screen,
+                                                     # inside its column and the element a click at its centre lands on
                                                      # (the four browser tests above start tools/perf_api.py --serve; PYTHON=<venv python>, SHOTS=<dir> keeps pictures)
 
 # Deezer CLI
@@ -578,8 +583,9 @@ artist (photo, fans, top titles, similar artists; the public API has no biograph
 and — LAST, because it is the long one — tracks that sound like the playing one (the radio's mix: one call to swap
 for our own embeddings later). On the phone a swipe UP is the mirror of the swipe down that dismisses
 (`MobileNowPlaying`: `revealMove` / `revealEnd` beside `dismissMove` / `dismissEnd`, from the sheet or forwarded
-from the cover; the panel follows the finger and settles open or shut; its header drags it back down; a cancelled
-gesture decides nothing). On the desktop it is the *À propos* tab. Following any link from in there leaves the
+from the cover; the panel follows the finger and settles open or shut; a swipe down drags it back down from anywhere
+on it — the header always, the body once it is scrolled to the top and the finger's first move is down, so a
+scroll or a sideways shelf keeps its gesture; a cancelled gesture decides nothing). On the desktop it is the *À propos* tab. Following any link from in there leaves the
 player (a `hashchange` listener). Its requests are keyed on the track's id as a STRING: `track` is the store's
 object, handed over again on every progress tick, and a reactive statement reading it asked for the credits four
 times a second (the browser test counts requests).

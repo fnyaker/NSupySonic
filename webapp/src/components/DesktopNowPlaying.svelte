@@ -192,7 +192,7 @@
       {$player.context?.kind === "flow" ? "Flow" : "En lecture"}
       {#if styleLabel}<em>{styleLabel}{#if $readout.bpm} · {$readout.bpm} BPM{/if}</em>{/if}
     </span>
-    <span class="right">
+    <span class="corner">
       {#if $isAdmin && CAN_KEEP && ($current?.deezer_id || $current?.id)}
         <!-- Deliberately quiet: a small, dim tag in the corner the empty spacer
              used to hold, only for the admin. Tagging is what you do when you
@@ -390,8 +390,11 @@
     color: rgba(255, 255, 255, 0.7);
   }
   /* Balances the close button on the other side, whether or not the tag button
-     is in it, so the header stays symmetric around the context label. */
-  .right {
+     is in it, so the header stays symmetric around the context label. Its own
+     class: it was `.right`, which the footer's button group also is, and Svelte
+     scopes per component, not per element — so the footer's seven buttons were
+     squeezed into this 26 px box and spilled under the side panel. */
+  .corner {
     width: 26px;
     display: grid;
     place-items: center;
@@ -495,6 +498,9 @@
     gap: 3px;
   }
   .t {
+    /* A button's default inline padding set the title 6 px right of the
+       artist line under it. */
+    padding: 0;
     font-size: 1.5rem;
     font-weight: 800;
     text-align: left;
@@ -571,6 +577,7 @@
   }
   .controls button {
     color: #fff;
+    flex: none;
   }
   .controls .sm {
     color: rgba(255, 255, 255, 0.7);
@@ -650,14 +657,17 @@
     width: 110px;
     flex: none;
   }
-  .right {
+  .footer .right {
     display: flex;
     align-items: center;
     gap: 12px;
   }
 
+  /* Narrower on a narrow window, so the player column keeps room for its
+     transport row (shuffle to repeat is 240 px at its
+     narrow spacing) instead of squeezing it. */
   .side {
-    width: 360px;
+    width: clamp(300px, 34vw, 360px);
     flex: none;
     display: flex;
     flex-direction: column;
@@ -672,6 +682,7 @@
     padding: 12px 12px 6px;
   }
   .tabs button {
+    white-space: nowrap;
     padding: 7px 12px;
     border-radius: 999px;
     color: rgba(255, 255, 255, 0.7);
@@ -694,6 +705,21 @@
     --ql-hover: rgba(255, 255, 255, 0.08);
     --ql-bg: transparent;
     color: #fff;
+  }
+  @media (max-width: 900px) {
+    .stage {
+      gap: 20px;
+      padding: 0 20px 24px;
+    }
+    .controls {
+      gap: 18px;
+    }
+    .tabs {
+      gap: 2px;
+    }
+    .tabs button {
+      padding: 7px 10px;
+    }
   }
   /* Short viewports: the cover already scales with vh, but the fixed-height
      rows below it (controls, visualizer, quality/volume footer) can still

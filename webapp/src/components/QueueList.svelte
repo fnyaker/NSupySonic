@@ -234,8 +234,15 @@
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--dim);
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
+  /* One line whatever the pane's width: the button keeps its pill. */
   .qclear {
+    flex: none;
+    white-space: nowrap;
     font-size: 0.8rem;
     font-weight: 700;
     color: inherit;

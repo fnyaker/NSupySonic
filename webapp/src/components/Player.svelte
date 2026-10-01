@@ -1878,6 +1878,12 @@
     return e && e.end > 0 && e.end <= d + 0.5 ? Math.min(e.end, d) : d;
   }
 
+  // Repeating a queue of one IS repeating the track: it restarts like repeat
+  // "one" (onEnded → jump(0) → restartCurrent), never crossfades into itself.
+  function repeatsItself(s) {
+    return s.repeat === "all" && s.queue.length === 1;
+  }
+
   // Mirrors player.next()'s own rule, so what we preload is what it will pick.
   function peekNext(s) {
     if (s.index < s.queue.length - 1) return s.queue[s.index + 1];
@@ -1900,7 +1906,7 @@
     if (!end) return null;
     // Nothing is announced when the player is about to stop at this track's end.
     if (sleepStopsAtTrackEnd()) return null;
-    if (s.repeat === "one") return { track: cur, at: end, start: 0, fade: 0 };
+    if (s.repeat === "one" || repeatsItself(s)) return { track: cur, at: end, start: 0, fade: 0 };
     const next = peekNext(s);
     if (!next) return null;
     // No Web Audio, no crossfade (armCrossfade gives up): a plain cut then.
@@ -1919,7 +1925,7 @@
     const cur = $current;
     if (!cur || cur.podcast) return;
     const s = get(player);
-    if (!s.playing || s.repeat === "one") return;
+    if (!s.playing || s.repeat === "one" || repeatsItself(s)) return;
     const next = peekNext(s);
     if (!next || next.podcast) return;
     const end = audioEndsAt();
@@ -2219,8 +2225,14 @@
       return;
     }
     if (s.repeat === "one") {
-      audio.currentTime = 0;
-      startPlayback("repeat-one");
+      // The same restart as a "previous" from mid-track, NOT a bare seek to 0:
+      // the element's last known position (the end) would survive it, and
+      // onElPlay's guard against a mobile suspend rewinding the element to 0
+      // would send it straight back there — every archived track then "ended"
+      // again at once, over and over. A first-play stream cannot seek, which is
+      // why it only broke once the track was on disk. It also re-arms the
+      // trimmed ending for the next pass.
+      restartCurrent();
       return;
     }
     if (s.index < s.queue.length - 1) {
