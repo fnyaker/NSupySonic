@@ -137,6 +137,11 @@ def main():
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--serve", action="store_true", help="keep serving on a port afterwards")
     ap.add_argument("--port", type=int, default=0)
+    ap.add_argument(
+        "--audio",
+        help="a WAV file archived as the first 12 tracks (ids[\"ids\"]), so /api/stream "
+        "serves them from disk with real byte ranges",
+    )
     args = ap.parse_args()
 
     work = tempfile.mkdtemp(prefix="nsperf-")
@@ -163,6 +168,18 @@ def main():
         _db.execute_sql("PRAGMA synchronous=OFF")
     print(f"populating ({args.tracks} tracks)...", file=sys.stderr)
     ids = populate(app, args.tracks, args.playlists, args.favorites, args.big_playlist)
+    if args.audio:
+        from supysonic.db import Track
+        from supysonic.deezer import ids as dzids
+
+        with app.app_context():
+            for sng in ids["ids"]:
+                t = Track[dzids.track_uuid(sng)]
+                # The served type comes from the extension.
+                path = os.path.splitext(t.path)[0] + ".wav"
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                shutil.copyfile(args.audio, path)
+                Track.update(path=path).where(Track.id == t.id).execute()
     # Each request opens its own connection (web.py), as the server does.
     from supysonic.db import close_connection
 

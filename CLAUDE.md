@@ -105,6 +105,9 @@ cd webapp && node test/output/run.mjs                # the audio path: routed by
                                                      # in one window, DIRECT on a fresh element and a fresh context, retried at a track change, forgotten when clean
 cd webapp && node test/explore/run.mjs [--phone]     # the Explore screen: front page, into a genre, play a chart, back (Deezer's answers put in by the test)
 cd webapp && node test/panel/run.mjs [--desktop]     # what is under the full-screen player: the swipe up (touch events), the desktop tab
+cd webapp && node test/repeat/run.mjs               # repeat one / all on a 4 s track: an ARCHIVED file served by the real server (byte ranges,
+                                                     # tools/perf_api.py --audio) and a live first-play stream, with the trim and the crossfade:
+                                                     # every pass reaches its end, none jumps back from the middle, no dead air
 cd webapp && node test/fullscreen/run.mjs           # the desktop full-screen player from 700x900 to 1920x1080: every control on screen,
                                                      # inside its column and the element a click at its centre lands on
                                                      # (the four browser tests above start tools/perf_api.py --serve; PYTHON=<venv python>, SHOTS=<dir> keeps pictures)

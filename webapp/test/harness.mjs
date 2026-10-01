@@ -28,11 +28,11 @@ export async function loadPlaywright() {
  * against the BUILT SPA (npm run build first). Login: bench / Bench1.
  * Resolves { base, ids, stop }.
  */
-export async function startServer() {
+export async function startServer(extra = []) {
   const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const py =
     process.env.PYTHON || (existsSync(join(repo, ".venv/bin/python")) ? join(repo, ".venv/bin/python") : "python3");
-  const srv = spawn(py, [join(repo, "tools/perf_api.py"), "--runs", "1", "--serve"], {
+  const srv = spawn(py, [join(repo, "tools/perf_api.py"), "--runs", "1", "--serve", ...extra], {
     stdio: ["pipe", "pipe", "ignore"],
   });
   const ready = await new Promise((res, rej) => {
