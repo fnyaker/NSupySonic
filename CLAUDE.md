@@ -135,7 +135,7 @@ Note: the upstream `tests/` are unittest-based; there is no pytest config.
 argon2 for cheap parameters (hashing was half the wall clock; `tests.managers.test_manager_user`
 pins the production defaults), and it compiles each distinct werkzeug URL builder once per process
 instead of once per rule per app (~95% of every `create_application`; `tests.test_harness` checks
-every rule's URLs against a fresh werkzeug compilation). CI runs five workflows:
+every rule's URLs against a fresh werkzeug compilation). CI runs six workflows:
 - `tests.yaml` — two jobs, not a version matrix: **image** (Python 3.13, what the Docker image
   ships, with numpy, `NS_REQUIRE_FFMPEG=1`, under coverage, and the image's OWN ffmpeg binary —
   the job reads the pinned `FROM mwader/static-ffmpeg…` line out of the Dockerfile and copies
@@ -152,6 +152,7 @@ every rule's URLs against a fresh werkzeug compilation). CI runs five workflows:
   the multi-arch index digest) and those two lists are what to re-check.
 - `network.yaml` — `tests/net` (real third-party services), weekly and on demand.
 - `android.yaml` — the native app APK, uploaded as a run artifact / attached to `v*` releases.
+- `release.yaml` — on a `v*` tag, attaches `docker-compose.yml` (image pinned to the tag's version, since the checked-in file follows `:latest`) and `.env.example` to the GitHub release; `android.yaml` attaches the APK to the same one, and whichever runs first creates the release.
 
 ## Android app
 

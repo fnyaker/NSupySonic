@@ -1,0 +1,61 @@
+name: Release
+
+# On a v* tag, creates the GitHub release and attaches the files a user needs
+# to run a given version without cloning the repository:
+#
+#   - docker-compose.yml  the stack, with the image pinned to THIS version
+#                         (the checked-in file follows :latest)
+#   - .env.example        its settings, to copy to .env
+#
+# The Android APK is attached to the same release by android.yaml, from the
+# same tag. Whichever workflow gets there first creates the release; the other
+# adds its file to it.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)attach the release files to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  files:
+    name: Attach docker-compose.yml
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      # docker/metadata-action (docker.yaml) publishes v1.2.3 as 1.2.3.
+      - name: Pin the image to this release
+        run: |
+          mkdir release
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          VERSION="${TAG#v}"
+          sed "s#${IMAGE}:latest#${IMAGE}:${VERSION}#" docker-compose.yml > release/docker-compose.yml
+          grep -q "${IMAGE}:${VERSION}" release/docker-compose.yml
+          if grep -q ':latest' release/docker-compose.yml; then
+            echo "docker-compose.yml still references :latest" >&2
+            grep -n ':latest' release/docker-compose.yml >&2
+            exit 1
+          fi
+          cp .env.example release/.env.example
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
+          files: |
+            release/docker-compose.yml
+            release/.env.example
