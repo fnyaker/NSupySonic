@@ -13,6 +13,7 @@
     crossfadeEnabled,
     crossfadeSeconds,
     crossfadeOnSkip,
+    crossfadeSkipSeconds,
     trimSilence,
     trimThresholdDb,
     audioOutput,
@@ -120,6 +121,9 @@
   // -- transitions -----------------------------------------------------------
   $: fadeLabel =
     $crossfadeSeconds <= 0 ? "enchaîné direct" : `${(+$crossfadeSeconds).toFixed(1)} s`;
+
+  $: skipFadeLabel =
+    $crossfadeSkipSeconds <= 0 ? "coupe douce" : `${(+$crossfadeSkipSeconds).toFixed(2).replace(/0$/, "")} s`;
 
   // -- the user's own presets ------------------------------------------------
   // A saved preset captures the whole chain (EQ + bass + normalisation), so it
@@ -427,12 +431,28 @@
       <span class="tg-txt">
         <span class="tg-title">Adoucir les changements manuels</span>
         <span class="tg-hint muted">
-          Un passage au titre suivant reste immédiat, mais sans la coupure sèche
-          au milieu de la forme d'onde.
+          Suivant et précédent s'enchaînent avec un fondu plus court que celui de
+          fin de titre, sans la coupure sèche au milieu de la forme d'onde.
         </span>
       </span>
       <span class="sw" class:on={$crossfadeOnSkip}><span class="knob"></span></span>
     </button>
+
+    <div class="slider-row" class:dim={!$crossfadeEnabled || !$crossfadeOnSkip}>
+      <span class="s-label">Durée</span>
+      <input
+        type="range"
+        min="0"
+        max="5"
+        step="0.25"
+        value={$crossfadeSkipSeconds}
+        disabled={!$crossfadeEnabled || !$crossfadeOnSkip}
+        on:input={(e) => crossfadeSkipSeconds.set(+e.target.value)}
+        style={`--p:${($crossfadeSkipSeconds / 5) * 100}%`}
+        aria-label="Durée du fondu sur suivant et précédent"
+      />
+      <span class="s-val">{skipFadeLabel}</span>
+    </div>
   </div>
 
   <div class="block">

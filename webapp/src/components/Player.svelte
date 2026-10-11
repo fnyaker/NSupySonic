@@ -20,6 +20,7 @@
     crossfadeEnabled,
     crossfadeSeconds,
     crossfadeOnSkip,
+    crossfadeSkipSeconds,
     trimSilence,
     trimThresholdDb,
   } from "../lib/stores.js";
@@ -309,6 +310,10 @@
       // A hand-over off Web Audio that had to wait (a switch, a crossfade, a
       // load in flight) is retried here, once the player is between states.
       if (renewWanted) renewElements("retry");
+      if (loadingTrack && Date.now() - loadStartedAt > LOAD_STUCK_MS) {
+        loadingTrack = false;
+        logInfo("load", "load flag held too long: released", null, { important: true });
+      }
       if (!audio || switching || recovering || loadingTrack || chasing) return;
       const s = get(player);
       if (!s.playing) {
@@ -872,7 +877,28 @@
     curBlobUrl = url;
   }
 
-  async function loadTrack(track) {
+  // `loadingTrack` gates every timeupdate, the watchdog and the recovery ladder,
+  // so a load that dies halfway with it still set leaves the new track PLAYING
+  // under a seek bar frozen at 0 and a status that says "loading" for good —
+  // with nothing left that would notice. A load therefore always hands the flag
+  // back: when it throws (the newest one only; a superseded load's flag belongs
+  // to whoever replaced it) and, as the backstop, when the watchdog finds it
+  // held for longer than any real load takes.
+  let loadToken = 0;
+  let loadStartedAt = 0;
+  const LOAD_STUCK_MS = 10000;
+
+  function loadTrack(track, opts = {}) {
+    const token = ++loadToken;
+    return loadTrackInner(track, opts, token).catch((err) => {
+      if (token !== loadToken) return;
+      loadingTrack = false;
+      logInfo("load", `load failed: ${err?.message || err}`, null, { important: true });
+      if (get(player).playing) recoverPlayback();
+    });
+  }
+
+  async function loadTrackInner(track, opts, token) {
     const firstLoad = curId === null;
     // A crossfade in flight is for a track that is no longer where we are
     // going. Do not restore the outgoing element's level: it is about to be
@@ -928,10 +954,23 @@
     // skip never leaves the outgoing track's position/duration on screen, and
     // gate onTime so a late timeupdate from the old source can't write it back.
     loadingTrack = true;
+    loadStartedAt = Date.now();
     player.setProgress(resumeAt, track.duration || 0);
     // A listen party announces the change now, not at its next look: guests
     // stop the old track a quarter of a second sooner.
     partyPoke();
+
+    // A manual skip with the crossfade on: overlap the two tracks over the
+    // (short, user-set) skip duration. Where that cannot be done — no Web Audio
+    // to blend through, a podcast, nothing audible yet, a duration of 0 — it
+    // falls through to the softened cut below.
+    if (!opts.hard && skipOverlapWanted(track, firstLoad)) {
+      const fade = skipFadeSeconds();
+      const done = await startSkipCrossfade(track, fade, token);
+      if (done) return;
+      if (token !== loadToken) return; // superseded while arming
+      // Not blended: the arming dropped the incoming element, carry on cutting.
+    }
 
     // A manual skip cuts hard by default. With the crossfade on, soften it:
     // a ramp short enough to be inaudible as a delay, long enough to kill the
@@ -958,6 +997,7 @@
     }
     setBlobUrl(src.blob ? src.url : null);
     curIsBlob = src.blob;
+    curPodcast = !!track.podcast;
     // A track change is where the processed path is tried again after a
     // measured fault, once its retry is due (lib/audio/output.js): the source
     // is being replaced anyway, so routing the element now is inaudible, and
@@ -1936,17 +1976,18 @@
     armCrossfade(next, fade, Math.max(0, remain - fade));
   }
 
-  async function armCrossfade(track, fade, delay) {
+  async function armCrossfade(track, fade, delay, skip = null) {
     const incoming = els.find((e) => e !== audio);
-    if (!incoming) return;
+    if (!incoming) return false;
     // The idle element has usually never been wired: crossfading is the one
     // case that needs a source node on an element that is not playing yet.
     wireAudio(incoming);
     // No Web Audio at all (an old engine, a blocked context): there is nothing
     // to blend through. The trimmed ending below still applies.
-    if (!canCrossfade(audio, incoming)) return;
+    if (!canCrossfade(audio, incoming)) return false;
 
     const mine = {
+      skip, // set when a manual skip asked for this overlap (see startSkipCrossfade)
       el: incoming,
       track,
       fade,
@@ -1975,7 +2016,7 @@
           /* ignore */
         }
       }
-      return;
+      return false;
     }
     mine.blobUrl = src.blob ? src.url : null;
     mine.isBlob = src.blob;
@@ -2003,6 +2044,39 @@
       mine.onMeta = onMeta;
     }
     mine.startTimer = setTimeout(beginCrossfade, Math.max(0, delay * 1000));
+    return true;
+  }
+
+  // -- a manual skip, overlapped ------------------------------------------------
+  // The end-of-track fade already knows how to bring a second element in under
+  // the first; a skip only differs in that the queue has ALREADY moved (the
+  // store did it before we got here) and in how long it is willing to wait for
+  // the incoming track to be playable: the old one keeps sounding meanwhile, so
+  // a few seconds of grace cost nothing, but past them the skip falls back to
+  // the plain softened cut rather than leave the listener on the old song.
+  const SKIP_READY_MS = 3000;
+  let curPodcast = false;
+
+  function skipFadeSeconds() {
+    return Math.max(0, Math.min(5, +get(crossfadeSkipSeconds) || 0));
+  }
+
+  function skipOverlapWanted(track, firstLoad) {
+    if (firstLoad || !track || track.podcast || curPodcast) return false;
+    if (!get(crossfadeEnabled) || !get(crossfadeOnSkip) || skipFadeSeconds() <= 0) return false;
+    if (!get(player).playing || !audio) return false;
+    // Something has to be audible to blend out of.
+    return !audio.paused && audio.readyState >= 2;
+  }
+
+  // Resolves true once the incoming track is the current one and fading in,
+  // false when it could not be blended (the caller then cuts instead).
+  function startSkipCrossfade(track, fade, token) {
+    return new Promise((resolve) => {
+      armCrossfade(track, fade, 0, { token, resolve }).then((armed) => {
+        if (!armed) resolve(false);
+      });
+    });
   }
 
   function beginCrossfade() {
@@ -2018,7 +2092,10 @@
         const onReady = () => beginCrossfade();
         el.addEventListener("canplay", onReady);
         x.onReady = onReady;
-        x.giveUp = setTimeout(() => cancelCrossfade(), (x.fade + 1) * 1000);
+        x.giveUp = setTimeout(
+          () => cancelCrossfade(),
+          x.skip ? SKIP_READY_MS : (x.fade + 1) * 1000
+        );
       }
       return;
     }
@@ -2035,7 +2112,12 @@
     // The queue may have moved under us while we preloaded (a track removed, a
     // reorder). Blending into something that is no longer next would be worse
     // than not blending at all.
-    if (peekNext(get(player))?.deezer_id !== x.track.deezer_id || sleepStopsAtTrackEnd()) {
+    // (A skip has moved the queue already: what must still hold is that the
+    // track it asked for is the one that is current.)
+    const stale = x.skip
+      ? get(current)?.deezer_id !== x.track.deezer_id
+      : peekNext(get(player))?.deezer_id !== x.track.deezer_id || sleepStopsAtTrackEnd();
+    if (stale) {
       cancelCrossfade();
       return;
     }
@@ -2054,6 +2136,7 @@
     fadeElement(old, 0, x.fade);
     adoptIncoming(x);
     x.endTimer = setTimeout(finishCrossfade, x.fade * 1000);
+    if (xfade === x && x.skip) x.skip.resolve(true);
   }
 
   // Make the incoming element the current one and advance the queue to match,
@@ -2083,7 +2166,8 @@
     cancelPendingSeek();
     cancelPauseMirror();
 
-    player.next();
+    if (!x.skip) player.next(); // a skip is already there: the store moved first
+    curPodcast = !!x.track.podcast;
     // Adopt the store's new sequence BEFORE the reactive block runs, so it sees
     // an element already loaded with this track and leaves it alone instead of
     // reloading it from the top.
@@ -2166,6 +2250,7 @@
     clearTimeout(x.startTimer);
     clearTimeout(x.endTimer);
     clearTimeout(x.giveUp);
+    if (x.skip) x.skip.resolve(false); // a no-op once it has resolved true
     if (x.onMeta) x.el.removeEventListener("loadedmetadata", x.onMeta);
     if (x.onReady) x.el.removeEventListener("canplay", x.onReady);
 

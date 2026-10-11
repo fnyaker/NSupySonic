@@ -47,6 +47,7 @@ export const MIRRORED = [
   "fade.enabled",
   "fade.seconds",
   "fade.onSkip",
+  "fade.skipSeconds",
   "fade.trim",
   "fade.trimDb",
   "player.quality",

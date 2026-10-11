@@ -119,6 +119,10 @@ export const crossfadeSeconds = persisted("fade.seconds", 6);
 // Also fade when the user skips by hand, not only at the natural end of a
 // track. A skip is a deliberate act, so this is a taste setting.
 export const crossfadeOnSkip = persisted("fade.onSkip", true);
+// How long the two tracks overlap on a manual next / previous. Shorter than the
+// end-of-track fade on purpose: the listener asked for the change, so it should
+// land quickly. 0 keeps the old behaviour (a 60 ms ramp, no overlap).
+export const crossfadeSkipSeconds = persisted("fade.skipSeconds", 1.5);
 // Trim the silence at both ends of a file so the fade meets real audio. The
 // threshold is what counts as silence, in dBFS.
 export const trimSilence = persisted("fade.trim", true);
