@@ -59,6 +59,19 @@ class PlaylistTestCase(FrontendTestBase):
         self.assertIn("Artist!", rv.data)
         self.assertIn("Album!", rv.data)
 
+    def test_export_name_cannot_steer_the_header(self):
+        pl = Playlist[self.playlistid]
+        pl.name = 'Été"; filename=evil.exe'
+        pl.save()
+        self._login("alice", "Alic3")
+        rv = self.client.get(f"/playlist/{self.playlistid}/export")
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(
+            rv.headers["Content-Disposition"],
+            "attachment; filename=\"_t___ filename_evil.exe.m3u\"; "
+            "filename*=UTF-8''%C3%89t%C3%A9%22%3B%20filename%3Devil.exe.m3u",
+        )
+
     def test_update(self):
         self._login("bob", "B0b")
         rv = self.client.post("/playlist/string", follow_redirects=True)

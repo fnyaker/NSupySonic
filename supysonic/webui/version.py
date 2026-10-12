@@ -50,7 +50,7 @@ def _read_build() -> dict:
         pass
     try:
         with open(index, "rb") as fh:
-            digest = hashlib.sha1(fh.read()).hexdigest()[:16]
+            digest = hashlib.sha1(fh.read(), usedforsecurity=False).hexdigest()[:16]
         return {"build": digest, "version": None}
     except OSError:
         return {"build": None, "version": None}

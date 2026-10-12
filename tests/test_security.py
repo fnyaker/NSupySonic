@@ -106,6 +106,49 @@ class SafeRedirectTestCase(unittest.TestCase):
                 safe_redirect_target(bad, fallback), fallback, f"leaked: {bad!r}"
             )
 
+    def test_rejects_breaks_inside_the_url(self):
+        """Browsers drop tab/CR/LF ANYWHERE in a URL, so "/\\t/evil" is
+        "//evil" — decided here, not by whatever urlsplit this Python has."""
+        from supysonic.frontend.user import safe_redirect_target
+
+        for bad in ("/\t/evil.example", "/\n/evil.example", "/\r\n/evil.example"):
+            self.assertEqual(
+                safe_redirect_target(bad, "/home"), "/home", f"leaked: {bad!r}"
+            )
+
+
+class LogInjectionTestCase(unittest.TestCase):
+    def _log(self, name, *args):
+        import io
+        import logging
+
+        from supysonic import logsafe
+
+        logsafe.install()
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        lg = logging.getLogger(name)
+        lg.addHandler(handler)
+        old = lg.level
+        lg.setLevel(logging.INFO)
+        try:
+            lg.info(*args)
+        finally:
+            lg.removeHandler(handler)
+            lg.setLevel(old)
+        return buf.getvalue()
+
+    def test_a_logged_argument_cannot_start_a_line(self):
+        out = self._log(
+            "supysonic.webui", "login %s from %s", "bob\nERROR forged ", "x"
+        )
+        self.assertEqual(out, "login bob\\nERROR forged\\u2028 from x\n")
+        out = self._log("supysonic", "%s", ValueError("a\r\nb"))
+        self.assertEqual(out, "a\\r\\nb\n")
+
+    def test_other_packages_are_left_alone(self):
+        self.assertEqual(self._log("not.supysonic", "%s", "a\nb"), "a\nb\n")
+
 
 class ValidIdTestCase(unittest.TestCase):
     def test_rejects_unicode_digits_and_negatives(self):

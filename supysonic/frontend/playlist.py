@@ -5,10 +5,12 @@
 #
 # Distributed under terms of the GNU AGPLv3 license.
 
+import re
 import uuid
 
 from flask import Response, flash, redirect, render_template, request, url_for
 from functools import wraps
+from urllib.parse import quote
 
 from ..db import Playlist, PlaylistTrack
 
@@ -56,7 +58,15 @@ def playlist_export(uid, playlist):
     return Response(
         render_template("playlist_export.m3u", playlist=playlist),
         mimetype="audio/mpegurl",
-        headers={"Content-disposition": f"attachment; filename={playlist.name}.m3u"},
+        # The name is the user's: a quote, a semicolon or a newline in it must
+        # not reach the header raw. RFC 6266 form, with an ASCII fallback.
+        headers={
+            "Content-disposition": "attachment; filename=\"{}.m3u\"; "
+            "filename*=UTF-8''{}.m3u".format(
+                re.sub(r'[^A-Za-z0-9 ._-]', "_", playlist.name) or "playlist",
+                quote(playlist.name, safe=""),
+            )
+        },
     )
 
 

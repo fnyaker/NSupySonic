@@ -5,6 +5,7 @@
 #
 # Distributed under terms of the GNU AGPLv3 license.
 
+import math
 import uuid
 
 from flask import current_app, request
@@ -69,7 +70,12 @@ def jukebox_control():
         if not gain:
             raise MissingParameter("gain")
         else:
-            args = (float(gain),)
+            # Subsonic's gain is 0.0..1.0. float() also accepts "nan" and
+            # "inf", which would reach the player as a volume.
+            gain = float(gain)
+            if not math.isfinite(gain):
+                raise GenericError("Invalid gain")
+            args = (min(max(gain, 0.0), 1.0),)
 
     try:
         status = DaemonClient(current_app.config["DAEMON"]["socket"]).jukebox_control(

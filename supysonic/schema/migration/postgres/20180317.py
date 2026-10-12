@@ -27,7 +27,7 @@ def process_table(connection, table):
     hashes = dict()
     c.execute(f"SELECT path FROM {table}")
     for row in c.fetchall():
-        hashes[row[0]] = hashlib.sha1(row[0].encode("utf-8")).digest()
+        hashes[row[0]] = hashlib.sha1(row[0].encode("utf-8"), usedforsecurity=False).digest()
     c.executemany(
         f"UPDATE {table} SET path_hash=%s WHERE path=%s",
         [(bytes(h), p) for p, h in hashes.items()],

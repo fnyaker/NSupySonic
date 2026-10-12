@@ -170,7 +170,9 @@ def party_link(pid: str):
         if party
         else "Cette listen party est terminée."
     )
-    target = _into_app(f"/party/{pid}")
+    # Every interpolated value is escaped here, at the page boundary, even
+    # those a pattern already vetted: the page must not depend on the regex.
+    target = html.escape(_into_app(f"/party/{pid}"))
     page = (
         "<!doctype html><html lang=fr><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -214,7 +216,9 @@ def remote_link(token: str):
         if link
         else "Ce lien de contrôle n'est plus valide."
     )
-    target = _into_app(f"/rc/{token}")
+    # The parser strips whitespace before matching: forward the vetted form,
+    # never the raw path segment, and escape it at the page boundary.
+    target = html.escape(_into_app(f"/rc/{token.strip()}"))
     page = (
         "<!doctype html><html lang=fr><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"

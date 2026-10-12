@@ -606,7 +606,8 @@ def lyrics():
 
     # Create a stable, unique, filesystem-compatible identifier for the artist+title
     unique = hashlib.md5(
-        json.dumps([x.lower() for x in (artist, title)]).encode("utf-8")
+        json.dumps([x.lower() for x in (artist, title)]).encode("utf-8"),
+        usedforsecurity=False,
     ).hexdigest()
     cache_key = f"lyrics-{unique}"
 

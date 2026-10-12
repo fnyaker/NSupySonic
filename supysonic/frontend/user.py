@@ -6,6 +6,7 @@
 # Distributed under terms of the GNU AGPLv3 license.
 
 import logging
+import re
 
 from flask import flash, redirect, render_template, request, session, url_for
 from flask import current_app
@@ -41,6 +42,10 @@ def safe_redirect_target(target, fallback):
     # protocol-relative URL — even though urlsplit() reports an empty netloc for
     # it. Fold them first so the checks below see what the browser will see.
     # Same for leading C0 controls and spaces, which browsers also strip.
+    # Tabs and newlines are removed from ANYWHERE in the URL ("/\t/evil.com" is
+    # "//evil.com" to a browser), so they go first rather than relying on the
+    # Python version's urlsplit doing the same.
+    target = re.sub(r"[\t\n\r]", "", target)
     target = target.replace("\\", "/").lstrip("".join(map(chr, range(0x21))))
     # Reject absolute URLs, protocol-relative (//evil), and anything with a
     # scheme or host; only a path that stays on this site is allowed.

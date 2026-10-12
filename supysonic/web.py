@@ -18,9 +18,11 @@ from os import makedirs, path
 from .config import IniConfig, app_config_from
 from .cache import Cache
 from .db import init_database, open_connection, close_connection
+from . import logsafe
 from .utils import get_secret_key
 
 logger = logging.getLogger(__package__)
+logsafe.install()
 
 
 def setup_deezer(app):

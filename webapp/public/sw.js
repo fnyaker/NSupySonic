@@ -165,6 +165,9 @@ self.addEventListener("activate", (event) => {
 
 // The page drives updates: it knows its own build id and the server's.
 self.addEventListener("message", (event) => {
+  // Only this origin's own pages can reach a service worker, but say so
+  // rather than rely on it: nothing else may start a download of the shell.
+  if (event.origin && event.origin !== self.location.origin) return;
   const data = event.data || {};
   if (data.type !== "stage-build") return;
   const source = event.source;

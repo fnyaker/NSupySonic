@@ -70,19 +70,19 @@ class PathMixin:
         if kwargs:
             path = kwargs.pop("path", None)
             if path:
-                kwargs["_path_hash"] = sha1(path.encode("utf-8")).digest()
+                kwargs["_path_hash"] = sha1(path.encode("utf-8"), usedforsecurity=False).digest()
         return _Model.get.__func__(cls, *args, **kwargs)
 
     def __init__(self, *args, **kwargs):
         if "path" in kwargs:
             path = kwargs["path"]
-            kwargs["_path_hash"] = sha1(path.encode("utf-8")).digest()
+            kwargs["_path_hash"] = sha1(path.encode("utf-8"), usedforsecurity=False).digest()
         _Model.__init__(self, *args, **kwargs)
 
     def __setattr__(self, attr, value):
         _Model.__setattr__(self, attr, value)
         if attr == "path":
-            _Model.__setattr__(self, "_path_hash", sha1(value.encode("utf-8")).digest())
+            _Model.__setattr__(self, "_path_hash", sha1(value.encode("utf-8"), usedforsecurity=False).digest())
 
 
 class Folder(PathMixin, _Model):

@@ -328,7 +328,7 @@ def _warn_once_about_pinning() -> None:
 
 def blowfish_key(track_id) -> bytes:
     """Per-track Blowfish key: md5(track_id) folded with the static secret."""
-    md5 = hashlib.md5(str(track_id).encode()).hexdigest()
+    md5 = hashlib.md5(str(track_id).encode(), usedforsecurity=False).hexdigest()
     return bytes(ord(md5[i]) ^ ord(md5[i + 16]) ^ _SECRET[i] for i in range(16))
 
 

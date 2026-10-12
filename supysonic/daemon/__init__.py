@@ -24,6 +24,9 @@ daemon = None
 
 
 def setup_logging(config):
+    from .. import logsafe
+
+    logsafe.install()
     if config["log_file"]:
         if config["log_rotate"]:
             log_handler = TimedRotatingFileHandler(config["log_file"], when="midnight")
