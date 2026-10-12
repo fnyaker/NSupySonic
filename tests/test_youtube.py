@@ -454,6 +454,29 @@ class YoutubeTestCase(unittest.TestCase):
             self.client.get(f"/api/replace/candidates/{tid}", query_string={"youtube": "1"})
         self.assertEqual(len(self.fake.calls), 1)
 
+    def test_an_unrelated_result_does_not_count_as_found(self):
+        """The artist's OTHER songs come back for any query naming them: that
+        is not Deezer having found the song, so YouTube is still asked."""
+        tid = self._dead_hit()
+        other = {"deezer_id": "778", "title": "Harder Better Faster Stronger", "duration": 224,
+                 "artists": [{"name": "Daft Punk"}], "album": {"title": "Discovery"}}
+        with mock.patch("supysonic.webui.availability._local_search_tracks", lambda q, n: [other]):
+            body = self.client.get(f"/api/replace/candidates/{tid}").get_json()
+        self.assertTrue(body["youtube_auto"])
+        self.assertEqual(len(self.fake.calls), 1)
+
+    def test_a_typed_query_keeps_youtubes_own_order(self):
+        """What somebody typed is what the results must be close to — not the
+        dead track, which may be another song entirely."""
+        tid = self._dead_hit()
+        self.fake.answer = [
+            self._raw("cccccccccc1", "Get Lucky", "Daft Punk", 248),
+            self._raw("cccccccccc2", "One More Time"),  # the dead track's twin
+        ]
+        body = self.client.get(f"/api/replace/candidates/{tid}", query_string={"q": "get lucky"}).get_json()
+        self.assertEqual([c["deezer_id"] for c in body["candidates"]],
+                         [str(yt.track_uuid("cccccccccc1")), str(yt.track_uuid("cccccccccc2"))])
+
     def test_the_search_box_query_is_the_one_asked(self):
         tid = self._dead_hit()
         self.client.get(f"/api/replace/candidates/{tid}", query_string={"q": "  daft   punk  live "})

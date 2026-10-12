@@ -257,6 +257,12 @@ _VERSION_WORDS = frozenset(
     "vip extended club dub sped slowed nightcore reprise orchestral unplugged "
     "cappella acapella".split()
 )
+# …of which these only name a CUT of the same recording, and a label is not
+# always right about it: YouTube Music calls Stromae's 3:27 album take "Alors on
+# danse (Radio Edit)". Tolerated when the length agrees to SOFT_EDIT_DELTA,
+# which a remix, a live take or an extended mix never does.
+_SOFT_VERSION_WORDS = frozenset("edit extended club dub".split())
+SOFT_EDIT_DELTA = 3
 
 
 def _title_parts(title):
@@ -299,7 +305,11 @@ def match_score(track, c):
     """
     core, versions = _title_parts(track.title)
     c_core, c_versions = _title_parts(c.get("title"))
-    if not core or core != c_core or c_versions - versions:
+    d0, d1 = track.duration or 0, c.get("duration") or 0
+    extra = c_versions - versions
+    if extra and extra <= _SOFT_VERSION_WORDS and d0 and d1 and abs(d0 - d1) <= SOFT_EDIT_DELTA:
+        extra = set()
+    if not core or core != c_core or extra:
         return None
     artist = _fold(track.artist.name if track.artist else "")
     if not artist or artist not in _artist_names(c):
@@ -309,7 +319,6 @@ def match_score(track, c):
         score += 2
     if _fold(c.get("title")) == _fold(track.title):
         score += 1
-    d0, d1 = track.duration or 0, c.get("duration") or 0
     if d0 and d1:
         delta = abs(d0 - d1)
         if delta > 15:
@@ -350,12 +359,21 @@ def closeness(track, c) -> float:
     return 0.6 * title + 0.3 * credited + 0.1 * length
 
 
-def _youtube_closest(track, query, seen, n=YOUTUBE_SHOWN) -> list:
-    """YouTube's songs for ``query``, the ``n`` closest to the dead track."""
+# What "Deezer found something" means for asking YouTube on its own: a result
+# that LOOKS like the song (its title and its artist), not any result at all —
+# the artist's other songs come back for any query naming them.
+PLAUSIBLE = 0.8
+
+
+def _youtube_closest(track, query, seen, n=YOUTUBE_SHOWN, ranked=True) -> list:
+    """YouTube's songs for ``query``: the ``n`` closest to the dead track, or —
+    ``ranked=False``, a query somebody TYPED — YouTube's own first ``n``, since
+    what they typed is what the results should be close to."""
     from .youtube import search_tracks
 
     hits = [t for t in search_tracks(query) if t["deezer_id"] not in seen and not t.get("unavailable")]
-    hits.sort(key=lambda t: -closeness(track, t))
+    if ranked:
+        hits.sort(key=lambda t: -closeness(track, t))
     return hits[:n]
 
 
@@ -448,9 +466,12 @@ def replacement_candidates(track_id):
         return jsonify({"query": query, "candidates": picked, "youtube": youtube})
 
     asked = request.args.get("youtube") in ("1", "true")
+    # Nothing found: for a typed query, nothing at all; otherwise nothing that
+    # looks like the song.
+    nothing = not out if manual else not any(closeness(track, c) >= PLAUSIBLE for c in out)
     youtube = False
-    if asked or not out:
-        extra = _youtube_closest(track, query, seen)
+    if asked or nothing:
+        extra = _youtube_closest(track, query, seen, ranked=not manual)
         youtube = not asked and bool(extra)  # reached for on its own
         out += extra
     return jsonify({"query": query, "candidates": out, "youtube_auto": youtube})

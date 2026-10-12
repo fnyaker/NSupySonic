@@ -440,8 +440,14 @@ sheet, where it can be auditioned). Fetched only for rows near the viewport, two
 candidates also search the local library by TITLE (artist checked): the `"<artist> <title>"` query
 is one LIKE per field and never found the copy you already had. The query drops "(Remastered…)" /
 " - Radio Edit" (`_core_title`), the sheet has a search box (`q`, ≤ 200 chars), and **YouTube is
-asked on its own when Deezer finds nothing** (`youtube_auto`) — its five `closeness`-ranked songs;
-the inline `?best=` falls back to YouTube the same way, still through `match_score`.
+asked on its own when Deezer finds nothing** (`youtube_auto`) — "nothing" meaning nothing that LOOKS
+like the song (`closeness` ≥ `PLAUSIBLE`: the artist's other songs come back for any query naming
+them, and used to block it), and for a typed query nothing at all. Five songs: ranked by
+`closeness` to the dead track, or in YouTube's own order for a typed query (what was typed is what
+they must be close to). The inline `?best=` falls back to YouTube the same way, through
+`match_score` — which tolerates a CUT's label (edit, extended, club, dub) when the length agrees to
+3 s: YouTube Music calls Stromae's 3:27 album take "Alors on danse (Radio Edit)". Checked against the
+real YouTube Music on five real dead-track shapes; the two it still refuses are other cuts.
 
 **The audio auto-match** (`deezer/audiomatch.py` = the ears, `deezer/automatch.py` = which
 candidates and in what order, `webui/automatch.py` = when, and applying it). A dead track has no audio

@@ -1700,6 +1700,12 @@ class WebUITestCase(unittest.TestCase):
         self.assertIsNone(match_score(dead, cand("Halo", artist="Some Cover Band")))
         self.assertIsNone(match_score(dead, cand("Halo", duration=300)))
         self.assertIsNone(match_score(dead, cand("Halo Again")))
+        # A cut's label is tolerated when the length agrees to 3 s (YouTube
+        # Music calls Stromae's 3:27 album take "Alors on danse (Radio Edit)"),
+        # never when it does not, and a remix never.
+        self.assertIsNotNone(match_score(dead, cand("Halo (Radio Edit)", duration=263)))
+        self.assertIsNone(match_score(dead, cand("Halo (Radio Edit)", duration=230)))
+        self.assertIsNone(match_score(dead, cand("Halo (Remix)", duration=261)))
         # YouTube is judged like the rest; WHEN it is asked is the route's
         # (only when nothing from Deezer or the disk is safe).
         self.assertIsNotNone(match_score(dead, cand("Halo", source="youtube")))
