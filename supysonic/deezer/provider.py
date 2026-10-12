@@ -437,6 +437,9 @@ class DeezerProvider:
         # attempt. The circuit breaker covers the socket, this covers the rest
         # (and gives the UI an instant answer).
         self._login_retry_at = 0.0
+        # A few seconds' memory of ``song.getData`` (see get_track_info).
+        self._info_memo: dict[str, tuple] = {}
+        self._info_memo_lock = threading.Lock()
 
     @classmethod
     def from_config(cls, cfg: dict) -> "DeezerProvider | None":
@@ -519,6 +522,9 @@ class DeezerProvider:
         how a server ends up with "Too many open files".
         """
         old, self._dz = self._dz, None
+        # The memo's track tokens belong to the session being dropped.
+        with self._info_memo_lock:
+            self._info_memo.clear()
         closer = getattr(old, "close", None)
         if closer is not None:
             try:
@@ -685,8 +691,34 @@ class DeezerProvider:
 
     # -- metadata (delegate to deezerpy gw) ------------------------------
 
+    # A first play of a track that has no row yet asked ``song.getData`` twice in
+    # a row — once to create the row (``archive.import_track``), once more a few
+    # milliseconds later to resolve the stream — a whole gateway round trip of
+    # the time to first audio. The answer is kept for a few seconds: far inside
+    # the life of the track token it carries, and dropped with the session.
+    _INFO_MEMO_TTL = 20.0
+    _INFO_MEMO_MAX = 256
+
     def get_track_info(self, sng_id) -> dict:
-        return self.dz.gw.get_track(sng_id)
+        dz = self.dz
+        key = str(sng_id)
+        now = time.monotonic()
+        with self._info_memo_lock:
+            hit = self._info_memo.get(key)
+            # A token is only good for the session that minted it.
+            if hit is not None and hit[0] > now and hit[1] is dz:
+                return dict(hit[2])
+        info = dz.gw.get_track(sng_id)
+        if isinstance(info, dict) and info.get("TRACK_TOKEN"):
+            with self._info_memo_lock:
+                if len(self._info_memo) >= self._INFO_MEMO_MAX:
+                    self._info_memo = {
+                        k: v for k, v in self._info_memo.items() if v[0] > now
+                    }
+                    if len(self._info_memo) >= self._INFO_MEMO_MAX:
+                        self._info_memo.clear()
+                self._info_memo[key] = (now + self._INFO_MEMO_TTL, dz, dict(info))
+        return info
 
     def get_tracks(self, sng_ids) -> list[dict]:
         """Several tracks in ONE gateway call, matched by ``SNG_ID``.

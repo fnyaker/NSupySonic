@@ -6,6 +6,7 @@
   import TrackBrowser from "../components/TrackBrowser.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import LoadFailed from "../components/LoadFailed.svelte";
   import Icon from "../components/Icon.svelte";
 
   export let params = {};
@@ -13,6 +14,7 @@
   let id = null;
   let data = null;
   let loading = true;
+  let loadError = null; // why there is nothing to show (components/LoadFailed)
 
   $: if (params.id && params.id !== id) {
     id = params.id;
@@ -25,6 +27,7 @@
   async function load(mixId) {
     const mine = ++loadSeq;
     loading = true;
+    loadError = null;
     data = null;
     try {
       // Cached copy first, fresh one right after — no skeleton on a revisit.
@@ -33,8 +36,11 @@
         data = r;
         loading = false;
       });
-    } catch {
-      if (mine === loadSeq && !data) data = null;
+    } catch (e) {
+      if (mine === loadSeq && !data) {
+        data = null;
+        loadError = e;
+      }
     }
     if (mine === loadSeq) loading = false;
   }
@@ -53,7 +59,7 @@
   <Skeleton kind="header" />
   <Skeleton kind="list" />
 {:else if !data?.playlist}
-  <p class="muted">Mix introuvable.</p>
+  <LoadFailed error={loadError} notFound="Mix introuvable." on:retry={() => load(id)} />
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.playlist.cover}>

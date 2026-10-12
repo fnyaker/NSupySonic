@@ -9,6 +9,7 @@
   import TrackList from "../components/TrackList.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import LoadFailed from "../components/LoadFailed.svelte";
   import Icon from "../components/Icon.svelte";
 
   export let params = {};
@@ -17,6 +18,7 @@
   let data = null;
   let fav = false;
   let loading = true;
+  let loadError = null; // why there is nothing to show (components/LoadFailed)
 
   $: if (params.id && params.id !== id) {
     id = params.id;
@@ -29,6 +31,7 @@
   async function load(albumId) {
     const mine = ++loadSeq;
     loading = true;
+    loadError = null;
     data = null;
     try {
       // Stale-while-revalidate: an album you've opened before paints straight
@@ -39,8 +42,11 @@
         fav = !!r.album?.is_favorite; // correct heart state on open
         loading = false;
       });
-    } catch {
-      if (mine === loadSeq && !data) data = null;
+    } catch (e) {
+      if (mine === loadSeq && !data) {
+        data = null;
+        loadError = e;
+      }
     }
     if (mine === loadSeq) loading = false;
   }
@@ -75,7 +81,7 @@
   <Skeleton kind="header" />
   <Skeleton kind="list" />
 {:else if !data?.album}
-  <p class="muted">Album introuvable.</p>
+  <LoadFailed error={loadError} notFound="Album introuvable." on:retry={() => load(id)} />
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.album.cover}>

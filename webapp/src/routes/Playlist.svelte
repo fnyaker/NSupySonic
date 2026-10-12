@@ -21,6 +21,7 @@
   import AddTracksSheet from "../components/AddTracksSheet.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import LoadFailed from "../components/LoadFailed.svelte";
   import Icon from "../components/Icon.svelte";
 
   export let params = {};
@@ -29,6 +30,7 @@
   let data = null;
   let fav = false;
   let loading = true;
+  let loadError = null; // why there is nothing to show (components/LoadFailed)
 
   let editing = false; // dedicated edit mode (drag handles + up/down + remove)
   let editingMeta = false; // header rename/description inputs open
@@ -66,6 +68,7 @@
     const mine = ++loadSeq;
     queueOrder(); // save any pending reorder of the playlist we're leaving
     loading = true;
+    loadError = null;
     data = null;
     editing = false;
     editingMeta = false;
@@ -86,8 +89,11 @@
         fav = !!r.playlist?.is_favorite;
         loading = false;
       });
-    } catch {
-      if (mine === loadSeq && !data) data = null;
+    } catch (e) {
+      if (mine === loadSeq && !data) {
+        data = null;
+        loadError = e;
+      }
     }
     if (mine === loadSeq) loading = false;
   }
@@ -252,7 +258,7 @@
   <Skeleton kind="header" />
   <Skeleton kind="list" />
 {:else if !data?.playlist}
-  <p class="muted">Playlist introuvable.</p>
+  <LoadFailed error={loadError} notFound="Playlist introuvable." on:retry={() => load(id)} />
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.playlist.cover}>

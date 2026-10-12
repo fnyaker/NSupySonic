@@ -8,6 +8,7 @@
   import TrackList from "../components/TrackList.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import LoadFailed from "../components/LoadFailed.svelte";
   import Icon from "../components/Icon.svelte";
   import { rememberScreen, recallScreen } from "../lib/nav.js";
 
@@ -18,6 +19,7 @@
   let disco = null;
   let fav = false;
   let loading = true;
+  let loadError = null; // why there is nothing to show (components/LoadFailed)
 
   // Two views on the artist page: the card-based overview and a flat, full
   // "Titres" list (all of the artist's tracks, loaded lazily on first open).
@@ -59,6 +61,7 @@
   async function load(artistId) {
     const mine = ++loadSeq;
     loading = true;
+    loadError = null;
     data = null;
     disco = null;
     fav = false;
@@ -74,8 +77,11 @@
         fav = !!r.artist?.is_favorite; // correct when the source reports it
         loading = false;
       });
-    } catch {
-      if (mine === loadSeq && !data) data = null;
+    } catch (e) {
+      if (mine === loadSeq && !data) {
+        data = null;
+        loadError = e;
+      }
     }
     if (mine === loadSeq) loading = false;
     api
@@ -125,7 +131,7 @@
   <Skeleton kind="header" />
   <Skeleton kind="list" />
 {:else if !data?.artist}
-  <p class="muted">Artiste introuvable.</p>
+  <LoadFailed error={loadError} notFound="Artiste introuvable." on:retry={() => load(id)} />
 {:else}
   <div class="fade-in">
     <GradientHeader cover={data.artist.picture}>

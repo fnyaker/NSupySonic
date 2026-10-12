@@ -72,10 +72,13 @@ def _replaygain_tag(raw) -> str | None:
         return None
 
 
-def tag_file(path: Path, meta: dict, cover: bytes | None) -> None:
-    """Write tags + embedded cover into a FLAC or MP3 file."""
+def tag_file(path: Path, meta: dict, cover: bytes | None, suffix: str | None = None) -> None:
+    """Write tags + embedded cover into a FLAC or MP3 file.
+
+    The format is read from the name, or from `suffix` for a file still under a
+    temporary one (archive._tag_archive)."""
     path = Path(path)
-    if path.suffix.lower() == ".flac":
+    if (suffix or path.suffix).lower() == ".flac":
         audio = FLAC(path)
         audio.delete()
         audio["title"] = meta["title"]

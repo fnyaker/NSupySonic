@@ -94,8 +94,18 @@ def ensure_archived(provider, track: Track) -> None:
         track.path = _fixed_ext_path(track.path, fmt)
 
         logger.info("Archiving Deezer track %s (%s) -> %s", track.deezer_id, fmt, track.path)
-        provider.download_to(url, used_id, track.path)
-        _finalize_archive(provider, track, fmt, info)
+        # Downloaded and tagged under a name nobody serves, THEN published: see
+        # _tag_archive for why the tags may never be written on the real path.
+        dest = Path(track.path)
+        staged = dest.with_name(f"{dest.name}.{uuid4().hex}.stage.part")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            provider.download_to(url, used_id, staged)
+            cover = _tag_archive(provider, staged, info, dest.suffix)
+            os.replace(staged, dest)
+        finally:
+            _safe_unlink(staged)
+        _finalize_archive(provider, track, fmt, info, cover)
 
 
 def _resolve_or_flag(provider, track: Track):
@@ -122,7 +132,26 @@ def _resolve_or_flag(provider, track: Track):
     return resolved
 
 
-def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
+def _tag_archive(provider, path, info: dict, suffix: str) -> bytes | None:
+    """Tag a downloaded file that is NOT yet at its archive path; returns the cover.
+
+    Tagging rewrites the file in place (mutagen moves the audio along to make
+    room for a 1000 px cover), and once a file is at its archive path it is
+    being served: ``/api/stream`` and Subsonic's stream send it, the silence
+    measurement reads it (and caches its answer for good). Tagged after the
+    rename, any of them reading in that window got a file half moved. So the
+    file is tagged under its staging name and published complete.
+    """
+    meta = meta_from_gw(info)
+    cover = provider.fetch_cover(meta.get("md5_image"))
+    try:
+        tag_file(Path(path), meta, cover, suffix)
+    except Exception as exc:  # tagging must never break playback
+        logger.warning("Tagging failed for %s: %s", path, exc)
+    return cover
+
+
+def _finalize_archive(provider, track: Track, fmt: str, info: dict, cover=None) -> None:
     """Tag the freshly-archived file, and archive everything ELSE about it.
 
     Archiving the audio is only half the promise. A track is "unavailable" when
@@ -135,13 +164,7 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict) -> None:
     playlist or album listing carries a subset), so the row is REFRESHED from it
     rather than only having its bitrate stamped.
     """
-    meta = meta_from_gw(info)
-    cover = provider.fetch_cover(meta.get("md5_image"))
-    try:
-        tag_file(Path(track.path), meta, cover)
-    except Exception as exc:  # tagging must never break playback
-        logger.warning("Tagging failed for %s: %s", track.path, exc)
-
+    # `cover` is what _tag_archive fetched for the tags, before publication.
     if cover:
         # Archive the art on disk too (a cover.jpg sidecar) so it is served
         # locally, exactly like the audio, even if Deezer later drops the album.
@@ -385,8 +408,13 @@ def open_live_stream(provider, track: Track, on_abort=None):
                         if dest.is_file():
                             _safe_unlink(tmp)
                         else:
-                            os.replace(tmp, dest)
-                            _finalize_archive(provider, track, fmt, info)
+                            # Tagged before it is published (see _tag_archive).
+                            try:
+                                cover = _tag_archive(provider, tmp, info, dest.suffix)
+                                os.replace(tmp, dest)
+                            finally:
+                                _safe_unlink(tmp)
+                            _finalize_archive(provider, track, fmt, info, cover)
                 else:
                     _safe_unlink(tmp)
                     # Client gave up mid-download — make sure it still gets cached.

@@ -890,6 +890,65 @@ class DeezerTestCase(TestBase):
 
     # -- archive: fetch + extension fix ----------------------------------
 
+    def _watch_tagging(self, track):
+        """Record, at each tag write, whether the archive path already existed."""
+        seen = []
+        original = archive.tag_file
+
+        def tag(path, meta, cover, suffix=None):
+            seen.append((os.path.exists(track.path), Path(path) == Path(track.path), suffix))
+            return original(path, meta, cover, suffix)
+
+        archive.tag_file = tag
+        self.addCleanup(setattr, archive, "tag_file", original)
+        return seen
+
+    def test_a_background_archive_is_tagged_before_it_is_published(self):
+        # Tagging rewrites the file in place; once it is at its archive path it
+        # is being served (stream, Subsonic, the silence measurement), and a
+        # reader in that window got a file half moved.
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        track = library.upsert_track(raw_track(31, "Staged"), root, "FLAC")
+        info = raw_track(31, "Staged")
+        self.provider.resolve = lambda sng_id, quality=None: ("u", "FLAC", info, sng_id)
+
+        def fake_download(url, track_id, dest):
+            with open(dest, "wb") as fh:
+                fh.write(b"fLaC" + b"\x00" * 4096)
+
+        self.provider.download_to = fake_download
+        self.provider.fetch_cover = lambda md5, size=1000: None
+        seen = self._watch_tagging(track)
+
+        archive.ensure_archived(self.provider, track)
+
+        self.assertEqual(seen, [(False, False, ".flac")])
+        self.assertTrue(os.path.isfile(track.path))
+        folder = os.path.dirname(track.path)
+        self.assertEqual([n for n in os.listdir(folder) if n.endswith(".part")], [])
+
+    def test_a_live_stream_is_tagged_before_it_is_published(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive_dir)
+        track = library.upsert_track(raw_track(32, "Live"), root, "FLAC")
+        info = raw_track(32, "Live")
+        self.provider.resolve = lambda sng_id, quality=None: ("u", "FLAC", info, sng_id)
+        self.provider.iter_decrypted = lambda url, tid: iter([b"fLaC" + b"\x00" * 2048, b"\x00" * 2048])
+        self.provider.fetch_cover = lambda md5, size=1000: None
+        seen = self._watch_tagging(track)
+
+        _mime, gen = archive.open_live_stream(self.provider, track)
+        body = b"".join(gen)
+
+        self.assertEqual(len(body), 4100)
+        self.assertEqual(seen, [(False, False, ".flac")])
+        self.assertTrue(os.path.isfile(track.path))
+        folder = os.path.dirname(track.path)
+        self.assertEqual([n for n in os.listdir(folder) if n.endswith(".part")], [])
+
     def test_ensure_archived_writes_file_and_updates_row(self):
         from supysonic.deezer import library
 

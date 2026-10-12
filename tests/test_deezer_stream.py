@@ -92,8 +92,8 @@ class Cdn:
     Bodies are written in pieces that are never a multiple of 2048, with a
     pause every few so the client really does receive them apart; ``chunked``
     also frames them as HTTP chunks of those sizes. ``*-truncated`` sends two
-    thirds and hangs up. ``gated`` sends three blocks, then waits for ``gate``
-    before the rest, and records when it did.
+    thirds and hangs up. ``gated`` sends three blocks (or ``head`` bytes), then
+    waits for ``gate`` before the rest, and records when it did.
     """
 
     PIECES = (1, 7, 1000, 2047, 3, 2049, 4096, 13, 3001, 511)
@@ -119,15 +119,15 @@ class Cdn:
 
             def do_GET(self):
                 cdn.hits.append(self.path)
-                body, mode = cdn.bodies.get(self.path, (None, None))
+                body, mode, head = cdn.bodies.get(self.path, (None, None, 6144))
                 if body is None or mode == "forbidden":
                     self.send_response(404 if body is None else 403)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
-                self._send(body, mode)
+                self._send(body, mode, head)
 
-            def _send(self, body, mode):
+            def _send(self, body, mode, head_size=6144):
                 chunked = mode.startswith("chunked")
                 truncated = mode.endswith("truncated")
                 self.send_response(200)
@@ -140,7 +140,7 @@ class Cdn:
                 if truncated:
                     body = body[: len(body) * 2 // 3]
                     self.close_connection = True
-                head, rest = (body[:6144], body[6144:]) if mode == "gated" else (body, b"")
+                head, rest = (body[:head_size], body[head_size:]) if mode == "gated" else (body, b"")
                 self._pieces(head, chunked)
                 if mode == "gated":
                     cdn.gate.wait(5)
@@ -165,9 +165,9 @@ class Cdn:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
-    def serve(self, name: str, body: bytes, mode: str = "length") -> str:
+    def serve(self, name: str, body: bytes, mode: str = "length", head: int = 6144) -> str:
         path = "/" + name.replace(" ", "-")
-        self.bodies[path] = (body, mode)
+        self.bodies[path] = (body, mode, head)
         return self.base + path
 
     def close(self):
@@ -531,6 +531,95 @@ class LiveStreamTestCase(_CdnMixin, TestBase):
         self.assertEqual(self.aborted, 1)
         self.assertEqual(Track[ids.track_uuid(self.SID)].last_modification, 0)
         self.assertEqual(self.analysed, [])
+
+    # -- the same live download, transcoded to Opus as it arrives -------------
+    # The Opus path used to archive the WHOLE FLAC before its first byte went
+    # out; measured at 512 KB/s on a minute of FLAC at a real music bitrate,
+    # 13 s of silence against 0.77 s now.
+
+    def _ffmpeg(self):
+        if not shutil.which("ffmpeg"):
+            if os.environ.get("NS_REQUIRE_FFMPEG") == "1":  # pragma: no cover
+                raise RuntimeError("NS_REQUIRE_FFMPEG=1 but ffmpeg is not on PATH")
+            self.skipTest("ffmpeg not installed")
+
+    def _music_flac(self):
+        """Ten seconds of stereo pink noise as FLAC: ~1.6 MB, a real track's
+        bitrate. The 15 KB of silence above is smaller than the 32 KB ffmpeg
+        reads before it emits anything, so it could not show a stream that
+        starts before its download ends."""
+        import subprocess
+
+        path = Path(self.archive_dir) / "music.flac"
+        subprocess.run(
+            ["ffmpeg", "-v", "0", "-f", "lavfi", "-i", "anoisesrc=d=10:c=pink:a=0.3:seed=7",
+             "-ac", "2", "-ar", "44100", "-y", str(path)],
+            check=True,
+        )
+        data = path.read_bytes()
+        path.unlink()
+        return data
+
+    def _opus(self, bitrate=64):
+        from supysonic.webui import _opus_live_generator
+
+        aborted = threading.Event()
+        self._on_abort = lambda: (setattr(self, "aborted", self.aborted + 1), aborted.set())
+        _mimetype, stream = self._open()
+        first = next(stream)
+        return _opus_live_generator(first, stream, bitrate), aborted
+
+    def test_opus_starts_while_the_flac_is_still_downloading_and_the_flac_is_kept(self):
+        import mutagen.oggopus
+
+        self._ffmpeg()
+        music = self._music_flac()
+        self.cdn.gate.clear()
+        self.cdn.rest_sent.clear()
+        # The CDN sends the first 256 KB (1.6 s of this audio) and holds the rest.
+        self._resolve_to(
+            self.cdn.serve("live-opus", encrypt_like_deezer(music, self.SID), "gated", head=256 * 1024)
+        )
+        opus, _aborted = self._opus()
+        got = []
+        reader = threading.Thread(target=lambda: got.append(next(opus)), daemon=True)
+        reader.start()
+        reader.join(4)  # the CDN holds the rest of the file back for 5 s
+        self.assertTrue(got, "no Opus before the download finished")
+        self.assertFalse(self.cdn.rest_sent.is_set(), "the listener waited for the whole file")
+        self.assertTrue(got[0].startswith(b"OggS"))
+        self.cdn.gate.set()
+        heard = got[0] + b"".join(opus)
+
+        # What the listener got is the whole track, in Opus...
+        out = Path(self.archive_dir) / "heard.ogg"
+        out.write_bytes(heard)
+        self.assertAlmostEqual(mutagen.oggopus.OggOpus(out).info.length, 10.0, delta=0.05)
+        # ...and the FLAC master was archived, tagged, exactly as it is played.
+        audio = mutagen.flac.FLAC(self.track.path)
+        self.assertEqual(audio.info.total_samples, 441000)
+        self.assertEqual(audio["title"], ["Harder (Live)"])
+        self.assertGreater(Track[ids.track_uuid(self.SID)].last_modification, 0)
+        self.assertEqual(self._leftovers(), [])
+        self.assertEqual(self.aborted, 0)
+
+    def test_an_opus_listener_who_leaves_early_leaves_no_archive_and_it_is_fetched_again(self):
+        self._ffmpeg()
+        self.cdn.gate.clear()
+        # Held back mid-file: the listener leaves while it is still downloading
+        # (a download that had already finished would rightly be kept).
+        self._resolve_to(
+            self.cdn.serve("live-opus-leave", encrypt_like_deezer(self._music_flac(), self.SID), "gated", head=256 * 1024)
+        )
+        opus, aborted = self._opus()
+        next(opus)
+        opus.close()  # the client hangs up: ffmpeg is killed, its feeder stops
+        self.cdn.gate.set()
+        self.assertTrue(aborted.wait(10), "the archive was not handed to the background queue")
+        self.assertFalse(os.path.exists(self.track.path))
+        self.assertEqual(self._leftovers(), [])
+        self.assertEqual(self.aborted, 1)
+        self.assertEqual(Track[ids.track_uuid(self.SID)].last_modification, 0)
 
     def test_a_download_that_breaks_off_is_never_kept(self):
         self._resolve_to(self.cdn.serve("live-cut", encrypt_like_deezer(FLAC, self.SID), "length-truncated"))

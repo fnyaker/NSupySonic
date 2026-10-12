@@ -310,6 +310,14 @@ unreachable, and the parts that do need Deezer must fail *fast* and *without a v
   exit and one wedged name would hang the shutdown of the worker being recycled because of it.
 - The `/api` blueprint has a catch-all error handler: an unforeseen failure becomes a JSON 500 with
   the traceback in the log, never an HTML page the SPA can't parse.
+- **Reaching Deezer again is the SERVER's job, never the client's.** A page only Deezer has, asked
+  while Deezer does not answer, is a 503 marked `X-NS-Error: deezer-unreachable` (`_deezer_missing` /
+  `_deezer_unreachable`, with `retry_in`); the proxy switched off is `deezer-disabled`. `lib/api.js`
+  reads the header as final and never retries it (an unmarked 503 — a restart — still is): the
+  server's calls already retry inside their budget and the breaker probes once its cooldown is over,
+  so three client retries only fetched the same instant refusal ~3 s later. Deezer ANSWERING that a
+  thing is not there stays a 404. The screens say "Deezer est injoignable" (`LoadFailed.svelte`),
+  never "introuvable", and only the person's "Réessayer" asks again.
 - The ARL can die at any moment. `DeezerProvider.check_login()` is the cached health check and
   distinguishes `"arl"` (credential dead — admin action) from `"network"` (says nothing about it);
   `/api/deezer/status` surfaces it, with `retry_in`, and the SPA raises a notice
@@ -396,8 +404,12 @@ that outlives the session.
 **event-driven, never polled**. Archiving happens the moment something becomes yours:
 
 - *playing* it (the FLAC stream is teed to disk by `archive.open_live_stream`, `on_abort` re-queues
-  it if the client disconnects; the Opus path and `api/media.py::_ensure_deezer_archived` call
-  `ensure_archived` outright; podcast episodes archive on first play too);
+  it if the client disconnects; a cold Opus request is that same live stream piped through ffmpeg
+  as it downloads (`webui._opus_live_generator`: a feeder thread owns the source, 100 ms Ogg pages,
+  first audio 0.26 s at 512 KB/s where it used to wait for the whole FLAC);
+  `api/media.py::_ensure_deezer_archived` calls `ensure_archived` outright; podcast episodes archive
+  on first play too). An archive is TAGGED BEFORE IT IS PUBLISHED (`archive._tag_archive`): tagging
+  rewrites the file in place, and a published file is being served;
 - *starring a track* (`/api/favorite`, and Subsonic's `star` via `annotation._archive_starred`);
 - *favouriting an album, a playlist or an artist* (`/api/favorite/<kind>` and Subsonic's `star` →
   `backfill.archive_entity`, in a worker thread, always the FULL tracklist — never the ~10-track

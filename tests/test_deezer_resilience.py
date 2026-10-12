@@ -545,6 +545,20 @@ class ResolveTestCase(unittest.TestCase):
             self.provider.resolve("1")
         self.assertEqual([a for a in self.routes.asked if a[0] == "song.getData"], [("song.getData", "1")])
 
+    def test_a_first_play_asks_for_the_track_once(self):
+        # A track with no row yet: the row is made from song.getData, and the
+        # stream resolved a few milliseconds later from the same answer — it was
+        # asked twice, a gateway round trip of the time to the first note.
+        self._deezer({"1": song("1", "t1")}, {("t1", "FLAC"): "https://cdn/1.flac"})
+        self.provider.get_track_info("1")
+        url, _fmt, _info, _used = self.provider.resolve("1")
+        self.assertEqual(url, "https://cdn/1.flac")
+        self.assertEqual([a for a in self.routes.asked if a[0] == "song.getData"], [("song.getData", "1")])
+        # The answer's token belongs to that session: a new one asks again.
+        self._deezer({"1": song("1", "t2")}, {("t2", "FLAC"): "https://cdn/2.flac"})
+        url, _fmt, _info, _used = self.provider.resolve("1")
+        self.assertEqual(url, "https://cdn/2.flac")
+
     def test_what_deezer_answers_is_a_verdict(self):
         cases = {
             "no source in any format": ({"1": song("1", "t1")}, {}),
@@ -988,3 +1002,32 @@ class AvailabilityTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GatewayListTestCase(unittest.TestCase):
+    """``song.getListData`` leaves out a track Deezer no longer has."""
+
+    def _gw(self, rows):
+        from deezerpy.gw import GW
+
+        gw = GW(None, {})
+        gw.api_call = lambda method, args=None, **kw: (
+            {"data": rows} if method == "song.getListData" else {"data": [{"SNG_ID": "1"}, {"SNG_ID": "2"}, {"SNG_ID": "3"}]}
+        )
+        return gw
+
+    def test_a_missing_row_leaves_a_hole_not_a_shift(self):
+        # Mapped by position, the row after the hole went to the wrong id and
+        # the last one walked off the end of the list: an IndexError that took
+        # the whole favourites list, and the nightly favourites sync, down.
+        gw = self._gw([{"SNG_ID": "1", "SNG_TITLE": "one"}, {"SNG_ID": "3", "SNG_TITLE": "three"}])
+        rows = gw.get_tracks(["1", "2", "3"])
+        self.assertEqual([(r["SNG_ID"], r["SNG_TITLE"]) for r in rows], [("1", "one"), (0, ""), ("3", "three")])
+
+    def test_a_full_answer_is_read_in_order(self):
+        gw = self._gw([{"SNG_ID": "1"}, {"SNG_ID": "2"}])
+        self.assertEqual([r["SNG_ID"] for r in gw.get_tracks(["1", 0, "2"])], ["1", 0, "2"])
+
+    def test_favourites_skip_a_track_deezer_no_longer_has(self):
+        gw = self._gw([{"SNG_ID": "1", "SNG_TITLE": "one"}, {"SNG_ID": "3", "SNG_TITLE": "three"}])
+        self.assertEqual([t["id"] for t in gw.get_my_favorite_tracks()], ["1", "3"])

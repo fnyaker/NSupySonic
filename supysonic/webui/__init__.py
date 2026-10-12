@@ -513,14 +513,78 @@ def _provider():
     return provider
 
 
+# A failure that is about DEEZER, not about this server, carries a code of its
+# own in `X-NS-Error`. The client reads it as final: retrying is the server's
+# job — every call already retries inside its network budget, and the circuit
+# breaker probes Deezer again once its cooldown is over — so a client that
+# re-asked three times only paid three more answers that it already had (the
+# same instant refusal, ~3 s of backoff, then the page saying "not found").
+NO_RETRY_HEADER = "X-NS-Error"
+DEEZER_UNREACHABLE = "deezer-unreachable"
+DEEZER_DISABLED = "deezer-disabled"
+
+
+def _deezer_disabled():
+    resp = jsonify({"error": "Deezer proxy disabled", "code": DEEZER_DISABLED})
+    resp.status_code = 503
+    resp.headers[NO_RETRY_HEADER] = DEEZER_DISABLED
+    return resp
+
+
+def _deezer_unreachable():
+    """503 for a page only Deezer has, while Deezer cannot be reached."""
+    provider = _provider()
+    outage = (getattr(provider, "outage", lambda: None)() or {}) if provider else {}
+    # Bounded: an "until further notice" backoff is infinite, and Infinity is
+    # not JSON any browser will parse.
+    retry_in = min(float(outage.get("retry_in") or 0), 3600.0)
+    resp = jsonify(
+        {
+            "error": "Deezer est injoignable",
+            "code": DEEZER_UNREACHABLE,
+            "reason": "network",  # the vocabulary of /deezer/status
+            "retry_in": round(retry_in, 1),
+        }
+    )
+    resp.status_code = 503
+    resp.headers[NO_RETRY_HEADER] = DEEZER_UNREACHABLE
+    resp.headers["Retry-After"] = str(max(1, int(retry_in + 0.999)) if retry_in else 30)
+    return resp
+
+
+def _deezer_down(exc=None) -> bool:
+    """Was a missing answer Deezer not answering (rather than Deezer saying no)?
+
+    `exc` is what the route's call raised, if it made one. A route that did not
+    call at all (``_dz_live`` said an outage is known) passes nothing, and the
+    provider's own instant reading decides.
+    """
+    provider = _provider()
+    if provider is None:
+        return False
+    if exc is not None and is_transport_failure(exc):
+        return True
+    probe = getattr(provider, "available", None)
+    return probe is not None and not probe()
+
+
+def _deezer_missing(exc=None):
+    """The answer for a page neither Deezer nor the database could give."""
+    if _provider() is None:
+        return _deezer_disabled()
+    if _deezer_down(exc):
+        return _deezer_unreachable()
+    return jsonify({"error": "not found"}), 404
+
+
 def _need_provider():
     provider = _provider()
     if provider is None:
-        return None, (jsonify({"error": "Deezer proxy disabled"}), 503)
+        return None, _deezer_disabled()
     return provider, None
 
 
-def _log_deezer_failure(message, *args):
+def _log_deezer_failure(message, *args, exc=None):
     """Log the Deezer call that just failed, from inside its ``except``.
 
     With a traceback for a real error — and WITHOUT one when Deezer is simply
@@ -530,11 +594,12 @@ def _log_deezer_failure(message, *args):
     the interesting fact is that Deezer is down, and it is the same fact 10 000
     times over.
     """
-    exc = sys.exc_info()[1]
+    if exc is None:
+        exc = sys.exc_info()[1]
     if is_transport_failure(exc):
         logger.warning("%s (Deezer unreachable: %s)", message % args if args else message, exc)
     else:
-        logger.warning(message, *args, exc_info=True)
+        logger.warning(message, *args, exc_info=exc or True)
 
 
 def _dz_api():
@@ -733,29 +798,26 @@ def _local_search_tracks(query: str, limit: int) -> list:
     like = like_term(query)
     if like is None:
         return []
+    # "On disk" is a column: `last_modification` is 0 until the archive stamps
+    # it, and reset to 0 by the only code that deletes one (cleanup.py). It used
+    # to be a stat() per row over five times `limit` rows sorted by title — and
+    # a common word whose first two hundred matches were merely imported hid
+    # every archived match behind them.
     q = _visible_tracks(
         Track.select(Track, Album, Artist)
         .join(Album)
         .switch(Track)
         .join(Artist)
         .where(
-            Track.title.contains(like)
-            | Album.name.contains(like)
-            | Artist.name.contains(like)
+            (
+                Track.title.contains(like)
+                | Album.name.contains(like)
+                | Artist.name.contains(like)
+            )
+            & (Track.deezer_id.is_null(True) | (Track.last_modification > 0))
         )
-    ).order_by(
-        Track.title
-    # Over-fetch, then keep only offline-playable rows up to `limit` (an
-    # archived-state filter can't be expressed cleanly in SQL here).
-    ).limit(min(limit * 5, 200))
-    keep = []
-    for t in q:
-        if t.deezer_id is not None and not os.path.isfile(t.path):
-            continue  # imported metadata only — not on disk, needs Deezer
-        keep.append(t)
-        if len(keep) >= limit:
-            break
-    return _db_tracks(keep)
+    ).order_by(Track.title).limit(limit)
+    return _db_tracks(q)
 
 
 def _local_starred() -> list:
@@ -1158,9 +1220,10 @@ def _db_mix_for(sid: str):
     return pl
 
 
-def _deezer_starred() -> list:
-    """The current user's starred *Deezer* tracks (from the DB), newest first."""
-    return list(
+def _deezer_starred():
+    """The current user's starred *Deezer* tracks (from the DB), newest first,
+    as a query (``_db_tracks`` reads it as tuples)."""
+    return (
         Track.select(Track, Album, Artist)
         .join(Album)
         .switch(Track)
@@ -1533,8 +1596,8 @@ def home():
 def smarttracklist(sid):
     if not _valid_slug(sid):
         return jsonify({"error": "invalid id"}), 400
-    provider = _provider()
     live = _dz_live()
+    failure = None
     if live is not None:
         try:
             res = live.get_smart_tracklist(sid)
@@ -1552,8 +1615,9 @@ def smarttracklist(sid):
                     "tracks": _tracks(songs.get("data", [])),
                 }
             )
-        except Exception:
+        except Exception as exc:
             _log_deezer_failure("smart tracklist %s failed; trying local DB", sid)
+            failure = exc
     # Deezer down/disabled: serve the last synced copy of this mix from the DB.
     pl = _db_mix_for(sid)
     if pl is not None:
@@ -1573,9 +1637,7 @@ def smarttracklist(sid):
                 "tracks": tracks,
             }
         )
-    if provider is None:
-        return jsonify({"error": "Deezer proxy disabled"}), 503
-    return jsonify({"error": "not found"}), 404
+    return _deezer_missing(failure)
 
 
 def _data(fn):
@@ -1585,6 +1647,29 @@ def _data(fn):
     except Exception:
         _log_deezer_failure("Deezer public API call failed")
         return []
+
+
+def _side_by_side(*fns):
+    """Run independent Deezer calls at once; ``[(value, exc), ...]`` in order.
+
+    A screen that needs several calls paid their SUM one after the other — a
+    search was five public-API round trips, an artist four, an album or a
+    playlist two — when nothing in one depends on another. Network only: the
+    database stays on the request's own thread. Every call still goes through
+    the shared limiter and the circuit breaker, so this asks Deezer nothing
+    more, only sooner.
+    """
+
+    def call(fn):
+        try:
+            return fn(), None
+        except Exception as exc:  # handed back to the caller, which decides
+            return None, exc
+
+    if len(fns) == 1:
+        return [call(fns[0])]
+    with ThreadPoolExecutor(max_workers=len(fns)) as pool:
+        return [f.result() for f in [pool.submit(call, fn) for fn in fns]]
 
 
 def _podcast_card(p):
@@ -1616,33 +1701,46 @@ def search():
         limit = 25
     limit = max(1, min(limit, 50))
 
-    # Local files first — always available, even when Deezer is unreachable.
-    try:
-        local_tracks = _local_search_tracks(query, limit)
-    except Exception:
-        logger.warning("Local search failed", exc_info=True)
-        local_tracks = []
+    def local():
+        # Local files — always available, even when Deezer is unreachable.
+        try:
+            return _local_search_tracks(query, limit)
+        except Exception:
+            logger.warning("Local search failed", exc_info=True)
+            return []
 
     # Public API (api.deezer.com): stable, typed, returns playlists + image URLs.
     # None when Deezer is off or unreachable — the local hits still go out.
     dzapi = _dz_api()
     if dzapi is None:
-        return jsonify({**empty, "tracks": local_tracks})
-    tracks = [_track_api(t) for t in _data(lambda: dzapi.search(query, limit=limit))]
-    albums = [_album_api(a) for a in _data(lambda: dzapi.search_album(query, limit=limit))]
-    artists = [_artist_api(a) for a in _data(lambda: dzapi.search_artist(query, limit=limit))]
-    playlists = [
-        _playlist_api(p) for p in _data(lambda: dzapi.search_playlist(query, limit=limit))
-    ]
-    podcasts = [
-        _podcast_card(p) for p in _data(lambda: dzapi.search_podcast(query, limit=limit))
-    ]
+        return jsonify({**empty, "tracks": local()})
+    # The five searches run side by side (they were five round trips one after
+    # the other), and the database is read on this thread while they are out.
+    calls = (
+        lambda: dzapi.search(query, limit=limit),
+        lambda: dzapi.search_album(query, limit=limit),
+        lambda: dzapi.search_artist(query, limit=limit),
+        lambda: dzapi.search_playlist(query, limit=limit),
+        lambda: dzapi.search_podcast(query, limit=limit),
+    )
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        futures = [pool.submit(_data, fn) for fn in calls]
+        local_tracks = local()
+        raw_tracks, raw_albums, raw_artists, raw_playlists, raw_podcasts = (
+            f.result() for f in futures
+        )
+    tracks = [_track_api(t) for t in raw_tracks]
+    albums = [_album_api(a) for a in raw_albums]
+    artists = [_artist_api(a) for a in raw_artists]
+    playlists = [_playlist_api(p) for p in raw_playlists]
+    podcasts = [_podcast_card(p) for p in raw_podcasts]
     # Downloaded/local tracks lead (they play from disk); drop the live-search
     # duplicates of the same Deezer ids so a track isn't listed twice.
     have = {t["deezer_id"] for t in local_tracks}
+    live = flag_unavailable([x for x in tracks if x and x["deezer_id"] not in have])
     return jsonify(
         {
-            "tracks": local_tracks + [x for x in tracks if x and x["deezer_id"] not in have],
+            "tracks": local_tracks + live,
             "albums": [x for x in albums if x],
             "artists": [x for x in artists if x],
             "playlists": [x for x in playlists if x],
@@ -1677,16 +1775,22 @@ def artist(artist_id):
     # The id is concatenated into the outgoing api.deezer.com URL: validate it
     # here rather than letting "%3F..." smuggle query parameters into the call.
     dzapi = _dz_api() if _valid_id(artist_id) else None
+    exc = None
     if dzapi is not None:
-        try:
-            info = dzapi.get_artist(artist_id)
-        except Exception:
-            _log_deezer_failure("artist %s lookup failed; trying local DB", artist_id)
-            info = None
+        # All four at once: the shelves only need the id, not the artist's
+        # answer, and one after the other they were four round trips.
+        (info, exc), (top, _), (albums, _), (related, _) = _side_by_side(
+            lambda: dzapi.get_artist(artist_id),
+            lambda: _data(lambda: dzapi.get_artist_top(artist_id, limit=15)),
+            lambda: _data(lambda: dzapi.get_artist_albums(artist_id, limit=50)),
+            lambda: _data(lambda: dzapi.get_artist_related(artist_id, limit=20)),
+        )
+        if exc is not None:
+            _log_deezer_failure("artist %s lookup failed; trying local DB", artist_id, exc=exc)
         if info and info.get("id"):
-            top = [_track_api(t) for t in _data(lambda: dzapi.get_artist_top(artist_id, limit=15))]
-            albums = [_album_api(a) for a in _data(lambda: dzapi.get_artist_albums(artist_id, limit=50))]
-            related = [_artist_api(a) for a in _data(lambda: dzapi.get_artist_related(artist_id, limit=20))]
+            top = flag_unavailable([x for x in map(_track_api, top or []) if x])
+            albums = [_album_api(a) for a in albums or []]
+            related = [_artist_api(a) for a in related or []]
             return jsonify(
                 {
                     "artist": _artist_api(info),
@@ -1704,9 +1808,9 @@ def artist(artist_id):
     )
     if ar is not None:
         return jsonify(_db_artist_response(ar))
-    if provider is None:
-        return jsonify({"error": "Deezer proxy disabled"}), 503
-    return jsonify({"error": "not found"}), 404
+    if not _valid_id(artist_id):
+        return jsonify({"error": "not found"}), 404
+    return _deezer_missing(exc)
 
 
 @webapi.route("/artist/<artist_id>/tracks")
@@ -1719,14 +1823,19 @@ def artist_tracks(artist_id):
     """
     PAGE = 100
     MAX = 300
-    provider = _provider()
     dzapi = _dz_api() if _valid_id(artist_id) else None
+    failure = None
     if dzapi is not None:
         tracks = []
         seen = set()
         index = 0
         while len(tracks) < MAX:
-            batch = _data(lambda i=index: dzapi.get_artist_top(artist_id, index=i, limit=PAGE))
+            try:
+                batch = (dzapi.get_artist_top(artist_id, index=index, limit=PAGE) or {}).get("data") or []
+            except Exception as exc:
+                _log_deezer_failure("artist %s tracks failed; trying local DB", artist_id)
+                failure = exc
+                break
             if not batch:
                 break
             for raw in batch:
@@ -1755,9 +1864,9 @@ def artist_tracks(artist_id):
             .order_by(Album.name, Track.disc, Track.number)
         )
         return jsonify({"tracks": _db_tracks(rows)})
-    if provider is None:
-        return jsonify({"error": "Deezer proxy disabled"}), 503
-    return jsonify({"error": "not found"}), 404
+    if not _valid_id(artist_id):
+        return jsonify({"error": "not found"}), 404
+    return _deezer_missing(failure)
 
 
 def _db_album_by_id(album_id):
@@ -1771,26 +1880,30 @@ def _db_album_by_id(album_id):
 @login_required
 def album(album_id):
     provider = _provider()
+    exc = None
     if provider is not None and _valid_id(album_id):
-        try:
-            page = provider.dz.gw.get_album_page(album_id) or {}
-            data = page.get("DATA") or {}
+        # The page (header + favourite state) and the FULL tracklist side by
+        # side: the page alone only carries the first tracks.
+        (page, exc), (songs, songs_exc) = _side_by_side(
+            lambda: provider.dz.gw.get_album_page(album_id),
+            lambda: provider.get_album_tracks(album_id),
+        )
+        if exc is not None:
+            _log_deezer_failure("album %s page failed; trying local DB", album_id, exc=exc)
+        else:
+            data = (page or {}).get("DATA") or {}
             if data.get("ALB_ID"):
-                try:
-                    songs = provider.get_album_tracks(album_id)
-                except Exception:
-                    songs = (page.get("SONGS") or {}).get("data", [])
+                if songs_exc is not None:
+                    songs = ((page or {}).get("SONGS") or {}).get("data", [])
                 return jsonify({"album": _album(data), "tracks": _tracks(songs)})
-        except Exception:
-            _log_deezer_failure("album %s page failed; trying local DB", album_id)
     # Deezer disabled/unreachable (or the album isn't on Deezer): serve the
     # imported/archived copy from the DB so downloaded albums browse offline.
     alb = _db_album_by_id(album_id)
     if alb is not None:
         return jsonify(_db_album_response(alb))
-    if provider is None:
-        return jsonify({"error": "Deezer proxy disabled"}), 503
-    return jsonify({"error": "not found"}), 404
+    if not _valid_id(album_id):
+        return jsonify({"error": "not found"}), 404
+    return _deezer_missing(exc)
 
 
 @webapi.route("/playlist/<playlist_id>")
@@ -1821,18 +1934,20 @@ def playlist(playlist_id):
     provider, err = _need_provider()
     if err:
         return err
-    try:
-        page = provider.get_playlist_page(playlist_id) or {}
-    except Exception:
-        _log_deezer_failure("playlist %s page failed", playlist_id)
-        return jsonify({"error": "not found"}), 404
+    # pagePlaylist only returns the first page of songs, so the full list is
+    # asked for too — at the same time, not after it.
+    (page, exc), (songs, songs_exc) = _side_by_side(
+        lambda: provider.get_playlist_page(playlist_id),
+        lambda: provider.get_playlist_tracks(playlist_id),
+    )
+    if exc is not None:
+        _log_deezer_failure("playlist %s page failed", playlist_id, exc=exc)
+        return _deezer_missing(exc)
+    page = page or {}
     data = page.get("DATA") or {}
     if not data.get("PLAYLIST_ID"):
         return jsonify({"error": "not found"}), 404
-    # pagePlaylist only returns the first page of songs; fetch them all.
-    try:
-        songs = provider.get_playlist_tracks(playlist_id)
-    except Exception:
+    if songs_exc is not None:
         songs = (page.get("SONGS") or {}).get("data", [])
     out = _playlist(data)
     out["editable"] = False
@@ -2472,8 +2587,9 @@ def my_favorites():
             # Include the admin's DB Deezer stars that AREN'T in the live list —
             # e.g. starred with push_to_deezer off, or whose push failed. Without
             # this they vanished from the library while still showing a full heart.
-            extra = [t for t in _deezer_starred() if str(t.deezer_id) not in have]
-            tracks.extend(_db_tracks(extra))
+            # As tuples: hydrating three models per star to compare one id was
+            # the slow half of this route on a big library.
+            tracks.extend(t for t in _db_tracks(_deezer_starred()) if t["deezer_id"] not in have)
             return jsonify({"tracks": tracks})
         except Exception:
             _log_deezer_failure("Deezer favorites fetch failed; serving from DB")
@@ -3024,7 +3140,7 @@ def favorite():
     track = archive.find_local_track(deezer_id)
     if track is None:
         if provider is None:
-            return jsonify({"error": "Deezer proxy disabled"}), 503
+            return _deezer_disabled()
         try:
             track = archive.import_track(provider, deezer_id)
         except Exception:
@@ -3379,7 +3495,7 @@ def trigger_sync():
     if _dz_live() is None:
         # The sync would postpone itself and the thread would exit, leaving the
         # UI to report a run that never happened. Say what is actually wrong.
-        return jsonify({"error": "Deezer est injoignable", "reason": "network"}), 503
+        return _deezer_unreachable()
 
     from ..deezer import scheduler
 
@@ -3782,6 +3898,82 @@ def _opus_generator(flac_path, bitrate):
         proc.wait()
 
 
+def _opus_live_generator(first, source, bitrate):
+    """Opus from a source that is still downloading: the first play of a track.
+
+    The Opus path used to archive the whole FLAC before its first byte went out
+    (tens of seconds on a slow link), where the FLAC path streams as it
+    downloads. Here the live, archiving stream (``archive.open_live_stream``)
+    is fed straight into ffmpeg's stdin by a thread of its own while this
+    generator hands ffmpeg's output to the client: the first note is the
+    download's first block plus ffmpeg's start-up.
+
+    The feeding thread owns ``source`` (a generator runs on one thread at a
+    time): it consumes it to the end — which is what publishes the archive —
+    or, when the listener leaves and ffmpeg is killed, its next write fails
+    and it closes ``source``, which drops the partial and queues the archive
+    in the background exactly as the FLAC path does.
+    """
+    import subprocess
+
+    # Out as soon as it is encoded: every packet flushed to the pipe, in Ogg
+    # pages of 100 ms rather than the muxer's one second. Measured at 512 KB/s,
+    # the first audio page left after 0.77 s without them, 0.26 s with.
+    cmd = [
+        "ffmpeg", "-v", "0", "-i", "pipe:0",
+        "-map", "0:a:0", "-c:a", "libopus", "-b:a", f"{bitrate}k", "-vbr", "on",
+        "-vn", "-flush_packets", "1", "-page_duration", "100000",
+        "-f", "ogg", "pipe:1",
+    ]
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+
+    def feed():
+        # The archive is finalised on this thread (the row is refreshed, the
+        # sidecars written): it needs a connection of its own.
+        try:
+            db.connect(reuse_if_open=True)
+        except Exception:  # pragma: no cover - connection setup best-effort
+            pass
+        try:
+            if first:
+                proc.stdin.write(first)
+            for chunk in source:
+                proc.stdin.write(chunk)
+        except (BrokenPipeError, ValueError, OSError):
+            pass  # ffmpeg is gone: the listener left
+        except Exception:
+            logger.warning("Live Opus source failed", exc_info=True)
+        finally:
+            source.close()
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                db.close()
+            except Exception:  # pragma: no cover
+                pass
+
+    feeder = threading.Thread(target=feed, name="opus-live-feed", daemon=True)
+    feeder.start()
+    try:
+        while True:
+            # read1: whatever is there now. read(n) waits for n bytes, and the
+            # first pages are smaller than that.
+            data = proc.stdout.read1(65536)
+            if not data:
+                break
+            yield data
+    except GeneratorExit:
+        proc.kill()
+        raise
+    finally:
+        proc.stdout.close()
+        proc.wait()
+
+
 def _stream_episode(episode, bitrate):
     """Stream a podcast episode: archived MP3 from disk, Opus-transcoded on
     request (cached), archiving from the podcast host on first play."""
@@ -4018,52 +4210,48 @@ def stream(deezer_id):
             return jsonify({"error": "track unavailable"}), 502
 
         if not os.path.isfile(track.path):
-            if not bitrate:
-                # FLAC (the default web-player quality): stream the archive AS it
-                # downloads so playback starts almost instantly; the archive is
-                # finalized inside the generator. If the client disconnects early,
-                # on_abort queues a normal background archive so it still caches.
-                pf = getattr(current_app, "deezer_prefetch", None)
-                # They were listening to it and the connection dropped: finish
-                # the archive ahead of anything bulk, not behind it.
-                from ..deezer.workload import Priority as _P
+            # Stream the archive AS it downloads so playback starts almost
+            # instantly — as FLAC, or through ffmpeg into Opus; the archive is
+            # finalized when the download completes. If the client disconnects
+            # early, on_abort queues a normal background archive so it still
+            # caches.
+            pf = getattr(current_app, "deezer_prefetch", None)
+            # They were listening to it and the connection dropped: finish
+            # the archive ahead of anything bulk, not behind it.
+            from ..deezer.workload import Priority as _P
 
-                on_abort = (
-                    (lambda did=deezer_id: pf.download_ids([did], priority=_P.PREFETCH))
-                    if pf
-                    else None
-                )
-                try:
-                    mimetype, gen = archive.open_live_stream(provider, track, on_abort)
-                    # The first block is read here rather than by the WSGI
-                    # server — which sends the headers with it anyway — so a
-                    # stream refused on its first bytes (the CDN says no, it is
-                    # empty, it does not decrypt to audio) gets this route's 502
-                    # instead of dying with the response half-sent.
-                    first = next(gen, None)
-                except TrackUnavailable:
-                    return _gone(track, deezer_id)
-                except Exception:
-                    _log_deezer_failure("Live stream failed for %s", deezer_id)
-                    return jsonify({"error": "track unavailable"}), 502
-                return current_app.response_class(
-                    _then(first, gen), mimetype=mimetype
-                )
-
-            # Opus on a cold track needs the full FLAC master first.
-            from ..deezer import workload
-
+            on_abort = (
+                (lambda did=deezer_id: pf.download_ids([did], priority=_P.PREFETCH))
+                if pf
+                else None
+            )
             try:
-                # Somebody is waiting on these bytes: the bulk archiver stands
-                # down for as long as this takes, instead of racing it for the
-                # same link and the same disk head.
-                with workload.foreground():
-                    archive.ensure_archived(provider, track)
+                mimetype, gen = archive.open_live_stream(provider, track, on_abort)
+                # The first block is read here rather than by the WSGI
+                # server — which sends the headers with it anyway — so a
+                # stream refused on its first bytes (the CDN says no, it is
+                # empty, it does not decrypt to audio) gets this route's 502
+                # instead of dying with the response half-sent.
+                first = next(gen, None)
             except TrackUnavailable:
                 return _gone(track, deezer_id)
             except Exception:
-                _log_deezer_failure("Stream fetch failed for %s", deezer_id)
+                _log_deezer_failure("Live stream failed for %s", deezer_id)
                 return jsonify({"error": "track unavailable"}), 502
+            if not bitrate:
+                return current_app.response_class(
+                    _then(first, gen), mimetype=mimetype
+                )
+            # Opus: the same live download, transcoded as it arrives (it
+            # used to wait for the whole FLAC). A complete transcode lands
+            # in the cache like any other, so the next play is seekable.
+            key = f"deezer-{track.id}-opus{bitrate}.ogg"
+            return current_app.response_class(
+                current_app.transcode_cache.set_generated(
+                    key, lambda: _opus_live_generator(first, gen, bitrate)
+                ),
+                mimetype="audio/ogg",
+            )
 
     if bitrate:
         cache = current_app.transcode_cache

@@ -130,6 +130,29 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
     throw { status: 401, message: "unauthorized" };
   }
   if (!res.ok) {
+    // A failure the server has already classified as Deezer's (unreachable,
+    // or the proxy switched off) is FINAL here. Reaching Deezer again is the
+    // server's job — its calls retry within their own budget and its breaker
+    // probes Deezer once the cooldown is over — so re-asking would only fetch
+    // the same instant refusal three more times, ~3 s of backoff later.
+    const code = res.headers.get("X-NS-Error");
+    if (code) {
+      // The Deezer health watcher still hears of it: it is what raises the
+      // "Deezer est injoignable" notice and re-checks when the server says.
+      if (res.status >= 500) reportServerError(res.status, path);
+      let info = {};
+      try {
+        info = (await res.json()) || {};
+      } catch {
+        /* the header says enough */
+      }
+      throw {
+        status: res.status,
+        code,
+        message: info.error || res.statusText,
+        retryIn: info.retry_in || 0,
+      };
+    }
     if (retriable && TRANSIENT.has(res.status) && attempt < 3) {
       await sleep(backoff(attempt));
       return req(path, opts, attempt + 1, true); // the server IS reachable
@@ -162,6 +185,13 @@ async function req(path, opts = {}, attempt = 0, wasOnline = null) {
 }
 
 const body = (b) => (b === undefined ? undefined : JSON.stringify(b));
+
+// A page only Deezer has, asked while Deezer is out (see `X-NS-Error` above):
+// a screen says "Deezer est injoignable" instead of "introuvable".
+export const DEEZER_UNREACHABLE = "deezer-unreachable";
+export function isDeezerUnreachable(err) {
+  return !!err && err.code === DEEZER_UNREACHABLE;
+}
 
 // The last cached copy of a content GET, read straight from disk with no
 // network at all. Returns null when there's nothing cached (or the path isn't

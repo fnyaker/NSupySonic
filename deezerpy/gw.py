@@ -157,13 +157,24 @@ class GW:
     def get_tracks(self, sng_ids):
         tracks_array = []
         body = self.api_call('song.getListData', {'SNG_IDS': sng_ids})
-        errors = 0
-        for i in range(len(sng_ids)):
-            if sng_ids[i] != 0:
-                tracks_array.append(body['data'][i - errors])
-            else:
-                errors += 1
-                tracks_array.append(EMPTY_TRACK_OBJ)
+        data = [t for t in ((body or {}).get('data') or []) if isinstance(t, dict)]
+        wanted = [i for i in sng_ids if i != 0]
+        if len(data) == len(wanted):
+            # Every id answered: the rows come back in the order asked.
+            rows = iter(data)
+            for i in sng_ids:
+                tracks_array.append(next(rows) if i != 0 else dict(EMPTY_TRACK_OBJ))
+            return tracks_array
+        # Deezer leaves out a track it no longer has. Mapped by position, every
+        # row after the hole belonged to the next id and the last one walked off
+        # the end of the list: one dead favourite was an IndexError that took
+        # the whole favourites list (and the nightly favourites sync) down.
+        by_id = {}
+        for t in data:
+            by_id.setdefault(str(t.get('SNG_ID')), t)
+        for i in sng_ids:
+            row = by_id.get(str(i)) if i != 0 else None
+            tracks_array.append(row if row is not None else dict(EMPTY_TRACK_OBJ))
         return tracks_array
 
     def get_tracks_data(self, sng_ids):
@@ -192,8 +203,10 @@ class GW:
     def get_album_tracks(self, alb_id):
         tracks_array = []
         body = self.api_call('song.getListByAlbum', {'ALB_ID': alb_id, 'nb': -1})
-        for track in body['data']:
-            track['POSITION'] = body['data'].index(track)
+        # enumerate, not list.index(): that compared every dict against all
+        # the ones before it, quadratic in the length of the list.
+        for position, track in enumerate(body['data']):
+            track['POSITION'] = position
             tracks_array.append(track)
         return tracks_array
 
@@ -211,8 +224,10 @@ class GW:
     def get_artist_top_tracks(self, art_id, limit=100):
         tracks_array = []
         body = self.api_call('artist.getTopTrack', {'ART_ID': art_id, 'nb': limit})
-        for track in body['data']:
-            track['POSITION'] = body['data'].index(track)
+        # enumerate, not list.index(): that compared every dict against all
+        # the ones before it, quadratic in the length of the list.
+        for position, track in enumerate(body['data']):
+            track['POSITION'] = position
             tracks_array.append(track)
         return tracks_array
 
@@ -244,8 +259,10 @@ class GW:
     def get_playlist_tracks(self, playlist_id):
         tracks_array = []
         body = self.api_call('playlist.getSongs', {'PLAYLIST_ID': playlist_id, 'nb': -1})
-        for track in body['data']:
-            track['POSITION'] = body['data'].index(track)
+        # enumerate, not list.index(): that compared every dict against all
+        # the ones before it, quadratic in the length of the list.
+        for position, track in enumerate(body['data']):
+            track['POSITION'] = position
             tracks_array.append(track)
         return tracks_array
 
@@ -488,6 +505,8 @@ class GW:
         data = self.get_tracks(ids)
         result = []
         for (i, track) in enumerate(data):
+            if not track.get('SNG_ID'):
+                continue  # a favourite Deezer no longer has (see get_tracks)
             track = dict(track, **ids_raw['data'][i])
             result.append(map_user_track(track))
         return result

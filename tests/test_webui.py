@@ -288,6 +288,9 @@ class MockApi:
         return {"data": [{"id": 77, "title": "P", "picture_medium": "https://img/p.jpg",
                           "nb_tracks": 3, "user": {"id": 5, "name": "owner"}}]}
 
+    def search_podcast(self, query, limit=25, **kw):
+        return {"data": []}
+
     def get_editorial_releases(self, limit=25, **kw):
         return self.search_album("", limit)
 
@@ -1589,6 +1592,9 @@ class WebUITestCase(unittest.TestCase):
             os.makedirs(os.path.dirname(t.path), exist_ok=True)
             with open(t.path, "wb") as fh:
                 fh.write(b"flacdata")
+            # What archive._finalize_archive stamps: "on disk" is this column.
+            t.last_modification = 1700000000
+            t.save()
         return t
 
     def test_search_includes_archived_deezer_tracks(self):
@@ -1610,6 +1616,51 @@ class WebUITestCase(unittest.TestCase):
         self._make_deezer_track(sng_id="42", title="Ghost Only", archived=False)
         data = self.client.get("/api/search?q=Ghost").get_json()
         self.assertFalse(any(x["deezer_id"] == "42" for x in data["tracks"]))
+
+    def test_archived_matches_are_not_hidden_behind_imported_ones(self):
+        # The local search used to over-fetch 5 x limit rows sorted by title and
+        # stat() each: 200 imported "Aaa…" rows sorting before the one archived
+        # "Zzz…" match left it out of the results entirely.
+        self._login()
+        for i in range(210):
+            self._make_deezer_track(sng_id=str(10000 + i), title=f"Common A{i:03d}", archived=False)
+        self._make_deezer_track(sng_id="99", title="Common Zed", archived=True)
+        data = self.client.get("/api/search?q=Common&limit=10").get_json()
+        local = [x for x in data["tracks"] if x["deezer_id"] == "99"]
+        self.assertEqual([x["title"] for x in local], ["Common Zed"])
+
+    def test_the_searches_are_asked_side_by_side(self):
+        # Five public-API searches one after the other were the sum of five
+        # round trips. Each of these waits for the other three at a barrier: it
+        # only lets them through if they are in flight at the same time.
+        import threading
+
+        api = self.app.deezer.dz.api
+        barrier = threading.Barrier(4, timeout=5)
+        for name in ("search", "search_album", "search_artist", "search_playlist"):
+            original = getattr(api, name)
+
+            def waiting(*a, _original=original, **kw):
+                barrier.wait()
+                return _original(*a, **kw)
+
+            setattr(api, name, waiting)
+        self._login()
+        data = self.client.get("/api/search?q=Foo").get_json()
+        self.assertFalse(barrier.broken)
+        self.assertEqual([a["deezer_id"] for a in data["artists"]], ["9"])
+        self.assertEqual([p["deezer_id"] for p in data["playlists"]], ["77"])
+        self.assertIn("1", [t["deezer_id"] for t in data["tracks"]])
+
+    def test_a_dead_track_is_flagged_in_the_search_results(self):
+        from supysonic.deezer import ids
+
+        self._login()
+        t = self._make_deezer_track(sng_id="1", title="Gone Song", archived=False)
+        Track.update(unavailable=now()).where(Track.id == ids.track_uuid("1")).execute()
+        data = self.client.get("/api/search?q=Whatever").get_json()
+        hit = [x for x in data["tracks"] if x["deezer_id"] == "1"]
+        self.assertTrue(hit and hit[0].get("unavailable"), t)
 
     def _make_feat_track(self, sng_id="7", title="Feat Song"):
         """An archived DB track credited to a main artist plus a guest."""
@@ -1639,6 +1690,8 @@ class WebUITestCase(unittest.TestCase):
         os.makedirs(os.path.dirname(t.path), exist_ok=True)
         with open(t.path, "wb") as fh:
             fh.write(b"flacdata")
+        t.last_modification = 1700000000  # stamped, as a real archive is
+        t.save()
         return t
 
     def test_db_track_exposes_credits(self):
@@ -1775,6 +1828,67 @@ class WebUITestCase(unittest.TestCase):
         rv = self.client.post("/api/sync")
         self.assertEqual(rv.status_code, 503)
         self.assertEqual(rv.get_json()["reason"], "network")
+
+    def _deezer_not_answering(self):
+        """Every call fails the way a dead link does (a connection error), as
+        opposed to ``_deezer_down``'s arbitrary error, which could be Deezer
+        answering something unexpected."""
+        import requests
+
+        class Silent:  # dz, dz.gw, dz.api… all the way down, then refused
+            def __getattr__(self, _name):
+                return self
+
+            def __call__(self, *a, **k):
+                raise requests.ConnectionError("connection refused")
+
+        dz = Silent()
+        self.app.deezer._dz = dz
+
+    def _assert_unreachable(self, rv):
+        self.assertEqual(rv.status_code, 503)
+        self.assertEqual(rv.headers.get("X-NS-Error"), "deezer-unreachable")
+        self.assertEqual(rv.get_json()["code"], "deezer-unreachable")
+        self.assertTrue(rv.headers.get("Retry-After"))
+
+    def test_a_page_only_deezer_has_says_deezer_is_unreachable_not_missing(self):
+        # It said "not found" (and the client retried a 503 three times): the
+        # album exists, the server just could not ask. The code tells the
+        # client the server already did the trying.
+        self._login()
+        self._deezer_not_answering()
+        for path in (
+            "/api/album/600",
+            "/api/playlist/123",
+            "/api/artist/500",
+            "/api/artist/500/tracks",
+            "/api/smarttracklist/new-releases",
+        ):
+            with self.subTest(path):
+                self._assert_unreachable(self.client.get(path))
+
+    def test_a_known_outage_answers_at_once_with_the_same_code(self):
+        self._login()
+        self._deezer_login_fails()
+        for path in ("/api/album/600", "/api/artist/500", "/api/smarttracklist/new-releases"):
+            with self.subTest(path):
+                rv = self.client.get(path)
+                self._assert_unreachable(rv)
+                self.assertLessEqual(rv.get_json()["retry_in"], 3600)  # never Infinity
+
+    def test_deezer_answering_no_is_still_not_found(self):
+        self._login()
+        self._deezer_down()  # an error that is not a transport failure
+        rv = self.client.get("/api/album/600")
+        self.assertEqual(rv.status_code, 404)
+        self.assertIsNone(rv.headers.get("X-NS-Error"))
+
+    def test_a_disabled_proxy_has_its_own_code(self):
+        self._login()
+        self.app.deezer = None
+        rv = self.client.get("/api/album/600")
+        self.assertEqual(rv.status_code, 503)
+        self.assertEqual(rv.headers.get("X-NS-Error"), "deezer-disabled")
 
     def test_album_offline_from_db(self):
         self._login()
@@ -3042,6 +3156,45 @@ class WebUITestCase(unittest.TestCase):
         self.assertTrue(rv.get_json()["queued"])
         self.assertEqual(pf.ids, ["1"])
         self.assertEqual(pf.priorities, [Priority.PREFETCH])
+
+    def test_a_cold_track_in_opus_streams_as_it_downloads_then_comes_from_the_cache(self):
+        # It used to archive the whole FLAC before its first byte went out.
+        import shutil
+        from unittest import mock
+
+        from supysonic.deezer import archive
+
+        if not shutil.which("ffmpeg"):
+            if os.environ.get("NS_REQUIRE_FFMPEG") == "1":  # pragma: no cover
+                raise RuntimeError("NS_REQUIRE_FFMPEG=1 but ffmpeg is not on PATH")
+            self.skipTest("ffmpeg not installed")
+        with open(os.path.join(os.path.dirname(__file__), "assets", "formats", "silence.flac"), "rb") as fh:
+            flac = fh.read()
+        opened = []
+
+        def live(provider, track, on_abort=None):
+            opened.append(track.deezer_id)
+
+            def gen():
+                for i in range(0, len(flac), 2048):
+                    yield flac[i : i + 2048]
+
+            return "audio/flac", gen()
+
+        self._login()
+        with mock.patch.object(archive, "open_live_stream", live), mock.patch.object(
+            archive, "ensure_archived", side_effect=AssertionError("waited for the whole file")
+        ):
+            rv = self.client.get("/api/stream/1?q=OPUS_64")
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(rv.mimetype, "audio/ogg")
+            body = rv.get_data()
+        self.assertEqual(opened, ["1"])
+        self.assertTrue(body.startswith(b"OggS"))
+        from supysonic.deezer import ids
+
+        key = f"deezer-{ids.track_uuid('1')}-opus64.ogg"
+        self.assertTrue(self.app.transcode_cache.has(key), "a complete transcode is kept")
 
     # -- bulk ZIP export -------------------------------------------------
 
