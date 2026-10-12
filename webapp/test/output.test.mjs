@@ -56,6 +56,7 @@ import {
   wireAudio,
   getContext,
   releaseElement,
+  tickVolumes,
 } from "../src/lib/audio/graph.js";
 
 const BT = normalizeRoute({ kind: "bluetooth", name: "KMM-BT309", conn: "1700000000000-3", source: "native" });
@@ -419,6 +420,42 @@ test("direct: a crossfade is the same equal-power curve, on the two volumes", as
   assert.equal(inc.volume, 0.5);
   releaseElement(out);
   releaseElement(inc);
+});
+
+test("direct: a fade ends EXACTLY on its target, whenever the last tick lands", () => {
+  // Unchanged volumes are not re-assigned (each assignment is a volumechange
+  // and a trip to the media thread), and "unchanged" is within 1e-4. A tick
+  // landing in the ramp's last thousandth wrote 0.9999992, and the end of the
+  // ramp then looked unchanged: the element stayed there for good — and a fade
+  // OUT stayed at 5e-5 instead of silence. Seen on a slow CI runner; here the
+  // clock is placed there on purpose.
+  audioOutput.set("direct");
+  normalization.set("off");
+  const real = performance.now.bind(performance);
+  let now = real();
+  const clock = Object.getOwnPropertyDescriptor(performance, "now");
+  Object.defineProperty(performance, "now", { value: () => now, configurable: true, writable: true });
+  try {
+    for (const [from, to] of [[0, 1], [1, 0]]) {
+      const el = fakeEl();
+      registerSource(el);
+      setPlayerVolume(1, [el]);
+      setFade(el, from);
+      const t0 = now;
+      fadeElement(el, to, 0.25);
+      now = t0 + 249.99; // the last thousandth of the ramp
+      tickVolumes();
+      assert.ok(Math.abs(el.volume - to) < 1e-4 && el.volume !== to, `set up: ${el.volume}`);
+      now = t0 + 275; // the ramp is over
+      tickVolumes();
+      assert.equal(el.volume, to);
+      releaseElement(el);
+    }
+  } finally {
+    if (clock) Object.defineProperty(performance, "now", clock);
+    else delete performance.now;
+    audioOutput.set("auto");
+  }
 });
 
 test("direct: an interrupted fade continues from where it audibly is", async () => {

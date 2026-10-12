@@ -1094,8 +1094,12 @@ function applyVol(el, now = performance.now()) {
   if (!v) return;
   const g = clamp01(baseVolume * directNorm(el) * currentFade(v, now));
   // Assigning an unchanged volume still fires `volumechange` and costs a trip
-  // to the media thread; skip it.
-  if (Math.abs(el.volume - g) > 1e-4) el.volume = g;
+  // to the media thread; skip it — mid-ramp. A SETTLED value is written
+  // exactly: a tick in a ramp's last thousandth left 0.9999992 behind, the end
+  // then read as "unchanged", and the element stayed short of its target for
+  // good (a fade out at 5e-5 rather than silence).
+  if (el.volume === g) return;
+  if (!v.ramp || Math.abs(el.volume - g) > 1e-4) el.volume = g;
 }
 
 function applyDirectVolumes() {
