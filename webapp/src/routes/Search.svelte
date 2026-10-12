@@ -7,6 +7,8 @@
   import PodcastCard from "../components/PodcastCard.svelte";
   import TrackList from "../components/TrackList.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import Icon from "../components/Icon.svelte";
+  import { youtubeStatus, loadYoutubeStatus } from "../lib/youtube.js";
 
   export let params = {};
 
@@ -28,8 +30,58 @@
   // the results, not to retype the query.
   const autofocusBox = !q;
 
+  // YouTube, the fallback: off unless ticked, on this screen only (a new
+  // search starts with it off again). Asked on Enter or when the box is ticked
+  // — never per keystroke: every partial word typed would be a request there,
+  // and the server keeps each answer a day, so a search repeated costs nothing.
+  let yt = saved?.yt ?? false;
+  let ytTracks = saved?.ytTracks ?? [];
+  let ytFor = saved?.ytFor ?? "";
+  let ytLoading = false;
+  let ytError = "";
+  let ytSeq = 0;
+  loadYoutubeStatus();
+  $: ytAvailable = !!$youtubeStatus?.enabled;
+  $: ytStale = yt && ytAvailable && q.trim() !== ytFor;
+
+  async function runYoutube() {
+    const term = q.trim();
+    if (!yt || !ytAvailable || !term || term === ytFor) return;
+    const mine = ++ytSeq;
+    ytLoading = true;
+    ytError = "";
+    try {
+      const r = await api.youtubeSearch(term);
+      if (mine !== ytSeq) return;
+      ytTracks = r.tracks || [];
+      ytFor = term;
+    } catch (e) {
+      if (mine !== ytSeq) return;
+      ytTracks = [];
+      ytError =
+        e?.status === 503 ? "YouTube ne répond pas pour le moment." : "La recherche YouTube a échoué.";
+    } finally {
+      if (mine === ytSeq) ytLoading = false;
+    }
+  }
+
+  function toggleYoutube() {
+    yt = !yt;
+    if (yt) runYoutube();
+  }
+
+  function onKey(e) {
+    if (e.key !== "Enter") return;
+    clearTimeout(timer);
+    const term = q.trim();
+    // Enter is "search now": the regular search at once, YouTube if ticked.
+    run(term);
+    runYoutube();
+    e.currentTarget.blur(); // drop the phone keyboard over the results
+  }
+
   // Whatever the screen is showing, ready for the next time we come back to it.
-  $: rememberScreen({ q, tab, results });
+  $: rememberScreen({ q, tab, results, yt, ytTracks, ytFor });
 
   // Deep link support (/search/:q from the sidebar).
   //
@@ -106,11 +158,28 @@
 <div class="bar fade-in">
   <!-- svelte-ignore a11y-autofocus -->
   <input
+    type="search"
+    enterkeyhint="search"
     placeholder="Artistes, titres, albums, playlists…"
     bind:value={q}
     on:input={onInput}
+    on:keydown={onKey}
     autofocus={autofocusBox}
   />
+  {#if ytAvailable}
+    <button
+      class="ytbox"
+      class:on={yt}
+      role="switch"
+      aria-checked={yt}
+      title="Chercher aussi sur YouTube (en dernier recours)"
+      on:click={toggleYoutube}
+    >
+      <span class="tick" aria-hidden="true">{#if yt}<Icon name="check" size={12} />{/if}</span>
+      <Icon name="youtube" size={16} />
+      <span>YouTube</span>
+    </button>
+  {/if}
 </div>
 
 {#if q.trim()}
@@ -132,7 +201,9 @@
 {:else if !q.trim()}
   <p class="muted hint">Commencez à taper pour rechercher.</p>
 {:else if !hasResults}
-  <p class="muted hint">Aucun résultat pour « {q} ».</p>
+  {#if !(yt && ytAvailable)}
+    <p class="muted hint">Aucun résultat pour « {q} ».</p>
+  {/if}
 {:else}
   {#if (tab === "all" || tab === "tracks") && results.tracks?.length}
     <div class="sechead">
@@ -145,6 +216,29 @@
     </div>
     <TrackList tracks={topTracks} />
   {/if}
+{/if}
+
+{#if !loading && q.trim() && yt && ytAvailable && (tab === "all" || tab === "tracks")}
+  <h2 class="ythead"><Icon name="youtube" size={20} /> Sur YouTube</h2>
+  {#if ytTracks.length && !ytStale && !ytLoading}
+    <p class="ytnote muted">Archivé à la première écoute, en Opus ~130 kbit/s (le mieux que YouTube propose).</p>
+  {/if}
+  {#if ytLoading}
+    <Skeleton kind="list" />
+  {:else if ytStale}
+    <button class="ytgo" on:click={runYoutube}>
+      <Icon name="search" size={15} /> Chercher « {q.trim()} » sur YouTube
+    </button>
+  {:else if ytError}
+    <p class="muted hint small">{ytError}</p>
+  {:else if !ytTracks.length}
+    <p class="muted hint small">Rien sur YouTube pour « {ytFor} ».</p>
+  {:else}
+    <TrackList tracks={ytTracks} />
+  {/if}
+{/if}
+
+{#if !loading && q.trim() && hasResults}
 
   {#if (tab === "all" || tab === "albums") && results.albums?.length}
     <div class="sechead">
@@ -196,8 +290,15 @@
 {/if}
 
 <style>
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
   .bar input {
-    width: 100%;
+    flex: 1 1 180px;
+    min-width: 0;
     max-width: 560px;
     padding: 14px 18px;
     border-radius: 999px;
@@ -209,6 +310,79 @@
   }
   .bar input:focus {
     border-color: var(--accent);
+  }
+  /* Hide the browser's own clear cross: the box is the same pill everywhere. */
+  .bar input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+  }
+  /* A checkbox you can hit with a thumb, reading as one: a tick, the mark
+     and the word, lit when it is on. */
+  .ytbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+    min-height: 44px;
+    padding: 0 16px 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+    font-weight: 700;
+    font-size: 0.9rem;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .ytbox:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .ytbox.on {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .tick {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 1.5px solid currentColor;
+    opacity: 0.8;
+  }
+  .ytbox.on .tick {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    opacity: 1;
+  }
+  .ythead {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  /* The note sits under the heading, not beside it: beside it, a phone broke
+     "Sur YouTube" over two lines to make room. */
+  .ytnote {
+    margin: 0 0 10px;
+    font-size: 0.8rem;
+  }
+  .ytgo {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0 8px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    background: var(--bg-card);
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .ytgo:hover {
+    background: var(--bg-hover);
+  }
+  .hint.small {
+    margin-top: 6px;
   }
   .tabs {
     display: flex;

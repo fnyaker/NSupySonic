@@ -128,7 +128,7 @@
         <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} kind="track" fallbackId={track.deezer_id} /></div>
         <div class="meta">
           <div class="t">
-            {#if track.local}<span class="local" title="Fichier local (pas sur Deezer)"><Icon name="cloudOff" size={13} /></span>{/if}
+            {#if track.source === "youtube"}<span class="local" title="Source YouTube (pas sur Deezer)"><Icon name="youtube" size={13} /></span>{:else if track.local}<span class="local" title="Fichier local (pas sur Deezer)"><Icon name="cloudOff" size={13} /></span>{/if}
             {#if $downloads.has(String(track.deezer_id))}<span class="dlbadge" title="Disponible hors-ligne"><Icon name="downloaded" size={13} /></span>{/if}
             {track.title}
             {#if track.explicit}<span class="explicit">E</span>{/if}

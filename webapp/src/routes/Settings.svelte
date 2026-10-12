@@ -28,6 +28,7 @@
     nativeDeezerLoginAvailable,
   } from "../lib/nativeDeezer.js";
   import Icon from "../components/Icon.svelte";
+  import { youtubeStatus, loadYoutubeStatus, setYoutubeEnabled } from "../lib/youtube.js";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
   import VisualizerSettings from "../components/VisualizerSettings.svelte";
@@ -278,6 +279,21 @@
     largest: "Le plus volumineux",
     oldest: "Le plus anciennement archivé",
   };
+
+  // -- the YouTube fallback (admin) -------------------------------------------
+  let ytSaving = false;
+  loadYoutubeStatus(true);
+  async function toggleYoutube() {
+    if (ytSaving || !$youtubeStatus?.installed) return;
+    ytSaving = true;
+    try {
+      await setYoutubeEnabled(!$youtubeStatus.enabled);
+    } catch (e) {
+      toasts.push(e?.message || "Réglage non enregistré", "error");
+    } finally {
+      ytSaving = false;
+    }
+  }
 
   async function loadRules() {
     if (!$user?.admin || !CAN_ADMIN) return;
@@ -892,6 +908,39 @@
     </div>
     {#if store.archive_dir}
       <p class="muted hint path">{store.archive_dir}</p>
+    {/if}
+  </section>
+{/if}
+
+{#if $user?.admin && CAN_ADMIN && $youtubeStatus}
+  <section class="card">
+    <h2>Source de secours&nbsp;: YouTube</h2>
+    <p class="muted sub">
+      Pour un titre que Deezer n'a pas&nbsp;: une case dans la recherche (décochée
+      par défaut) et un bouton dans la feuille de remplacement d'un titre
+      indisponible. YouTube n'est interrogé que lorsque quelqu'un le demande, et
+      un titre lu est archivé une fois pour toutes, dans le son d'origine
+      (Opus ~130-160&nbsp;kbit/s, YouTube n'a pas mieux).
+    </p>
+    {#if !$youtubeStatus.installed}
+      <p class="muted hint warn">
+        <Icon name="alert" size={14} /> Non installé sur ce serveur
+        (<code>pip install 'supysonic[youtube]'</code>, déjà inclus dans l'image Docker).
+      </p>
+    {:else}
+      <button class="toggle" role="switch" aria-checked={$youtubeStatus.enabled} disabled={ytSaving} on:click={toggleYoutube}>
+        <span class="tg-txt">
+          <span class="tg-title">Proposer YouTube en dernier recours</span>
+          <span class="tg-hint muted">
+            {#if $youtubeStatus.held}
+              YouTube a refusé ou n'a pas répondu&nbsp;: laissé tranquille encore {Math.ceil($youtubeStatus.retry_in / 60)} min.
+            {:else}
+              Pour tous les utilisateurs. Désactivé, ce qui est déjà archivé reste lisible.
+            {/if}
+          </span>
+        </span>
+        <span class="sw" class:on={$youtubeStatus.enabled}><span class="knob"></span></span>
+      </button>
     {/if}
   </section>
 {/if}

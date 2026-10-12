@@ -67,3 +67,23 @@ def local_album_uuid(artist_name, album_name) -> uuid.UUID:
 
 def local_artist_uuid(name) -> uuid.UUID:
     return uuid.uuid5(NS_LOCAL_ARTIST, (name or "").strip().lower())
+
+
+# YouTube fallback rows (deezer/youtube.py): the track's id is known from the
+# video id alone, so a search hit already carries the id its row WILL have.
+NS_YOUTUBE = uuid.uuid5(NS_DEEZER, "youtube")
+NS_YOUTUBE_TRACK = uuid.uuid5(NS_YOUTUBE, "track")
+NS_YOUTUBE_ALBUM = uuid.uuid5(NS_YOUTUBE, "album")
+NS_YOUTUBE_ARTIST = uuid.uuid5(NS_YOUTUBE, "artist")
+
+
+def youtube_track_uuid(video_id) -> uuid.UUID:
+    return uuid.uuid5(NS_YOUTUBE_TRACK, str(video_id))
+
+
+def youtube_album_uuid(key) -> uuid.UUID:
+    return uuid.uuid5(NS_YOUTUBE_ALBUM, str(key))
+
+
+def youtube_artist_uuid(key) -> uuid.UUID:
+    return uuid.uuid5(NS_YOUTUBE_ARTIST, str(key))

@@ -82,9 +82,15 @@ def _resolve_local(track_id):
     if _valid_id(track_id):
         return archive.find_local_track(track_id)
     try:
-        return Track.get_or_none(Track.id == uuidlib.UUID(str(track_id)))
+        row = Track.get_or_none(Track.id == uuidlib.UUID(str(track_id)))
     except (ValueError, AttributeError):
         return None
+    if row is None:
+        # A YouTube search hit, offered as a replacement: made from the hit.
+        from .youtube import materialize
+
+        row = materialize(track_id)
+    return row
 
 
 @webapi.route("/track/<track_id>/probe")
@@ -103,6 +109,23 @@ def probe_track(track_id):
     track = _resolve_local(track_id)
     if track is not None and not _may_access_track(track):
         return jsonify({"error": "not found"}), 404
+
+    # A YouTube fallback track: on disk, or not yet fetched. Never asks YouTube
+    # here — the stream itself is the one request it gets, and a verdict comes
+    # only from YouTube answering that the video is gone.
+    if track is not None and track.youtube_id and not track.deezer_id:
+        import os.path
+
+        if os.path.isfile(track.path):
+            clear_unavailable(track)
+            # What the file really holds: the player shows it when the quality
+            # asked for is more than YouTube had (FLAC, Opus 320...).
+            return jsonify(
+                {"available": True, "reason": None, "bitrate": int(track.bitrate or 0)}
+            )
+        if track.unavailable is not None and not is_stale(track):
+            return jsonify({"available": False, "reason": "unavailable"})
+        return jsonify({"available": True, "reason": "unknown"})
 
     # A local file: available iff it is on disk. No Deezer involved.
     if track is not None and not track.deezer_id:
@@ -262,8 +285,19 @@ def replacement_candidates(track_id):
             Track.unavailable.is_null(False) & Track.deezer_id.is_null(False)
         )
     }
-    out = [t for t in out if t["deezer_id"] not in dead]
-    return jsonify({"query": query, "candidates": out[:30]})
+    out = [t for t in out if t["deezer_id"] not in dead][:30]
+
+    # YouTube only when asked (the sheet's "search YouTube too"): it is the
+    # fallback, and every search there is a request we would rather not make.
+    if request.args.get("youtube") in ("1", "true"):
+        from .youtube import search_tracks
+
+        out += [
+            t
+            for t in search_tracks(query)
+            if t["deezer_id"] not in seen and not t.get("unavailable")
+        ]
+    return jsonify({"query": query, "candidates": out})
 
 
 # -- replacement ------------------------------------------------------------
@@ -454,6 +488,14 @@ def verify_gone(track, track_id):
         # Archived. This is the whole point of archiving — it plays forever.
         clear_unavailable(track)
         return False, "archived"
+
+    if track is not None and track.youtube_id and not track.deezer_id:
+        # Not archived: gone only if YouTube itself said so (the verdict is
+        # set by nothing else). Asking again here would be a YouTube call for
+        # a button press, and "it did not answer" never authorises a deletion.
+        if track.unavailable is not None:
+            return True, "unavailable"
+        return False, "inconclusive"
 
     if track is not None and not track.deezer_id:
         # A local upload with no file left. Nothing can bring it back, and

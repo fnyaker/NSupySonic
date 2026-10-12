@@ -19,7 +19,7 @@ import unittest
 from importlib.metadata import PackageNotFoundError, requires
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMAGE_EXTRAS = ("postgresql", "embedding")  # what the Dockerfile asks for
+IMAGE_EXTRAS = ("postgresql", "embedding", "youtube")  # what the Dockerfile asks for
 
 
 def _normalize(req):

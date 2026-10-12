@@ -367,6 +367,12 @@ export const api = {
   podcasts: () => req("/podcasts"),
   podcast: (id) => req("/podcast/" + id),
   searchPodcasts: (q) => req("/search/podcasts?q=" + encodeURIComponent(q)),
+  // The YouTube fallback: opt-in per search (lib/youtube.js). Its hits are
+  // ordinary tracks whose id is the row they become once played or kept.
+  youtubeSearch: (q) => req("/youtube/search?q=" + encodeURIComponent(q)),
+  youtubeStatus: () => req("/youtube/status"),
+  setYoutubeEnabled: (enabled) =>
+    req("/youtube/settings", { method: "PUT", body: body({ enabled }) }),
   subscribePodcast: (url) =>
     req("/podcasts", { method: "POST", body: body({ url }) }),
   unsubscribePodcast: (id) => req("/podcast/" + id, { method: "DELETE" }),
@@ -517,7 +523,10 @@ export const api = {
   // element can't: is this track dead, or was that just a bad moment?
   probeTrack: (id) => req("/track/" + id + "/probe"),
   unavailableTracks: () => req("/unavailable"),
-  replacementCandidates: (id) => req("/replace/candidates/" + id),
+  // `youtube`: also ask YouTube (the sheet's opt-in button) — one request
+  // there, cached a day by the server.
+  replacementCandidates: (id, { youtube = false } = {}) =>
+    req("/replace/candidates/" + id + (youtube ? "?youtube=1" : "")),
   replaceTrack: (from, to) =>
     req("/replace", { method: "POST", body: body({ from, to }) }),
   replaceStatus: (job) => req("/replace/status/" + job),

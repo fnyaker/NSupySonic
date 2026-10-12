@@ -94,7 +94,7 @@
           <div class="thumb"><Cover src={t.album?.cover} alt={t.title} size={42} kind="track" fallbackId={t.deezer_id} /></div>
           <div class="meta">
             <div class="t">
-              {#if t.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
+              {#if t.source === "youtube"}<span class="local" title="Source YouTube (pas sur Deezer)"><Icon name="youtube" size={12} /></span>{:else if t.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
               {t.title}
             </div>
             <div class="sub muted">{artistLine(t)}{t.album?.title ? " · " + t.album.title : ""}</div>

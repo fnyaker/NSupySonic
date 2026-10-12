@@ -51,6 +51,9 @@ def _ensure_deezer_archived(res):
     No-op (and no Deezer imports) when the proxy is disabled or the track is a
     regular local file already on disk.
     """
+    if getattr(res, "youtube_id", None) and not getattr(res, "deezer_id", None):
+        _ensure_youtube_archived(res)
+        return
     provider = getattr(current_app, "deezer", None)
     if provider is None or not getattr(res, "deezer_id", None):
         return
@@ -67,6 +70,26 @@ def _ensure_deezer_archived(res):
     except Exception as e:
         logger.warning("Deezer archiving failed for track %s: %s", res.id, e)
         raise ServerError("Could not fetch track from Deezer")
+
+
+def _ensure_youtube_archived(res):
+    """A YouTube fallback row (deezer/youtube.py) a Subsonic client plays: the
+    same one-time fetch the web player's first play does."""
+    if os.path.isfile(res.path):
+        return
+    from ..deezer import youtube as yt
+    from ..webui.youtube import enabled
+
+    archive_dir = (current_app.config.get("DEEZER") or {}).get("archive_dir")
+    if not archive_dir or not enabled():
+        raise ServerError("YouTube fallback is not enabled")
+    try:
+        yt.ensure_archived(res, archive_dir, yt.recall(res.id, getattr(current_app, "cache", None)))
+    except yt.YoutubeError as e:
+        logger.warning("YouTube archiving failed for track %s: %s", res.id, e)
+        raise ServerError("Could not fetch track from YouTube")
+    fresh = type(res).get_by_id(res.id)
+    res.path, res.bitrate, res.duration = fresh.path, fresh.bitrate, fresh.duration
 
 
 def _ensure_episode_archived(episode):

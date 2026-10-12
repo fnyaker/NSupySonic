@@ -13,7 +13,8 @@ to Opus on demand. AGPL-3.0, Python 3.10+.
 ## Core design rule
 
 **Always archive FLAC, transcode to Opus (320/128/64). NEVER stream MP3 directly from Deezer.**
-This applies to both the web player and Subsonic clients. Deezer entities are materialized as
+This applies to both the web player and Subsonic clients. The one exception is the YouTube
+fallback (below): YouTube has no lossless audio, so its original Opus is archived as is. Deezer entities are materialized as
 ordinary supysonic DB rows under a dedicated `Deezer` root folder, so supysonic's normal
 browse/search/playlist/star endpoints work **unchanged** — only streaming is intercepted.
 
@@ -383,6 +384,42 @@ ever with nothing left to replace. Narrow on purpose, since `/api/replace` accep
 SPA mirrors that timing: the work is a worker thread, so the list is dropped optimistically
 (`resolvedUnavailable`) and refetched only once the job reports done (`unavailableVersion`) —
 refetching on sheet-close re-read the old state and the row flickered back.
+
+**YouTube is a FALLBACK, never a second catalogue** (`supysonic/deezer/youtube.py`,
+`supysonic/webui/youtube.py`, `webapp/src/lib/youtube.js`; optional extra `supysonic[youtube]`:
+`ytmusicapi` + `yt-dlp` + `yt-dlp-ejs`, with Deno in the image for yt-dlp's challenge solver). It
+is reached in exactly two ways, both a person asking: the search screen's **YouTube** box (unticked
+by default, asked on Enter or when ticked — never per keystroke) and the replacement sheet's
+*Chercher aussi sur YouTube*. Every rule is about calling YouTube as little as possible:
+- **Search is ONE request** to YouTube Music's API (`ytmusicapi`, `filter="songs"`: title, artists,
+  album, duration, square art; ~0.9 s), kept a day per query, empty answers too. yt-dlp never
+  searches.
+- **A hit costs nothing until it is played.** It is served under the UUID its row WILL have
+  (`ids.youtube_track_uuid(video_id)`) and its metadata is remembered (`remember`/`recall`: memory
+  + the disk cache), so starring it, adding it to a playlist or choosing it as a replacement
+  creates the row from the search's own answer (`webui/youtube.materialize`, reached from
+  `/stream`, `/favorite`, `_resolve_tracks`, `availability._resolve_local`) — no second request.
+  An id whose hit is forgotten is simply unknown.
+- **The audio is fetched once, on the first PLAY** (`ensure_archived`: one extraction + one
+  download, ~2 s for five minutes, serialized per video, two at a time), staged in
+  `archive_dir/.youtube-staging` (the local scanner skips dot-directories) and published under
+  `archive_dir/YouTube/<artist>/<album>/<title> [<id>].opus` with tags, cover and a `.json`
+  sidecar. A prefetch (`X-NS-Background`) never fetches; nothing bulk-archives it; the cleanup
+  never deletes it (it only considers `deezer_id` rows). Subsonic's `stream` goes through the same
+  call (`api/media._ensure_youtube_archived`).
+- **The original stream is kept, never re-encoded**: Opus ~130-160 kbit/s (format 251) remuxed to
+  Ogg with `-c copy` (AAC/m4a only when YouTube has no Opus). `/stream` serves the file as is unless
+  the client asks for LESS than it holds (`TRANSCODE_MARGIN`), and the player shows the real rate
+  (`SourceBadge.svelte`: "YT 133k" beside a FLAC or Opus 320 chip; read once from `/probe`).
+- A row is `deezer_id NULL` + `youtube_id` set, so it is NOT an upload: `scan_local` never prunes
+  it, `/me/local` and the local search skip it until it is archived, the probe answers "unknown"
+  without asking anyone, and `verify_gone` only accepts YouTube's own verdict. Its artist/album
+  carry no id in the API (no page to open: empty ids are "not a link" to the SPA).
+- **Failing is not a verdict, and a refusal is left alone**: only YouTube answering that a video is
+  gone (`YoutubeUnavailable`) marks a track unavailable; a network failure holds YouTube off for a
+  minute and a refusal (429, "confirm you're not a bot") for fifteen (`held`), during which nothing
+  is asked. The admin switch (Réglages → *Source de secours : YouTube*, `Meta yt.enabled`) turns
+  it off for everyone; what is archived keeps playing. `tests/test_youtube.py` counts the requests.
 
 **Unavailable means BOTH sources are gone** — not "Deezer dropped it". `DELETE /api/track/<id>` is
 the third answer next to replace-and-upload, and `availability.verify_gone` re-checks *at the moment
@@ -2350,7 +2387,7 @@ second interface to keep in step with the first, and that is the whole design:
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20260928`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261012`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported. A migration script is split on `;` AFTER its
 `--` comment lines are dropped (`db.split_sql_script`): a `;` inside a comment used to cut it in two

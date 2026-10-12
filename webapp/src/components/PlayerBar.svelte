@@ -29,6 +29,7 @@
   import RemoteButton from "./RemoteButton.svelte";
   import SleepButton from "./SleepButton.svelte";
   import SpeedButton from "./SpeedButton.svelte";
+  import SourceBadge from "./SourceBadge.svelte";
 
   const QUALITIES = ["FLAC", "OPUS_320", "OPUS_256", "OPUS_192", "OPUS_128", "OPUS_64"];
   const QUALITY_LABEL = {
@@ -134,6 +135,7 @@
 
   <!-- extras -->
   <div class="extra">
+    <SourceBadge />
     {#if canKeep}
       <div class="q-wrap">
         <button

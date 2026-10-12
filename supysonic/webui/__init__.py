@@ -765,7 +765,7 @@ def _stream_size(stream) -> int:
 
 
 def _local_track(t: Track) -> dict:
-    return {
+    out = {
         "deezer_id": str(t.id),  # the universal id for local tracks is the UUID
         "local": True,
         "title": t.title,
@@ -786,6 +786,29 @@ def _local_track(t: Track) -> dict:
             "cover": "/api/localcover/" + str(t.id),
         },
     }
+    if t.youtube_id:
+        _youtube_fields(out, t.youtube_id, t.bitrate)
+    return out
+
+
+def _youtube_fields(out: dict, video_id, bitrate) -> dict:
+    """What marks a YouTube fallback track in the API: its source and the
+    bitrate its file REALLY has (0 until it is archived) — the player shows it
+    rather than the quality that was asked for. Its art goes through
+    ``/api/cover``, which falls back to the search's thumbnail before the
+    file (and its embedded art) is here."""
+    out["source"] = "youtube"
+    out["youtube_id"] = video_id
+    out["bitrate"] = int(bitrate or 0)
+    out["album"]["cover"] = "/api/cover/" + out["deezer_id"]
+    # No artist or album page to open: YouTube's names are labels here, and a
+    # link would land on "introuvable". An empty id is what the SPA reads as
+    # "not a link" (ArtistLine, the track menu, the album column).
+    out["artist"]["deezer_id"] = ""
+    out["album"]["deezer_id"] = ""
+    for a in out["artists"]:
+        a["deezer_id"] = ""
+    return out
 
 
 def _local_search_tracks(query: str, limit: int) -> list:
@@ -814,7 +837,10 @@ def _local_search_tracks(query: str, limit: int) -> list:
                 | Album.name.contains(like)
                 | Artist.name.contains(like)
             )
-            & (Track.deezer_id.is_null(True) | (Track.last_modification > 0))
+            & (
+                (Track.deezer_id.is_null(True) & Track.youtube_id.is_null(True))
+                | (Track.last_modification > 0)
+            )
         )
     ).order_by(Track.title).limit(limit)
     return _db_tracks(q)
@@ -978,6 +1004,8 @@ def _row_columns():
             Track.duration,
             Track.unavailable.is_null(False),
             Track.gain,
+            Track.youtube_id,
+            Track.bitrate,
             _raw(Artist.id),
             Artist.deezer_id,
             Artist.name,
@@ -1031,29 +1059,33 @@ def _db_track_rows(query) -> list:
         within = query.select(Track.id).order_by().where(Track.deezer_id.is_null(False))
     credits = _credits_by_raw_id([r[0] for r in rows if r[1] is not None], within)
     out = []
-    for tid, dz, title, duration, gone, gain, aid, adz, aname, alid, aldz, alname, md5 in rows:
+    for (
+        tid, dz, title, duration, gone, gain, ytid, bitrate,
+        aid, adz, aname, alid, aldz, alname, md5,
+    ) in rows:
         if dz is None:
             uid = _uuid_text(tid)
             artist_id = _uuid_text(aid)
-            out.append(
-                {
-                    "deezer_id": uid,
-                    "local": True,
-                    "title": title,
-                    "duration": duration or 0,
-                    "explicit": False,
-                    "unavailable": bool(gone),
-                    "gain": gain,
-                    "artist": {"deezer_id": artist_id, "name": aname},
-                    "artists": [{"deezer_id": artist_id, "name": aname, "role": "Main"}],
-                    "display_artist": aname,
-                    "album": {
-                        "deezer_id": _uuid_text(alid),
-                        "title": alname,
-                        "cover": "/api/localcover/" + uid,
-                    },
-                }
-            )
+            row = {
+                "deezer_id": uid,
+                "local": True,
+                "title": title,
+                "duration": duration or 0,
+                "explicit": False,
+                "unavailable": bool(gone),
+                "gain": gain,
+                "artist": {"deezer_id": artist_id, "name": aname},
+                "artists": [{"deezer_id": artist_id, "name": aname, "role": "Main"}],
+                "display_artist": aname,
+                "album": {
+                    "deezer_id": _uuid_text(alid),
+                    "title": alname,
+                    "cover": "/api/localcover/" + uid,
+                },
+            }
+            if ytid:
+                _youtube_fields(row, ytid, bitrate)
+            out.append(row)
             continue
         artists = credits.get(tid) or [
             {"deezer_id": str(adz or _uuid_text(aid)), "name": aname, "role": "Main"}
@@ -1322,8 +1354,14 @@ def _resolve_tracks(provider, raw_ids) -> list:
             if _may_access_track(row):
                 out.append(row)
             continue
-        except (ValueError, Track.DoesNotExist):
+        except ValueError:
             pass
+        except Track.DoesNotExist:
+            # A YouTube search hit: its row is made from the search's answer.
+            row = youtube.materialize(sid)
+            if row is not None:
+                out.append(row)
+            continue
         if _valid_id(sid):
             # Known Deezer track? Reuse the DB row (no network) so adding an
             # already-imported track to a playlist works even when Deezer is down.
@@ -2554,7 +2592,7 @@ def my_local():
         .switch(Track)
         .join(Artist)
         .switch(Track)
-        .where(Track.deezer_id.is_null(True))
+        .where(Track.deezer_id.is_null(True) & Track.youtube_id.is_null(True))
     ).order_by(Artist.name, Album.name, Track.disc, Track.number).limit(5000)
     return jsonify({"tracks": [_local_track(t) for t in q]})
 
@@ -3124,7 +3162,11 @@ def favorite():
     if not _valid_id(deezer_id):
         try:
             track = Track[uuid.UUID(deezer_id)]
-        except (ValueError, Track.DoesNotExist):
+        except Track.DoesNotExist:
+            track = youtube.materialize(deezer_id)
+            if track is None:
+                return jsonify({"error": "invalid deezer_id"}), 400
+        except ValueError:
             return jsonify({"error": "invalid deezer_id"}), 400
         if not _may_access_track(track):
             return jsonify({"error": "invalid deezer_id"}), 400
@@ -4105,6 +4147,13 @@ def cover_response(cid, *, vetted=False):
             return jsonify({"error": "not found"}), 404
     if track is not None and os.path.isfile(track.path):
         return _serve_embedded_cover(track)
+    if not _valid_id(cid) and (track is None or track.youtube_id):
+        # A YouTube hit or a YouTube row not fetched yet: the search's art.
+        resp = youtube.cover(track, cid)
+        if resp is not None:
+            return resp
+        if track is not None:
+            return jsonify({"error": "not found"}), 404
 
     provider = _provider()
     if provider is None:
@@ -4168,14 +4217,26 @@ def stream(deezer_id):
         try:
             track = Track[key]
         except Track.DoesNotExist:
-            try:
-                episode = PodcastEpisode[key]
-            except PodcastEpisode.DoesNotExist:
-                return jsonify({"error": "invalid id"}), 400
-            return _stream_episode(episode, bitrate)
+            # A YouTube search hit becomes its row the moment it is played.
+            track = youtube.materialize(key)
+            if track is None:
+                try:
+                    episode = PodcastEpisode[key]
+                except PodcastEpisode.DoesNotExist:
+                    return jsonify({"error": "invalid id"}), 400
+                return _stream_episode(episode, bitrate)
         if not _may_access_track(track):
             # Someone else's private upload: indistinguishable from an unknown id.
             return jsonify({"error": "invalid id"}), 400
+        if track.youtube_id and not track.deezer_id:
+            # The fallback source: fetched once on this first play, then served
+            # from disk for good — as is, unless the client asked for less.
+            if not os.path.isfile(track.path):
+                refused = youtube.stream_cold(track)
+                if refused is not None:
+                    return refused
+                track = Track.get_by_id(track.id)
+            return youtube.serve(track, bitrate)
 
     if track is None or not os.path.isfile(track.path):
         if not _valid_id(deezer_id):
@@ -4280,3 +4341,4 @@ from . import export  # noqa: E402,F401  isort:skip
 from . import credits  # noqa: E402,F401  isort:skip
 from . import party  # noqa: E402,F401  isort:skip
 from . import remote  # noqa: E402,F401  isort:skip
+from . import youtube  # noqa: E402,F401  isort:skip

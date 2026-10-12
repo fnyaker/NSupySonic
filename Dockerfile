@@ -74,6 +74,11 @@ RUN npm run build   # writes /web/supysonic/webui/dist
 # Only /ffmpeg is copied: ffprobe (another 141 MB) is never called.
 FROM mwader/static-ffmpeg:9.0.2@sha256:7d9bdaaf887f7e6ce6151f67325c344074b5ff1fb75316011c3376503e449a7b AS ffmpeg
 
+# The JavaScript runtime yt-dlp needs to solve YouTube's player challenges, for
+# the YouTube fallback (supysonic/deezer/youtube.py). One static binary, glibc,
+# both architectures; pinned to the multi-arch index digest like ffmpeg.
+FROM denoland/deno:bin-2.9.7@sha256:bc5aa4466e21b6d3021226a85ba2e1911f7c386254d97b9d797903ab74edace2 AS deno
+
 # ---------------------------------------------------------------------------
 # Builder: install supysonic (+ vendored deezerpy) and gunicorn into a venv
 # ---------------------------------------------------------------------------
@@ -95,7 +100,7 @@ WORKDIR /src
 #    sdist-only sphinx dependency); they are removed again below.
 COPY setup.cfg docker/requirements.py ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python requirements.py postgresql embedding > /tmp/requirements.txt \
+    python requirements.py postgresql embedding youtube > /tmp/requirements.txt \
  && pip install -r /tmp/requirements.txt gunicorn setuptools wheel
 
 # 2. The package itself — only what the wheel is built from, so an SPA-only
@@ -144,6 +149,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=deno /deno /usr/local/bin/deno
 
 COPY --from=builder /opt/venv /opt/venv
 # The release this image was built from (CI passes the git tag). The entrypoint

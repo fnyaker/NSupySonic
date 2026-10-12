@@ -22,6 +22,7 @@
   import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
+  import { youtubeStatus, loadYoutubeStatus } from "../lib/youtube.js";
 
   let candidates = [];
   let query = "";
@@ -35,10 +36,38 @@
   $: if (target && loadedFor !== target) load(target);
   $: if (!target) teardown();
 
+  // YouTube is the last resort, asked only when somebody presses for it: one
+  // search there (cached a day by the server), and a hit costs nothing more
+  // until it is auditioned or chosen — which is when its audio is archived.
+  let yt = "idle"; // idle | loading | done | error
+  let ytFound = 0;
+  loadYoutubeStatus();
+
+  async function searchYoutube() {
+    const t = target;
+    if (!t || yt === "loading") return;
+    yt = "loading";
+    try {
+      const r = await api.replacementCandidates(t.deezer_id, { youtube: true });
+      if (loadedFor !== t) return;
+      const have = new Set(candidates.map((c) => c.deezer_id));
+      const extra = (r.candidates || []).filter(
+        (c) => c.source === "youtube" && !have.has(c.deezer_id)
+      );
+      ytFound = extra.length;
+      candidates = [...candidates, ...extra];
+      yt = "done";
+    } catch {
+      if (loadedFor === t) yt = "error";
+    }
+  }
+
   async function load(t) {
     loadedFor = t;
     loading = true;
     candidates = [];
+    yt = "idle";
+    ytFound = 0;
     stopPreview();
     try {
       const r = await api.replacementCandidates(t.deezer_id);
@@ -262,7 +291,7 @@
                 </div>
                 <div class="meta">
                   <div class="t">
-                    {#if c.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
+                    {#if c.source === "youtube"}<span class="local" title="Source YouTube (pas sur Deezer)"><Icon name="youtube" size={12} /></span>{:else if c.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
                     {c.title}
                   </div>
                   <div class="a muted">{artistLine(c)} · {c.album?.title || ""}</div>
@@ -274,6 +303,30 @@
               </li>
             {/each}
           </ul>
+        {/if}
+        {#if !loading && $youtubeStatus?.enabled}
+          <div class="yt">
+            {#if yt === "done"}
+              <p class="muted hint">
+                {ytFound
+                  ? `${ytFound} titre${ytFound > 1 ? "s" : ""} trouvé${ytFound > 1 ? "s" : ""} sur YouTube, ajouté${ytFound > 1 ? "s" : ""} à la liste.`
+                  : "Rien de proche sur YouTube non plus."}
+              </p>
+            {:else}
+              <button class="upload" disabled={busy || yt === "loading"} on:click={searchYoutube}>
+                <Icon name="youtube" size={16} />
+                {yt === "loading" ? "Recherche sur YouTube…" : "Chercher aussi sur YouTube"}
+              </button>
+              <p class="muted hint">
+                {#if yt === "error"}
+                  YouTube n'a pas répondu. Réessayez plus tard.
+                {:else}
+                  En dernier recours. Un titre YouTube est archivé à la première
+                  écoute, en Opus d'environ 130 kbit/s (YouTube n'a pas mieux).
+                {/if}
+              </p>
+            {/if}
+          </div>
         {/if}
       </div>
 
@@ -451,6 +504,10 @@
   .pick:disabled {
     opacity: 0.55;
     cursor: default;
+  }
+  /* The body is inset 10px: this lines its button up with the footer's. */
+  .yt {
+    padding: 6px 8px 14px;
   }
   footer {
     padding: 12px 18px 16px;

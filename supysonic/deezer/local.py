@@ -140,11 +140,17 @@ def scan_local(archive_dir: str) -> dict:
     Returns ``{"added": n, "removed": n}``.
     """
     root = library.get_root_folder(archive_dir)
-    tracked = {t.path: t for t in Track.select(Track.id, Track.path, Track.deezer_id)}
+    tracked = {
+        t.path: t
+        for t in Track.select(Track.id, Track.path, Track.deezer_id, Track.youtube_id)
+    }
 
     added = 0
     seen = set()
-    for dirpath, _dirs, files in os.walk(archive_dir):
+    for dirpath, dirs, files in os.walk(archive_dir):
+        # Dot-directories are work in progress (the YouTube downloads are
+        # staged in one): a file there is not anybody's upload yet.
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
         for fn in files:
             ext = os.path.splitext(fn)[1][1:].lower()
             if ext not in AUDIO_EXTS:
@@ -164,7 +170,14 @@ def scan_local(archive_dir: str) -> dict:
 
     removed = 0
     for path, track in tracked.items():
-        if track.deezer_id is None and path not in seen and not os.path.isfile(path):
+        # A YouTube row with no file is simply not archived yet, like a Deezer
+        # one: only an upload whose file vanished is gone.
+        if (
+            track.deezer_id is None
+            and track.youtube_id is None
+            and path not in seen
+            and not os.path.isfile(path)
+        ):
             track.delete_instance(recursive=True)
             removed += 1
 

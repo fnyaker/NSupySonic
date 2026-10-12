@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS track (
     duration INTEGER NOT NULL,
     has_art BOOLEAN NOT NULL DEFAULT false,
     deezer_id VARCHAR(32),
+    youtube_id VARCHAR(16),
     album_id UUID NOT NULL REFERENCES album,
     artist_id UUID NOT NULL REFERENCES artist,
     bitrate INTEGER NOT NULL,

@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20260928"
+SCHEMA_VERSION = "20261012"
 
 
 def now():
@@ -352,6 +352,10 @@ class Track(PathMixin, _Model):
     duration = IntegerField()
     has_art = BooleanField(default=False)
     deezer_id = CharField(null=True)
+    # The YouTube video this row was fetched from, for the fallback source
+    # (deezer/youtube.py). NULL for everything else. Such a row has no
+    # deezer_id, so it is NOT an upload: it may be not yet archived.
+    youtube_id = CharField(null=True)
 
     album = ForeignKeyField(Album, backref="tracks")
     artist = ForeignKeyField(Artist, backref="tracks")

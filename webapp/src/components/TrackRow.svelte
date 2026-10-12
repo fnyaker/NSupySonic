@@ -222,7 +222,7 @@
               aria-label="Titre indisponible, remplacer"
               on:click|stopPropagation={() => openReplace(track)}><Icon name="alert" size={13} /></button>
           {/if}
-          {#if track.local}<span class="local" title="Fichier local (pas sur Deezer)"><Icon name="cloudOff" size={13} /></span>{/if}
+          {#if track.source === "youtube"}<span class="local" title="Source YouTube (pas sur Deezer)"><Icon name="youtube" size={13} /></span>{:else if track.local}<span class="local" title="Fichier local (pas sur Deezer)"><Icon name="cloudOff" size={13} /></span>{/if}
           {#if downloaded}<span class="dlbadge" title="Disponible hors-ligne"><Icon name="downloaded" size={13} /></span>{/if}
           {track.title}
           {#if track.explicit}<span class="explicit">E</span>{/if}
@@ -232,9 +232,14 @@
     </div>
 
     {#if showAlbum && track.album}
-      <button class="alb muted" on:click|stopPropagation={() => push("/album/" + track.album.deezer_id)}>
-        {track.album.title}
-      </button>
+      {#if track.album.deezer_id}
+        <button class="alb muted" on:click|stopPropagation={() => push("/album/" + track.album.deezer_id)}>
+          {track.album.title}
+        </button>
+      {:else}
+        <!-- No page to open (a YouTube track's album is only a label). -->
+        <span class="alb muted plain">{track.album.title}</span>
+      {/if}
     {/if}
 
     <button class="fav" class:on={fav} on:click|stopPropagation={() => toggleFavorite(track)} aria-label="Favori">
@@ -395,7 +400,7 @@
   }
   /* `.a` holds one hoverable button per credited artist (ArtistLine), so the
      hover treatment belongs on each name, not on the whole line. */
-  .alb:hover {
+  .alb:hover:not(.plain) {
     color: var(--text);
     text-decoration: underline;
   }

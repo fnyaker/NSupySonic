@@ -48,6 +48,11 @@ inside sh -euc '
     done
 ' || fail "ffmpeg cannot write and read back the formats the app serves"
 
+step "the YouTube fallback has its JavaScript runtime"
+# yt-dlp solves YouTube's player challenges in Deno; without it a first play
+# of a YouTube track fails for some videos only, which is the worst way to fail.
+inside deno eval 'console.log(6 * 7)' | grep -qx 42 || fail "deno does not run"
+
 step "the Python side is complete, and the build tools are gone"
 docker run --rm -i --entrypoint python "$IMAGE" - <<'EOF' || fail "python checks"
 import importlib.util
@@ -64,6 +69,9 @@ assert any(n.startswith("rhythm") for n in wasm), f"no rhythm analyser in {wasm}
 
 from supysonic.deezer import embedding
 assert embedding.available(), "the embedding extractor reports itself unavailable"
+
+from supysonic.deezer import youtube
+assert youtube.installed(), "the YouTube fallback reports itself unavailable"
 
 for tool in ("pip", "setuptools", "wheel"):
     assert importlib.util.find_spec(tool) is None, f"{tool} is still in the venv"

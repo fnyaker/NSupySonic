@@ -3,6 +3,7 @@
   // now-playing views, where the old segmented FLAC/320/128/64 strip was too big.
   import { quality } from "../lib/stores.js";
   import Icon from "./Icon.svelte";
+  import SourceBadge from "./SourceBadge.svelte";
 
   const QUALITIES = ["FLAC", "OPUS_320", "OPUS_256", "OPUS_192", "OPUS_128", "OPUS_64"];
   const LABEL = {
@@ -24,6 +25,8 @@
 
 <svelte:window on:click={() => (open = false)} />
 
+<div class="qwrap">
+<SourceBadge tone="immersive" />
 <div class="qm">
   <button
     class="trigger"
@@ -50,8 +53,14 @@
     </ul>
   {/if}
 </div>
+</div>
 
 <style>
+  .qwrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
   .qm {
     position: relative;
   }
