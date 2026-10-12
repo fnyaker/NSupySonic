@@ -1,0 +1,140 @@
+name: Security scan
+
+# Static analysis, dependency, secret and Dockerfile scanners, each its own job
+# so they run side by side and none waits on another. ADVISORY: this is a
+# workflow of its own and every job is continue-on-error, so a finding never
+# gates a merge. Findings land in the repository's Security tab (code scanning)
+# wherever a tool speaks SARIF, and in the job log otherwise.
+#
+#   codeql    GitHub's semantic analysis of the Python and the SPA's JavaScript
+#   semgrep   pattern rules (security-audit, Python, JavaScript, Flask, secrets)
+#   bandit    Python-specific checks (subprocess, yaml/pickle, weak crypto, SQL)
+#   trivy     known CVEs in every lockfile (pip, npm, the three Rust crates,
+#             Gradle), committed secrets, Dockerfile and compose misconfiguration
+#   gitleaks  secrets anywhere in the git history (the ARL is a full-account
+#             credential: a commit that ever held one is a finding)
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan
+        run: |
+          semgrep scan \
+            --config p/security-audit --config p/python --config p/flask \
+            --config p/javascript --config p/secrets --config p/dockerfile \
+            --exclude webapp/node_modules --exclude supysonic/webui/dist \
+            --exclude 'webapp/test' --exclude tests \
+            --sarif --output semgrep.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('semgrep.sarif') != ''
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  bandit:
+    name: Bandit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install "bandit[sarif]"
+      - name: Scan
+        run: bandit -r supysonic deezerpy -f sarif -o bandit.sarif --exit-zero
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('bandit.sarif') != ''
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+  trivy:
+    name: Trivy (dependencies, secrets, Dockerfile)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          skip-dirs: webapp/node_modules,supysonic/webui/dist
+          format: sarif
+          output: trivy.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy.sarif') != ''
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+
+  gitleaks:
+    name: Gitleaks (history)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
