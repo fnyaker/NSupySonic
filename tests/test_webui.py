@@ -1481,6 +1481,52 @@ class WebUITestCase(unittest.TestCase):
         self.assertIsNotNone(Track.get_or_none(Track.id == safe.id))
         self.assertIsNotNone(Track.get_or_none(Track.id == alive.id))
 
+    def test_selection_deletes_are_bounded(self):
+        """Each job is a thread making up to 200 Deezer calls outside the
+        request pool: one running per user, two per server, or a loop on the
+        route is hundreds of threads hammering Deezer."""
+        import threading as th
+
+        from supysonic.db import Track
+
+        self._make_deezer_track(sng_id="90", title="Gone", archived=False)
+        Track.update(unavailable=now()).execute()
+        UserManager.add("bob", "B0b")
+        UserManager.add("carol", "C4rol")
+        gate = th.Event()
+        entered = th.Semaphore(0)
+
+        def resolve(*a, **k):
+            entered.release()
+            gate.wait(5)
+            return {"url": "https://example/audio"}
+
+        provider = self.app.deezer
+        orig = provider.resolve
+        provider.resolve = resolve
+        clients = {name: self.app.test_client() for name in ("alice", "bob", "carol")}
+        for name, pw in (("alice", "Alic3"), ("bob", "B0b"), ("carol", "C4rol")):
+            clients[name].post("/api/login", json={"username": name, "password": pw})
+        post = lambda who: clients[who].post("/api/tracks/delete", json={"ids": ["90"]})
+        try:
+            first = post("alice")
+            self.assertEqual(first.status_code, 200, first.get_json())
+            self.assertTrue(entered.acquire(timeout=5))  # its worker is inside Deezer
+            again = post("alice")
+            self.assertEqual(again.status_code, 409)
+            self.assertEqual(again.get_json()["job"], first.get_json()["job"])
+            self.assertEqual(post("bob").status_code, 200)
+            self.assertTrue(entered.acquire(timeout=5))
+            self.assertEqual(post("carol").status_code, 429)
+        finally:
+            gate.set()
+            provider.resolve = orig
+        deadline = time.time() + 5
+        while time.time() < deadline and post("carol").status_code != 200:
+            time.sleep(0.05)
+        # Once the others finish, the slot is free again.
+        self.assertLess(time.time(), deadline)
+
     def test_a_selection_delete_rejects_nonsense(self):
         self._login()
         post = lambda ids: self.client.post("/api/tracks/delete", json={"ids": ids})

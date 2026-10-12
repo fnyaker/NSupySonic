@@ -750,6 +750,12 @@ def _run_delete(app, job_id, track_id, user_id, admin):
 # they run in the worker, never in the request thread.
 
 BULK_DELETE_MAX = 200
+# Each job is a thread making up to BULK_DELETE_MAX Deezer calls, outside the
+# request pool that bounds everything else. Unbounded, a loop on this route is
+# hundreds of threads hammering Deezer until its breaker opens for EVERYONE.
+# One running job per user, a couple per server.
+BULK_DELETE_JOBS = 2
+_bulk_running: dict = {}  # user id -> job id, under _jobs_lock
 
 
 @webapi.route("/tracks/delete", methods=["POST"])
@@ -786,15 +792,26 @@ def delete_tracks():
     if not todo:
         return jsonify({"error": "not found"}), 404
 
+    user_id = request.webuser.id
+    with _jobs_lock:
+        busy = _bulk_running.get(user_id)
+        if busy is not None:
+            return jsonify({"error": "a deletion is already running", "job": busy}), 409
+        if len(_bulk_running) >= BULK_DELETE_JOBS:
+            return jsonify({"error": "server busy"}), 429, {"Retry-After": "10"}
+        # Reserved in the same critical section as the check: two requests
+        # arriving together must not both pass it.
+        _bulk_running[user_id] = ""
     job_id = _new_job("delete-many")
     with _jobs_lock:
         _jobs[job_id].update(
             total=len(todo), done=0, deleted=[], kept=[], missing=missing
         )
+        _bulk_running[user_id] = job_id
     app = current_app._get_current_object()
     threading.Thread(
         target=_run_delete_many,
-        args=(app, job_id, todo, request.webuser.id, _is_admin()),
+        args=(app, job_id, todo, user_id, _is_admin()),
         name="track-delete-many",
         daemon=True,
     ).start()
@@ -841,6 +858,9 @@ def _run_delete_many(app, job_id, todo, user_id, admin):
         logger.warning("Bulk deletion failed", exc_info=True)
         _finish_job(job_id, ok=False, error=str(exc))
     finally:
+        with _jobs_lock:
+            if _bulk_running.get(user_id) == job_id:
+                del _bulk_running[user_id]
         try:
             close_connection()
         except Exception:
