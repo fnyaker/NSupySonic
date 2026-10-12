@@ -65,16 +65,29 @@ _MAX_COMPONENT_BYTES = 200
 # the same way, and none of them should have to import the web layer to do so.
 
 
+# Called with the Track the FIRST time it is found dead (a renewed verdict is
+# not news). The web layer's auto-match registers here: the DB layer must not
+# import it, and every path that finds a track dead goes through this function.
+UNAVAILABLE_HOOKS: list = []
+
+
 def mark_unavailable(track) -> None:
     """Record that Deezer has no playable source for this track (fail-soft)."""
     if track is None:
         return
+    first = getattr(track, "unavailable", None) is None
     try:
         stamp = _now()
         Track.update(unavailable=stamp).where(Track.id == track.id).execute()
         track.unavailable = stamp
     except Exception:  # bookkeeping must never break the caller
-        pass
+        return
+    if first:
+        for hook in list(UNAVAILABLE_HOOKS):
+            try:
+                hook(track)
+            except Exception:  # an observer never breaks the verdict
+                pass
 
 
 def clear_unavailable(track) -> None:

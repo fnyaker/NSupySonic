@@ -1527,6 +1527,150 @@ class WebUITestCase(unittest.TestCase):
         # Once the others finish, the slot is free again.
         self.assertLess(time.time(), deadline)
 
+    # -- the auto-match ------------------------------------------------------
+    # decide() — the listening — is tested by ear in tests/test_audiomatch.py.
+    # Here it is a stub, so these run without numpy: what is pinned is WHEN it
+    # runs, what a match does to the library, and who may start it.
+
+    def _automatch(self, verdict_for):
+        """Patch the listening; returns the module and the tracks it was asked about."""
+        from supysonic.webui import automatch as wam
+
+        asked = []
+        orig_decide, orig_avail = wam.am.decide, wam.audiomatch.available
+
+        def decide(provider, track, archive_dir, **kw):
+            asked.append(str(track.deezer_id))
+            return verdict_for(track)
+
+        wam.am.decide = decide
+        wam.audiomatch.available = lambda: True
+        self.addCleanup(setattr, wam.am, "decide", orig_decide)
+        self.addCleanup(setattr, wam.audiomatch, "available", orig_avail)
+        wam.drain(self.app)  # nothing from an earlier test
+        return wam, asked
+
+    def _match(self, target):
+        from supysonic.deezer.automatch import Candidate, Verdict
+
+        c = Candidate("local", str(target.id), target.title, "Archived Artist", 200, "Best of")
+        return Verdict("match", best=c, score=0.9993)
+
+    def test_a_track_found_dead_is_matched_once_and_replaced_everywhere(self):
+        from supysonic.db import Playlist, PlaylistTrack, StarredTrack, Track
+        from supysonic.deezer import library
+
+        dead = self._make_deezer_track(sng_id="95", title="Song", archived=False)
+        alive = self._make_deezer_track(sng_id="96", title="Song", archived=True)
+        alice = User.get(User.name == "alice")
+        pl = Playlist.create(user=alice, name="Mix")
+        PlaylistTrack.create(playlist=pl, track=dead, index=0)
+        StarredTrack.create(user=alice, starred=dead, date=now())
+        wam, asked = self._automatch(lambda t: self._match(alive))
+
+        with self.app.app_context():
+            library.mark_unavailable(Track.get_by_id(dead.id))
+            library.mark_unavailable(Track.get_by_id(dead.id))  # a renewed verdict is not news
+            outs = wam.drain(self.app)
+
+        self.assertEqual(asked, ["95"])
+        self.assertEqual([o["status"] for o in outs], ["match"])
+        self.assertEqual(
+            [r.track_id for r in PlaylistTrack.select().where(PlaylistTrack.playlist == pl.id)],
+            [alive.id],
+        )
+        self.assertIsNotNone(StarredTrack.get_or_none(StarredTrack.starred == alive.id))
+        # Nothing references the dead row any more: it is retired.
+        self.assertIsNone(Track.get_or_none(Track.id == dead.id))
+        self._login()
+        recent = self.client.get("/api/automatch").get_json()["recent"]
+        self.assertEqual(recent[0]["by"]["id"], "96")
+        self.assertEqual(recent[0]["score"], 0.9993)
+
+    def test_a_renewed_verdict_is_not_listened_to_again(self):
+        """The probe re-confirms a dead track every week; each one is not a
+        fresh reason to download candidates (the admin's run is the retry)."""
+        from supysonic.db import Track
+        from supysonic.deezer import library
+        from supysonic.deezer.automatch import Verdict
+
+        dead = self._make_deezer_track(sng_id="104", title="Song", archived=False)
+        wam, asked = self._automatch(lambda t: Verdict("no_match", "closest 90.0 %"))
+        with self.app.app_context():
+            library.mark_unavailable(Track.get_by_id(dead.id))
+            wam.drain(self.app)
+            library.mark_unavailable(Track.get_by_id(dead.id))
+            wam.drain(self.app)
+        self.assertEqual(asked, ["104"])
+
+    def test_switched_off_the_auto_match_listens_to_nothing(self):
+        from supysonic.db import Track
+        from supysonic.deezer import library
+
+        dead = self._make_deezer_track(sng_id="97", title="Song", archived=False)
+        wam, asked = self._automatch(lambda t: self.fail("must not be asked"))
+        self._login()
+        rv = self.client.put("/api/automatch/settings", json={"enabled": False})
+        self.assertEqual(rv.get_json()["enabled"], False)
+        with self.app.app_context():
+            library.mark_unavailable(Track.get_by_id(dead.id))
+            self.assertEqual(wam.drain(self.app), [])
+        self.assertEqual(self.client.put("/api/automatch/settings", json={"enabled": "no"}).status_code, 400)
+
+    def test_the_auto_match_is_the_admins(self):
+        UserManager.add("bob", "B0b")
+        self.client.post("/api/login", json={"username": "bob", "password": "B0b"})
+        for method, url in (("get", "/api/automatch"), ("put", "/api/automatch/settings"),
+                            ("post", "/api/automatch/run"), ("post", "/api/automatch/cancel")):
+            rv = getattr(self.client, method)(url, json={"enabled": True})
+            self.assertEqual(rv.status_code, 403, url)
+
+    def test_the_admins_run_reports_every_track_by_cause(self):
+        from supysonic.db import Track
+        from supysonic.deezer.automatch import Verdict
+
+        alive = self._make_deezer_track(sng_id="98", title="Song", archived=True)
+        self._make_deezer_track(sng_id="99", title="Song", archived=False)
+        self._make_deezer_track(sng_id="100", title="Other", archived=False)
+        self._make_deezer_track(sng_id="101", title="Third", archived=False)
+        Track.update(unavailable=now()).where(Track.deezer_id.in_(["99", "100", "101"])).execute()
+        verdicts = {
+            "99": self._match(alive),
+            "100": Verdict("no_reference", "Deezer serves no preview for it"),
+            "101": Verdict("no_match", "closest 97.3 % (deezer:5)", score=0.973),
+        }
+        self._automatch(lambda t: verdicts[str(t.deezer_id)])
+        self._login()
+        rv = self.client.post("/api/automatch/run?sync=1")
+        self.assertEqual(rv.status_code, 200, rv.get_json())
+        last = self.client.get("/api/automatch").get_json()["last"]
+        self.assertEqual((last["total"], last["done"]), (3, 3))
+        self.assertEqual(last["counts"], {"match": 1, "no_reference": 1, "no_match": 1})
+        self.assertEqual(last["replaced"][0]["track"]["id"], "99")
+        self.assertEqual(
+            last["reasons"], {"Deezer serves no preview for it": 1, "below 99 %": 1}
+        )
+        self.assertEqual(sorted(f["track"]["id"] for f in last["failures"]), ["100", "101"])
+
+    def test_deezer_unreachable_stops_the_run_without_deciding(self):
+        from supysonic.db import Track
+        from deezerpy.errors import DeezerUnavailable
+
+        for sid in ("102", "103"):
+            self._make_deezer_track(sng_id=sid, title="Song", archived=False)
+        Track.update(unavailable=now()).where(Track.deezer_id.in_(["102", "103"])).execute()
+
+        def down(track):
+            raise DeezerUnavailable("api.deezer.com is not answering")
+
+        self._automatch(down)
+        self._login()
+        self.client.post("/api/automatch/run?sync=1")
+        last = self.client.get("/api/automatch").get_json()["last"]
+        self.assertEqual(last["done"], 0)
+        self.assertIn("unreachable", last["stopped"])
+        self.assertEqual(Track.select().where(Track.unavailable.is_null(False)).count(), 2)
+
     def test_a_selection_delete_rejects_nonsense(self):
         self._login()
         post = lambda ids: self.client.post("/api/tracks/delete", json={"ids": ids})
@@ -1556,7 +1700,9 @@ class WebUITestCase(unittest.TestCase):
         self.assertIsNone(match_score(dead, cand("Halo", artist="Some Cover Band")))
         self.assertIsNone(match_score(dead, cand("Halo", duration=300)))
         self.assertIsNone(match_score(dead, cand("Halo Again")))
-        self.assertIsNone(match_score(dead, cand("Halo", source="youtube")))
+        # YouTube is judged like the rest; WHEN it is asked is the route's
+        # (only when nothing from Deezer or the disk is safe).
+        self.assertIsNotNone(match_score(dead, cand("Halo", source="youtube")))
         # Closer in length ranks higher; a file on disk wins a tie.
         self.assertGreater(same, match_score(dead, cand("Halo", duration=272)))
         self.assertGreater(match_score(dead, cand("Halo", local=True)), same)

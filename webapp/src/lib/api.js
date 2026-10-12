@@ -525,14 +525,27 @@ export const api = {
   unavailableTracks: () => req("/unavailable"),
   // `youtube`: also ask YouTube (the sheet's opt-in button) — one request
   // there, cached a day by the server.
-  replacementCandidates: (id, { youtube = false } = {}) =>
-    req("/replace/candidates/" + id + (youtube ? "?youtube=1" : "")),
+  // `q`: the sheet's search box replaces the query. YouTube is also asked,
+  // unprompted, when Deezer finds nothing (`youtube_auto` in the answer).
+  replacementCandidates: (id, { youtube = false, q = "" } = {}) => {
+    const qs = new URLSearchParams();
+    if (youtube) qs.set("youtube", "1");
+    if (q) qs.set("q", q);
+    const s = qs.toString();
+    return req("/replace/candidates/" + id + (s ? "?" + s : ""));
+  },
   // Only the matches safe enough to apply in one click (same song, artist,
   // version and length), best first — what the library list shows inline.
   bestReplacements: (id, n = 2) => req("/replace/candidates/" + id + "?best=" + n),
   replaceTrack: (from, to) =>
     req("/replace", { method: "POST", body: body({ from, to }) }),
   replaceStatus: (job) => req("/replace/status/" + job),
+  // The audio auto-match (admin): its switch, the library-wide run, the report.
+  automatch: () => req("/automatch"),
+  automatchSettings: (enabled) =>
+    req("/automatch/settings", { method: "PUT", body: body({ enabled }) }),
+  automatchRun: () => req("/automatch/run", { method: "POST" }),
+  automatchCancel: () => req("/automatch/cancel", { method: "POST" }),
   // Drop a track that exists neither on Deezer nor on disk. The server
   // re-checks both before it removes anything, and answers 409 if either one
   // still has it — "gone from Deezer" is not "gone".

@@ -438,7 +438,31 @@ aside, the same main artist, no version word the dead track did not have (remix,
 acoustic…), a length within 15 s; never YouTube. Anything less sure stays behind "Autres choix" (the
 sheet, where it can be auditioned). Fetched only for rows near the viewport, two at a time. The
 candidates also search the local library by TITLE (artist checked): the `"<artist> <title>"` query
-is one LIKE per field and never found the copy you already had.
+is one LIKE per field and never found the copy you already had. The query drops "(Remastered…)" /
+" - Radio Edit" (`_core_title`), the sheet has a search box (`q`, ≤ 200 chars), and **YouTube is
+asked on its own when Deezer finds nothing** (`youtube_auto`) — its five `closeness`-ranked songs;
+the inline `?best=` falls back to YouTube the same way, still through `match_score`.
+
+**The audio auto-match** (`deezer/audiomatch.py` = the ears, `deezer/automatch.py` = which
+candidates and in what order, `webui/automatch.py` = when, and applying it). A dead track has no audio
+left anywhere but the 30 s preview Deezer's public API may still serve for it, so that is the ONLY
+reference (the user's choice: no ISRC shortcut; no preview → left for a person). Candidates pass a
+metadata gate first (same core title, same main artist, ±20 s), then: files on disk; Deezer (its
+preview, then — if that did not overlap — its whole stream, decrypted straight into ffmpeg, never
+archived); YouTube only when Deezer had nothing, at most 2 downloads, staged and deleted unless the
+candidate wins (then `ensure_archived(produced=)` publishes that very file). ≥ `THRESHOLD` (0.99)
+replaces everywhere with the admin's scope (`availability.replace_everywhere`, the same code as a
+person's replacement) WITHOUT asking — so the panel always lists what it replaced, with the score.
+What 0.99 means is measured on real ffmpeg (`tests/test_audiomatch.py`): the same master as FLAC,
+Opus 128 or −6 dB reads 0.9991-0.9999, a remaster 0.992 (same performance: accepted), the same
+arrangement re-performed with 10 ms of timing drift 0.981, the instrumental 0.74. Two things made
+those numbers: aligning to the SAMPLE after the hop-grid search (0.984 → 0.9999 on the same master)
+and a 40 dB floor (at 60, Opus's noise fill in near-empty bands read 0.985). No BLAS (band means by
+cumulative sum): its threads would escape the worker's `renice`. Runs on the EVENT
+(`library.UNAVAILABLE_HOOKS`, first verdict only — a weekly re-confirmation is not news; one worker,
+bounded queue; under `app.testing` nothing starts, tests call `drain`) and on the admin's button
+(`/api/automatch/run`, progress, causes tallied, stopped — not failed — when Deezer is unreachable).
+Switch `Meta dz.automatch`, ON by default; nothing runs without numpy + ffmpeg.
 
 **An archived track carries its whole identity on disk**, which is what makes the above safe:
 `_finalize_archive` writes the audio, `cover.jpg`, the `.lrc` lyrics, the file tags, **refreshes the

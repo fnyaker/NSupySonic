@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 
 from supysonic.config import DefaultConfig
-from supysonic.db import StarredTrack, Track, release_database
+from supysonic.db import StarredTrack, Track, now, release_database
 from supysonic.deezer import youtube as yt
 from supysonic.managers.user import UserManager
 from supysonic.web import create_application
@@ -405,20 +405,73 @@ class YoutubeTestCase(unittest.TestCase):
             self.assertEqual(result, {"added": 0, "removed": 0})
             self.assertIsNotNone(Track.get_or_none(Track.id == tid))
 
-    def test_replacement_candidates_ask_youtube_only_when_told(self):
+    def _dead_hit(self):
+        """The first hit, starred (so it has a row) and flagged dead."""
         self._login()
         tid = self._search()[0]["deezer_id"]
         self.client.post("/api/favorite", json={"deezer_id": tid, "on": True})
+        with self.app.app_context():
+            Track.update(unavailable=now()).where(Track.id == tid).execute()
         self.fake.calls.clear()
         yt.reset()
+        return tid
+
+    @staticmethod
+    def _raw(vid, title, artist="Daft Punk", seconds=321):
+        return {"videoId": vid, "title": title, "artists": [{"name": artist, "id": "x"}],
+                "album": None, "duration_seconds": seconds, "thumbnails": []}
+
+    def test_with_nothing_found_youtube_is_asked_and_its_five_closest_shown(self):
+        tid = self._dead_hit()
+        self.fake.answer = [
+            self._raw("aaaaaaaaaa1", "Something Else"),
+            self._raw("aaaaaaaaaa2", "One More Time", "A Cover Band", 300),
+            self._raw("aaaaaaaaaa3", "One More Time (Live)", seconds=340),
+            self._raw("aaaaaaaaaa4", "One More Time"),
+            self._raw("aaaaaaaaaa5", "Another One", "Nobody", 100),
+            self._raw("aaaaaaaaaa6", "One More Time", seconds=380),
+            self._raw("aaaaaaaaaa7", "Harder Better"),
+        ]
         rv = self.client.get(f"/api/replace/candidates/{tid}")
-        self.assertEqual(rv.status_code, 200)
-        self.assertEqual(self.fake.calls, [])
-        rv = self.client.get(f"/api/replace/candidates/{tid}", query_string={"youtube": "1"})
-        ids = [c["deezer_id"] for c in rv.get_json()["candidates"]]
+        body = rv.get_json()
+        self.assertTrue(body["youtube_auto"])
+        self.assertEqual(len(self.fake.calls), 1)  # one search, not one per row
+        # closeness, measured: 4 1.000 (same everything), 3 0.968 (Live, 19 s
+        # longer), 6 0.902 (59 s longer), 2 0.665 (another artist), 7 0.538
+        # (another title, same artist); 1 (0.533) and 5 (0.150) do not make it.
+        vids = [str(yt.track_uuid("aaaaaaaaaa" + n)) for n in "43627"]
+        self.assertEqual([c["deezer_id"] for c in body["candidates"]], vids)
+
+    def test_with_something_found_youtube_is_not_asked(self):
+        tid = self._dead_hit()
+        found = {"deezer_id": "777", "title": "One More Time", "duration": 321,
+                 "artists": [{"name": "Daft Punk"}], "album": {"title": "Discovery"}}
+        with mock.patch("supysonic.webui.availability._local_search_tracks", lambda q, n: [found]):
+            body = self.client.get(f"/api/replace/candidates/{tid}").get_json()
+            self.assertEqual(self.fake.calls, [])
+            self.assertFalse(body["youtube_auto"])
+            # …unless the sheet asks for it.
+            self.client.get(f"/api/replace/candidates/{tid}", query_string={"youtube": "1"})
         self.assertEqual(len(self.fake.calls), 1)
-        self.assertNotIn(tid, ids)  # the track itself is no replacement
-        self.assertIn(str(yt.track_uuid("AIKwmk4mnNw")), ids)
+
+    def test_the_search_box_query_is_the_one_asked(self):
+        tid = self._dead_hit()
+        self.client.get(f"/api/replace/candidates/{tid}", query_string={"q": "  daft   punk  live "})
+        self.assertEqual(self.fake.calls[0][0], "daft punk live")
+        long = "x" * 500
+        self.client.get(f"/api/replace/candidates/{tid}", query_string={"q": long})
+        self.assertLessEqual(len(self.fake.calls[-1][0]), 200)
+
+    def test_one_click_suggestions_fall_back_to_youtube_only_when_safe(self):
+        tid = self._dead_hit()
+        self.fake.answer = [
+            self._raw("bbbbbbbbbb1", "One More Time (Remix)"),
+            self._raw("bbbbbbbbbb2", "One More Time", seconds=323),
+        ]
+        body = self.client.get(f"/api/replace/candidates/{tid}?best=2").get_json()
+        self.assertTrue(body["youtube"])
+        self.assertEqual([c["deezer_id"] for c in body["candidates"]],
+                         [str(yt.track_uuid("bbbbbbbbbb2"))])
 
     def test_the_cover_of_a_hit_comes_from_its_thumbnail_once(self):
         self._login()

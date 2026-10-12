@@ -38,6 +38,7 @@ play.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -520,6 +521,26 @@ def _download(video_id: str, workdir: str) -> str:
     raise YoutubeError("yt-dlp produced no file")
 
 
+def download_audio(video_id: str, workdir: str) -> str:
+    """The audio of a video into ``workdir``, for the auto-match to LISTEN to.
+
+    Same download, same slots, same holds as a first play — but nothing is
+    archived and no row is touched: a candidate the comparison rejects leaves
+    nothing behind. The one it accepts is handed to ``ensure_archived``
+    (``produced=``) so it is not downloaded twice.
+    """
+    if not valid_video_id(video_id):
+        raise YoutubeError("not a YouTube video id")
+    _check_held()
+    with _download_slots:
+        try:
+            return _download(video_id, workdir)
+        except YoutubeError:
+            raise
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+
 def fetch_thumbnail(url: str | None) -> bytes | None:
     """The square art (Google's image CDN, not YouTube's API). Best-effort."""
     if not url or not url.startswith("https://"):
@@ -637,7 +658,9 @@ def hit_from_track(track: Track) -> dict:
     }
 
 
-def ensure_archived(track: Track, archive_dir: str, hit: dict | None = None) -> Track:
+def ensure_archived(
+    track: Track, archive_dir: str, hit: dict | None = None, produced: str | None = None
+) -> Track:
     """Download, tag and publish the audio of a YouTube row. Idempotent.
 
     Serialized per video: two listeners pressing play at once cost ONE
@@ -653,16 +676,27 @@ def ensure_archived(track: Track, archive_dir: str, hit: dict | None = None) -> 
         track = Track.get_by_id(track.id)  # another thread may have just done it
         if os.path.isfile(track.path):
             return track
-        _check_held()
+        if not (produced and os.path.isfile(produced)):
+            # A file already in hand needs nothing from YouTube.
+            _check_held()
         hit = hit or hit_from_track(track)
         staging = os.path.join(archive_dir, STAGING_DIR)
         os.makedirs(staging, exist_ok=True)
         workdir = tempfile.mkdtemp(prefix=f"{vid}.", dir=staging)
         try:
-            with _download_slots:
+            if produced and os.path.isfile(produced):
+                # Already downloaded (the auto-match listened to it): moved in,
+                # tagged and published like a download of our own.
+                moved = os.path.join(workdir, os.path.basename(produced))
+                shutil.move(produced, moved)
+                produced = moved
+            else:
+                produced = None
+            with contextlib.nullcontext() if produced else _download_slots:
                 logger.info("Archiving YouTube video %s", vid)
                 try:
-                    produced = _download(vid, workdir)
+                    if produced is None:
+                        produced = _download(vid, workdir)
                 except YoutubeError:
                     raise
                 except Exception as exc:

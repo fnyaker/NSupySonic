@@ -40,20 +40,30 @@
   $: if (target && loadedFor !== target) load(target);
   $: if (!target) teardown();
 
-  // YouTube is the last resort, asked only when somebody presses for it: one
-  // search there (cached a day by the server), and a hit costs nothing more
-  // until it is auditioned or chosen — which is when its audio is archived.
+  // YouTube is the fallback: asked when somebody presses for it, and by the
+  // server on its own when Deezer finds nothing (`youtube_auto`) — its five
+  // closest songs, one search there (cached a day). A hit costs nothing more
+  // until it is auditioned or chosen, which is when its audio is archived.
   let yt = "idle"; // idle | loading | done | error
   let ytFound = 0;
+  let ytAuto = false;
   loadYoutubeStatus();
+
+  // The search box: pre-filled with what the server searched for, and a new
+  // query replaces it. `activeQ` is the manual query in effect ("" = the
+  // server's own), so "Chercher aussi sur YouTube" asks about the same thing.
+  let searchText = "";
+  let activeQ = "";
+  let seq = 0;
 
   async function searchYoutube() {
     const t = target;
     if (!t || yt === "loading") return;
+    const mine = seq;
     yt = "loading";
     try {
-      const r = await api.replacementCandidates(t.deezer_id, { youtube: true });
-      if (loadedFor !== t) return;
+      const r = await api.replacementCandidates(t.deezer_id, { youtube: true, q: activeQ });
+      if (loadedFor !== t || mine !== seq) return;
       const have = new Set(candidates.map((c) => c.deezer_id));
       const extra = (r.candidates || []).filter(
         (c) => c.source === "youtube" && !have.has(c.deezer_id)
@@ -62,26 +72,43 @@
       candidates = [...candidates, ...extra];
       yt = "done";
     } catch {
-      if (loadedFor === t) yt = "error";
+      if (loadedFor === t && mine === seq) yt = "error";
     }
   }
 
-  async function load(t) {
+  async function load(t, q = "") {
+    const mine = ++seq;
     loadedFor = t;
+    activeQ = q;
     loading = true;
     candidates = [];
     yt = "idle";
     ytFound = 0;
+    ytAuto = false;
     stopPreview();
     try {
-      const r = await api.replacementCandidates(t.deezer_id);
+      const r = await api.replacementCandidates(t.deezer_id, { q });
+      if (mine !== seq) return; // a newer search is on its way
       candidates = r.candidates || [];
       query = r.query || "";
+      if (!q) searchText = query;
+      if (r.youtube_auto) {
+        ytAuto = true;
+        ytFound = candidates.filter((c) => c.source === "youtube").length;
+        yt = "done";
+      }
     } catch (e) {
-      toasts.push(e?.message || "Impossible de chercher un remplaçant", "error");
+      if (mine === seq) toasts.push(e?.message || "Impossible de chercher un remplaçant", "error");
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
+  }
+
+  function submitSearch() {
+    const text = searchText.trim().replace(/\s+/g, " ");
+    if (!target || !text) return;
+    if (text === (activeQ || query) && !loading) return;
+    load(target, text === query && !activeQ ? "" : text);
   }
 
   // The audition element is shared with the library's inline suggestions
@@ -91,6 +118,9 @@
 
   function teardown() {
     stopPreview();
+    seq++;
+    searchText = "";
+    activeQ = "";
     loadedFor = null;
     candidates = [];
     busy = false;
@@ -187,13 +217,26 @@
         <button class="close" on:click={closeReplace} aria-label="Fermer"><Icon name="close" size={20} /></button>
       </header>
 
+      <form class="search" on:submit|preventDefault={submitSearch} role="search">
+        <Icon name="search" size={16} />
+        <input
+          type="search"
+          bind:value={searchText}
+          placeholder="Artiste, titre, album…"
+          aria-label="Chercher un autre remplaçant"
+          maxlength="200"
+          enterkeyhint="search" />
+        <button type="submit" class="go" disabled={loading || !searchText.trim()}>Chercher</button>
+      </form>
+
       <div class="body">
         {#if loading}
           <p class="muted pad">Recherche de titres proches…</p>
         {:else if !candidates.length}
           <p class="muted pad">
-            Aucun titre proche trouvé{query ? ` pour « ${query} »` : ""}. Vous pouvez
-            importer votre propre fichier ci-dessous.
+            Aucun titre proche trouvé{query ? ` pour « ${query} »` : ""}, ni sur
+            Deezer ni sur YouTube. Essayez une autre recherche, ou importez votre
+            propre fichier ci-dessous.
           </p>
         {:else}
           <ul class="list">
@@ -228,9 +271,14 @@
           <div class="yt">
             {#if yt === "done"}
               <p class="muted hint">
-                {ytFound
-                  ? `${ytFound} titre${ytFound > 1 ? "s" : ""} trouvé${ytFound > 1 ? "s" : ""} sur YouTube, ajouté${ytFound > 1 ? "s" : ""} à la liste.`
-                  : "Rien de proche sur YouTube non plus."}
+                {#if ytAuto}
+                  Rien sur Deezer : {ytFound > 1 ? `les ${ytFound} titres YouTube les plus proches` : "le titre YouTube le plus proche"},
+                  archivés en Opus (~130 kbit/s) à la première écoute.
+                {:else}
+                  {ytFound
+                    ? `${ytFound} titre${ytFound > 1 ? "s" : ""} trouvé${ytFound > 1 ? "s" : ""} sur YouTube, ajouté${ytFound > 1 ? "s" : ""} à la liste.`
+                    : "Rien de proche sur YouTube non plus."}
+                {/if}
               </p>
             {:else}
               <button class="upload" disabled={busy || yt === "loading"} on:click={searchYoutube}>
@@ -341,6 +389,53 @@
   .close:hover {
     background: var(--bg-hover);
     color: var(--text);
+  }
+  /* The search box sits between the header and the list, outside the
+     scroller: it stays in reach whatever has been scrolled. */
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 18px 10px;
+    padding: 4px 4px 4px 14px;
+    border-radius: 999px;
+    background: var(--bg);
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+  }
+  .search:focus-within {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .search input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: none;
+    outline: none;
+    color: var(--text);
+    font-size: 0.92rem;
+    padding: 7px 0;
+  }
+  .search input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+  }
+  .go {
+    flex: none;
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text);
+    font-weight: 700;
+    font-size: 0.82rem;
+  }
+  .go:hover:not(:disabled) {
+    background: var(--accent);
+    color: #fff;
+  }
+  .go:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .body {
     overflow-y: auto;

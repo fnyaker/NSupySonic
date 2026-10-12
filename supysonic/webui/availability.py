@@ -294,10 +294,9 @@ def match_score(track, c):
     Required: the same title once versions are set aside, the same main artist,
     no version marker the dead track did not have, and a length within 15 s
     when both are known. Then closer is better, and a file on disk (which can
-    never vanish again) wins a tie.
+    never vanish again) wins a tie. A YouTube hit is judged the same way; the
+    route only asks YouTube when nothing from Deezer or the disk is safe.
     """
-    if c.get("source") == "youtube":
-        return None
     core, versions = _title_parts(track.title)
     c_core, c_versions = _title_parts(c.get("title"))
     if not core or core != c_core or c_versions - versions:
@@ -321,14 +320,56 @@ def match_score(track, c):
     return score
 
 
+YOUTUBE_SHOWN = 5
+QUERY_MAX = 200
+
+
+def _core_title(title) -> str:
+    """The title without "(Remastered 2011)", "[Live]", " - Radio Edit" (unfolded)."""
+    t = _BRACKETS_RE.sub(" ", str(title or ""))
+    if " - " in t:
+        t = t.split(" - ", 1)[0]
+    return " ".join(t.split())
+
+
+def closeness(track, c) -> float:
+    """0..1: how close a candidate LOOKS to the dead track, to rank a search.
+
+    Softer than ``match_score`` on purpose — it orders what a person will
+    look at, it does not decide anything: the title's resemblance (the most
+    of it), the artist, then the length.
+    """
+    from difflib import SequenceMatcher
+
+    a, b = _fold(_core_title(track.title)), _fold(_core_title(c.get("title")))
+    title = SequenceMatcher(None, a, b).ratio() if a and b else 0.0
+    artist = _fold(track.artist.name if track.artist else "")
+    credited = 1.0 if artist and artist in _artist_names(c) else 0.0
+    d0, d1 = track.duration or 0, c.get("duration") or 0
+    length = max(0.0, 1.0 - abs(d0 - d1) / 60.0) if d0 and d1 else 0.5
+    return 0.6 * title + 0.3 * credited + 0.1 * length
+
+
+def _youtube_closest(track, query, seen, n=YOUTUBE_SHOWN) -> list:
+    """YouTube's songs for ``query``, the ``n`` closest to the dead track."""
+    from .youtube import search_tracks
+
+    hits = [t for t in search_tracks(query) if t["deezer_id"] not in seen and not t.get("unavailable")]
+    hits.sort(key=lambda t: -closeness(track, t))
+    return hits[:n]
+
+
 @webapi.route("/replace/candidates/<track_id>")
 @login_required
 def replacement_candidates(track_id):
     """Plausible stand-ins for a dead track: same title, same artist, first.
 
     Local files come first — they are on disk, so they can never go away again —
-    then Deezer's own results for "<artist> <title>", with the dead track and
-    anything else we already know to be unavailable filtered out.
+    then Deezer's own results, with the dead track and anything else we already
+    know to be unavailable filtered out. ``q`` replaces the query (the sheet's
+    search box). YouTube is asked when the sheet asks for it (``youtube=1``)
+    AND, without being asked, when Deezer found nothing: the fallback a person
+    would have reached for next. Its five closest songs, never more.
     """
     track = _resolve_local(track_id)
     if track is None:
@@ -336,7 +377,10 @@ def replacement_candidates(track_id):
     if not _may_access_track(track):
         return jsonify({"error": "not found"}), 404
 
-    query = f"{track.artist.name} {track.title}".strip()
+    manual = " ".join(str(request.args.get("q") or "").split())[:QUERY_MAX]
+    # Brackets and " - Remastered" are what a pressing calls itself, not what
+    # the song is called: searching without them finds the other pressings.
+    query = manual or f"{track.artist.name} {_core_title(track.title)}".strip()
     out = []
     seen = {str(track_id)}
 
@@ -345,15 +389,16 @@ def replacement_candidates(track_id):
             continue
         seen.add(t["deezer_id"])
         out.append(t)
-    # "<artist> <title>" is one LIKE against each field, so it never finds the
-    # file you already have of the same song. Its title does — kept only when
-    # the artist is the same, or every song called "Intro" would come first.
-    artist = _fold(track.artist.name if track.artist else "")
-    for t in _local_search_tracks(track.title, 25):
-        if t["deezer_id"] in seen or not artist or artist not in _artist_names(t):
-            continue
-        seen.add(t["deezer_id"])
-        out.append(t)
+    if not manual:
+        # "<artist> <title>" is one LIKE against each field, so it never finds
+        # the file you already have of the same song. Its title does — kept
+        # only when the artist is the same, or every "Intro" would come first.
+        artist = _fold(track.artist.name if track.artist else "")
+        for t in _local_search_tracks(_core_title(track.title) or track.title, 25):
+            if t["deezer_id"] in seen or not artist or artist not in _artist_names(t):
+                continue
+            seen.add(t["deezer_id"])
+            out.append(t)
 
     provider = _provider()
     if provider is not None:
@@ -380,30 +425,35 @@ def replacement_candidates(track_id):
 
     # `best=N`: only the matches safe enough to offer as a ONE-CLICK swap (the
     # library list shows them inline) — same song, same artist, same version,
-    # about the same length — best first. Anything less sure stays behind the
-    # sheet, where it can be auditioned first.
+    # about the same length — best first. YouTube only when nothing from Deezer
+    # or the disk is safe: it is the fallback, here as everywhere.
     best = request.args.get("best")
     if best:
         try:
             n = max(1, min(int(best), 5))
         except ValueError:
             n = 2
-        scored = [(match_score(track, c), i, c) for i, c in enumerate(out)]
-        scored = [s for s in scored if s[0] is not None]
-        scored.sort(key=lambda s: (-s[0], s[1]))
-        return jsonify({"query": query, "candidates": [c for _, _, c in scored[:n]]})
 
-    # YouTube only when asked (the sheet's "search YouTube too"): it is the
-    # fallback, and every search there is a request we would rather not make.
-    if request.args.get("youtube") in ("1", "true"):
-        from .youtube import search_tracks
+        def safest(cands):
+            scored = [(match_score(track, c), i, c) for i, c in enumerate(cands)]
+            scored = [x for x in scored if x[0] is not None]
+            scored.sort(key=lambda x: (-x[0], x[1]))
+            return [c for _, _, c in scored[:n]]
 
-        out += [
-            t
-            for t in search_tracks(query)
-            if t["deezer_id"] not in seen and not t.get("unavailable")
-        ]
-    return jsonify({"query": query, "candidates": out})
+        picked = safest(out)
+        youtube = False
+        if not picked:
+            picked = safest(_youtube_closest(track, query, seen, n=25))
+            youtube = bool(picked)
+        return jsonify({"query": query, "candidates": picked, "youtube": youtube})
+
+    asked = request.args.get("youtube") in ("1", "true")
+    youtube = False
+    if asked or not out:
+        extra = _youtube_closest(track, query, seen)
+        youtube = not asked and bool(extra)  # reached for on its own
+        out += extra
+    return jsonify({"query": query, "candidates": out, "youtube_auto": youtube})
 
 
 # -- replacement ------------------------------------------------------------
@@ -510,6 +560,53 @@ def replace_track():
     return jsonify({"ok": True, "job": job_id})
 
 
+def replace_everywhere(app, source, target, user_id, admin):
+    """Put ``target`` wherever ``source`` is; ``(playlists, favorites)`` touched.
+
+    Only playlists the caller may edit (their own; every one for an admin) and
+    their favourites (everyone's for an admin). Mirrored to Deezer for the
+    admin, fail-soft; the source row is retired when nothing uses it any more.
+    Shared by a person's replacement and the auto-match.
+    """
+    rows = (
+        PlaylistTrack.select(PlaylistTrack, Playlist)
+        .join(Playlist, on=(PlaylistTrack.playlist == Playlist.id))
+        .where(PlaylistTrack.track == source.id)
+    )
+    if not admin:
+        rows = rows.where(Playlist.user == user_id)
+
+    touched = set()
+    favorites = 0
+    with db.atomic():
+        for row in rows:
+            # In place, at the same position: a replacement must not
+            # reshuffle the playlist it repairs.
+            PlaylistTrack.update(track=target.id).where(
+                (PlaylistTrack.playlist == row.playlist_id)
+                & (PlaylistTrack.track == source.id)
+            ).execute()
+            touched.add(row.playlist_id)
+
+        # Favorites: whoever starred the dead track gets the new one.
+        starred = StarredTrack.select().where(StarredTrack.starred == source.id)
+        if not admin:
+            starred = starred.where(StarredTrack.user == user_id)
+        for star in starred:
+            exists = StarredTrack.get_or_none(
+                (StarredTrack.user == star.user_id)
+                & (StarredTrack.starred == target.id)
+            )
+            if exists is None:
+                StarredTrack.create(user=star.user_id, starred=target.id)
+            star.delete_instance()
+            favorites += 1
+
+    _mirror_to_deezer(app, source, target, touched, admin)
+    _retire_replaced(source)
+    return len(touched), favorites
+
+
 def _run_replace(app, job_id, source_id, target_id, user_id, admin):
     """Worker: rewrite playlists and favorites, then mirror to Deezer."""
     from ..db import close_connection, open_connection
@@ -523,45 +620,7 @@ def _run_replace(app, job_id, source_id, target_id, user_id, admin):
             if source is None or target is None:
                 _finish_job(job_id, ok=False, error="track vanished")
                 return
-
-            # Only playlists the caller may edit: their own, and (for an admin)
-            # every one. A replacement must never rewrite someone else's list.
-            rows = (
-                PlaylistTrack.select(PlaylistTrack, Playlist)
-                .join(Playlist, on=(PlaylistTrack.playlist == Playlist.id))
-                .where(PlaylistTrack.track == source.id)
-            )
-            if not admin:
-                rows = rows.where(Playlist.user == user_id)
-
-            touched = set()
-            with db.atomic():
-                for row in rows:
-                    # In place, at the same position: a replacement must not
-                    # reshuffle the playlist it repairs.
-                    PlaylistTrack.update(track=target.id).where(
-                        (PlaylistTrack.playlist == row.playlist_id)
-                        & (PlaylistTrack.track == source.id)
-                    ).execute()
-                    touched.add(row.playlist_id)
-                playlists = len(touched)
-
-                # Favorites: whoever starred the dead track gets the new one.
-                starred = StarredTrack.select().where(StarredTrack.starred == source.id)
-                if not admin:
-                    starred = starred.where(StarredTrack.user == user_id)
-                for star in starred:
-                    exists = StarredTrack.get_or_none(
-                        (StarredTrack.user == star.user_id)
-                        & (StarredTrack.starred == target.id)
-                    )
-                    if exists is None:
-                        StarredTrack.create(user=star.user_id, starred=target.id)
-                    star.delete_instance()
-                    favorites += 1
-
-            _mirror_to_deezer(app, source, target, touched, admin)
-            _retire_replaced(source)
+            playlists, favorites = replace_everywhere(app, source, target, user_id, admin)
             _finish_job(job_id, ok=True, playlists=playlists, favorites=favorites)
     except Exception as exc:
         logger.warning("Replacing %s failed", source_id, exc_info=True)
