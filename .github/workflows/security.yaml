@@ -112,14 +112,14 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: aquasecurity/trivy-action@v0.33.1
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret,misconfig
-          skip-dirs: webapp/node_modules,supysonic/webui/dist
-          format: sarif
-          output: trivy.sarif
+      # The official image rather than aquasecurity/trivy-action, whose setup
+      # step could not fetch the binary on the runner.
+      - name: Scan
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:latest fs . \
+            --scanners vuln,secret,misconfig \
+            --skip-dirs webapp/node_modules --skip-dirs supysonic/webui/dist \
+            --format sarif --output trivy.sarif
       - uses: github/codeql-action/upload-sarif@v3
         if: always() && hashFiles('trivy.sarif') != ''
         with:
