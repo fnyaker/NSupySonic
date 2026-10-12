@@ -179,9 +179,17 @@ test("the Rust scope is faster than the JavaScript it replaced", () => {
     for (let i = 0; i < 3000; i++) scene.update(frames[i & 255], 1 / 94);
     return Number(process.hrtime.bigint() - t0) / 1000 / 3000;
   };
-  const js = time(refScope({ preset }));
+  // Best of several rounds, alternating the two: one pass each let a noisy
+  // neighbour on a shared CI runner land on one side only (74 us against 91
+  // measured there, where a quiet machine reads 42 against 71).
+  const ref = refScope({ preset });
   const b = createScopeScene({ preset, core });
-  const rust = time(b);
+  let js = Infinity;
+  let rust = Infinity;
+  for (let round = 0; round < 5; round++) {
+    js = Math.min(js, time(ref));
+    rust = Math.min(rust, time(b));
+  }
   b.dispose();
   console.log(`# scope update, high tier: JavaScript ${js.toFixed(1)} us, Rust ${rust.toFixed(1)} us`);
   assert.ok(rust < js * 0.8, `Rust ${rust.toFixed(1)} us against JavaScript ${js.toFixed(1)} us`);
