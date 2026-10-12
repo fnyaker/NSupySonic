@@ -263,7 +263,7 @@ def _run_job(app, job):
                         job["stopped"] = "Deezer is unreachable: stopped, nothing was decided"
                     break
                 logger.warning("Auto-match of %s failed", tid, exc_info=True)
-                out = {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+                out = {"status": "error", "reason": am.cause(exc)}
             with _state_lock:
                 job["done"] += 1
                 st = out.get("status", "error")

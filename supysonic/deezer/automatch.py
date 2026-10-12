@@ -74,6 +74,19 @@ class Verdict:
     tried: list = field(default_factory=list)  # [(candidate label, score or cause)]
 
 
+# -- causes ----------------------------------------------------------------------
+
+_URL_RE = re.compile(r"(https?)://([^/\s'\"]+)[^\s'\"]*", re.IGNORECASE)
+
+
+def cause(exc, prefix: str = "") -> str:
+    """An exception as a cause a report may carry: its type and message, with
+    every URL cut down to its host — a Deezer stream URL carries a signed
+    token, and this text ends up in a JSON report and on the admin's screen."""
+    text = _URL_RE.sub(lambda m: f"{m.group(1)}://{m.group(2)}/…", str(exc))
+    return (prefix + f"{type(exc).__name__}: {text}")[:200]
+
+
 # -- names -------------------------------------------------------------------------
 
 _BRACKETS_RE = re.compile(r"[\(\[][^\)\]]*[\)\]]")
@@ -161,7 +174,7 @@ def reference_url(provider, deezer_id) -> tuple[str | None, str]:
     except Exception as exc:
         if is_transport_failure(exc):
             raise  # not a verdict: the caller tries again later
-        return None, f"Deezer refused the lookup: {exc}"
+        return None, cause(exc, "Deezer refused the lookup: ")
     url = data.get("preview") or ""
     if not url:
         return None, "Deezer serves no preview for it"
@@ -266,7 +279,7 @@ def decide(provider, track: Track, archive_dir: str, *, youtube_enabled=False,
         except Exception as exc:
             if is_transport_failure(exc):
                 raise
-            return Verdict("no_reference", f"preview unreadable: {exc}")
+            return Verdict("no_reference", cause(exc, "preview unreadable: "))
 
         def hear(c: Candidate, samples) -> float:
             score, _, overlap = audiomatch.match(ref, samples)
@@ -276,7 +289,7 @@ def decide(provider, track: Track, archive_dir: str, *, youtube_enabled=False,
             return score
 
         def fail(c: Candidate, exc) -> None:
-            verdict.tried.append((_label(c), f"{type(exc).__name__}: {exc}"[:200]))
+            verdict.tried.append((_label(c), cause(exc)))
 
         # 1. On disk.
         for c in _rank(track, [c for c in local_candidates(track) if plausible(track, c)]):
@@ -293,7 +306,7 @@ def decide(provider, track: Track, archive_dir: str, *, youtube_enabled=False,
             if is_transport_failure(exc):
                 raise
             found = []
-            verdict.tried.append(("deezer:search", f"{type(exc).__name__}: {exc}"[:200]))
+            verdict.tried.append(("deezer:search", cause(exc)))
         found = [c for c in found if c.id not in dead and plausible(track, c)]
         for c in _rank(track, found)[:DEEZER_CANDIDATES]:
             try:
@@ -319,7 +332,7 @@ def decide(provider, track: Track, archive_dir: str, *, youtube_enabled=False,
                 yfound = [c for c in youtube_candidates(track, store) if plausible(track, c)]
             except yt.YoutubeError as exc:
                 yfound = []
-                verdict.tried.append(("youtube:search", str(exc)[:200]))
+                verdict.tried.append(("youtube:search", cause(exc)))
             for c in _rank(track, yfound)[:YOUTUBE_CANDIDATES]:
                 try:
                     c.path = yt.download_audio(c.id, tempfile.mkdtemp(dir=work))

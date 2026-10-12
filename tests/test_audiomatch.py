@@ -287,3 +287,20 @@ class DecideTestCase(_Material):
         for url in ("http://cdnt-preview.dzcdn.net/a.mp3", "https://dzcdn.net.evil.com/a",
                     "https://127.0.0.1/a.mp3", "file:///etc/passwd", "https://evil.com/dzcdn.net"):
             self.assertFalse(_preview_url_ok(url), url)
+
+
+class CauseTestCase(unittest.TestCase):
+    def test_a_cause_never_carries_a_url_past_its_host(self):
+        """A failed stream names its URL, and a Deezer stream URL is signed."""
+        from supysonic.deezer.automatch import cause
+
+        exc = ConnectionError(
+            "HTTPSConnectionPool(host='e-cdns-proxy-1.dzcdn.net'): Max retries exceeded with url: "
+            "https://e-cdns-proxy-1.dzcdn.net/mobile/1/abc?hdnea=exp=1;acl=/*;hmac=SECRET99 (timed out)"
+        )
+        text = cause(exc, "stream: ")
+        self.assertNotIn("SECRET99", text)
+        self.assertNotIn("hdnea", text)
+        self.assertIn("https://e-cdns-proxy-1.dzcdn.net/…", text)
+        self.assertTrue(text.startswith("stream: ConnectionError: "))
+        self.assertLessEqual(len(cause(ValueError("x" * 999))), 200)
