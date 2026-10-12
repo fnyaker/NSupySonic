@@ -428,6 +428,18 @@ inconclusive network answer → refuse. Only `TrackUnavailable` with no file, or
 file is gone, authorises it. Scoped like a replacement (own playlists/favourites; an admin also drops
 the row, `recursive=True`) and mirrored to Deezer for the admin, fail-soft.
 
+**The "Indisponibles" list is built for clearing out** (`components/UnavailableList.svelte`,
+`lib/replace.js`). Tick several (shift-click for a range) and `POST /api/tracks/delete` (≤ 200 ids)
+deletes them in ONE job that runs `verify_gone` per track in the worker (a Deezer call each, never
+in the request thread) and reports `deleted` / `kept: [{id, reason}]`: a selection is no way round
+the re-check. On a desktop each row also shows up to two ONE-CLICK stand-ins,
+`/replace/candidates/<id>?best=2` → `match_score`: same title once brackets and " - …" are set
+aside, the same main artist, no version word the dead track did not have (remix, live, edit,
+acoustic…), a length within 15 s; never YouTube. Anything less sure stays behind "Autres choix" (the
+sheet, where it can be auditioned). Fetched only for rows near the viewport, two at a time. The
+candidates also search the local library by TITLE (artist checked): the `"<artist> <title>"` query
+is one LIKE per field and never found the copy you already had.
+
 **An archived track carries its whole identity on disk**, which is what makes the above safe:
 `_finalize_archive` writes the audio, `cover.jpg`, the `.lrc` lyrics, the file tags, **refreshes the
 DB row from the authoritative `song.getData` payload** (`library.refresh_track_metadata` — rows are

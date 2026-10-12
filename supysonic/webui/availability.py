@@ -19,6 +19,7 @@ good.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import uuid as uuidlib
 from datetime import timedelta
@@ -239,6 +240,87 @@ def _archived_track_api(t: Track) -> dict:
     }
 
 
+def _fold(text) -> str:
+    """Case, accents and punctuation dropped: "Beyoncé - Halo!" → "beyonce halo"."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFKD", str(text or "")).lower()
+    s = "".join(ch if ch.isalnum() else " " for ch in s if not unicodedata.combining(ch))
+    return " ".join(s.split())
+
+
+_BRACKETS_RE = re.compile(r"[\(\[][^\)\]]*[\)\]]")
+# A word that makes a recording a DIFFERENT recording of the song. A swap to one
+# of those is a decision for somebody who listened, not a one-click default.
+_VERSION_WORDS = frozenset(
+    "remix live edit acoustic instrumental karaoke cover demo rework bootleg "
+    "vip extended club dub sped slowed nightcore reprise orchestral unplugged "
+    "cappella acapella".split()
+)
+
+
+def _title_parts(title):
+    """``(core, version words)`` of a title."""
+    raw = str(title or "")
+    extras = " ".join(_BRACKETS_RE.findall(raw))
+    core = _BRACKETS_RE.sub(" ", raw)
+    if " - " in core:
+        core, tail = core.split(" - ", 1)
+        extras += " " + tail
+    words = set(_fold(extras).split())
+    # "Remastered", "Radio", "Album version"… name a pressing, not another
+    # recording: only the words above count.
+    versions = words & _VERSION_WORDS
+    return _fold(core), versions
+
+
+_CREDIT_SPLIT_RE = re.compile(r",|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b", re.IGNORECASE)
+
+
+def _artist_names(c) -> set:
+    """Every credited name of a candidate, one by one, folded."""
+    names = {_fold(a.get("name")) for a in (c.get("artists") or []) if isinstance(a, dict)}
+    if isinstance(c.get("artist"), dict):
+        names.add(_fold(c["artist"].get("name")))
+    for part in _CREDIT_SPLIT_RE.split(str(c.get("display_artist") or "")):
+        names.add(_fold(part))
+    names.discard("")
+    return names
+
+
+def match_score(track, c):
+    """How safely ``c`` stands in for ``track``; None when it must not be offered.
+
+    Required: the same title once versions are set aside, the same main artist,
+    no version marker the dead track did not have, and a length within 15 s
+    when both are known. Then closer is better, and a file on disk (which can
+    never vanish again) wins a tie.
+    """
+    if c.get("source") == "youtube":
+        return None
+    core, versions = _title_parts(track.title)
+    c_core, c_versions = _title_parts(c.get("title"))
+    if not core or core != c_core or c_versions - versions:
+        return None
+    artist = _fold(track.artist.name if track.artist else "")
+    if not artist or artist not in _artist_names(c):
+        return None  # another artist's take is a cover: not a one-click swap
+    score = 10.0
+    if versions == c_versions:
+        score += 2
+    if _fold(c.get("title")) == _fold(track.title):
+        score += 1
+    d0, d1 = track.duration or 0, c.get("duration") or 0
+    if d0 and d1:
+        delta = abs(d0 - d1)
+        if delta > 15:
+            return None
+        score += 3 - delta / 5
+    if c.get("local"):
+        score += 0.5
+    return score
+
+
 @webapi.route("/replace/candidates/<track_id>")
 @login_required
 def replacement_candidates(track_id):
@@ -260,6 +342,15 @@ def replacement_candidates(track_id):
 
     for t in _local_search_tracks(query, 10):
         if t["deezer_id"] in seen:
+            continue
+        seen.add(t["deezer_id"])
+        out.append(t)
+    # "<artist> <title>" is one LIKE against each field, so it never finds the
+    # file you already have of the same song. Its title does — kept only when
+    # the artist is the same, or every song called "Intro" would come first.
+    artist = _fold(track.artist.name if track.artist else "")
+    for t in _local_search_tracks(track.title, 25):
+        if t["deezer_id"] in seen or not artist or artist not in _artist_names(t):
             continue
         seen.add(t["deezer_id"])
         out.append(t)
@@ -286,6 +377,21 @@ def replacement_candidates(track_id):
         )
     }
     out = [t for t in out if t["deezer_id"] not in dead][:30]
+
+    # `best=N`: only the matches safe enough to offer as a ONE-CLICK swap (the
+    # library list shows them inline) — same song, same artist, same version,
+    # about the same length — best first. Anything less sure stays behind the
+    # sheet, where it can be auditioned first.
+    best = request.args.get("best")
+    if best:
+        try:
+            n = max(1, min(int(best), 5))
+        except ValueError:
+            n = 2
+        scored = [(match_score(track, c), i, c) for i, c in enumerate(out)]
+        scored = [s for s in scored if s[0] is not None]
+        scored.sort(key=lambda s: (-s[0], s[1]))
+        return jsonify({"query": query, "candidates": [c for _, _, c in scored[:n]]})
 
     # YouTube only when asked (the sheet's "search YouTube too"): it is the
     # fallback, and every search there is a request we would rather not make.
@@ -344,6 +450,9 @@ def _finish_job(job_id: str, **fields) -> None:
 def replace_status(job_id):
     with _jobs_lock:
         job = _jobs.get(str(job_id))
+        # A snapshot: a bulk job's lists are appended to by its worker.
+        if job is not None:
+            job = {k: list(v) if isinstance(v, list) else v for k, v in job.items()}
     if job is None:
         return jsonify({"error": "unknown job"}), 404
     return jsonify(job)
@@ -554,6 +663,59 @@ def delete_track(track_id):
     return jsonify({"ok": True, "job": job_id, "reason": reason})
 
 
+def _remove_everywhere(app, track, user_id, admin):
+    """Unpick ``track`` from the caller's lists, drop the row (admin), mirror.
+
+    Returns ``(playlists, favorites)`` touched. Shared by the single and the
+    bulk deletion: the scope rules are the same for one track or two hundred.
+    """
+    deezer_id = track.deezer_id
+
+    rows = (
+        PlaylistTrack.select(PlaylistTrack, Playlist)
+        .join(Playlist, on=(PlaylistTrack.playlist == Playlist.id))
+        .where(PlaylistTrack.track == track.id)
+    )
+    if not admin:
+        rows = rows.where(Playlist.user == user_id)
+    touched = {row.playlist_id for row in rows}
+    # Collected BEFORE the row goes: once the track is deleted the
+    # PlaylistTrack links are gone and there is nothing left to mirror.
+    mirrored = [
+        pl.deezer_id
+        for pl in Playlist.select().where(Playlist.id.in_(list(touched)))
+        if pl.deezer_id
+    ] if touched else []
+
+    with db.atomic():
+        for pid in touched:
+            pl = Playlist.get_or_none(Playlist.id == pid)
+            if pl is None:
+                continue
+            # Through the model, not a raw delete: the playlist keeps a
+            # contiguous index, which every ordering read depends on.
+            indexes = [
+                i for i, t in enumerate(pl.get_tracks()) if t.id == track.id
+            ]
+            if indexes:
+                pl.remove_at_indexes(indexes)
+
+        starred = StarredTrack.select().where(StarredTrack.starred == track.id)
+        if not admin:
+            starred = starred.where(StarredTrack.user == user_id)
+        favorites = starred.count()
+        for star in starred:
+            star.delete_instance()
+
+        if admin:
+            # recursive: the ArtistCredit rows, ratings and any
+            # remaining starred/playlist links go with it.
+            track.delete_instance(recursive=True)
+
+    _purge_on_deezer(app, deezer_id, mirrored, admin)
+    return len(touched), favorites
+
+
 def _run_delete(app, job_id, track_id, user_id, admin):
     """Worker: unpick the track from everything, then drop the row (admin)."""
     from ..db import close_connection, open_connection
@@ -566,57 +728,118 @@ def _run_delete(app, job_id, track_id, user_id, admin):
             if track is None:
                 _finish_job(job_id, ok=True)  # someone got there first
                 return
-            deezer_id = track.deezer_id
-
-            rows = (
-                PlaylistTrack.select(PlaylistTrack, Playlist)
-                .join(Playlist, on=(PlaylistTrack.playlist == Playlist.id))
-                .where(PlaylistTrack.track == track.id)
-            )
-            if not admin:
-                rows = rows.where(Playlist.user == user_id)
-            touched = {row.playlist_id for row in rows}
-            # Collected BEFORE the row goes: once the track is deleted the
-            # PlaylistTrack links are gone and there is nothing left to mirror.
-            mirrored = [
-                pl.deezer_id
-                for pl in Playlist.select().where(Playlist.id.in_(list(touched)))
-                if pl.deezer_id
-            ] if touched else []
-
-            with db.atomic():
-                for pid in touched:
-                    pl = Playlist.get_or_none(Playlist.id == pid)
-                    if pl is None:
-                        continue
-                    # Through the model, not a raw delete: the playlist keeps a
-                    # contiguous index, which every ordering read depends on.
-                    indexes = [
-                        i for i, t in enumerate(pl.get_tracks()) if t.id == track.id
-                    ]
-                    if indexes:
-                        pl.remove_at_indexes(indexes)
-                playlists = len(touched)
-
-                starred = StarredTrack.select().where(StarredTrack.starred == track.id)
-                if not admin:
-                    starred = starred.where(StarredTrack.user == user_id)
-                favorites = starred.count()
-                for star in starred:
-                    star.delete_instance()
-
-                if admin:
-                    # recursive: the ArtistCredit rows, ratings and any
-                    # remaining starred/playlist links go with it.
-                    track.delete_instance(recursive=True)
-
-            _purge_on_deezer(app, deezer_id, mirrored, admin)
+            playlists, favorites = _remove_everywhere(app, track, user_id, admin)
             _finish_job(job_id, ok=True, playlists=playlists, favorites=favorites)
     except Exception as exc:
         logger.warning("Deleting %s failed", track_id, exc_info=True)
         _finish_job(
             job_id, ok=False, error=str(exc), playlists=playlists, favorites=favorites
         )
+    finally:
+        try:
+            close_connection()
+        except Exception:
+            pass
+
+
+# -- deleting a selection ----------------------------------------------------
+# The library's "Indisponibles" list lets you tick several dead tracks and drop
+# them at once. Same guarantee as one at a time — every track is re-checked
+# against BOTH sources at the moment it goes, and one that turns out to be
+# playable is kept and reported — but the checks are a Deezer call each, so
+# they run in the worker, never in the request thread.
+
+BULK_DELETE_MAX = 200
+
+
+@webapi.route("/tracks/delete", methods=["POST"])
+@login_required
+def delete_tracks():
+    data = request.get_json(silent=True) or {}
+    ids = data.get("ids")
+    if not isinstance(ids, list) or not ids or len(ids) > BULK_DELETE_MAX:
+        return jsonify({"error": "invalid ids"}), 400
+
+    todo = []  # (universal id, Track.id)
+    missing = []
+    seen = set()
+    for raw in ids:
+        uid = str(raw or "")
+        if not uid or len(uid) > 64 or uid in seen:
+            continue
+        seen.add(uid)
+        if not _valid_id(uid):
+            try:
+                uuidlib.UUID(uid)
+            except ValueError:
+                missing.append(uid)
+                continue
+            row = Track.get_or_none(Track.id == uuidlib.UUID(uid))
+        else:
+            from ..deezer import archive
+
+            row = archive.find_local_track(uid)
+        if row is None or not _may_access_track(row):
+            missing.append(uid)
+            continue
+        todo.append((uid, row.id))
+    if not todo:
+        return jsonify({"error": "not found"}), 404
+
+    job_id = _new_job("delete-many")
+    with _jobs_lock:
+        _jobs[job_id].update(
+            total=len(todo), done=0, deleted=[], kept=[], missing=missing
+        )
+    app = current_app._get_current_object()
+    threading.Thread(
+        target=_run_delete_many,
+        args=(app, job_id, todo, request.webuser.id, _is_admin()),
+        name="track-delete-many",
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True, "job": job_id, "total": len(todo)})
+
+
+def _run_delete_many(app, job_id, todo, user_id, admin):
+    from ..db import close_connection, open_connection
+
+    playlists = favorites = 0
+    try:
+        with app.app_context():
+            open_connection(reuse=True)
+            for uid, row_id in todo:
+                outcome = None
+                try:
+                    track = Track.get_or_none(Track.id == row_id)
+                    if track is None:
+                        outcome = ("deleted", None)  # someone got there first
+                    else:
+                        gone, reason = verify_gone(track, uid)
+                        if not gone:
+                            outcome = ("kept", reason)
+                        else:
+                            p, f = _remove_everywhere(app, track, user_id, admin)
+                            playlists += p
+                            favorites += f
+                            outcome = ("deleted", None)
+                except Exception:
+                    logger.warning("Deleting %s failed", uid, exc_info=True)
+                    outcome = ("kept", "error")
+                with _jobs_lock:
+                    job = _jobs.get(job_id)
+                    if job is not None:
+                        if outcome[0] == "deleted":
+                            job["deleted"].append(uid)
+                        else:
+                            job["kept"].append({"id": uid, "reason": outcome[1]})
+                        job["done"] += 1
+                        job["playlists"] = playlists
+                        job["favorites"] = favorites
+            _finish_job(job_id, ok=True)
+    except Exception as exc:
+        logger.warning("Bulk deletion failed", exc_info=True)
+        _finish_job(job_id, ok=False, error=str(exc))
     finally:
         try:
             close_connection()

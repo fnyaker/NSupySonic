@@ -14,11 +14,15 @@
     closeReplace,
     toasts,
     clearUnavailable,
-    unavailableChanged,
-    quality,
-    normalization,
   } from "../lib/stores.js";
   import { invalidatePlaylists, loadFavorites } from "../lib/actions.js";
+  import {
+    previewing,
+    togglePreview,
+    stopPreview,
+    applyReplacement,
+    watchJob,
+  } from "../lib/replace.js";
   import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
@@ -80,54 +84,10 @@
     }
   }
 
-  // -- preview ---------------------------------------------------------------
-  // Same pipeline as the player: the /api/stream URL at the quality you listen
-  // at, and the same loudness normalization, so what you audition is what you
-  // will get. Deliberately its OWN element — auditioning a replacement must not
-  // hijack (or be hijacked by) whatever is playing.
-  let previewEl = null;
-  let previewId = null;
-
-  function preview(track) {
-    if (previewId === track.deezer_id) {
-      stopPreview();
-      return;
-    }
-    stopPreview();
-    const el = new Audio();
-    el.src = api.streamUrl(track.deezer_id, $quality);
-    el.preload = "auto";
-    // Match the player's static normalization so a candidate doesn't merely
-    // sound louder than the rest of your library and win on that.
-    el.volume = 1;
-    if ($normalization !== "off" && typeof track.gain === "number")
-      el.volume = Math.max(0, Math.min(1, Math.pow(10, track.gain / 20)));
-    el.addEventListener("ended", stopPreview);
-    el.addEventListener("error", () => {
-      toasts.push("Lecture impossible pour ce titre", "error");
-      stopPreview();
-    });
-    el.play().catch(() => {
-      toasts.push("Lecture impossible pour ce titre", "error");
-      stopPreview();
-    });
-    previewEl = el;
-    previewId = track.deezer_id;
-  }
-
-  function stopPreview() {
-    if (previewEl) {
-      try {
-        previewEl.pause();
-        previewEl.removeAttribute("src");
-        previewEl.load();
-      } catch {
-        /* ignore */
-      }
-    }
-    previewEl = null;
-    previewId = null;
-  }
+  // The audition element is shared with the library's inline suggestions
+  // (lib/replace.js): starting one stops the other.
+  $: previewId = $previewing;
+  const preview = togglePreview;
 
   function teardown() {
     stopPreview();
@@ -143,48 +103,8 @@
   async function replaceWith(candidate) {
     if (busy || !target) return;
     busy = true;
-    stopPreview();
-    try {
-      const r = await api.replaceTrack(target.deezer_id, candidate.deezer_id);
-      // The dead track is gone from your library, so drop its badge; the
-      // stand-in is playable, so make sure it doesn't inherit one.
-      clearUnavailable(target.deezer_id);
-      invalidatePlaylists();
-      loadFavorites(true);
-      toasts.push(`« ${candidate.title} » remplace le titre indisponible`);
-      closeReplace();
-      if (r?.job) watch(r.job);
-    } catch (e) {
-      toasts.push(e?.message || "Le remplacement a échoué", "error");
-      busy = false;
-    }
-  }
-
-  // The rewrite runs server-side; poll just long enough to report the outcome.
-  async function watch(job, failure = "Le remplacement a échoué côté serveur") {
-    for (let i = 0; i < 40; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      let s;
-      try {
-        s = await api.replaceStatus(job);
-      } catch {
-        return;
-      }
-      if (s.running) continue;
-      if (s.ok) {
-        // Only NOW is the database actually in its new state — the swap runs in
-        // a worker thread. Anything showing the unavailable list re-reads it.
-        unavailableChanged();
-        const bits = [];
-        if (s.playlists) bits.push(`${s.playlists} playlist${s.playlists > 1 ? "s" : ""}`);
-        if (s.favorites) bits.push("favoris");
-        if (bits.length) toasts.push("Mis à jour dans " + bits.join(" et "));
-        invalidatePlaylists();
-      } else {
-        toasts.push(failure, "error");
-      }
-      return;
-    }
+    if (await applyReplacement(target, candidate)) closeReplace();
+    else busy = false;
   }
 
   // -- your own file ---------------------------------------------------------
@@ -231,7 +151,7 @@
       loadFavorites(true);
       toasts.push(`« ${target.title} » retiré de la bibliothèque`);
       closeReplace();
-      if (r?.job) watch(r.job, "La suppression a échoué côté serveur");
+      if (r?.job) watchJob(r.job, "La suppression a échoué côté serveur");
     } catch (e) {
       // The one error worth spelling out: the track turned out to be playable.
       toasts.push(

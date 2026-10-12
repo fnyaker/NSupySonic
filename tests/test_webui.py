@@ -1439,6 +1439,112 @@ class WebUITestCase(unittest.TestCase):
         self._login()
         self.assertEqual(self.client.delete("/api/track/999999").status_code, 404)
 
+    def test_a_selection_is_deleted_track_by_track_with_the_same_checks(self):
+        """Ticking several tracks is not a way round the re-check: the one that
+        is gone goes, the archived one and the playable one stay — each with
+        its reason — in one job."""
+        from supysonic.db import Track
+        from supysonic.deezer.provider import TrackUnavailable
+
+        gone = self._make_deezer_track(sng_id="80", title="Gone", archived=False)
+        safe = self._make_deezer_track(sng_id="81", title="Safe", archived=True)
+        alive = self._make_deezer_track(sng_id="82", title="Alive", archived=False)
+        Track.update(unavailable=now()).execute()
+
+        def resolve(track_id, *a, **k):
+            if str(track_id) == "80":
+                raise TrackUnavailable("no source")
+            return {"url": "https://example/audio"}
+
+        provider = self.app.deezer
+        orig = provider.resolve
+        provider.resolve = resolve
+        try:
+            self._login()
+            rv = self.client.post(
+                "/api/tracks/delete", json={"ids": ["80", "81", "82", "999999", "80"]}
+            )
+            self.assertEqual(rv.status_code, 200, rv.get_json())
+            self.assertEqual(rv.get_json()["total"], 3)
+            status = self._await_job(rv.get_json()["job"])
+        finally:
+            provider.resolve = orig
+
+        self.assertTrue(status["ok"], status)
+        self.assertEqual((status["done"], status["deleted"]), (3, ["80"]))
+        self.assertEqual(
+            sorted((k["id"], k["reason"]) for k in status["kept"]),
+            [("81", "archived"), ("82", "playable")],
+        )
+        self.assertEqual(status["missing"], ["999999"])
+        self.assertIsNone(Track.get_or_none(Track.id == gone.id))
+        self.assertIsNotNone(Track.get_or_none(Track.id == safe.id))
+        self.assertIsNotNone(Track.get_or_none(Track.id == alive.id))
+
+    def test_a_selection_delete_rejects_nonsense(self):
+        self._login()
+        post = lambda ids: self.client.post("/api/tracks/delete", json={"ids": ids})
+        self.assertEqual(post([]).status_code, 400)
+        self.assertEqual(post("80").status_code, 400)
+        self.assertEqual(post(["1"] * 201).status_code, 400)
+        self.assertEqual(post(["../etc", "not-a-uuid"]).status_code, 404)
+
+    def test_one_click_suggestions_are_only_the_same_recording(self):
+        """`best` is what the library offers inline, to be applied in one
+        click without listening: same song, same artist, same version, same
+        length. A remix, a cover or a live take is left to the sheet."""
+        from types import SimpleNamespace as NS
+        from supysonic.webui.availability import match_score
+
+        dead = NS(title="Halo (Remastered)", duration=261, artist=NS(name="Beyoncé"))
+
+        def cand(title, artist="Beyonce", duration=262, **kw):
+            return {"title": title, "duration": duration,
+                    "artists": [{"name": artist}], **kw}
+
+        same = match_score(dead, cand("Halo"))
+        self.assertIsNotNone(same)
+        self.assertIsNotNone(match_score(dead, cand("HALO", display_artist="Beyoncé, Jay-Z", artist="Jay-Z")))
+        self.assertIsNone(match_score(dead, cand("Halo (Remix)")))
+        self.assertIsNone(match_score(dead, cand("Halo - Live")))
+        self.assertIsNone(match_score(dead, cand("Halo", artist="Some Cover Band")))
+        self.assertIsNone(match_score(dead, cand("Halo", duration=300)))
+        self.assertIsNone(match_score(dead, cand("Halo Again")))
+        self.assertIsNone(match_score(dead, cand("Halo", source="youtube")))
+        # Closer in length ranks higher; a file on disk wins a tie.
+        self.assertGreater(same, match_score(dead, cand("Halo", duration=272)))
+        self.assertGreater(match_score(dead, cand("Halo", local=True)), same)
+
+    def test_best_candidates_keep_only_safe_matches(self):
+        from supysonic.db import Track
+
+        dead = self._make_deezer_track(sng_id="60", title="Song", archived=False)
+        Track.update(unavailable=now()).where(Track.id == dead.id).execute()
+        # Another pressing already on disk: found by its title (the "<artist>
+        # <title>" query matches no single field), and first — it can never
+        # vanish again.
+        self._make_deezer_track(sng_id="66", title="Song", archived=True)
+
+        def hit(sng_id, title, artist="Archived Artist", duration=200):
+            return {"id": int(sng_id), "title": title, "duration": duration,
+                    "artist": {"id": 500, "name": artist},
+                    "album": {"id": 600, "title": "Album", "cover_medium": ""}}
+
+        api = self.app.deezer.dz.api
+        orig = api.search
+        api.search = lambda *a, **k: {"data": [
+            hit("60", "Song"), hit("62", "Song (Remix)"), hit("63", "Song", "Other"),
+            hit("64", "Song", duration=230), hit("61", "Song"), hit("65", "Song", duration=204),
+        ]}
+        try:
+            self._login()
+            body = self.client.get("/api/replace/candidates/60?best=2").get_json()
+        finally:
+            api.search = orig
+        # Never itself, never the remix / the other artist / 30 s longer; the
+        # one on disk, then the exact length; the one 4 s off is third.
+        self.assertEqual([c["deezer_id"] for c in body["candidates"]], ["66", "61"])
+
     # What a deletion or a replacement does to the admin's REAL Deezer account.
     # Nothing else in the app writes to a third party on the user's behalf, and
     # these calls ran in no test: a wrong id here edits somebody's playlists.

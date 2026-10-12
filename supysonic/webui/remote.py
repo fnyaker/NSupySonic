@@ -208,6 +208,7 @@ POLICY = {
     "delete_local": "full",
     "replace_track": "full",
     "delete_track": "full",
+    "delete_tracks": "full",
     "export_zip": "full",
     "share_file": "full",
     "share_clip": "full",

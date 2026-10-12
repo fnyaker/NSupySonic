@@ -527,6 +527,9 @@ export const api = {
   // there, cached a day by the server.
   replacementCandidates: (id, { youtube = false } = {}) =>
     req("/replace/candidates/" + id + (youtube ? "?youtube=1" : "")),
+  // Only the matches safe enough to apply in one click (same song, artist,
+  // version and length), best first — what the library list shows inline.
+  bestReplacements: (id, n = 2) => req("/replace/candidates/" + id + "?best=" + n),
   replaceTrack: (from, to) =>
     req("/replace", { method: "POST", body: body({ from, to }) }),
   replaceStatus: (job) => req("/replace/status/" + job),
@@ -534,6 +537,9 @@ export const api = {
   // re-checks both before it removes anything, and answers 409 if either one
   // still has it — "gone from Deezer" is not "gone".
   deleteTrack: (id) => req("/track/" + id, { method: "DELETE" }),
+  // The same, for a selection (≤ 200): one job, each track re-checked in turn;
+  // the job reports `deleted` ids and `kept` [{id, reason}].
+  deleteTracks: (ids) => req("/tracks/delete", { method: "POST", body: body({ ids }) }),
 
   // Build identity of the served app (+ the Android release it expects).
   version: () => req("/version"),

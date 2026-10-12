@@ -9,7 +9,6 @@
     syncing,
     downloads,
     openExport,
-    openReplace,
     resolvedUnavailable,
     unavailableVersion,
     playlists,
@@ -18,12 +17,12 @@
   import { listDownloads } from "../lib/offline.js";
   import { api } from "../lib/api.js";
   import { rememberScreen, recallScreen } from "../lib/nav.js";
-  import { bytes as fmtBytes, artistLine } from "../lib/format.js";
+  import { bytes as fmtBytes } from "../lib/format.js";
   import Card from "../components/Card.svelte";
-  import Cover from "../components/Cover.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
+  import UnavailableList from "../components/UnavailableList.svelte";
 
   // Back from an album you opened out of "Téléchargés" belongs on "Téléchargés"
   // — restore the tab (and the playlist filter) the screen was left on.
@@ -264,29 +263,10 @@
   {:else}
     <p class="muted hint gone-hint">
       Ces titres ne peuvent plus être lus. Choisissez un remplaçant&nbsp;: il
-      prendra leur place dans toutes vos playlists et vos favoris.
+      prendra leur place dans toutes vos playlists et vos favoris. Ou cochez
+      ceux dont vous ne voulez plus et supprimez-les d'un coup.
     </p>
-    <ul class="gone-list">
-      {#each gone as t (t.deezer_id)}
-        <li class="gone-row">
-          <div class="gone-thumb">
-            <Cover src={t.album?.cover} alt={t.title} size={44} kind="track" fallbackId={t.deezer_id} />
-          </div>
-          <div class="gone-meta">
-            <div class="gone-t">{t.title}</div>
-            <div class="muted gone-a">
-              {artistLine(t)}
-              {#if t.playlists?.length}
-                · dans {t.playlists.map((p) => p.title).join(", ")}
-              {/if}
-            </div>
-          </div>
-          <button class="pill sm" on:click={() => openReplace(t)}>
-            <Icon name="refresh" size={16} /> Remplacer
-          </button>
-        </li>
-      {/each}
-    </ul>
+    <UnavailableList bind:tracks={gone} />
   {/if}
 {:else if tab === "local"}
   {#if local === null}
@@ -419,47 +399,6 @@
   }
   .gone-hint {
     margin-bottom: 14px;
-  }
-  .gone-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .gone-row {
-    display: grid;
-    grid-template-columns: 44px 1fr auto;
-    align-items: center;
-    gap: 12px;
-    padding: 8px;
-    border-radius: 10px;
-  }
-  .gone-row:hover {
-    background: var(--bg-hover);
-  }
-  .gone-thumb {
-    width: 44px;
-    /* Dimmed, because this one is not music you can play right now. */
-    opacity: 0.65;
-  }
-  .gone-meta {
-    min-width: 0;
-  }
-  .gone-t {
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .gone-a {
-    font-size: 0.82rem;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .pill.sm {
-    padding: 8px 14px;
-    font-size: 0.85rem;
-    white-space: nowrap;
   }
   .ghost-btn {
     display: inline-flex;
