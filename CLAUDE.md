@@ -786,17 +786,39 @@ seconds of every track converging — through the intro, which is the least repr
 — and pays that cost again on every device, on every play. Same reasoning as the loudness: the audio
 does not change, so neither does the answer. Measure once, keep it in `track_analysis`, serve it.
 
-- The TEMPO is **Deezer's own** where Deezer has one: its public API publishes a `bpm` per track,
-  exact and free. Anything else (a local upload, a track with no figure) is measured from a
-  low-passed envelope — ffmpeg decimates to 1 kHz u8 and the per-frame peak is a `max`/`min` over a
-  ten-byte slice, so no audio sample is ever touched from Python — **and only when something in
+- The TEMPO is **beat-tracked from the file** (`deezer/beats.py`, `ANALYSIS_VERSION` 5): a numpy port
+  of the analyser Mixxx ships as its default — qm-dsp's complex-spectral-difference onsets (44.1 kHz,
+  1024/512) and TempoTrackV2 (comb filter bank + Viterbi for the period, Ellis-style dynamic
+  programming for the beats), then Mixxx's BeatUtils (constant regions within 25 ms, the longest
+  joined to those agreeing in tempo and phase, rounded to the simplest value its error bars allow).
+  GPL-2.0-or-later code, credited in the file. The envelope estimator it replaced read 154 for a 150
+  BPM record and 133 for 132 (2.7%: a beat lost every nine seconds); on the 28 arranged records
+  (`tools/tempo_eval.py`) it was 17/26 within 3.5%, the tracker is **23/26 exact** and 26/26 with
+  Deezer's figure as witness, ~1 s for a five-minute file. And Deezer has NO figure for nearly all
+  of a hard-dance library (2 of 3 462 files here carried a non-zero one), so the estimator was what
+  everybody got. Three rules sit on top, each measured:
+  - **Hardcore is doubled back**: the Rayleigh weighting centres on 120 BPM and tracks a 200 BPM
+    kick on every other beat (Mixxx's own failure). When the half beats strike as hard as the
+    beats — both in the kick band (43-129 Hz) and across the spectrum, between 0.85 and 1.3 of the
+    beats — the tempo is doubled (frenchcore, Krach, speedcore read 0.93-1.06; nothing tracked right
+    falls in the window; hard house's offbeat donk took the phase and read 13.7, hence the cap).
+  - **No beat, no tempo**: the old attack gate (`_attack_rate`, 40 rises a minute in the bass) and
+    the beats' salience against the quarter-beat positions ≥ 1.12 (real masters 1.16-3.3, pads
+    1.01-1.07 — a thin margin, stated; the player's locked grid re-checks presence anyway).
+  - **Deezer's figure only witnesses the OCTAVE** (`_reconcile_tracked`): Deezer at twice the
+    tracked tempo moves it up (dnb at 87/174, double-kick metal); at half it is Deezer's hardcore
+    listing and ignored, unless alternate beats are unequal in the bass (< 0.3: a one-drop tracked
+    at double time) — then it halves; any other disagreement follows the tracker's confidence.
+  Without numpy the envelope estimator below still answers. A version bump re-measures the library
+  on boot (`webui/analysis.reanalyse_if_stale`) instead of waiting for the button.
+- The fallback envelope estimator measures a low-passed envelope — ffmpeg decimates to 1 kHz u8 and
+  the per-frame peak is a `max`/`min` over a ten-byte slice — **and only when something in
   that band STRIKES** (`_attack_rate`, `ANALYSIS_VERSION` 3). The block peak of a steady note
   ripples with its phase, and the normalised autocorrelation turned that ripple into a confident
   beat: a held 82 Hz note read 240 BPM at 0.79, a held chord 231 at 0.50, and the player anchored
   on it. The same bytes, squared and smoothed, now have to rise 1 dB within 30 ms at least 40 times
   a minute (held tones and chords: 0; the sparsest record with a beat: 99.7). The rise is small on
-  purpose — a limitered hard kick's tail sits 2 dB under its attack, and 3 dB lost those. Every
-  record with a beat measures exactly what it did before; `tools/tempo_eval.py` is the check.
+  purpose — a limitered hard kick's tail sits 2 dB under its attack, and 3 dB lost those.
 - The DESCRIPTORS come from ffmpeg's `aspectralstats` and `ebur128`: centroid, spread, flatness,
   entropy, rolloff and flux per frame, plus integrated loudness and **loudness range**. LRA is the
   single best "how squashed is this" axis there is — a limitered hardcore master sits near 3 LU, a

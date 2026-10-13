@@ -71,7 +71,10 @@ logger = logging.getLogger(__name__)
 #      a grid share of 0.06 and trance was doubled to 280), the hard families
 #      are written on the scales these measures have, and a verdict's
 #      confidence is backed by how much its rules actually found.
-ANALYSIS_VERSION = 4
+#   5  the tempo is BEAT-TRACKED (beats.py, Mixxx's analyser) and Deezer's
+#      figure only witnesses its octave; the envelope estimator read 154 for
+#      a 150 BPM record and the wrong octave on half the non-club records.
+ANALYSIS_VERSION = 5
 
 # Never analyse more than this much of a file. Ten minutes is far more than any
 # verdict needs, and it is what stops a two-hour DJ set costing two hours of
@@ -623,15 +626,48 @@ def _grid_share(odf, period):
     return num / den if den > 1e-9 else 0.0
 
 
+#: The beat tracker's salience (beats.py `_salience`: on-beat onsets against
+#: those a quarter of a beat away) under which there is no beat to serve.
+#: Measured: twenty real masters from this library read 1.16 (a dense hard
+#: techno) to 3.3, the eval's records 1.33 (dubstep) to 29; the ambient pads
+#: 1.07 and a detuned-saw pad 1.01. The margin is thin on both sides, and
+#: stated: a phantom tempo here is caught again by the player, whose locked
+#: grid only counts as present where the music folds onto it.
+MIN_BEAT_SALIENCE = 1.12
+
+
 def _measure_tempo(path):
     """(bpm, confidence, grid_share) measured from the file itself.
 
     ``(None, 0.0, 0.0)`` when nothing in the low band strikes often enough to
     carry a beat at all (``_attack_rate``): no tempo is better than a phantom.
+
+    The tempo is the BEAT TRACKER's (beats.py: Mixxx's analyser, ported) when
+    numpy is there — exact to the hundredth on a record made to a click, where
+    the envelope estimator below read 154 for 150. Without numpy the envelope
+    estimator still answers, as it always did.
     """
     odf, attacks = _low_envelope(path)
     if attacks < MIN_ATTACKS_PER_MINUTE:
         return None, 0.0, 0.0
+    from . import beats
+
+    if beats.available():
+        r = beats.analyse(path)
+        if r is None or r["salience"] < MIN_BEAT_SALIENCE:
+            return None, 0.0, 0.0
+        bpm = r["bpm"]
+        if not (MIN_BPM <= bpm <= MAX_BPM):
+            return None, 0.0, 0.0
+        smooth = _smooth(odf)
+        grid = _grid_share(smooth, 60 * ENV_HZ / bpm) if len(smooth) >= 8 * ENV_HZ else 0.0
+        _remember_witness(path, r["alternation"])
+        return round(bpm, 3), round(r["confidence"], 3), round(grid, 3)
+    return _measure_tempo_envelope(odf)
+
+
+def _measure_tempo_envelope(odf):
+    """The envelope estimator: the fallback when numpy is not installed."""
     odf = _smooth(odf)
     n = len(odf)
     win = 8 * ENV_HZ
@@ -1248,6 +1284,73 @@ def _reconcile_octave(published, measured, measured_conf, published_conf, source
     return published, published_conf, source
 
 
+# The tracker's alternation reading per file, for the reconciliation that
+# follows the measurement in the same analysis (kept apart so _measure_tempo's
+# (bpm, confidence, grid) contract is unchanged). Bounded; taken once.
+_witness_lock = threading.Lock()
+_witness = OrderedDict()
+
+
+def _remember_witness(path, alternation):
+    with _witness_lock:
+        _witness[path] = alternation
+        while len(_witness) > 64:
+            _witness.popitem(last=False)
+
+
+def _take_witness(path):
+    with _witness_lock:
+        return _witness.pop(path, None)
+
+
+def _tracker() -> bool:
+    from . import beats
+
+    return beats.available()
+
+
+#: Alternate beats this unequal in the bass mean the track's beat is every
+#: OTHER tracked one (see beats.py `alternation`): measured, a one-drop
+#: tracked at double time 0.21; every hard-dance record 0.93-1.00; the
+#: kick-on-one-and-three records it must never halve (boom bap, pop, piano
+#: rag) 0.33-0.41 — and those agree with Deezer anyway.
+HALF_ALTERNATION = 0.3
+#: How sure the tracker must be (the share of the track its constant tempo
+#: was taken from) to be served over a published figure it disagrees with.
+TRACKED_CONF = 0.5
+
+
+def _reconcile_tracked(published, measured, conf, alternation=None):
+    """The beat tracker's tempo, with Deezer's figure as a witness of OCTAVE
+    only. (bpm, confidence, source).
+
+    The tracker is the authority on the tempo — it is exact where Deezer's
+    figure is rounded or simply wrong — and it can be wrong only one way the
+    signal cannot settle: the octave of a genre whose half-time and full-time
+    readings fold alike (dnb at 87 or 174, double-kick metal at 90 or 180).
+    So: Deezer at TWICE the tracked tempo moves it up an octave; Deezer at
+    HALF is Deezer's own well-known listing of hardcore and is ignored —
+    unless alternate tracked beats are clearly unequal in the bass, which is a
+    half-time groove tracked at double time (a one-drop), and both witnesses
+    then agree; any other disagreement goes to the tracker when it is sure,
+    to Deezer when it is not.
+    """
+    if not published:
+        return measured, conf, "measured"
+    r = published / measured
+    if abs(r - 1) < _SAME:
+        return measured, max(conf, 0.9), "measured"
+    if abs(r / 2 - 1) < _SAME and measured * 2 <= MAX_BPM:
+        return round(measured * 2, 3), max(conf, 0.85), "measured+octave"
+    if abs(r * 2 - 1) < _SAME:
+        if alternation is not None and alternation < HALF_ALTERNATION and measured / 2 >= MIN_BPM:
+            return round(measured / 2, 3), max(conf, 0.85), "measured+octave"
+        return measured, conf, "measured"
+    if conf >= TRACKED_CONF:
+        return measured, conf, "measured"
+    return published, 0.8, "deezer"
+
+
 # --- is Deezer's figure right? ---------------------------------------------------
 #: Below this the file's own measurement is not a witness either way.
 AUDIT_MIN_CONF = 0.3
@@ -1395,7 +1498,11 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
     pulse = 0.0
     try:
         measured, conf, pulse = _measure_tempo(track.path)
-        if not bpm and measured:
+        if measured and _tracker():
+            bpm, bpm_conf, bpm_source = _reconcile_tracked(
+                bpm, measured, conf, _take_witness(track.path)
+            )
+        elif not bpm and measured:
             bpm, bpm_conf, bpm_source = measured, conf, "measured"
         elif bpm and measured:
             bpm, bpm_conf, bpm_source = _reconcile_octave(

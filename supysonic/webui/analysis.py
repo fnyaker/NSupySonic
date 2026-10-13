@@ -229,6 +229,63 @@ def resume_if_interrupted(app):
     threading.Thread(target=start, name="analysis-resume", daemon=True).start()
 
 
+def reanalyse_if_stale(app):
+    """Re-measure the library on boot when its verdicts are older than this
+    release's analysis (``ANALYSIS_VERSION``).
+
+    A version bump means a stored verdict would come out differently today —
+    version 5 replaced the tempo estimator with a beat tracker, and a library
+    left on the old figures keeps serving 154 for a 150 BPM track until
+    somebody happens to press the button. The ordinary (not forced) backfill
+    re-measures exactly the stale rows and skips the current ones, so this is
+    the button pressed once, by the release that needs it. Nothing starts when
+    every row is current, when a run is already going (the interrupted-run
+    resume above takes precedence), or without ffmpeg.
+    """
+    from ..deezer.analysis import ANALYSIS_VERSION, ffmpeg_available
+
+    def start():
+        import time
+
+        time.sleep(RESUME_DELAY + 5)
+        if not ffmpeg_available():
+            return
+        with app.app_context():
+            from ..db import close_connection, open_connection
+
+            try:
+                open_connection(reuse=True)
+                stale = (
+                    TrackAnalysis.select(TrackAnalysis.track)
+                    .where(TrackAnalysis.version < ANALYSIS_VERSION)
+                    .limit(1)
+                    .exists()
+                )
+                total = Track.select().where(Track.last_modification > 0).count() if stale else 0
+            except Exception:
+                logger.debug("Could not look for stale analyses", exc_info=True)
+                return
+            finally:
+                try:
+                    close_connection()
+                except Exception:
+                    pass
+        if not stale:
+            return
+        with _analysis_lock:
+            if _analysis_job["running"]:
+                return
+            _analysis_job.update(
+                running=True, started=now().isoformat(), finished=None, force=False,
+                workers=_workers(), total=total, scanned=0, done=0, skipped=0,
+                failed=0, error=None, failures=[], failure_reasons={},
+            )
+        logger.info("Analyses older than version %s: re-measuring the library", ANALYSIS_VERSION)
+        _run_analysis(app, False, _workers(), None)
+
+    threading.Thread(target=start, name="analysis-upgrade", daemon=True).start()
+
+
 @webapi.route("/analysis/backfill", methods=["POST"])
 @login_required
 @admin_required
