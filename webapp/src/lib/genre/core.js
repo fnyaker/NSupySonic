@@ -138,6 +138,26 @@ function readHead(x, data, deep, opt, seed, grouped, groups) {
   }
   const confusion = [];
   for (let c = 0; c < C; c++) confusion.push(Array.from(confFlat.subarray(c * C, (c + 1) * C)));
+  // Every row's held-out verdict, as a probability (the fitted temperature
+  // applied): what the health check reads to point at the labels the model
+  // disagrees with on data it never trained on (lib/genre/health.js).
+  const heldPtr = x.tr_held ? x.tr_held() : 0;
+  const maskPtr = x.tr_held_mask ? x.tr_held_mask() : 0;
+  let heldProbs = null;
+  if (heldPtr && maskPtr) {
+    const L = new Float32Array(x.memory.buffer, heldPtr, n * C);
+    const M = new Uint8Array(x.memory.buffer, maskPtr, n);
+    const T = res[6] > 0 ? res[6] : 1;
+    heldProbs = new Float32Array(n * C).fill(NaN);
+    for (let i = 0; i < n; i++) {
+      if (!M[i]) continue;
+      let top = -Infinity;
+      for (let k = 0; k < C; k++) top = Math.max(top, L[i * C + k] / T);
+      let sum = 0;
+      for (let k = 0; k < C; k++) sum += Math.exp(L[i * C + k] / T - top);
+      for (let k = 0; k < C; k++) heldProbs[i * C + k] = Math.exp(L[i * C + k] / T - top) / sum;
+    }
+  }
 
   const examples = new Array(C).fill(0);
   for (let i = 0; i < n; i++) examples[y[i]]++;
@@ -192,6 +212,9 @@ function readHead(x, data, deep, opt, seed, grouped, groups) {
     projected: res[2],
     accuracy: res[4],
     balanced: res[5],
+    // The same fits on their OWN training rows: against `balanced`, the
+    // overfitting gap.
+    fitBalanced: res[10],
     temperature: res[6],
     grouped,
     seed,
@@ -209,6 +232,7 @@ function readHead(x, data, deep, opt, seed, grouped, groups) {
       dim: d,
       hidden: metrics.hidden,
       metrics,
+      heldProbs,
     };
     layers.forEach((layer, i) => {
       head[`W${i + 1}`] = layer.W;
@@ -218,7 +242,7 @@ function readHead(x, data, deep, opt, seed, grouped, groups) {
   }
   metrics.bagged = res[3];
   metrics.noise = Math.max(0, Number(opt.noise) || 0);
-  return { kind: "linear", labels, dim: d, W: layers[0].W, b: layers[0].b, metrics };
+  return { kind: "linear", labels, dim: d, W: layers[0].W, b: layers[0].b, metrics, heldProbs };
 }
 
 /** The temperature the trainer fits on held-out logits (rows of C), for tests. */

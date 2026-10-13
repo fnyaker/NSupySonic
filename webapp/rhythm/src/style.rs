@@ -343,6 +343,12 @@ pub struct Style {
     evidence: f32,
     pub top: [(i32, f32); 3],
     pub kick: KickShape,
+    /// THE SERVER'S GENRE, PINNED (`pin`), or -1. The family is then the
+    /// served one and nothing votes against it — the classifier's rules are
+    /// not run at all — while the kick's shape, the piep and the descriptors
+    /// keep being measured: knowing WHAT is playing is the server's answer,
+    /// hearing what it is DOING right now stays this side's job.
+    pub pinned: i32,
 }
 
 impl Style {
@@ -361,6 +367,7 @@ impl Style {
             evidence: 0.0,
             top: [(-1, 0.0); 3],
             kick: KickShape::new(),
+            pinned: -1,
         }
     }
 
@@ -425,9 +432,15 @@ impl Style {
         self.confidence = 0.0;
         self.evidence = 0.0;
         self.top = [(-1, 0.0); 3];
+        self.pinned = -1;
         // The look and the archetypes are NOT reset: a new track eases the
         // picture from where the last one left it, rather than snapping it to
         // neutral for the length of a dissolve.
+    }
+
+    /// Pin the family to the served one (-1 releases it).
+    pub fn pin(&mut self, id: i32) {
+        self.pinned = if id >= 0 && (id as usize) < self.families.len() { id } else { -1 };
     }
 
     /// How family `id` builds its groove (beat.rs DOWN_MODELS), 0 unknown.
@@ -479,18 +492,33 @@ impl Style {
         if self.families.is_empty() {
             return;
         }
-        let tempo_trust = if locked { (confidence * 1.6).clamp(0.25, 1.0) } else { 0.0 };
+        let pinned = self.pinned >= 0 && (self.pinned as usize) < self.families.len();
         let mut sum = 0f32;
         let mut specific = 0f32;
-        for i in 0..self.families.len() {
-            let w = self.eval(&self.families[i], tempo_trust);
-            self.raw[i] = w;
-            sum += w;
-            if !self.families[i].fallback {
-                specific += w;
+        if pinned {
+            for i in 0..self.families.len() {
+                self.raw[i] = if i as i32 == self.pinned { 1.0 } else { 0.0 };
+            }
+            sum = 1.0;
+            specific = 1.0;
+        } else {
+            let tempo_trust = if locked { (confidence * 1.6).clamp(0.25, 1.0) } else { 0.0 };
+            for i in 0..self.families.len() {
+                let w = self.eval(&self.families[i], tempo_trust);
+                self.raw[i] = w;
+                sum += w;
+                if !self.families[i].fallback {
+                    specific += w;
+                }
             }
         }
-        let a = (1.0 - (-dt / 2.5).exp()) * (0.04 + 0.96 * dyn_ * dyn_);
+        // A pinned family is eased in over most of a second whatever the
+        // level: it is an answer, not an opinion waiting for evidence.
+        let a = if pinned {
+            1.0 - (-dt / 0.8).exp()
+        } else {
+            (1.0 - (-dt / 2.5).exp()) * (0.04 + 0.96 * dyn_ * dyn_)
+        };
         // THE SHARES ARE ONLY AS GOOD AS WHAT THEY ARE SHARES OF. Where no
         // rule fits — the grid on the wrong octave, a passage nothing
         // describes — every family reads next to nothing, and normalising
@@ -558,6 +586,12 @@ impl Style {
             self.look[k] += (target - self.look[k]) * a;
         }
         self.top = top;
+        if pinned {
+            self.dominant = self.pinned;
+            self.pending = -1;
+            self.confidence = 1.0;
+            return;
+        }
         let (best, best_w) = top[0];
         if self.dominant < 0 {
             self.dominant = best;

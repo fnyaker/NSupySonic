@@ -57,7 +57,7 @@ self.onmessage = async (ev) => {
     // Float32Arrays cross as transferables, so a head with a 512x2560 first
     // layer (5 MB) costs nothing to hand back.
     const transfer = [];
-    for (const key of ["W", "b", "W1", "b1", "W2", "b2", "W3", "b3"])
+    for (const key of ["W", "b", "W1", "b1", "W2", "b2", "W3", "b3", "heldProbs"])
       if (head[key]) transfer.push(head[key].buffer);
     self.postMessage({ type: "done", id, head }, transfer);
   } catch (err) {

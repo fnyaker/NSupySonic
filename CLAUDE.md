@@ -805,11 +805,10 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   nothing to install on a server that already has ffmpeg.
 - Everything it classifies on is **physical or scale-free** (BPM, hertz, decibels, 0..1 ratios), on
   purpose: the client's live classifier works on its own normalized feature scales and the two must
-  not be expected to share a threshold. They are independent readings, and **neither is simply the
-  authority**: a served genre that somebody CHOSE (a tag, the trained head) leads; one the heuristic
-  GUESSED from whole-file averages yields to a confident live reading of how the track is built (see
-  *The classifier reads how the music is BUILT* below). Its BPM — Deezer's own figure — stays the
-  tempo's anchor either way.
+  not be expected to share a threshold. **Once served, the server's genre and measured tempo ARE the
+  answer**: the client pins the family and locks the tempo (see *The server's answers are locked*
+  below) and classifies or estimates neither again — its live classifier only speaks for a track the
+  server has no genre for.
 - **Its rules were never measured against its own measures, and on the arranged records it named 0
   of 28** — every hard record jazz, strings or dnb. Two faults, both fixed and pinned by
   `tests/base/test_analysis.py` on MEASURED features (the drawn ones it had were on the imagined
@@ -1000,8 +999,8 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   Two builds, baseline and SIMD128, computing the SAME bits (the scalar loops keep their partial
   sums where the vector lanes keep theirs; the test trains one head with each and compares weight
   for weight); `build.rs` hashes `src/*.rs` and the test fails on a stale binary, like the analyser.
-- **Folds by ARTIST are an option** (*Tester sur des artistes inconnus*, `cv::grouped`, `artist_id`
-  on `/genre/labelled`). Two tracks off one album share a production and a mastering chain; with
+- **Folds by ARTIST are automatic** whenever most genres have two artists (`health.js#canGroup`,
+  `cv::grouped`, `artist_id` on `/genre/labelled`). Two tracks off one album share a production and a mastering chain; with
   plain stratified folds one trains the head and the other then "tests" it, so the score measures
   recognising albums — and the temperature fitted on those easy calls leaves the head over-confident,
   which is what the server gates on. Measured on artists whose own sound outweighs their genre's:
@@ -1010,6 +1009,20 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   and says so with a recall of zero. `/genre/labelled` is the WHOLE labelled set in one statement:
   it was capped at the 500 newest tags (training silently ignored the rest) and read each row's
   artist and album back lazily (1 022 statements for 510 tags, now 8).
+- **Training watches itself, and says so in one verdict** (`lib/genre/health.js`, pinned by
+  `test/genrehealth.test.mjs` on trainer runs built to have each fault). BEFORE it trains it removes
+  what would bias the head or flatter its score — a genre under 5 tracks (left out, still taggable),
+  the same recording tagged twice (`vectorKey`: one copy kept) or tagged two ways (neither), one
+  artist over 40% of a genre (its newest tracks kept up to the cap). AFTER, the trainer reports each
+  fold's fit on its OWN training rows (`fitBalanced`, `tr_res[10]`) and every row's held-out logits
+  (`tr_held`): the gap between the two is memorising (measured: labels unrelated to the audio read
+  1.00 trained / 0.21 held out), the stratified-minus-by-artist score is the artist bias (1.00 /
+  0.18 on genres that are really artists), and a label the held-out head confidently puts elsewhere
+  is offered for review (*Revoir ces titres* runs them through the tagger with their tag shown).
+  `assess` turns it into good / à surveiller / peu fiable and at most three remarks with what to do;
+  the tables are under *Détails*. The mode is **Automatique**: the linear head, and a 256-wide
+  network only with ten tracks a genre and kept only on two points of held-out gain. A "peu fiable"
+  model asks before it is sent; `metrics.health` (level + causes) is stored with it.
 - The linear trainer's **random projection is decided by the score**, not assumed: it is free on
   clustered data (1.000 at 4× the speed) and costly on marginal data, so it trains projected and
   re-runs at full width when balanced accuracy comes back under 0.8. The deep trainer keeps the same
@@ -1076,9 +1089,15 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   **refuses a head it cannot read back** — it stores, re-reads, and deletes the row if the weights
   do not match the labels and dim given. A model stored but unusable would silently do nothing for
   ever.
-- Tagging is **confirming, not typing**: every candidate arrives with the current model's guess,
-  ordered by play count (the labels that matter are on the music this library actually plays), the
-  keyboard is the interface (`1`…`9` choose, `↵` confirms, `→` skips, `espace` previews) and the
+- Tagging is **confirming, not typing**: every candidate arrives with the vocabulary RANKED FOR IT
+  (`scores`: `[label, score, head, proto]`, `deezer/genre.py#rank_scores` — the head's calibrated
+  probability blended 3:1 with a softmax over the prototype similarities, so a genre two tracks old
+  ranks before any head knows it; `lib/genre/rank.js` orders the rest by use in the library, never by
+  name). The nine best are big buttons on `1`…`9`, `↵` takes the first, `/` searches every genre
+  (accents folded, rank kept inside each tier), recent genres sit one tap away, `z` undoes the last
+  label, and `GET /genre/track/<id>` gives the tag sheet the same ranking for one track (it used to
+  read the whole labelled set to find one row). The candidates come ordered by play count (the labels
+  that matter are on the music this library actually plays), `→` skips, `espace` previews, and the
   preview jumps a third of the way into the track — nobody judges a genre from the intro. The
   preview carries a **seek bar that follows the element's own clock**, so it stays true to whatever
   the stream/transcode pipeline is actually delivering: its length falls back to the candidate's
@@ -1126,16 +1145,10 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   kept a day; an unreachable Deezer returns the list unchecked and caches nothing. Importing one
   (`/genre/references/import`) makes the row from Deezer's record, tags it and queues the archive,
   which is where it gets the vector that makes it a training example.
-- **The genre chip reads the SERVED verdict first** (`webapp/src/lib/trackverdict.js`). It used to
-  read the live classifier only, so it needed the analysis engine running, the `smart` scene
-  selected AND the classifier past its confidence floor — miss any one and there was no label at
-  all, which is why it showed up about half the time. A hand-applied tag or the trained head is not
-  a guess at all, so that leads (`styleIsTrusted`); otherwise the chip shows the engine's reading
-  once it is sure — which is the served guess until the live classifier is confident of ANOTHER
-  family (`audio/engine.js#merged`, `LIVE_OVERRIDE_CONF`) — and the served guess when the engine is
-  not reading at all. A heuristic genre also only sets the tempo range when it is confident and its
-  own BPM lies inside that range (`adoptVerdict`): served "jazz" on a 205 BPM Krach record once set an
-  80-165 plateau against a 205 seed.
+- **The genre chip reads the SERVED verdict** (`webapp/src/lib/trackverdict.js`). It used to read
+  the live classifier only, so it needed the analysis engine running, the `smart` scene selected AND
+  the classifier past its confidence floor. The served genre is the genre now (the analyser pins it);
+  the engine's own reading only names a track the server has no genre for.
 
 **Audio analysis is RUST, ON THE AUDIO THREAD** (`webapp/rhythm/`, compiled to
 `src/lib/audio/rhythm.wasm`; `webapp/src/lib/audio/` is the delivery). The JavaScript engine read
@@ -1430,6 +1443,22 @@ got 54 of 74 cases exactly right with 381 tempo jumps between them, this one get
   itself. Snares count because a kick-snare groove is one beat per hit; the range bound keeps a
   half-time groove from dragging 140 down to 70. Techno cold went from 67% to 100% tempo (F70 0.83 →
   0.96) and nothing else moved in any of the eval's four scenarios.
+
+**THE SERVER'S ANSWERS ARE LOCKED** (`engine.js#adoptVerdict`). The genre and the tempo are measured
+over the whole file on the server, its octave reconciled against Deezer's; an analyser deciding them
+again from eight seconds of audio could only disagree by being wrong. So a served genre PINS the
+family (`style.rs` `pinned`: its rules stop voting; look, archetype, band and bar model are the served
+genre's) and a measured tempo LOCKS the grid (`tempo.rs` `fixed_bpm`: never re-estimated; the grid may
+absorb a rounded figure's 0.3% and no more, `beat.rs` `fixed_period`). What stays this side's is what
+the music is DOING, read with the genre's own **profile** (`style.js#profileOf` → `pattern.rs`): a song
+form needs four bars without the kick before a return is a DROP (its returns still anchor the phrase),
+and a genre with no drum kit publishes no kick (the bar model still reads those onsets). And whether a
+beat is THERE at all: the confidence of a locked grid follows how well the music folds onto it
+(`FIXED_GQ_NONE`/`FULL`, measured beatless 0.12-0.19 against beat records' medians 0.30-0.87), and once
+heard it coasts through a lull. The eval's `served` scenario against `seeded`: F70/F35 95/94 →
+94/94, false drops on the song-form records 10 → 0, kick precision 83 → 87%, main kicks 86 → 90%,
+the ambient record locked 90% → 3% of the time. A PROVISIONAL tempo (Deezer's, before the file
+exists) is not locked: it seeds, below, and the tracker may still double it.
 
 **THE SERVED TEMPO IS AN ANCHOR, NOT A HINT.** Somebody measured the whole track; an eight-second
 window deciding it disagrees is the single most common way this tracker was wrong, and the user's

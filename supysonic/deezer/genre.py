@@ -545,6 +545,20 @@ def prototype_predict(vec):
     another space: indexing one with the other's length is how this endpoint
     used to answer 500) is given no opinion rather than a wrong one.
     """
+    scores = prototype_scores(vec)
+    if not scores:
+        return None
+    return scores[0]
+
+
+def prototype_scores(vec):
+    """[(label, similarity)] against EVERY genre prototype, nearest first, or
+    None (same space rules as ``prototype_predict``, which is its first row).
+
+    The studio ranks its whole vocabulary by these when the head has nothing to
+    say about a genre — a genre two tracks old has a prototype long before a
+    head has been trained on it.
+    """
     from . import embedding as emb
 
     # The prototypes live in the part every head-readable vector shares.
@@ -558,7 +572,7 @@ def prototype_predict(vec):
     if u is None:
         return None
     width = len(u)
-    best = None
+    out = []
     for name, row in table.items():
         c = row["centroid"]
         if len(c) != width:
@@ -566,11 +580,57 @@ def prototype_predict(vec):
         s = 0.0
         for i in range(width):
             s += c[i] * u[i]
-        if best is None or s > best[1]:
-            best = (name, s)
-    if best is None:
+        out.append((name, round(s, 4)))
+    if not out:
         return None
-    return best[0], round(best[1], 4)
+    out.sort(key=lambda p: p[1], reverse=True)
+    return out
+
+
+#: How sharply the prototype similarities are turned into a ranking share.
+#: Cosines between genre centroids of one extractor sit within a few hundredths
+#: of each other (0.80-0.92 is typical), so a plain normalisation would call
+#: every genre equally likely; a softmax at this temperature gives the nearest
+#: prototype most of the weight when it leads by ~0.05, and splits it when two
+#: are within ~0.01 — which is what "nearest" honestly means at that distance.
+PROTO_SHARPNESS = 0.015
+#: The trained head's share when both opinions exist. The head was trained and
+#: calibrated (temperature) on held-out data; the prototypes are an average.
+HEAD_WEIGHT = 0.75
+
+
+def rank_scores(guess, protos, limit=None):
+    """Every genre either opinion has a word on, as [(label, score, head, proto)],
+    best first. ``score`` is in 0..1 and only ORDERS the vocabulary; ``head`` is
+    the calibrated probability (None when the head does not know the genre) and
+    ``proto`` the prototype's share (None without a prototype)."""
+    head = dict(guess[2]) if guess and len(guess) > 2 and guess[2] else {}
+    share = {}
+    if protos:
+        top = protos[0][1]
+        exps = {name: math.exp((s - top) / PROTO_SHARPNESS) for name, s in protos}
+        total = sum(exps.values()) or 1.0
+        share = {name: e / total for name, e in exps.items()}
+    out = []
+    for name in set(head) | set(share):
+        h = head.get(name)
+        p = share.get(name)
+        if h is not None and p is not None:
+            score = HEAD_WEIGHT * h + (1 - HEAD_WEIGHT) * p
+        elif h is not None:
+            score = h if not share else HEAD_WEIGHT * h
+        else:
+            score = p if not head else (1 - HEAD_WEIGHT) * p
+        out.append(
+            (
+                name,
+                round(score, 4),
+                None if h is None else round(h, 4),
+                None if p is None else round(p, 4),
+            )
+        )
+    out.sort(key=lambda r: (-r[1], r[0]))
+    return out[:limit] if limit else out
 
 
 def invalidate_centroids():

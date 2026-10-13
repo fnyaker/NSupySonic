@@ -44,7 +44,7 @@
   } from "../lib/stores.js";
   import { effectiveMode, MODE_BY_ID } from "../lib/viz/modes.js";
   import { readout } from "../lib/audio/engine.js";
-  import { servedStyleLabel, styleIsTrusted } from "../lib/trackverdict.js";
+  import { servedStyleLabel } from "../lib/trackverdict.js";
   import Visualizer from "./Visualizer.svelte";
   import EcoToggle from "./EcoToggle.svelte";
   import { currentLyricLine } from "../lib/lyrics.js";
@@ -77,18 +77,14 @@
   $: vmode = effectiveMode($vizMode, $vizBeatDetect, $ecoMode);
   $: fullBleed = $vizFullBleed && (MODE_BY_ID.get(vmode)?.fullBleed ?? false);
   $: stripViz = vmode === "bars";
-  // A CHOSEN served genre leads (a tag, a trained model): it is there the
-  // moment the track starts and it is not a guess at all. Otherwise the
-  // engine's reading once it is reasonably sure — the server's guess until the
-  // live classifier, which hears how the track is built, is confident of
-  // another family (audio/engine.js \`merged\`) — and the server's guess when
-  // the engine is not reading at all. A label that flickers between four
-  // genres in a bar is worse than no label, hence the floor.
+  // The served genre is THE genre (the analyser pins it, audio/engine.js
+  // adoptVerdict); the live classifier's reading only names a track the server
+  // has no genre for, once it is reasonably sure — a label that flickers
+  // between four genres in a bar is worse than no label, hence the floor.
   $: styleLabel = !$vizShowStyle
     ? ""
-    : ($styleIsTrusted && $servedStyleLabel) ||
-      (vmode === "smart" && $readout.styleConfidence > 0.35 ? $readout.styleLabel : "") ||
-      $servedStyleLabel;
+    : $servedStyleLabel ||
+      (vmode === "smart" && $readout.styleConfidence > 0.35 ? $readout.styleLabel : "");
 
   function onVisibility() {
     if (document.hidden) {

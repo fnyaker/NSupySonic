@@ -56,7 +56,7 @@
   } from "../lib/stores.js";
   import { effectiveMode, MODE_BY_ID } from "../lib/viz/modes.js";
   import { readout } from "../lib/audio/engine.js";
-  import { servedStyleLabel, styleIsTrusted } from "../lib/trackverdict.js";
+  import { servedStyleLabel } from "../lib/trackverdict.js";
   import Visualizer from "./Visualizer.svelte";
   import EcoToggle from "./EcoToggle.svelte";
   import { currentLyricLine } from "../lib/lyrics.js";
@@ -134,15 +134,13 @@
   $: vmode = effectiveMode($vizMode, $vizBeatDetect, $ecoMode);
   $: fullBleed = $vizFullBleed && (MODE_BY_ID.get(vmode)?.fullBleed ?? false);
   $: stripViz = vmode === "bars";
-  // A CHOSEN served genre leads (a tag, a trained model: lib/trackverdict.js).
-  // Otherwise the engine's reading, once it is sure — which is the served guess
-  // until the live classifier is confident of another family (audio/engine.js
-  // \`merged\`) — and the served guess when there is no engine reading at all.
+  // The served genre is THE genre (the analyser pins it, audio/engine.js
+  // adoptVerdict); the live classifier's reading only names a track the server
+  // has no genre for, once it is reasonably sure.
   $: styleLabel = !$vizShowStyle
     ? ""
-    : ($styleIsTrusted && $servedStyleLabel) ||
-      (vmode === "smart" && $readout.styleConfidence > 0.35 ? $readout.styleLabel : "") ||
-      $servedStyleLabel;
+    : $servedStyleLabel ||
+      (vmode === "smart" && $readout.styleConfidence > 0.35 ? $readout.styleLabel : "");
 
   onDestroy(() => {
     bg.destroy();

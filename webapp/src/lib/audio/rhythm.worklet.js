@@ -69,6 +69,15 @@ class NsRhythm extends AudioWorkletProcessor {
       case "seed":
         this.r.seed(m.bpm, m.conf);
         break;
+      case "lock":
+        this.r.lockTempo(m.bpm);
+        break;
+      case "pin":
+        this.r.pinFamily(m.i);
+        break;
+      case "profile":
+        this.r.setProfile(m.lull, m.kicks);
+        break;
       case "range":
         this.r.setRange(m.lo, m.hi);
         break;

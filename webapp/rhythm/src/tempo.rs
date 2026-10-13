@@ -126,6 +126,26 @@ fn ramp_down(x: f32, t: f32, w: f32) -> f32 {
     ((t - x) / w).clamp(0.0, 1.0)
 }
 
+/// The confidence a locked (served) tempo is held at while the music folds
+/// onto its grid.
+const FIXED_CONF: f32 = 0.95;
+/// The grid quality (`grid_quality`, at the served period) read as "no beat
+/// here" and as "fully a beat". Measured on the eval at its served tempo: the
+/// beatless records fold to 0.12-0.17 (ambient pads, p10-p90) and 0.09-0.26
+/// (rubato piano, median 0.19) — a slow fold of anything is never quite flat —
+/// while every record with a beat has its median at 0.30 (trap) to 0.87
+/// (waltz), techno 0.41.
+const FIXED_GQ_NONE: f32 = 0.18;
+const FIXED_GQ_FULL: f32 = 0.32;
+/// Clearly-present estimates after which the served grid coasts through a
+/// lull instead of following the fold.
+const FIXED_HEARD: u32 = 3;
+/// How far the grid may refine a served figure: a published BPM is rounded to
+/// a whole number (174 for 174.4: 0.23%), and a measured one to a hundredth.
+/// The PUBLISHED tempo stays the served figure; this only lets the grid's
+/// period absorb the rounding so the phase does not walk.
+const FIXED_SLACK: f32 = 0.003;
+
 pub struct TempoOut {
     pub bpm: f32,
     pub period: f32,
@@ -201,6 +221,16 @@ pub struct Tempo {
     shortlist: Vec<usize>,
     /// A BUILD is running (pattern.rs, set by lib.rs): hold the tempo.
     pub hold: bool,
+    /// THE SERVER'S TEMPO, LOCKED (`lock`), or 0. The server measured the
+    /// whole file and reconciled Deezer's octave against it
+    /// (analysis.py#_reconcile_octave); an eight-second window disagreeing is
+    /// the tracker being wrong, not the server. So nothing is estimated while
+    /// it is set: the period stays the server's (the grid may refine it by a
+    /// fraction of a percent, for a figure rounded to a whole BPM) and only the
+    /// PHASE is the tracker's to find.
+    pub fixed_bpm: f32,
+    /// Estimates on which the served grid was clearly present (capped).
+    fixed_heard: u32,
     pub out: TempoOut,
 }
 
@@ -281,6 +311,8 @@ impl Tempo {
             list: Vec::with_capacity(lag_max),
             shortlist: Vec::with_capacity(SHORTLIST),
             hold: false,
+            fixed_bpm: 0.0,
+            fixed_heard: 0,
             out: TempoOut {
                 bpm: 0.0,
                 period: 0.5,
@@ -328,6 +360,8 @@ impl Tempo {
         self.challenger = 0.0;
         self.challenge_count = 0;
         self.seed_lag = 0.0;
+        self.fixed_bpm = 0.0;
+        self.fixed_heard = 0;
         self.seed_up = 0.0;
         // The range is NOT reset: it describes the track about to play.
         self.out.bpm = 0.0;
@@ -732,6 +766,40 @@ impl Tempo {
         let up = overall > self.activity;
         let a = 1.0 - (-self.est_every / if up { 3.0 } else { 30.0 }).exp();
         self.activity += (overall - self.activity) * a;
+        // A served tempo is not estimated again: through a build, or a
+        // passage whose autocorrelation is poor, it is still the tempo. What
+        // stays this side's question is whether there IS a beat right now —
+        // the server's figure for an ambient piece, or a beatless intro, is a
+        // number with nothing on it, and a confident grid there would pulse
+        // the animation to silence. So the confidence follows how well the
+        // music folds onto THIS grid, and a breakdown coasts as it always did.
+        // Once the beat has been HEARD on this grid, a passage that folds
+        // poorly onto it (a breakdown of pads, which is not quiet) coasts
+        // like any breakdown instead of dropping the grid: measured, following
+        // the fold there cost psytrance 15 points of F-measure.
+        if self.fixed_bpm > 0.0 {
+            let gq = self.grid_quality(self.period * self.fps);
+            let present = ((gq - FIXED_GQ_NONE) / (FIXED_GQ_FULL - FIXED_GQ_NONE)).clamp(0.0, 1.0);
+            if present >= 0.8 {
+                self.fixed_heard = (self.fixed_heard + 1).min(FIXED_HEARD);
+            }
+            let coast = self.locked && (recent < overall * 0.35 || quiet_window);
+            if coast || (self.fixed_heard >= FIXED_HEARD && present < 0.8) {
+                self.confidence = (self.confidence * 0.97).fmax(FIXED_CONF * present);
+            } else {
+                self.confidence = self.confidence * 0.55 + FIXED_CONF * present * 0.45;
+            }
+            if self.confidence < 0.12 {
+                self.locked = false;
+            } else if !self.locked && self.confidence > 0.25 {
+                self.locked = true;
+                self.period = 60.0 / self.fixed_bpm;
+                self.bpm = self.fixed_bpm;
+                self.out.retimed += 1;
+            }
+            self.measure_kick_pulse();
+            return;
+        }
         if self.locked && (recent < overall * 0.35 || quiet_window) {
             self.confidence *= 0.97;
             return;
@@ -990,7 +1058,13 @@ impl Tempo {
             self.last_est = self.clock;
             self.estimate();
         }
-        self.out.bpm = if self.locked { self.bpm } else { 0.0 };
+        self.out.bpm = if !self.locked {
+            0.0
+        } else if self.fixed_bpm > 0.0 {
+            self.fixed_bpm
+        } else {
+            self.bpm
+        };
         self.out.period = self.period;
         self.out.confidence = self.confidence;
         self.out.locked = self.locked;
@@ -1002,6 +1076,9 @@ impl Tempo {
     /// bonus and the octave question are asked about the grid actually on
     /// screen. Only small corrections are accepted here.
     pub fn nudge_period(&mut self, period: f32) {
+        if self.fixed_bpm > 0.0 && (period * self.fixed_bpm / 60.0 - 1.0).abs() > FIXED_SLACK {
+            return;
+        }
         if self.locked && period > 0.0 && (period / self.period - 1.0).abs() < 0.03 {
             self.period = period;
             self.bpm = 60.0 / period;
@@ -1043,6 +1120,34 @@ impl Tempo {
         self.last_est = -1e9;
         self.out.retimed += 1;
         self.out.bpm = self.bpm;
+        self.out.period = self.period;
+        self.out.confidence = self.confidence;
+        self.out.locked = true;
+        true
+    }
+
+    /// Lock the tempo to the server's figure (0 unlocks). On the locked
+    /// grid's level or an octave of it, the phase is kept (`seed`); anywhere
+    /// else the grid is simply retimed to it. Returns false for a figure out
+    /// of range.
+    pub fn lock(&mut self, bpm: f32) -> bool {
+        if bpm == 0.0 {
+            self.fixed_bpm = 0.0;
+            return true;
+        }
+        if !(bpm >= MIN_BPM && bpm <= MAX_BPM) {
+            return false;
+        }
+        self.seed(bpm, FIXED_CONF);
+        if (self.period * bpm / 60.0 - 1.0).abs() > 1e-3 {
+            self.period = 60.0 / bpm;
+            self.bpm = bpm;
+            self.locked = true;
+            self.out.retimed += 1;
+        }
+        self.confidence = self.confidence.fmax(FIXED_CONF);
+        self.fixed_bpm = bpm;
+        self.out.bpm = bpm;
         self.out.period = self.period;
         self.out.confidence = self.confidence;
         self.out.locked = true;

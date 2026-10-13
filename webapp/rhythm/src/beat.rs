@@ -152,7 +152,15 @@ pub const DOWN_MODELS: [DownModel; 5] = [
     DownModel { chord: 1.2, kick: 0.5, low: 0.25, nov: 0.6, snare_down: 1.1, snare_back: 1.1, mid: 0.4, roll: 0.0 },
 ];
 
+/// How far the grid's period may sit from a served one (see `fixed_period`).
+const FIXED_SLACK: f64 = 0.003;
+
 pub struct Grid {
+    /// The SERVED period (lib.rs, from tempo.rs `fixed_bpm`), or 0. The fit
+    /// may refine the period by FIXED_SLACK around it — a published figure is
+    /// rounded — and no further: measured, unbounded it walked a locked 132
+    /// to 131.2 on the arranged techno record.
+    pub fixed_period: f64,
     hop_s: f64,
     ev: [Ev; EV_CAP],
     ev_head: usize,
@@ -223,6 +231,7 @@ impl Grid {
         }
         let mut g = Grid {
             hop_s,
+            fixed_period: 0.0,
             ev: [Ev::default(); EV_CAP],
             ev_head: 0,
             ev_len: 0,
@@ -517,6 +526,15 @@ impl Grid {
                 }
             }
         }
+        if self.fixed_period > 0.0 {
+            let lo = self.fixed_period * (1.0 - FIXED_SLACK);
+            let hi = self.fixed_period * (1.0 + FIXED_SLACK);
+            if self.p < lo || self.p > hi {
+                let pos = (now - self.t0) / self.p;
+                self.p = self.p.clamp(lo, hi);
+                self.t0 = now - pos * self.p;
+            }
+        }
         // The beats keep their numbers through whatever moved above.
         if was_init {
             if self.t0 != old_t0 || self.p != old_p {
@@ -799,7 +817,13 @@ impl Grid {
         o.period = self.p as f32;
         let locked = self.locked && self.confidence > 0.12;
         o.locked = locked;
-        o.bpm = if locked { (60.0 / self.p) as f32 } else { 0.0 };
+        o.bpm = if !locked {
+            0.0
+        } else if self.fixed_period > 0.0 {
+            (60.0 / self.fixed_period) as f32
+        } else {
+            (60.0 / self.p) as f32
+        };
         o.confidence = self.confidence;
         let pos = (t + self.hop_s * 0.5 - self.t0) / self.p;
         let n = pos.floor() as i64 + self.idx_off;

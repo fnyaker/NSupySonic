@@ -138,7 +138,8 @@ pub extern "C" fn tr_step(epochs: u32) -> f64 {
 }
 
 /// The outcome's scalars: 0 kind, 1 folds, 2 projected, 3 bagged, 4 accuracy,
-/// 5 balanced, 6 temperature, 7 retried, 8 evaluated, 9 layer count.
+/// 5 balanced, 6 temperature, 7 retried, 8 evaluated, 9 layer count,
+/// 10 the fits' balanced accuracy on their own training rows.
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub extern "C" fn tr_res() -> *const f64 {
@@ -155,6 +156,7 @@ pub extern "C" fn tr_res() -> *const f64 {
             RES[7] = if o.retried { 1.0 } else { 0.0 };
             RES[8] = o.evaluated as f64;
             RES[9] = o.layers.len() as f64;
+            RES[10] = o.fit_balanced;
         }
         RES.as_ptr()
     }
@@ -164,6 +166,19 @@ pub extern "C" fn tr_res() -> *const f64 {
 #[no_mangle]
 pub extern "C" fn tr_conf() -> *const i32 {
     job().and_then(|j| j.outcome.as_ref()).map_or(core::ptr::null(), |o| o.confusion.as_ptr())
+}
+
+/// Every row's held-out logits, `n × c` (before the temperature).
+#[no_mangle]
+pub extern "C" fn tr_held() -> *const f32 {
+    job().and_then(|j| j.outcome.as_ref()).map_or(core::ptr::null(), |o| o.held.as_ptr())
+}
+
+/// 1 where a row was held out by some fold (its logits in `tr_held` mean
+/// something), 0 where no fold could test it.
+#[no_mangle]
+pub extern "C" fn tr_held_mask() -> *const u8 {
+    job().and_then(|j| j.outcome.as_ref()).map_or(core::ptr::null(), |o| o.held_mask.as_ptr())
 }
 
 fn layer(l: u32) -> Option<&'static train::Layer> {
@@ -295,5 +310,43 @@ mod tests {
             job.outcome.unwrap().layers[0].w.clone()
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn the_fit_on_training_rows_exposes_memorising() {
+        // Labels with no relation to the rows: 6 classes over 60 points of
+        // pure noise in 256 dimensions, where a linear head can fit anything.
+        // It must read near chance held out and near perfect on what it trained
+        // on — that gap is the overfitting the studio reports.
+        let mut data = clusters(6, 10, 256, 0.0, 11, 5);
+        let mut r = Rng::new(4);
+        for v in data.x.iter_mut() {
+            *v = (r.next() * 2.0 - 1.0) as f32;
+        }
+        let mut o = Opts::linear();
+        o.proj = 0;
+        o.epochs = 80;
+        let mut job = Job::new(data, o);
+        job.start().unwrap();
+        job.finish();
+        let out = job.outcome.unwrap();
+        assert!(out.fit_balanced > 0.95, "fit {}", out.fit_balanced);
+        assert!(out.balanced < 0.4, "held out {}", out.balanced);
+        // ...and every row was held out once, its logits kept.
+        assert!(out.held_mask.iter().all(|&m| m == 1));
+        assert_eq!(out.held.len(), 60 * 6);
+    }
+
+    #[test]
+    fn separable_data_has_no_gap() {
+        let data = clusters(5, 16, 64, 0.2, 7, 4);
+        let mut o = Opts::linear();
+        o.proj = 0;
+        o.epochs = 30;
+        let mut job = Job::new(data, o);
+        job.start().unwrap();
+        job.finish();
+        let out = job.outcome.unwrap();
+        assert!(out.fit_balanced - out.balanced < 0.05, "fit {} held {}", out.fit_balanced, out.balanced);
     }
 }

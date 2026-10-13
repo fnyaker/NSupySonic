@@ -5,7 +5,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Rhythm } from "../../src/lib/audio/rhythm-core.js";
-import { familyTable, grooveOf, tempoRangeFor } from "../../src/lib/audio/style.js";
+import { familyTable, familyIndex, grooveOf, profileOf, tempoRangeFor } from "../../src/lib/audio/style.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // A fresh cargo build wins over the committed binary, so the eval always
@@ -20,7 +20,7 @@ export function wasmBytes() {
 
 export default {
   name: "wasm",
-  async run(pcm, sr, { seed = 0, seedAt = 4, genre = "", chunk = 4096, onFrame = null } = {}) {
+  async run(pcm, sr, { seed = 0, seedAt = 4, genre = "", served = false, chunk = 4096, onFrame = null } = {}) {
     const r = await Rhythm.fromBytes(wasmBytes(), sr);
     r.loadFamilies(familyTable());
     r.setLevel(2);
@@ -41,11 +41,19 @@ export default {
       const t0 = i / sr;
       if (!applied && (seed || genre) && t0 >= (seed ? seedAt : 0)) {
         applied = true;
+        // `served`: what the app does now with a measured verdict — the
+        // family pinned and the tempo locked (engine.js#adoptVerdict).
+        if (served && genre) {
+          r.pinFamily(familyIndex(genre));
+          const p = profileOf(genre);
+          r.setProfile(p.lull, p.kicks);
+        }
         const range = genre ? tempoRangeFor(genre) : null;
         if (range) r.setRange(range[0], range[1]);
         r.setLiveRange(!genre);
         if (genre) r.setGroove(grooveOf(genre));
-        if (seed) r.seed(seed, genre ? 0.9 : 0.7);
+        if (seed && served) r.lockTempo(seed);
+        else if (seed) r.seed(seed, genre ? 0.9 : 0.7);
       }
       const n = r.push(pcm.subarray(i, Math.min(pcm.length, i + chunk)));
       for (let k = 0; k < n; k++) {

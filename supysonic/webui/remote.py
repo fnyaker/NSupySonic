@@ -224,6 +224,7 @@ POLICY = {
     "genre_tag_create": "full",
     "genre_candidates": "full",
     "genre_labelled": "full",
+    "genre_track": "full",
     "genre_references": "full",
     "genre_reference_import": "full",
     "genre_model": {"GET": "read", "PUT": "admin", "DELETE": "admin"},

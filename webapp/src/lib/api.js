@@ -302,6 +302,8 @@ export const api = {
   genreCandidates: (limit = 40, sort = null) =>
     req("/genre/candidates?limit=" + limit + (sort ? "&sort=" + sort : "")),
   genreLabelled: () => req("/genre/labelled"),
+  // One track's tag and the vocabulary ranked for it (the tag sheet).
+  genreTrack: (id) => req("/genre/track/" + encodeURIComponent(id)),
   genreEmbeddings: (ids) =>
     req("/genre/embeddings", { method: "POST", body: body({ ids: (ids || []).map(String) }) }),
   genreModel: () => req("/genre/model"),

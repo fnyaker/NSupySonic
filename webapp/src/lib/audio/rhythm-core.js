@@ -133,6 +133,18 @@ export class Rhythm {
   seed(bpm, confidence = 0.9) {
     return !!this.x.rhythm_seed(+bpm || 0, +confidence || 0.9);
   }
+  /** Lock the tempo to the server's figure; 0 releases it (tempo.rs `lock`). */
+  lockTempo(bpm) {
+    return !!this.x.rhythm_lock_tempo(+bpm || 0);
+  }
+  /** The served genre's reading of the arrangement (style.js profileOf). */
+  setProfile(lull, kicks) {
+    this.x.rhythm_set_profile(+lull || 0, kicks === false ? 0 : 1);
+  }
+  /** Pin the served family (familyTable index); -1 releases it. */
+  pinFamily(index) {
+    this.x.rhythm_pin_family(Number.isInteger(index) ? index : -1);
+  }
   setRange(lo, hi) {
     this.x.rhythm_set_range(+lo || 0, +hi || 0);
   }

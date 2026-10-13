@@ -861,3 +861,101 @@ test("the analyser keeps up with real time with room to spare", () => {
   const share = (performance.now() - t0) / 30000;
   assert.ok(share < 0.1, `30 s of audio took ${(share * 100).toFixed(1)}% of real time`);
 });
+
+// --- the server's answers, locked -----------------------------------------------------------
+//
+// A measured verdict PINS the family and LOCKS the tempo (engine.js
+// adoptVerdict): nothing is classified or estimated again, and what the music
+// is doing is read with the genre's own profile (style.js profileOf). Each
+// claim below was measured on the eval's arranged records through this binary.
+
+import { familyIndex, profileOf } from "../src/lib/audio/style.js";
+
+function served(id, { genre, bpm, profile = true, at = 4 } = {}) {
+  const { pcm, truth } = loadSong(SONG_BY_ID.get(id));
+  const g = genre ?? truth.genre;
+  const r = analyser();
+  const F = r.layout.fields;
+  const hopS = r.hop / SR;
+  const out = { bpm: [], period: [], locked: 0, frames: 0, dominant: [], kicks: 0, drops: 0, downbeats: 0 };
+  let applied = false;
+  for (let i = 0; i < pcm.length; i += 128) {
+    if (!applied && i / SR >= at) {
+      applied = true;
+      r.pinFamily(familyIndex(g));
+      if (profile) {
+        const p = profileOf(g);
+        r.setProfile(p.lull, p.kicks);
+      }
+      r.lockTempo(bpm ?? truth.bpm);
+    }
+    const n = r.push(pcm.subarray(i, Math.min(pcm.length, i + 128)));
+    for (let k = 0; k < n; k++) {
+      const fr = r.frame(k);
+      const t = fr[F.frame[0]] * hopS;
+      if (t < at + 1) continue;
+      out.frames++;
+      if (fr[F.locked[0]]) {
+        out.locked++;
+        out.bpm.push(fr[F.bpm[0]]);
+        out.period.push(fr[F.period[0]]);
+      }
+      out.dominant.push(fr[F.styleDominant[0]]);
+      if (fr[F.kickHit[0]]) out.kicks++;
+      if (fr[F.drop[0]]) out.drops++;
+      if (fr[F.downbeat[0]]) out.downbeats++;
+    }
+  }
+  out.lockedShare = out.locked / Math.max(1, out.frames);
+  return out;
+}
+
+test("a locked tempo is never re-estimated, through the build that used to pull it to 170", () => {
+  // Unlocked, the arranged techno record's second build drew the grid to
+  // 170-172 for seven seconds (see tempo.rs `hold`).
+  const s = served("techno-132");
+  const off = s.bpm.filter((b) => b !== s.bpm[0] || Math.abs(b / 132 - 1) > 1e-4);
+  assert.equal(off.length, 0, `${off.length} frames off 132 (first ${off[0]})`);
+  // ...and the grid's own period only absorbs a rounded figure's error
+  // (0.3%): unbounded, its fit walked to 131.2 BPM (0.6%).
+  const drift = s.period.filter((p) => Math.abs((p * 132) / 60 - 1) > 0.0031);
+  assert.equal(drift.length, 0, `${drift.length} frames with the grid off 132 (first ${60 / drift[0]})`);
+  assert.ok(s.lockedShare > 0.9, `locked ${s.lockedShare}`);
+});
+
+test("a locked tempo on music with no beat does not invent one", () => {
+  // Measured: the ambient record at its served 60 BPM is locked 3% of the time
+  // (it was 90% while the lock held the confidence up); every beat record
+  // keeps its F-measure (the eval's `served` scenario).
+  const s = served("ambient-pads");
+  assert.ok(s.lockedShare < 0.1, `locked ${s.lockedShare}`);
+});
+
+test("a pinned family is not re-classified, whatever the music sounds like", () => {
+  // The frenchcore record pinned to techno: the classifier never gets a vote.
+  const s = served("frenchcore-200", { genre: "techno", bpm: 200, profile: false });
+  const techno = familyIndex("techno");
+  assert.ok(techno >= 0);
+  assert.ok(s.dominant.every((d) => d === techno), "the dominant family moved off the pin");
+});
+
+test("a song form has no club drop, and its returns still mark the phrase", () => {
+  // Measured: the pop record fires 2 drops under the club rule (its chorus
+  // returning after a fill) and none with the song profile; its downbeats
+  // are the same either way, because the return still anchors the phrase.
+  const club = served("pop-112", { profile: false });
+  const song = served("pop-112");
+  assert.equal(club.drops, 2);
+  assert.equal(song.drops, 0);
+  assert.equal(song.downbeats, club.downbeats);
+});
+
+test("a genre with no drum kit publishes no kick", () => {
+  // The ragtime record's stride left hand was published as kicks; the bar
+  // model still reads it (downbeats unchanged), the animations do not.
+  const kit = served("ragtime-piano-96", { genre: "piano", profile: false });
+  const none = served("ragtime-piano-96", { genre: "piano" });
+  assert.ok(kit.kicks > 20, `kicks without the profile: ${kit.kicks}`);
+  assert.equal(none.kicks, 0);
+  assert.equal(none.downbeats, kit.downbeats);
+});

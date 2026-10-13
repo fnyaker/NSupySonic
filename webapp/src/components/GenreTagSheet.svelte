@@ -18,47 +18,48 @@
   // people labelling it would train it against itself. The whole component is
   // inert for anyone else.
   import { fade, scale } from "svelte/transition";
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { api } from "../lib/api.js";
   import { genreTagSheet, closeGenreTag, toasts } from "../lib/stores.js";
   import { putAnalysis } from "../lib/analysis.js";
+  import { rankTags, searchTags, noteRecent } from "../lib/genre/rank.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
 
   let tags = [];
+  let counts = {};
+  let scores = [];
   let loaded = false;
   let loading = false;
   let busy = 0; // tag id being written, or 0
   let query = "";
   let loadedFor = null;
+  let input = null;
 
   $: track = $genreTagSheet?.track || null;
   $: if (track && loadedFor !== track && !loading) load(track);
   $: if (!track) teardown();
-  $: shown = filter(tags, query);
-
-  function filter(list, q) {
-    const needle = (q || "").trim().toLowerCase();
-    if (!needle) return list;
-    return list.filter((t) => (t.name || "").toLowerCase().includes(needle));
-  }
+  // The vocabulary in THIS track's order (lib/genre/rank.js): the model's and
+  // the prototypes' opinion first, then what the library uses most — never the
+  // alphabet, which put the genre you wanted somewhere in a wall of 200 chips.
+  $: ranked = rankTags(tags, scores, counts);
+  $: shown = query.trim() ? searchTags(ranked, query) : ranked;
+  $: scored = ranked.length > 0 && ranked[0].score != null;
 
   async function load(t) {
     loadedFor = t;
     loading = true;
     try {
-      // The vocabulary, and which tag this track already wears. Both are cheap
-      // reads and both are needed: showing the current one is how you know
-      // whether there is anything to do.
-      const [status, labelled] = await Promise.all([
+      // The vocabulary, and this track's own tag and ranking — one row, not the
+      // whole labelled set read to find it.
+      const [status, mine] = await Promise.all([
         api.genreStatus(),
-        api.genreLabelled(),
+        api.genreTrack(t.deezer_id || t.id).catch(() => null),
       ]);
       tags = status?.tags || [];
-      const row = (labelled?.labelled || []).find(
-        (r) => String(r.deezer_id) === String(t.deezer_id)
-      );
-      currentTagId = row?.tag?.id ?? null;
+      counts = status?.counts || {};
+      scores = mine?.scores || [];
+      currentTagId = mine?.tag?.id ?? null;
     } catch (e) {
       toasts.push(e?.message || "Impossible de lire les genres", "error");
       tags = [];
@@ -66,6 +67,9 @@
       loading = false;
       loaded = true;
     }
+    // A keyboard is there to type with; a phone's would cover half the list.
+    await tick();
+    if (input && window.matchMedia?.("(pointer: fine)").matches) input.focus();
   }
 
   let currentTagId = null;
@@ -76,6 +80,7 @@
     loading = false;
     busy = 0;
     query = "";
+    scores = [];
     currentTagId = null;
   }
   onDestroy(teardown);
@@ -90,6 +95,7 @@
     try {
       await api.genreLabel(track.deezer_id || track.id, tag ? tag.id : null);
       currentTagId = tag ? tag.id : null;
+      if (tag) noteRecent(tag.id);
       toasts.push(
         tag ? `« ${track.title} » étiqueté ${tag.name}` : "Étiquette retirée"
       );
@@ -117,7 +123,25 @@
   }
 
   function onKey(e) {
-    if (e.key === "Escape") closeGenreTag();
+    if (!track) return;
+    if (e.key === "Escape") {
+      if (query) query = "";
+      else closeGenreTag();
+      return;
+    }
+    // Enter on a focused chip is that chip's own click, not "the first one".
+    if (e.key === "Enter" && shown[0] && !busy && e.target?.tagName !== "BUTTON") {
+      e.preventDefault();
+      apply(shown[0].tag);
+      return;
+    }
+    // 1..9 pick from the ranking — only when the box is empty, since a digit
+    // typed into it is part of a name.
+    const n = parseInt(e.key, 10);
+    if (!query && n >= 1 && n <= 9 && shown[n - 1] && !busy && !(e.metaKey || e.ctrlKey || e.altKey)) {
+      e.preventDefault();
+      apply(shown[n - 1].tag);
+    }
   }
 </script>
 
@@ -149,23 +173,36 @@
             (Bibliothèque&nbsp;→&nbsp;Genres).
           </p>
         {:else}
-          <input
-            class="q"
-            type="text"
-            placeholder="Filtrer…"
-            bind:value={query}
-            autocomplete="off"
-          />
+          <div class="q">
+            <Icon name="search" size={16} />
+            <input
+              bind:this={input}
+              type="search"
+              placeholder="Chercher un genre…"
+              bind:value={query}
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Chercher un genre"
+            />
+          </div>
+          {#if !query}
+            <p class="order muted">
+              {scored ? "Du plus au moins probable pour ce titre" : "Les plus utilisés d'abord"}
+            </p>
+          {/if}
           <div class="grid">
-            {#each shown as tag (tag.id)}
+            {#each shown as r, i (r.tag.id)}
               <button
                 class="chip"
-                class:on={String(currentTagId) === String(tag.id)}
-                class:busy={busy === tag.id}
+                class:on={String(currentTagId) === String(r.tag.id)}
+                class:top={i === 0 && (scored || query)}
+                class:busy={busy === r.tag.id}
                 disabled={!!busy}
-                style={tag.color ? `--chip:${tag.color}` : ""}
-                on:click={() => apply(tag)}>
-                {tag.name}
+                style={r.tag.color ? `--chip:${r.tag.color}` : ""}
+                on:click={() => apply(r.tag)}>
+                {#if i < 9 && !query}<kbd>{i + 1}</kbd>{/if}
+                <span>{r.tag.name}</span>
+                {#if r.score != null && r.score >= 0.01}<small>{Math.round(r.score * 100)} %</small>{/if}
               </button>
             {/each}
             {#if !shown.length}
@@ -256,17 +293,35 @@
     flex: 1;
   }
   .q {
-    width: 100%;
-    padding: 9px 12px;
-    margin-bottom: 10px;
-    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 44px;
+    padding: 0 12px;
+    margin-bottom: 8px;
+    border-radius: 12px;
     background: var(--bg-elev);
     border: 1px solid var(--bg-hover);
-    color: var(--text);
+    color: var(--text-dim);
   }
-  .q:focus {
-    outline: none;
+  .q:focus-within {
     border-color: var(--accent);
+  }
+  .q input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    border: 0;
+    background: none;
+    outline: none;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  .order {
+    margin: 0 0 10px;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
   .grid {
     display: flex;
@@ -275,6 +330,10 @@
     padding-bottom: 8px;
   }
   .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 38px;
     padding: 7px 14px;
     border-radius: 999px;
     border: 1px solid var(--bg-hover);
@@ -290,6 +349,27 @@
     background: var(--chip, var(--accent));
     border-color: var(--chip, var(--accent));
     color: var(--bg-card);
+  }
+  .chip.top:not(.on) {
+    border-color: var(--chip, var(--accent));
+    background: color-mix(in srgb, var(--chip, var(--accent)) 12%, var(--bg-elev));
+  }
+  .chip kbd {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 5px;
+    padding: 0 5px;
+    font: inherit;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--text-dim);
+  }
+  .chip.on kbd {
+    color: inherit;
+  }
+  .chip small {
+    font-weight: 500;
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
   }
   .chip.busy {
     opacity: 0.6;
