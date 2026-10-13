@@ -6971,6 +6971,26 @@ class GenreStudioTestCase(unittest.TestCase):
         again = self.client.post("/api/genre/references/import", json={"deezer_id": "4242", "tag": tag["id"]})
         self.assertEqual(again.status_code, 200)
 
+    def test_a_default_sound_is_tagged_once_and_never_overwrites_a_tag(self):
+        """The defaults are ADDED to the tags: a recording Deezer carries gets its
+        sub-genre, a track already wearing a tag keeps it (one tag per track), and
+        a recording Deezer does not carry (artist AND title) is not invented."""
+        from supysonic.db import GenreTag, TrackTag
+        from supysonic.webui import genre as wg
+
+        api = self._with_catalogue(tracks=[self._hit(11, "The Bells", "Jeff Mills")])
+        self._login()
+        self._tag("Techno", "groove")
+        self._tag("Hardtekk", "hard")
+        with self.app.app_context():
+            provider = self.app.deezer
+            techno = GenreTag.get(GenreTag.name == "Techno")
+            hardtek = GenreTag.get(GenreTag.name == "Hardtekk")
+            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "The Bells", techno), "tagged")
+            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "The Bells", hardtek), "kept")
+            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "Nowhere Man", hardtek), "not_found")
+        self.assertEqual([tt.tag.name for tt in TrackTag.select()], ["Techno"])
+
     def test_removing_a_tag_gives_the_verdict_back(self):
         """A tag removed left the row naming the tag's genre with source "tag" —
         served as somebody's choice, by nobody, for ever."""
