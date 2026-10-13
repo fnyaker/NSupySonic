@@ -6868,7 +6868,10 @@ class GenreStudioTestCase(unittest.TestCase):
             self.assertTrue(names, genre)
         # The scenes nobody has written a canon for have no track list: an
         # invented one would be worse than none. (Their artists may be offered.)
-        for genre in ("Pieep", "Deutscher Krach", "Hardtekk", "Zaag", "Uptempo", "Frenchcore"):
+        # Frenchcore is the exception: its sub-genre list is hand-written from
+        # published essentials (subgenre_tracks.py), not from a canon.
+        # Deutscher Krach has a list now: the scene's own label's releases (subgenre_tracks.py).
+        for genre in ("Pieep", "Hardtekk", "Zaag", "Uptempo"):
             self.assertNotIn(genre, refs.REFERENCES, genre)
 
     def _with_catalogue(self, tracks=None, artists=None, fail=False):
@@ -6929,7 +6932,9 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertEqual(len(api.calls), len(refs.REFERENCES["Techno"]))
         # A scene's artists: that name, not the nearest one.
         body = self.client.get("/api/genre/references?genre=Frenchcore").json
-        self.assertEqual(body["tracks"], [])
+        # Its hand-written sub-genre list is searched too, and none of it is in the stub catalogue.
+        self.assertEqual(len(body["tracks"]), len(refs.REFERENCES["Frenchcore"]))
+        self.assertTrue(all(r["match"] is None for r in body["tracks"]))
         self.assertEqual({a["name"]: (a["match"] or {}).get("deezer_id") for a in body["artists"]},
                          {"Dr. Peacock": None, "Sefa": "56"})
 
@@ -6965,6 +6970,76 @@ class GenreStudioTestCase(unittest.TestCase):
         self.app.deezer = None
         again = self.client.post("/api/genre/references/import", json={"deezer_id": "4242", "tag": tag["id"]})
         self.assertEqual(again.status_code, 200)
+
+    def test_a_default_sound_is_tagged_once_and_never_overwrites_a_tag(self):
+        """The defaults are ADDED to the tags: a recording Deezer carries gets its
+        sub-genre, a track already wearing a tag keeps it (one tag per track), and
+        a recording Deezer does not carry (artist AND title) is not invented."""
+        from supysonic.db import GenreTag, TrackTag
+        from supysonic.webui import genre as wg
+
+        api = self._with_catalogue(tracks=[self._hit(11, "The Bells", "Jeff Mills")])
+        self._login()
+        self._tag("Techno", "groove")
+        self._tag("Hardtekk", "hard")
+        with self.app.app_context():
+            provider = self.app.deezer
+            techno = GenreTag.get(GenreTag.name == "Techno")
+            hardtek = GenreTag.get(GenreTag.name == "Hardtekk")
+            got = wg._tag_default_sound(api, provider, "Jeff Mills", "The Bells", techno)
+            self.assertEqual(got[0], "tagged")
+            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "The Bells", hardtek), ("kept", got[1]))
+            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "Nowhere Man", hardtek), ("not_found", None))
+        self.assertEqual([tt.tag.name for tt in TrackTag.select()], ["Techno"])
+
+    def _run_default_sounds(self, lists):
+        """One whole run over these lists, on a thread of its own as in
+        production (the worker renices the thread it runs on)."""
+        import threading
+        from unittest import mock
+
+        from supysonic.deezer import subgenre_tracks as sg
+        from supysonic.webui import genre as wg
+
+        with mock.patch.dict(sg.SUBGENRE_TRACKS, lists, clear=True):
+            wg._sounds_job.update(running=True, stopped=False, retry_at=0.0)
+            t = threading.Thread(target=wg._run_sounds, args=(self.app,))
+            t.start()
+            t.join(timeout=10)
+            self.assertFalse(t.is_alive())
+            return wg._sounds_json(), wg._sounds_signature()
+
+    def test_a_default_sounds_run_counts_what_it_did_and_remembers_it(self):
+        from supysonic.db import Meta, TrackTag
+        from supysonic.webui import genre as wg
+
+        self._with_catalogue(tracks=[self._hit(11, "The Bells", "Jeff Mills")])
+        self._login()
+        self._tag("Techno", "groove")
+        job, sig = self._run_default_sounds({
+            "Techno": (("Jeff Mills", "The Bells"), ("Jeff Mills", "Nowhere Man")),
+            # A tag the admin deleted: counted as failed, and NOT taken for Deezer being down.
+            "Gone": (("A", "B"),) * 6,
+        })
+        self.assertEqual(
+            {k: job[k] for k in ("running", "stopped", "total", "done", "tagged", "kept", "not_found", "failed")},
+            {"running": False, "stopped": False, "total": 8, "done": 8, "tagged": 1, "kept": 0, "not_found": 1, "failed": 6},
+        )
+        self.assertEqual([tt.tag.name for tt in TrackTag.select()], ["Techno"])
+        self.assertEqual(Meta.get(Meta.key == wg.SOUNDS_META_KEY).value, sig, "a finished run is not repeated")
+
+    def test_a_default_sounds_run_stops_when_deezer_does_not_answer(self):
+        from supysonic.db import Meta, TrackTag
+        from supysonic.webui import genre as wg
+
+        self._with_catalogue(fail=True)
+        self._login()
+        self._tag("Techno", "groove")
+        job, _sig = self._run_default_sounds({"Techno": tuple(("Jeff Mills", "T%d" % i) for i in range(20))})
+        self.assertTrue(job["stopped"])
+        self.assertEqual((job["done"], job["failed"]), (5, 5), "five failures in a row, then it stops")
+        self.assertEqual(TrackTag.select().count(), 0)
+        self.assertIsNone(Meta.get_or_none(Meta.key == wg.SOUNDS_META_KEY), "an interrupted run is tried again later")
 
     def test_removing_a_tag_gives_the_verdict_back(self):
         """A tag removed left the row naming the tag's genre with source "tag" —

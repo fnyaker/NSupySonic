@@ -10,7 +10,7 @@ and the first eight are the hardest to find in a library that was never sorted
 by genre. So the studio offers, per genre, a few recordings that are a genre's
 textbook examples — the kind a history of the style names.
 
-The rule this list is held to: **nothing in it is a guess.** Every pair is a
+The rule this list was held to: **nothing in it is a guess.** Every pair is a
 recording that exists under that artist and that title, and that the genre's
 own literature names as one of its examples. Where no such list could be
 written with certainty — the young, local scenes this app cares most about
@@ -19,6 +19,12 @@ nowhere written down — there is NO list rather than a plausible-looking one,
 and the studio says so. For some of those, the scene's established artists
 are offered instead (``SCENE_ARTISTS``): an artist page to listen through and
 tag in bulk (with its review), not a track put forward as the genre.
+
+The sub-genre lists in ``subgenre_tracks.py`` are the exception the admin asked
+for: hand-written from published essentials, forums and DJ tracklists rather
+than from a canon, and merged in below. They are no less checked here — each
+pair goes through the same Deezer match — but they are NOT vetted as the
+genre's examples, so the listening step before tagging is what keeps them honest.
 
 Nothing here is imported blindly either. Each pair is looked up on Deezer at
 the moment it is shown, a hit must match the artist AND the title (``match``),
@@ -30,6 +36,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+
+from .subgenre_tracks import SUBGENRE_TRACKS
 
 #: Genre label (as the studio's vocabulary spells it) -> (artist, title) pairs.
 #: The title may be a distinctive fragment: a classical recording's full title
@@ -202,6 +210,12 @@ SCENE_ARTISTS: dict[str, tuple[str, ...]] = {
     "Hardcore": ("Angerfist", "Neophyte", "Paul Elstak"),
     "Gabber": ("Paul Elstak", "Neophyte"),
 }
+
+# The hand-written sub-genre lists go in after the curated ones, skipping any
+# pair the curated list already names (a "Piano" track is both, once).
+for _genre, _pairs in SUBGENRE_TRACKS.items():
+    _have = set(REFERENCES.get(_genre, ()))
+    REFERENCES[_genre] = REFERENCES.get(_genre, ()) + tuple(p for p in _pairs if p not in _have)
 
 _WS = re.compile(r"[^0-9a-z]+")
 _ARTIST_SPLIT = re.compile(r"\s*(?:&|,| and | feat\.? | ft\.? | x | with )\s*", re.I)

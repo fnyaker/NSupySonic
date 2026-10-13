@@ -236,6 +236,7 @@ POLICY = {
     "analysis_backfill_start": "admin",
     "analysis_backfill_status": "admin",
     "genre_relabel": "admin",
+    "genre_sounds": "admin",
     "genre_extractor_upload": "admin",
     "genre_extractor_delete": "admin",
     "genre_extractor_test": "admin",

@@ -541,6 +541,8 @@ def genre_status():
         # tagging starts by CONFIRMING a guess rather than typing a vocabulary.
         # One-time — see seed_default_tags.
         gen.seed_default_tags()
+        # ...and the default sounds, once per list change (see start_sounds_if_due).
+        start_sounds_if_due(current_app._get_current_object())
 
     from peewee import fn
 
@@ -1439,6 +1441,182 @@ def genre_reference_import():
     if pf is not None and not track.last_modification:
         queued = bool(pf.download_ids([did], priority=Priority.USER))
     return jsonify({"track": _track_json(track), "tag": _tag_json(tag), "queued": queued})
+
+
+# -- the default sounds ---------------------------------------------------------
+# deezer/subgenre_tracks.py's recordings are ADDED to the tags, once: each one
+# Deezer carries is brought in and tagged with its sub-genre, unless the track
+# already wears a tag. One tag per track, so a sound someone chose (or an earlier
+# default) is never overwritten. Nothing is downloaded here: a tagged row is
+# archived when it is played or by the labelled backfill, like any other. Runs on
+# the first admin visit after the lists change; the user can tag more on top.
+SOUNDS_META_KEY = "genre_sounds_seeded"
+SOUNDS_MAX_FAILS = 5  # consecutive failures that mean Deezer is not answering
+SOUNDS_RETRY_S = 600.0  # after a stopped run, wait this long before trying again
+_sounds_lock = threading.Lock()
+_sounds_job = {
+    "running": False, "stopped": False, "retry_at": 0.0, "finished": None,
+    "total": 0, "done": 0, "tagged": 0, "kept": 0, "not_found": 0, "failed": 0,
+}
+
+
+def _sounds_signature():
+    from ..deezer import subgenre_tracks as sg
+
+    return "%d:%d" % (len(sg.SUBGENRE_TRACKS), sum(len(v) for v in sg.SUBGENRE_TRACKS.values()))
+
+
+def _sounds_json():
+    with _sounds_lock:
+        return {k: v for k, v in _sounds_job.items() if k != "retry_at"}
+
+
+def _tag_default_sound(dzapi, provider, artist, title, tag):
+    """Bring one default recording in and tag it. Returns ``(outcome, track
+    id)``: "tagged", "kept" (the track already wears a tag) or "not_found"
+    (Deezer does not carry THAT artist and THAT title). A Deezer failure
+    raises, so the caller can tell it apart. The verdict is NOT re-decided
+    here: the run does it in one pass at the end, as the bulk tag does."""
+    from ..deezer import library
+    from ..deezer import references as refs
+    from . import _ensure_track_row
+
+    found = (dzapi.advanced_search(artist=refs.first_artist(artist), track=title, limit=10) or {}).get("data") or []
+    hit = refs.match(artist, title, found)
+    if hit is None:
+        return "not_found", None
+    track = _resolve(hit["id"])
+    if track is None:
+        root = library.get_root_folder(provider.archive_dir)
+        track = _ensure_track_row(provider, str(hit["id"]), root, library.ImportCache())
+    if TrackTag.select().where(TrackTag.track == track).exists():
+        return "kept", track.id
+    TrackTag.create(track=track, tag=tag)
+    return "tagged", track.id
+
+
+def _run_sounds(app):
+    from ..db import close_connection, open_connection
+    from ..deezer import subgenre_tracks as sg
+    from ..deezer.workload import renice
+    from . import _dz_api, _dz_live
+
+    renice(12)
+    with app.app_context():
+        complete = False
+        tagged_ids = []
+        try:
+            open_connection(reuse=True)
+            dzapi, provider = _dz_api(), _dz_live()
+            if dzapi is None or provider is None:
+                with _sounds_lock:
+                    _sounds_job["stopped"] = True
+                    _sounds_job["retry_at"] = time.monotonic() + SOUNDS_RETRY_S
+                return
+            tags = {t.name: t for t in GenreTag.select()}
+            pairs = [(g, a, t) for g, ps in sg.SUBGENRE_TRACKS.items() for a, t in ps]
+            with _sounds_lock:
+                _sounds_job.update(total=len(pairs), done=0, tagged=0, kept=0, not_found=0, failed=0, stopped=False)
+            fails = 0
+            for genre, artist, title in pairs:
+                tag = tags.get(genre)
+                if tag is None:
+                    # A tag the admin deleted: nothing to add to, and nothing to
+                    # do with Deezer answering or not.
+                    with _sounds_lock:
+                        _sounds_job["done"] += 1
+                        _sounds_job["failed"] += 1
+                    continue
+                try:
+                    outcome, track_id = _tag_default_sound(dzapi, provider, artist, title, tag)
+                    fails = 0
+                except Exception:
+                    logger.info("genre: default sound %s - %s failed", artist, title, exc_info=True)
+                    outcome, track_id = "failed", None
+                    fails += 1
+                if outcome == "tagged":
+                    tagged_ids.append(track_id)
+                with _sounds_lock:
+                    _sounds_job["done"] += 1
+                    _sounds_job[outcome] += 1
+                    if fails >= SOUNDS_MAX_FAILS:
+                        # Deezer is not answering: stop, and do not record the run as done.
+                        _sounds_job["stopped"] = True
+                        _sounds_job["retry_at"] = time.monotonic() + SOUNDS_RETRY_S
+                        return
+            complete = True
+        except Exception:
+            logger.warning("genre: default sounds crashed", exc_info=True)
+        finally:
+            if complete:
+                _mark_sounds_done(_sounds_signature())
+            if tagged_ids:
+                # What the bulk tag does after applying: the prototypes and the
+                # cached opinions are stale, and the verdicts are re-decided in
+                # one pass that tells the devices (the generation) if any moved.
+                _forget_centroids()
+                invalidate_predictions()
+                _run_redecide(app, tagged_ids)
+            with _sounds_lock:
+                _sounds_job["running"] = False
+                _sounds_job["finished"] = now().isoformat()
+            try:
+                close_connection()
+            except Exception:
+                pass
+
+
+def _mark_sounds_done(signature):
+    try:
+        from ..db import Meta
+
+        row = Meta.get_or_none(Meta.key == SOUNDS_META_KEY)
+        if row is None:
+            Meta.create(key=SOUNDS_META_KEY, value=signature)
+        else:
+            row.value = signature
+            row.save()
+    except Exception:
+        logger.debug("genre: could not store the default-sounds flag", exc_info=True)
+
+
+def start_sounds(app) -> bool:
+    with _sounds_lock:
+        if _sounds_job["running"]:
+            return False
+        _sounds_job.update(running=True, stopped=False, finished=None)
+    threading.Thread(target=_run_sounds, args=(app,), name="genre-default-sounds", daemon=True).start()
+    return True
+
+
+def start_sounds_if_due(app):
+    """Start the default sounds when the lists changed since they were last
+    added. A run Deezer cut short waits SOUNDS_RETRY_S before the next try, so a
+    studio page polled during an outage does not hammer it."""
+    from ..db import Meta
+
+    if app.testing:
+        return
+    with _sounds_lock:
+        if _sounds_job["stopped"] and time.monotonic() < _sounds_job["retry_at"]:
+            return
+    try:
+        row = Meta.get_or_none(Meta.key == SOUNDS_META_KEY)
+    except Exception:
+        return
+    if row is not None and (row.value or "") == _sounds_signature():
+        return
+    start_sounds(app)
+
+
+@webapi.route("/genre/sounds", methods=["GET", "POST"])
+@login_required
+@admin_required
+def genre_sounds():
+    """The default sounds' progress; POST starts a run (the studio's button)."""
+    if request.method == "POST":
+        start_sounds(current_app._get_current_object())
+    return jsonify(_sounds_json())
 
 
 @webapi.route("/genre/construction")
