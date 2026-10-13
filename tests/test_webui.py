@@ -6868,7 +6868,10 @@ class GenreStudioTestCase(unittest.TestCase):
             self.assertTrue(names, genre)
         # The scenes nobody has written a canon for have no track list: an
         # invented one would be worse than none. (Their artists may be offered.)
-        for genre in ("Pieep", "Deutscher Krach", "Hardtekk", "Zaag", "Uptempo", "Frenchcore"):
+        # Frenchcore is the exception: its sub-genre list is hand-written from
+        # published essentials (subgenre_tracks.py), not from a canon.
+        # Deutscher Krach has a list now: the scene's own label's releases (subgenre_tracks.py).
+        for genre in ("Pieep", "Hardtekk", "Zaag", "Uptempo"):
             self.assertNotIn(genre, refs.REFERENCES, genre)
 
     def _with_catalogue(self, tracks=None, artists=None, fail=False):
@@ -6929,7 +6932,9 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertEqual(len(api.calls), len(refs.REFERENCES["Techno"]))
         # A scene's artists: that name, not the nearest one.
         body = self.client.get("/api/genre/references?genre=Frenchcore").json
-        self.assertEqual(body["tracks"], [])
+        # Its hand-written sub-genre list is searched too, and none of it is in the stub catalogue.
+        self.assertEqual(len(body["tracks"]), len(refs.REFERENCES["Frenchcore"]))
+        self.assertTrue(all(r["match"] is None for r in body["tracks"]))
         self.assertEqual({a["name"]: (a["match"] or {}).get("deezer_id") for a in body["artists"]},
                          {"Dr. Peacock": None, "Sefa": "56"})
 
