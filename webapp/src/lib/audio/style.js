@@ -1351,6 +1351,38 @@ export function grooveOf(name) {
   return FAMILY_BY_ID.get(g.family)?.a === "hard" ? GROOVES.hard : GROOVES.unknown;
 }
 
+// HOW EACH GENRE IS READ, beyond its tempo band and its bar (the analyser's
+// genre-specialised half: rhythm/src/pattern.rs `drop_lull_beats`, `kicks`).
+// A song form has no club drop — its chorus coming back after a fill is not
+// one — so the kick must be out for four bars, a real breakdown, before its
+// return counts. A genre with no drum kit publishes no kick at all.
+const SONG_FORM = new Set([
+  "ambient", "strings", "jazz", "vocalPop", "rnb", "hiphop", "rap", "rock", "metal", "brutal",
+  "punk", "indie", "hardrock", "reggaeton", "reggae", "dancehall", "funk", "lofi", "pop", "soul",
+  "blues", "country", "folk", "disco",
+]);
+const DRUMLESS = new Set(["ambient", "strings"]);
+const SONG_LULL_BEATS = 16;
+
+/**
+ * The analyser's profile for a genre name: `lull` (beats the kick must be out
+ * before a drop, 0 = the club default) and `kicks` (false: publish none).
+ */
+export function profileOf(name) {
+  const fam = genreOf(name)?.family;
+  if (!fam) return { lull: 0, kicks: true };
+  return { lull: SONG_FORM.has(fam) ? SONG_LULL_BEATS : 0, kicks: !DRUMLESS.has(fam) };
+}
+
+/**
+ * The analyser's index (familyTable order) of the family a genre name resolves
+ * to, or -1 — what the engine pins when the server has named the genre.
+ */
+export function familyIndex(name) {
+  const fam = genreOf(name)?.family;
+  return fam ? FAMILIES.findIndex((f) => f.id === fam) : -1;
+}
+
 /**
  * The whole vocabulary, flattened for the analyser (style.rs#load_families):
  * [count, then per family: archetype, flag (1 tempo-free, 2 the fallback), look x7, rangeLo, rangeHi, groove,

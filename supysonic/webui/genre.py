@@ -456,19 +456,33 @@ def _candidate_row(track, emb, gen, cache):
         # needs no training, so it is the only one with something to say while a
         # genre is still one or two examples old — see deezer/genre.py.
         extra = _extras(track, _served_bpm(track)) if gen.reads_extras() else None
-        hit = (gen.predict(vec, extra), gen.prototype_predict(vec))
+        hit = (gen.predict(vec, extra), gen.prototype_scores(vec))
         if len(cache) < _PRED_CACHE_MAX:
             cache[track.id] = hit
-    guess, proto = hit
+    guess, protos = hit
     row = _track_json(track, guess)
-    if proto:
-        row["prototype"] = {"label": proto[0], "similarity": proto[1]}
+    if protos:
+        row["prototype"] = {"label": protos[0][0], "similarity": protos[0][1]}
+    row["scores"] = _scores_json(guess, protos)
     # top1 − top2 already says how decided the head is. With no head nothing is
     # "decided", so everything is equally worth a look and the play count is
     # free to break the tie.
     margin = (guess[3] if len(guess) > 3 else 1.0) if guess else 0.0
     row["uncertainty"] = round(max(0.0, 1.0 - margin), 4)
     return row
+
+
+#: How many ranked genres a candidate carries. The studio shows the first nine
+#: on keys and orders the rest of the vocabulary after them; past this the
+#: shares are noise (a few thousandths) and the vocabulary's own order follows.
+SCORES_MAX = 24
+
+
+def _scores_json(guess, protos):
+    """The vocabulary ranked for one track: [[label, score, head, proto]]."""
+    from ..deezer import genre as gen
+
+    return [list(r) for r in gen.rank_scores(guess, protos, SCORES_MAX)]
 
 
 def _served_bpm(track):
@@ -1018,6 +1032,41 @@ def genre_candidates():
             # True when the scan stopped on its own cap rather than on the list
             # being full: there may be more, we just did not look further.
             "truncated": scanned >= scan and truncated,
+        }
+    )
+
+
+@webapi.route("/genre/track/<ident>")
+@login_required
+@admin_required
+def genre_track(ident):
+    """One track's tag and the vocabulary ranked for it — what the tag sheet
+    opened from a track's menu needs, without reading the whole labelled set
+    to find one row (it used to fetch every tag in the library for that)."""
+    from ..deezer import embedding as emb
+    from ..deezer import genre as gen
+
+    track = _resolve(ident)
+    if track is None:
+        return jsonify({"error": "unknown track"}), 404
+    tt = TrackTag.select(TrackTag, GenreTag).join(GenreTag).where(TrackTag.track == track).first()
+    scores = []
+    try:
+        vec = emb.load_embedding(track)
+        if vec is not None:
+            extra = None
+            if gen.reads_extras():
+                served = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+                extra = _extras(track, served.bpm if served is not None else None)
+            scores = _scores_json(gen.predict(vec, extra), gen.prototype_scores(vec))
+    except Exception:
+        # The ranking is a convenience; the sheet still tags without it.
+        logger.debug("genre: could not rank %s", track.id, exc_info=True)
+    return jsonify(
+        {
+            "track": str(track.id),
+            "tag": _tag_json(tt.tag) if tt is not None else None,
+            "scores": scores,
         }
     )
 

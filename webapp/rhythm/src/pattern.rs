@@ -49,6 +49,8 @@ const BIG: f32 = 0.82;
 const DROP_HOLD: f64 = 8.0;
 const DIVS: [f32; 7] = [2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0];
 const HIST: usize = 32;
+/// The club arrangement's drop: the kick out for three and a half beats.
+pub const DROP_LULL_CLUB: f64 = 3.5;
 
 #[derive(Default, Clone)]
 pub struct PatternOut {
@@ -147,6 +149,19 @@ pub struct Pattern {
     gap_avg: f32,
     roll_run: f64,
     pub dbg_lull: f64,
+    /// THE GENRE'S OWN READING (`set_profile`, from the served genre).
+    /// How long the kick must have been out, in beats, before its return is
+    /// a DROP: 3.5 is the club arrangement (a build, a cut, the drop); a song
+    /// form has no drop, and a chorus coming back after a two-beat fill is
+    /// not one — measured, the generic rule fired 13 drops across the eval's
+    /// pop, rock, metal, reggae, jazz and piano records, which have none.
+    pub drop_lull_beats: f64,
+    /// When the arrangement last came back (a drop or not): the spacing rule.
+    return_at: f64,
+    /// False for a genre with no drum kit (solo piano, strings, ambient): a
+    /// left-hand bass note is not a kick, and an animation thumping on it is
+    /// wrong, so no kick, roll or drop event is published.
+    pub kicks: bool,
     pub out: PatternOut,
 }
 
@@ -201,6 +216,9 @@ impl Pattern {
             gap_avg: 1.0,
             roll_run: 0.0,
             dbg_lull: 0.0,
+            drop_lull_beats: DROP_LULL_CLUB,
+            return_at: -1e9,
+            kicks: true,
             out: PatternOut::default(),
         };
         p.reset();
@@ -236,6 +254,9 @@ impl Pattern {
         self.quiet_since = -1.0;
         self.lull = 0.0;
         self.heard = 0.0;
+        self.drop_lull_beats = DROP_LULL_CLUB;
+        self.return_at = -1e9;
+        self.kicks = true;
         self.gap_avg = 1.0;
         self.roll_run = 0.0;
         self.out = PatternOut { since_drop: 999.0, drop_in: -1.0, ..PatternOut::default() };
@@ -480,9 +501,16 @@ impl Pattern {
         // ...then a main kick, with the level there to back it (the analyser
         // has already heard the next few frames).
         if o.main_kick {
-            if self.lull >= (beat * 3.5).fmax(1.2) && i.dyn_ahead > 0.6 && self.clock - self.drop_at > beat * 8.0 && self.heard > 6.0 {
-                o.drop = true;
-                self.drop_at = self.clock;
+            // The arrangement coming back is a phrase boundary in every genre
+            // (a chorus after a fill lands on a bar's first beat), so it
+            // anchors the phrase whatever the genre; only the club's long
+            // lull makes it a DROP (`drop_lull_beats`).
+            if self.lull >= (beat * DROP_LULL_CLUB).fmax(1.2) && i.dyn_ahead > 0.6 && self.clock - self.return_at > beat * 8.0 && self.heard > 6.0 {
+                if self.lull >= (beat * self.drop_lull_beats).fmax(1.2) {
+                    o.drop = true;
+                    self.drop_at = self.clock;
+                }
+                self.return_at = self.clock;
                 anchor = true;
                 if self.section != SEC_FULL {
                     self.prev_section = self.section;
@@ -491,7 +519,7 @@ impl Pattern {
                     self.section_since = self.clock;
                 }
             }
-            if o.drop {
+            if anchor {
                 self.lull = 0.0;
             }
         }

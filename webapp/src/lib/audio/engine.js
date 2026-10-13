@@ -82,6 +82,8 @@ import {
   familyLook,
   familyTable,
   grooveOf,
+  familyIndex,
+  profileOf,
   tempoRangeFor,
   ARCHETYPES,
   KICK_TYPES,
@@ -125,6 +127,8 @@ let verdictSeeded = false;
 // kicks have since doubled (a hardcore track Deezer lists at half), and seeding
 // the same number a second time would put the grid back at half speed.
 let seededBpm = 0;
+// The served tempo the grid is LOCKED to (a measured verdict), 0 when none.
+let lockedBpm = 0;
 // How many tracks ahead to ask for. The queue moves one at a time and the
 // answers are tiny, so a short window keeps every upcoming track's verdict in
 // hand well before it starts.
@@ -398,40 +402,48 @@ function adoptVerdict(id, late = false) {
   if (!v) return;
   verdict = v;
   verdictSeeded = true;
-  // THE TEMPO RANGE FIRST, because it changes what the tracker finds plausible
-  // and the seed is read against it. The genre is the one piece of information
-  // that settles the octave question, which no amount of signal processing can:
-  // 250 BPM uptempo and 125 BPM house produce the same autocorrelation. A
-  // served genre also retires the live classifier's say in it.
+  // THE GENRE AND THE TEMPO ARE THE SERVER'S ANSWERS, NOT THIS SIDE'S
+  // QUESTIONS. The server classified the whole track (a tag, the trained head,
+  // or its rules) and measured its tempo over the whole file, reconciling
+  // Deezer's octave against it (analysis.py#_reconcile_octave); an analyser
+  // that classified and estimated again from eight seconds of whatever is
+  // playing could only ever disagree by being wrong. So a served genre PINS
+  // the family (style.rs `pinned`: its rules stop voting; its look, archetype,
+  // tempo band and bar model are the served genre's) and a measured tempo
+  // LOCKS the grid (tempo.rs `fixed_bpm`: only the phase is found here, and
+  // whether a beat is present at all). What stays live is what the music is
+  // DOING — the kicks and their shape, the rolls, the drops, the sections —
+  // read with the genre's own models.
   //
-  // ...when the genre can be believed. A TAG or the trained model's verdict
-  // always can. The server's HEURISTIC reads whole-file averages that cannot
-  // hear how a genre is built (the kick's shape, a piep, a roll), and a wrong
-  // family here does real damage: served "jazz" for a 205 BPM Krach record set
-  // an 80-165 plateau against a 205 seed. So a heuristic genre sets the range
-  // only when it is confident AND its own figure lies inside that range, and
-  // otherwise the live classifier keeps its say (liveRange).
+  // The one figure not locked is a PROVISIONAL tempo: Deezer's, before the
+  // file exists to check its octave. It seeds as before, and the tracker may
+  // still double it (tempo.rs#seed's one-sided rule).
   const name = v.style || v.styleLabel || "";
-  const trusted = servedTrusted(v);
+  const index = familyIndex(name);
+  send({ t: "pin", i: index });
+  const profile = profileOf(name);
+  send({ t: "profile", lull: profile.lull, kicks: profile.kicks });
+  // A sub-genre written at a tempo of its own (hitech, hard house…) narrows
+  // its family's band; sent after the pin, which applied the family's.
   const range = tempoRangeFor(name);
   const bpm = +v.bpm || 0;
   const fits = range && (!bpm || (bpm >= range[0] * 0.97 && bpm <= range[1] * 1.03));
-  const useRange = range && fits && (trusted || (v.styleConfidence ?? 0) >= HEURISTIC_RANGE_CONF);
-  if (useRange) send({ t: "range", lo: range[0], hi: range[1] });
-  send({ t: "liveRange", on: !useRange });
-  // ...and how its bar is marked (beat.rs DOWN_MODELS). A genre somebody chose
-  // says how the music is built whatever its tempo figure says, and a sub-genre
-  // with no band of its own (dembow, a prog rock tag) still has a groove; a
-  // heuristic genre is believed about its groove only where it set the range.
-  // Any other leaves the choice to the live reading.
-  send({ t: "groove", g: trusted || useRange ? grooveOf(name) : 0 });
-  // ...and the figure itself, WHETHER OR NOT the grid has already locked: the
-  // verdict comes over the network, behind the audio in the request ladder,
-  // and a late seed moves the grid's LEVEL while keeping its phase, so it
-  // cannot make the animation jump (rhythm/src/tempo.rs#seed).
-  if (v.bpm && Math.abs(+v.bpm / (seededBpm || 1) - 1) > 0.01) {
-    send({ t: "seed", bpm: +v.bpm, conf: v.bpmConfidence ?? 0.9 });
-    seededBpm = +v.bpm;
+  if (range && fits) send({ t: "range", lo: range[0], hi: range[1] });
+  send({ t: "liveRange", on: index < 0 && !(range && fits) });
+  if (name) send({ t: "groove", g: grooveOf(name) });
+  if (bpm && !v.provisional) {
+    if (Math.abs(bpm / (lockedBpm || 1) - 1) > 0.001) {
+      send({ t: "lock", bpm });
+      lockedBpm = bpm;
+      seededBpm = bpm;
+    }
+  } else if (bpm && Math.abs(bpm / (seededBpm || 1) - 1) > 0.01) {
+    // ...WHETHER OR NOT the grid has already locked: the verdict comes over
+    // the network, behind the audio in the request ladder, and a late seed
+    // moves the grid's LEVEL while keeping its phase, so it cannot make the
+    // animation jump (rhythm/src/tempo.rs#seed).
+    send({ t: "seed", bpm, conf: v.bpmConfidence ?? 0.9 });
+    seededBpm = bpm;
   }
 }
 
@@ -598,7 +610,12 @@ function onRhythmMessage(r, m) {
     r.lookahead = m.lookahead;
     r.sampleRate = m.sampleRate;
     r.ready = true;
+    // A fresh analyser knows nothing: the verdict goes to it again in full
+    // (pin, profile, range, groove, and the lock or seed it would otherwise
+    // skip as already sent).
     verdictSeeded = false;
+    seededBpm = 0;
+    lockedBpm = 0;
     stopFallback();
   } else if (m.t === "error") {
     console.warn("rhythm analyser failed to start:", m.message);
@@ -970,24 +987,10 @@ const mergedStyle = {
   served: true,
 };
 
-// A served genre somebody CHOSE — a tag, or the head trained on the admin's
-// tags — against one the server's heuristic GUESSED.
-function servedTrusted(v) {
-  return v?.styleSource === "tag" || v?.styleSource === "model";
-}
-// The heuristic's confidence needed before its genre sets the tempo range, and
-// the live classifier's needed before it overrides a heuristic genre. The live
-// one reads how the track is BUILT, kick by kick (rhythm/src/style.rs), and its
-// confidence is backed by how much its rules actually found; the server's
-// heuristic reads whole-file averages. So when the live reading is sure of a
-// different family, it is the better witness — and it is what names the
-// genre, picks the look and the world. A tag or a trained model still wins.
-const HEURISTIC_RANGE_CONF = 0.5;
-const LIVE_OVERRIDE_CONF = 0.5;
-
+// A served genre is the genre: the live classifier no longer overrides it
+// (see adoptVerdict). A verdict with no genre leaves the live reading in charge.
 function merged(live, v) {
-  if (!servedTrusted(v) && live.dominant && live.dominant !== v.style && (live.confidence || 0) > LIVE_OVERRIDE_CONF)
-    return live;
+  if (!v.style && !v.styleLabel) return live;
   mergedStyle.kick = live.kick;
   mergedStyle.families = live.families;
   // The served verdict names a genre — a family, or a studio sub-genre that
@@ -1053,6 +1056,7 @@ function newTrack(id) {
   verdict = null;
   verdictSeeded = false;
   seededBpm = 0;
+  lockedBpm = 0;
   send({ t: "reset", gen });
   // No verdict yet: the tempo range back to the default, and the live
   // classifier's say in it back on.
@@ -1252,6 +1256,7 @@ function recomputeLevel() {
     if (lv > LEVEL.SPECTRUM) {
       verdictSeeded = false;
       seededBpm = 0;
+      lockedBpm = 0;
     }
   }
 }

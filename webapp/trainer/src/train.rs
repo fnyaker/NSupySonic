@@ -116,6 +116,16 @@ pub struct Outcome {
     pub temperature: f64,
     pub retried: bool,
     pub evaluated: usize,
+    /// The balanced accuracy of each fold's fits on THEIR OWN training rows,
+    /// pooled. Against `balanced` (the same fits on rows they never saw) it is
+    /// the overfitting gap: a head that scores 1.00 on what it learnt and 0.60
+    /// on the rest has memorised its examples rather than learnt the genres.
+    pub fit_balanced: f64,
+    /// Every row's held-out logits (`n × c`, before the temperature), zero
+    /// where `held_mask` is false — what the studio reads to point at the
+    /// labels the model disagrees with on data it did not train on.
+    pub held: Vec<f32>,
+    pub held_mask: Vec<u8>,
 }
 
 // --- the space a run trains in -------------------------------------------------
@@ -207,6 +217,16 @@ fn class_weights(y: &[i32], rows: &[u32], c: usize) -> Vec<f32> {
 }
 
 /// Softmax of `logits` into `p` (f64), max-subtracted.
+fn argmax(v: &[f32]) -> usize {
+    let mut best = 0;
+    for k in 1..v.len() {
+        if v[k] > v[best] {
+            best = k;
+        }
+    }
+    best
+}
+
 fn softmax(logits: &[f32], p: &mut [f64]) {
     let mut top = f64::NEG_INFINITY;
     for &v in logits {
@@ -601,6 +621,8 @@ struct Run {
     done: usize,
     held: Vec<f32>,
     held_mask: Vec<bool>,
+    /// Each fold fit's verdicts on its own training rows (`c × c`).
+    fit_conf: Vec<i32>,
     final_w: Vec<f32>,
     final_b: Vec<f32>,
     final_net: Option<Net>,
@@ -733,6 +755,7 @@ impl Job {
             done: 0,
             held: vec![0.0; n * c],
             held_mask: vec![false; n],
+            fit_conf: vec![0; c * c],
             final_w: if self.opt.kind == 0 { vec![0.0; c * dim] } else { Vec::new() },
             final_b: vec![0.0; c],
             final_net: None,
@@ -832,6 +855,11 @@ impl Job {
                             axpy(&mut run.held[i * c..(i + 1) * c], inv, &logits);
                             run.held_mask[i] = true;
                         }
+                        for &i in &task.rows {
+                            let i = i as usize;
+                            forward(&f.w, &f.b, run.space.row(data, i), &mut logits, c, dim);
+                            run.fit_conf[data.y[i] as usize * c + argmax(&logits)] += 1;
+                        }
                     }
                     Fit::Mlp(mut m) => {
                         let batch = m.net.batch;
@@ -841,6 +869,13 @@ impl Job {
                                 let i = i as usize;
                                 axpy(&mut run.held[i * c..(i + 1) * c], inv, m.net.logits(k));
                                 run.held_mask[i] = true;
+                            }
+                        }
+                        for chunk in task.rows.chunks(batch) {
+                            m.net.forward(chunk, data, &run.space, false);
+                            for (k, &i) in chunk.iter().enumerate() {
+                                let i = i as usize;
+                                run.fit_conf[data.y[i] as usize * c + argmax(m.net.logits(k))] += 1;
                             }
                         }
                     }
@@ -881,6 +916,7 @@ impl Job {
             held_y.push(yi as i32);
         }
         let (accuracy, balanced) = cv::scores(&confusion, &self.examples, c);
+        let (_, fit_balanced) = cv::scores(&run.fit_conf, &self.examples, c);
         let temperature = cv::temperature(&held, &held_y, c);
         let layers = if self.opt.kind == 0 {
             let w = match &run.space.p {
@@ -914,6 +950,9 @@ impl Job {
             temperature,
             retried: false,
             evaluated: held_y.len(),
+            fit_balanced,
+            held_mask: run.held_mask.iter().map(|&m| m as u8).collect(),
+            held: run.held,
         };
         // Projection costs a few percent of distance, which is nothing on
         // clustered data and everything on classes barely apart: a weak score

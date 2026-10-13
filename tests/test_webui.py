@@ -6022,6 +6022,69 @@ class GenreStudioTestCase(unittest.TestCase):
         self.assertEqual(gen.prototype_predict(self._vec(emb.EMBED_DIM, 0, 1.0))[0], "techno")
         self.assertEqual(gen.prototype_predict(self._vec(emb.EMBED_DIM, 1, 1.0))[0], "rap")
 
+    def test_candidates_carry_the_vocabulary_ranked_for_them(self):
+        """The studio orders its genres by THIS list, not by name: the nearest
+        prototype first, for every genre that has one."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        names = ("techno", "rap", "jazz")
+        for axis, name in enumerate(names):
+            tag = self._tag(name)
+            t = self._track(str(2101 + axis))
+            self._store_embedding(t, self._vec(emb.EMBED_DIM, axis, 1.0))
+            self.client.post("/api/genre/label", json={"track": t.deezer_id, "tag": tag["id"]})
+        c = self._track("2199")
+        # Mostly rap, a little jazz, nothing of techno.
+        v = self._vec(emb.EMBED_DIM, 1, 1.0)
+        v[2] = 0.35
+        self._store_embedding(c, v)
+        rows = self.client.get("/api/genre/candidates").json["candidates"]
+        row = next(r for r in rows if r["deezer_id"] == c.deezer_id)
+        order = [r[0] for r in row["scores"]]
+        self.assertEqual(order, ["rap", "jazz", "techno"])
+        # [label, score, head, proto]: no head yet, so only the prototype speaks
+        # and its shares add up to one.
+        self.assertTrue(all(r[2] is None for r in row["scores"]))
+        self.assertAlmostEqual(sum(r[3] for r in row["scores"]), 1.0, places=2)
+
+    def test_the_tag_sheet_reads_one_track(self):
+        """The sheet opened from a track's menu gets its tag and its ranking in
+        one small answer, not the whole labelled set."""
+        from supysonic.deezer import embedding as emb
+
+        self._login()
+        tek = self._tag("techno")
+        rap = self._tag("rap")
+        a = self._track("2201")
+        b = self._track("2202")
+        self._store_embedding(a, self._vec(emb.EMBED_DIM, 0, 1.0))
+        self._store_embedding(b, self._vec(emb.EMBED_DIM, 1, 1.0))
+        self.client.post("/api/genre/label", json={"track": a.deezer_id, "tag": tek["id"]})
+        self.client.post("/api/genre/label", json={"track": b.deezer_id, "tag": rap["id"]})
+        body = self.client.get(f"/api/genre/track/{b.deezer_id}").json
+        self.assertEqual(body["tag"]["name"], "rap")
+        self.assertEqual(body["scores"][0][0], "rap")
+        # By local id too, and hostile ids are a 404, never a 500.
+        self.assertEqual(self.client.get(f"/api/genre/track/{a.id}").json["tag"]["name"], "techno")
+        for bad in ("nope", "1%27%20OR%201=1", "0" * 40):
+            self.assertEqual(self.client.get(f"/api/genre/track/{bad}").status_code, 404)
+
+    def test_the_ranking_blends_the_head_and_the_prototypes(self):
+        from supysonic.deezer import genre as gen
+
+        guess = ("a", 0.6, {"a": 0.6, "b": 0.4}, 0.2)
+        protos = [("b", 0.90), ("a", 0.80), ("c", 0.79)]
+        rows = gen.rank_scores(guess, protos)
+        by = {r[0]: r for r in rows}
+        # The head knows a and b; c only has a prototype, so it trails both.
+        self.assertEqual([r[0] for r in rows][-1], "c")
+        self.assertIsNone(by["c"][2])
+        self.assertEqual(by["a"][2], 0.6)
+        # Scores order, they stay in 0..1.
+        self.assertTrue(all(0 <= r[1] <= 1 for r in rows))
+        self.assertEqual(gen.rank_scores(None, None), [])
+
     def test_prototype_says_nothing_before_anything_is_labelled(self):
         """None, not a guess: a studio with no labels has no opinion, and an
         empty prototype must not be confused with one that happens to be far."""

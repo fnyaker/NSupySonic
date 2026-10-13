@@ -608,6 +608,7 @@ impl Analyzer {
                 let v = ((f.mid_odf - thr) / (sd * 3.0 + 1e-9)).clamp(0.05, 1.0);
                 self.grid.add_event(t - kick::DETECT_LATENCY, v, KIND_MID);
             }
+            self.grid.fixed_period = if self.tempo.fixed_bpm > 0.0 { 60.0 / self.tempo.fixed_bpm as f64 } else { 0.0 };
             let tempo = &self.tempo.out;
             self.grid.update(t, self.hop_s, tempo, &f.chroma, f.level);
             if self.grid.initialised() {
@@ -878,6 +879,24 @@ impl Analyzer {
             );
         }
 
+        // A genre with no drum kit publishes no kick (pattern.rs `kicks`). Only
+        // what is PUBLISHED is muted: the bar model and the sections above
+        // still read those onsets, and a stride left hand is how a piano rag
+        // marks its bar.
+        let mut p = p;
+        if !self.pattern.kicks {
+            p.kick_hit = false;
+            p.kick_strength = 0.0;
+            p.kick_env = 0.0;
+            p.main_kick = false;
+            p.main_power = 0.0;
+            p.big_kick = false;
+            p.roll_kick = false;
+            p.roll = 0.0;
+            p.roll_div = 0.0;
+            p.drop = false;
+        }
+
         // --- write it -------------------------------------------------------------------
         let base = self.out_n * self.frame_len;
         let o = &mut self.out[base..base + self.frame_len];
@@ -995,6 +1014,33 @@ impl Analyzer {
 
     pub fn seed(&mut self, bpm: f32, conf: f32) -> bool {
         self.tempo.seed(bpm, conf)
+    }
+
+    /// The served genre's way of reading the arrangement (pattern.rs
+    /// `drop_lull_beats`, `kicks`); 0 beats restores the club default.
+    pub fn set_profile(&mut self, drop_lull_beats: f32, kicks: bool) {
+        self.pattern.drop_lull_beats = if drop_lull_beats > 0.0 { drop_lull_beats as f64 } else { pattern::DROP_LULL_CLUB };
+        self.pattern.kicks = kicks;
+    }
+
+    /// The server's tempo, locked (0 releases it): see tempo.rs `fixed_bpm`.
+    pub fn lock_tempo(&mut self, bpm: f32) -> bool {
+        self.tempo.lock(bpm)
+    }
+
+    /// The server's genre family, pinned (-1 releases it): see style.rs
+    /// `pinned`. Its tempo range and its groove come with it, and the live
+    /// reading no longer moves either.
+    pub fn pin_family(&mut self, id: i32) {
+        self.style.pin(id);
+        if self.style.pinned >= 0 {
+            if let Some((lo, hi)) = self.style.range_of(id) {
+                self.tempo.set_range(lo, hi);
+            }
+            self.live_range = false;
+            self.groove_served = true;
+            self.set_groove_now(self.style.groove_of(id));
+        }
     }
 
     pub fn set_range(&mut self, lo: f32, hi: f32) {
@@ -1124,6 +1170,25 @@ pub extern "C" fn rhythm_lookahead() -> u32 {
 #[no_mangle]
 pub extern "C" fn rhythm_seed(bpm: f32, conf: f32) -> u32 {
     g().a.as_mut().map(|a| a.seed(bpm, conf) as u32).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rhythm_lock_tempo(bpm: f32) -> u32 {
+    g().a.as_mut().map(|a| a.lock_tempo(bpm) as u32).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rhythm_set_profile(drop_lull_beats: f32, kicks: u32) {
+    if let Some(a) = g().a.as_mut() {
+        a.set_profile(drop_lull_beats, kicks != 0);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rhythm_pin_family(id: i32) {
+    if let Some(a) = g().a.as_mut() {
+        a.pin_family(id);
+    }
 }
 
 #[no_mangle]

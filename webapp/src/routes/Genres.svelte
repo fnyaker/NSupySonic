@@ -20,6 +20,8 @@
   import { EXTRAS, rawExtras, fitScaler, extrasBlock } from "../lib/genre/construction.js";
   import { measureTrack, releaseMeasurer } from "../lib/genre/measure.js";
   import { train, release } from "../lib/genre/trainer.js";
+  import { rankTags, searchTags, recentTags, noteRecent } from "../lib/genre/rank.js";
+  import { MIN_EXAMPLES, prepare, canGroup, vectorKey, assess, suspects as findSuspects } from "../lib/genre/health.js";
   import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
   import JobFailures from "../components/JobFailures.svelte";
@@ -73,9 +75,24 @@
   $: counts = status?.counts || {};
   $: labelled = status?.labelled || 0;
   $: extractor = status?.extractor || { available: false };
-  $: suggestion = current?.predicted
-    ? tags.find((t) => t.name === current.predicted)
-    : null;
+  // The vocabulary in THIS track's order (lib/genre/rank.js): what the head
+  // and the prototypes think first, then what this library uses most. The
+  // number keys reach the first nine, and Entrée the first.
+  $: ranked = rankTags(tags, current?.scores, counts);
+  $: scored = ranked.length > 0 && ranked[0].score != null;
+  $: picks = ranked.slice(0, 9);
+  $: suggestion = scored ? ranked[0].tag : null;
+  let query = "";
+  let searchEl = null;
+  let showAll = false;
+  let recent = recentTags();
+  $: found = query.trim() ? searchTags(ranked, query).slice(0, 30) : [];
+  $: recentRows = recent
+    .map((id) => ranked.find((r) => r.tag.id === id))
+    .filter((r) => r && !picks.includes(r));
+  // The last label, for one-key undo (z): a tagging pass is fast, and a slip
+  // of the finger must cost one key, not a hunt through the library.
+  let lastAction = null;
 
   // -- preview ----------------------------------------------------------------
   let audio = null;
@@ -101,6 +118,11 @@
   // hard ones.
   const MODES = [
     {
+      id: "auto",
+      label: "Automatique",
+      desc: "Tête linéaire, et un réseau seulement s'il fait mieux sur des titres qu'il n'a pas vus.",
+    },
+    {
       id: "linear",
       label: "Rapide",
       desc: "Tête linéaire. Une seconde. Le bon choix par défaut.",
@@ -117,27 +139,21 @@
     },
   ];
   const TRAIN_OPTS = {
+    auto: {},
     linear: {},
     deep: { hidden: 256, hidden2: 0, epochs: 120 },
     deep2: { hidden: 512, hidden2: 512, epochs: 180 },
   };
-  let mode = "linear";
-  // Hold out whole ARTISTS when scoring (the trainer's artist folds). Off by
-  // default, remembered per device: it is a stricter question, not a better
-  // model, and its lower number needs the explanation next to the switch.
-  let byArtist = false;
-  try {
-    byArtist = localStorage.getItem("genre.byArtist") === "1";
-  } catch {
-    /* storage refused: the default it is */
-  }
-  $: {
-    try {
-      localStorage.setItem("genre.byArtist", byArtist ? "1" : "0");
-    } catch {
-      /* not remembered, still applied */
-    }
-  }
+  // "auto" decides the capacity from the data (see runTraining); the fixed
+  // modes stay behind "Réglages avancés" for whoever wants to force one.
+  let mode = "auto";
+  let advanced = false;
+  // A network is only tried when there is enough to train it on (ten tracks a
+  // genre: under that a 256-wide layer memorises), and only kept on a clear win
+  // on held-out data — two points of balanced accuracy — over the linear head.
+  const AUTO_DEEP_PER_CLASS = 10;
+  const AUTO_DEEP_MIN_GAIN = 0.02;
+  const AUTO_DEEP_UNLESS = 0.97;
   // Read the served tempo and the construction summaries next to the
   // embedding — when a quick head says they help (INPUT_MIN_GAIN).
   let useConstruction = true;
@@ -205,9 +221,8 @@
       ? Math.min(100, Math.round((analysis.scanned / analysis.total) * 100))
       : 0;
 
-  $: eligible = tags.filter((t) => (counts[t.name] || 0) >= 2);
-  $: trainable = eligible.length >= 2 && labelled >= eligible.length * 3;
-  $: thin = tags.filter((t) => (counts[t.name] || 0) > 0 && (counts[t.name] || 0) < 8);
+  $: eligible = tags.filter((t) => (counts[t.name] || 0) >= MIN_EXAMPLES);
+  $: trainable = eligible.length >= 2;
 
   // The extractor check no longer happens on the request thread (loading a
   // 40 MB ONNX graph is seconds), so the first answer may be "vérification…".
@@ -255,6 +270,8 @@
   function switchSort(mode) {
     if (mode === candidateSort) return;
     candidateSort = mode;
+    reviewing = false;
+    savedCandidates = null;
     loadCandidates();
   }
 
@@ -329,37 +346,82 @@
   // -- tagging actions --------------------------------------------------------
   async function label(tag) {
     const track = current;
-    if (!track) return;
+    if (!track || !tag) return;
     stopPreview();
+    const at = cursor;
+    const prev = track.review ? tags.find((t) => t.name === track.review.label) || null : null;
+    query = "";
+    recent = noteRecent(tag.id);
     // Optimistic: the row leaves at once and the count moves with it. A tagging
     // pass is a rhythm, and a round trip per track breaks it.
     candidates = candidates.filter((c) => c.id !== track.id);
     if (cursor >= candidates.length) cursor = Math.max(0, candidates.length - 1);
-    if (status) {
-      status.counts = { ...status.counts, [tag.name]: (status.counts[tag.name] || 0) + 1 };
-      status.labelled = (status.labelled || 0) + 1;
-      status = status;
-    }
+    bumpCount(tag.name, 1, !prev);
+    if (prev) bumpCount(prev.name, -1, false);
+    lastAction = { track, tag, prev, at };
     try {
-      await api.genreLabel(track.deezer_id || track.id, tag.id);
+      if (!prev || prev.id !== tag.id) await api.genreLabel(track.deezer_id || track.id, tag.id);
     } catch (e) {
       toasts.push(e?.message || "étiquetage impossible", "error");
+      lastAction = null;
       await refresh();
     }
-    if (candidates.length === 0) await loadCandidates();
+    if (candidates.length === 0) {
+      if (reviewing) endReview();
+      else await loadCandidates();
+    }
+  }
+
+  function bumpCount(name, by, labelledToo) {
+    if (!status) return;
+    status.counts = { ...status.counts, [name]: Math.max(0, (status.counts[name] || 0) + by) };
+    if (labelledToo) status.labelled = Math.max(0, (status.labelled || 0) + by);
+    status = status;
+  }
+
+  async function undo() {
+    const a = lastAction;
+    if (!a) return;
+    lastAction = null;
+    stopPreview();
+    candidates = [...candidates.slice(0, a.at), a.track, ...candidates.slice(a.at)];
+    cursor = Math.min(a.at, candidates.length - 1);
+    noMore = false;
+    bumpCount(a.tag.name, -1, !a.prev);
+    if (a.prev) bumpCount(a.prev.name, 1, false);
+    try {
+      await api.genreLabel(a.track.deezer_id || a.track.id, a.prev ? a.prev.id : null);
+      toasts.push(`Annulé : « ${a.track.title} »`);
+    } catch (e) {
+      toasts.push(e?.message || "annulation impossible", "error");
+      await refresh();
+    }
   }
 
   function skip() {
     stopPreview();
+    query = "";
     if (cursor < candidates.length - 1) cursor += 1;
+    else if (reviewing) endReview();
     else loadCandidates();
   }
   function back() {
     stopPreview();
+    query = "";
     if (cursor > 0) cursor -= 1;
   }
   function confirmSuggestion() {
     if (suggestion) label(suggestion);
+  }
+  function onSearchKey(ev) {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      if (found[0]) label(found[0].tag);
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      query = "";
+      ev.target.blur();
+    }
   }
 
   // -- preview ----------------------------------------------------------------
@@ -463,16 +525,9 @@
   // -- training ---------------------------------------------------------------
   async function buildMatrix() {
     const res = await api.genreLabelled();
-    const rows = res.labelled || [];
-    const names = [];
-    const keep = [];
-    for (const r of rows) {
-      if (!r.tag) continue;
-      keep.push(r);
-      if (!names.includes(r.tag.name)) names.push(r.tag.name);
-    }
-    names.sort();
-    if (names.length < 2) throw new Error("il faut au moins deux genres étiquetés");
+    const keep = (res.labelled || []).filter((r) => r.tag);
+    if (new Set(keep.map((r) => r.tag.name)).size < 2)
+      throw new Error("il faut au moins deux genres étiquetés");
 
     // Embeddings in batches: /genre/embeddings never extracts, so a track whose
     // vector is missing is simply left out rather than making the whole run wait.
@@ -490,9 +545,24 @@
         vectors.set(k, decodeEmbedding(v));
       for (const [k, v] of Object.entries(part.extras || {})) extras.set(k, v);
     }
-    const usable = keep.filter((r) => vectors.has(String(r.deezer_id || r.id)));
-    if (!usable.length)
-      throw new Error("aucun vecteur disponible — lancez « supysonic-cli deezer embed »");
+    const withVec = keep.filter((r) => vectors.has(String(r.deezer_id || r.id)));
+    if (!withVec.length)
+      throw new Error("aucun vecteur disponible — lancez « Calculer les empreintes »");
+    // What would bias the head or its score is taken out BEFORE it trains
+    // (lib/genre/health.js): duplicates, a recording tagged two ways, an artist
+    // making up most of a genre, a genre too thin to learn.
+    const probe = withVec.map((r) => ({
+      label: r.tag.name,
+      artist: r.artist_id || null,
+      key: vectorKey(vectors.get(String(r.deezer_id || r.id))),
+    }));
+    const prep = prepare(probe);
+    const usable = prep.keep.map((i) => withVec[i]);
+    const names = [...new Set(usable.map((r) => r.tag.name))].sort();
+    if (names.length < 2)
+      throw new Error(
+        `il faut au moins deux genres de ${MIN_EXAMPLES} titres ou plus — ${prep.excluded.length ? "trop peu d'exemples pour " + prep.excluded.slice(0, 4).join(", ") : "étiquetez encore un peu"}`
+      );
     // v3 vectors carry the loud half of the track after the v2 ones (which they
     // begin with, value for value). One matrix has one width: the loud block is
     // a candidate only when EVERY row has it; otherwise all train on the v2 part.
@@ -516,7 +586,13 @@
     return {
       rowsV, raws, y, groups, n: usable.length, d, older, labels: names,
       measured: raws.filter((r) => r.slice(1).some(Number.isFinite)).length,
-      skipped: keep.length - usable.length,
+      skipped: keep.length - withVec.length,
+      prep,
+      tracks: usable,
+      // Whole artists are held out whenever most genres have two of them: the
+      // score then says whether the head learnt the GENRE, and the temperature
+      // the server gates on is fitted on calls that honest.
+      grouped: canGroup(probe, prep.keep),
     };
   }
 
@@ -545,20 +621,20 @@
       const data = await buildMatrix();
       const skipped = data.skipped;
       const seed = (Math.random() * 0x100000000) >>> 0;
-      const base = { grouped: byArtist, seed };
+      const base = { grouped: data.grouped, seed };
       // Two optional inputs, each kept only if it MEASURABLY helps: a quick
       // linear head with it and one without, on the same folds and seed. The
       // loud half of the track first (a width), then tempo and construction on
       // top of the width that won; the requested mode then trains once.
-      const quickHead = (scaler, width, from, to) =>
-        train(pack(data, scaler, width), "linear", (st, pct) => (progress = from + (to - from) * (pct || 0)), base);
+      const quickHead = (scaler, width, from, to, opts = base) =>
+        train(pack(data, scaler, width), "linear", (st, pct) => (progress = from + (to - from) * (pct || 0)), opts);
       let width = data.d;
       let quick = null;
       let loud = null;
       if (data.d === V3_DIM) {
         progressStage = "moitié forte";
-        const narrow = await quickHead(null, V2_DIM, 0.2, 0.3);
-        const wide = await quickHead(null, V3_DIM, 0.3, 0.4);
+        const narrow = await quickHead(null, V2_DIM, 0.2, 0.27);
+        const wide = await quickHead(null, V3_DIM, 0.27, 0.34);
         const used = wide.metrics.balanced >= narrow.metrics.balanced + INPUT_MIN_GAIN;
         loud = { used, with: wide.metrics.balanced, without: narrow.metrics.balanced, older: 0 };
         width = used ? V3_DIM : V2_DIM;
@@ -572,8 +648,8 @@
       if (useConstruction && hasExtras) {
         progressStage = "tempo et construction";
         const fitted = fitScaler(data.raws);
-        const without = quick || (await quickHead(null, width, 0.4, 0.45));
-        const withX = await quickHead(fitted, width, 0.45, 0.5);
+        const without = quick || (await quickHead(null, width, 0.34, 0.38));
+        const withX = await quickHead(fitted, width, 0.38, 0.42);
         const used = withX.metrics.balanced >= without.metrics.balanced + INPUT_MIN_GAIN;
         construction = {
           used,
@@ -585,20 +661,53 @@
         scaler = used ? fitted : null;
         quick = used ? withX : without;
       }
-      const from = quick ? 0.5 : 0.2;
-      progressStage = mode === "linear" ? "entraînement" : "entraînement approfondi";
-      const trained =
-        mode === "linear" && quick
-          ? quick
-          : await train(
-              pack(data, scaler, width),
-              mode === "linear" ? "linear" : "deep",
-              (stage, pct) => {
-                progressStage = stage === "done" ? "terminé" : progressStage;
-                progress = from + (1 - from) * (pct || 0);
-              },
-              { ...(TRAIN_OPTS[mode] || {}), ...base }
-            );
+      if (!quick) {
+        progressStage = "entraînement";
+        quick = await quickHead(scaler, width, 0.2, 0.42);
+      }
+      // How much of the score is knowing the ARTIST: the same head scored with
+      // ordinary folds, where two tracks off one album can train and test each
+      // other. Only meaningful when the headline was held out by artist.
+      let stratified = null;
+      if (data.grouped) {
+        progressStage = "biais d'artiste";
+        stratified = (await quickHead(scaler, width, 0.42, 0.5, { seed, grouped: false })).metrics.balanced;
+      }
+      progressStage = mode === "linear" || mode === "auto" ? "entraînement" : "entraînement approfondi";
+      let trained = quick;
+      let modeNote = "";
+      const C = data.labels.length;
+      if (mode === "auto") {
+        // Capacity follows the data. A network is tried only with enough
+        // examples per genre and room to improve, and kept only when it beats
+        // the linear head on tracks it never trained on — the guard against a
+        // bigger model that merely memorises.
+        if (data.n >= AUTO_DEEP_PER_CLASS * C && quick.metrics.balanced < AUTO_DEEP_UNLESS) {
+          progressStage = "réseau";
+          const deepHead = await train(
+            pack(data, scaler, width),
+            "deep",
+            (stage, pct) => (progress = 0.5 + 0.5 * (pct || 0)),
+            { ...TRAIN_OPTS.deep, ...base }
+          );
+          if (deepHead.metrics.balanced >= quick.metrics.balanced + AUTO_DEEP_MIN_GAIN) {
+            trained = deepHead;
+            modeNote = `réseau gardé : ${pct(deepHead.metrics.balanced)} % contre ${pct(quick.metrics.balanced)} % pour la tête linéaire`;
+          } else {
+            modeNote = `tête linéaire gardée : le réseau ne faisait pas mieux (${pct(deepHead.metrics.balanced)} %)`;
+          }
+        }
+      } else if (mode !== "linear") {
+        trained = await train(
+          pack(data, scaler, width),
+          "deep",
+          (stage, pct) => {
+            progressStage = stage === "done" ? "terminé" : progressStage;
+            progress = 0.5 + 0.5 * (pct || 0);
+          },
+          { ...(TRAIN_OPTS[mode] || {}), ...base }
+        );
+      }
       if (construction) trained.metrics.construction = construction;
       if (loud) trained.metrics.loud = loud;
       if (scaler)
@@ -609,6 +718,25 @@
           std: scaler.std,
           scale: EXTRA_SCALE,
         };
+      // The tracks whose label the held-out head contests, ready to review.
+      const sus = findSuspects(trained.heldProbs, data.y, data.labels).map((s) => {
+        const t = data.tracks[s.row];
+        const C2 = data.labels.length;
+        const scores = data.labels
+          .map((l, k) => [l, +trained.heldProbs[s.row * C2 + k].toFixed(4), null, null])
+          .sort((a, b) => b[1] - a[1]);
+        return { ...t, scores, review: { label: s.label, predicted: s.predicted, own: s.own, other: s.other } };
+      });
+      trained.suspects = sus;
+      trained.health = assess(trained.metrics, { prep: data.prep, stratified, suspects: sus, mode: modeNote });
+      // What the server keeps of it: the verdict and its causes, not the prose.
+      trained.metrics.health = {
+        level: trained.health.level,
+        issues: trained.health.issues.map((i) => i.code),
+        fit: trained.metrics.fitBalanced,
+        stratified,
+      };
+      trained.heldProbs = null;
       trained.skipped = skipped;
       head = trained;
       progress = 1;
@@ -617,6 +745,29 @@
     } finally {
       training = false;
     }
+  }
+
+  // Review the labels the model contested: they go through the tagger like
+  // candidates, with their current tag shown.
+  let reviewing = false;
+  let savedCandidates = null;
+  function startReview() {
+    if (!head?.suspects?.length) return;
+    stopPreview();
+    if (!reviewing) savedCandidates = { list: candidates, cursor };
+    candidates = head.suspects.slice();
+    cursor = 0;
+    noMore = false;
+    reviewing = true;
+    tab = "tag";
+  }
+  function endReview() {
+    reviewing = false;
+    if (savedCandidates) {
+      candidates = savedCandidates.list;
+      cursor = Math.min(savedCandidates.cursor, Math.max(0, candidates.length - 1));
+      savedCandidates = null;
+    } else loadCandidates();
   }
 
   // -- well-known recordings per genre ------------------------------------------
@@ -718,6 +869,11 @@
 
   async function sendModel() {
     if (!head || sending) return;
+    if (
+      head.health?.level === "poor" &&
+      !window.confirm("Ce modèle est peu fiable : le serveur s'en servirait pour classer toute la bibliothèque. L'envoyer quand même ?")
+    )
+      return;
     sending = true;
     try {
       // Each label's FAMILY, as the analyser resolves it: when the head is
@@ -875,6 +1031,8 @@
 
   function openExtractor() {
     tab = "model";
+    // Straight to the action the empty state named, when it can run now.
+    if (extractor.available && !embed?.running && !extractor.session_error) startEmbed();
   }
 
   // -- embedding backfill -----------------------------------------------------
@@ -970,16 +1128,31 @@
 
   // -- keyboard ---------------------------------------------------------------
   function onKey(ev) {
-    if (tab !== "tag" || !current) return;
+    if (tab !== "tag") return;
+    if (!current) {
+      if ((ev.key === "z" || ev.key === "Backspace") && lastAction && !/INPUT|TEXTAREA/.test(ev.target?.tagName || "")) {
+        ev.preventDefault();
+        undo();
+      }
+      return;
+    }
     const t = ev.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable))
       return;
     if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
     const n = parseInt(ev.key, 10);
-    if (n >= 1 && n <= 9 && tags[n - 1]) {
+    if (n >= 1 && n <= 9 && picks[n - 1]) {
       ev.preventDefault();
-      label(tags[n - 1]);
-    } else if (ev.key === "Enter" && suggestion) {
+      label(picks[n - 1].tag);
+    } else if (ev.key === "/") {
+      ev.preventDefault();
+      searchEl?.focus();
+    } else if (ev.key === "z" || ev.key === "Backspace") {
+      if (lastAction) {
+        ev.preventDefault();
+        undo();
+      }
+    } else if (ev.key === "Enter" && suggestion && t?.tagName !== "BUTTON") {
       ev.preventDefault();
       confirmSuggestion();
     } else if (ev.key === "ArrowRight" || ev.key === "s") {
@@ -1060,6 +1233,7 @@
   });
 
   const pct = (v) => Math.round((v || 0) * 100);
+  const h_more = (h) => (h?.health?.more ? ` — et ${h.health.more} autre${h.health.more > 1 ? "s" : ""} remarque${h.health.more > 1 ? "s" : ""}` : "");
   const heat = (v) =>
     v <= 0 ? "transparent" : `color-mix(in srgb, var(--accent) ${Math.round(v * 100)}%, transparent)`;
 </script>
@@ -1292,139 +1466,53 @@
           <h2><Icon name="mic" size={18} /> Étiquetage</h2>
           <div class="stats">
             <span><strong>{labelled}</strong> étiquetés</span>
-            <span class="sep">·</span>
-            <span>{candidates.length - cursor} en file</span>
-          </div>
-        </div>
-
-        <!-- The order switch. It is the one control that changes what labelling
-             is worth, so it sits above the card rather than buried: "les plus
-             écoutés" improves the model on the music you actually play, "les
-             plus incertains" improves it fastest overall. Neither dominates,
-             which is why it is a choice and not a default of ours. -->
-        <div class="sortbar" role="tablist" aria-label="Ordre des titres à étiqueter">
-          <button
-            class:on={candidateSort === "plays"}
-            role="tab"
-            aria-selected={candidateSort === "plays"}
-            on:click={() => switchSort("plays")}
-          >Les plus écoutés</button>
-          <button
-            class:on={candidateSort === "active"}
-            role="tab"
-            aria-selected={candidateSort === "active"}
-            on:click={() => switchSort("active")}
-          >Les plus incertains</button>
-          <span class="hint muted small">
-            {candidateSort === "active"
-              ? "les titres où le modèle hésite : chaque étiquette lui apprend le plus"
-              : "le modèle s'améliore d'abord sur ce que tu écoutes vraiment"}
-          </span>
-        </div>
-
-        {#if extractor.available}
-          <div class="embed-bar" class:running={embed?.running}>
-            {#if embed?.running}
-              <div class="progress"><i style={`width:${embedPct}%`}></i></div>
-              <div class="embed-stats muted small">
-                <span>{embed.scanned}/{embed.total || "?"} analysés</span>
-                <span class="sep">·</span>
-                <span><strong>{embed.done}</strong> calculées</span>
-                {#if embed.failed}
-                  <span class="sep">·</span>
-                  <span class="bad">{embed.failed} en échec</span>
-                {/if}
-              </div>
-            {:else}
-              <button
-                class="ghost"
-                on:click={startEmbed}
-                disabled={!!extractor.session_error}
-              >
-                <Icon name="activity" size={16} /> Calculer les empreintes
-              </button>
-              {#if embed && (embed.done || embed.failed)}
-                <span class="muted small">
-                  Dernier passage : <strong>{embed.done}</strong> calculée{embed.done > 1 ? "s" : ""}{#if embed.failed},
-                    <span class="bad">{embed.failed} en échec</span>{/if}
-                </span>
-              {:else}
-                <span class="muted small">
-                  Mesure les titres qui n'en ont pas encore — l'entraînement ne voit
-                  que ce qui a été mesuré.
-                </span>
-              {/if}
+            {#if candidates.length}
+              <span class="sep">·</span>
+              <span>{Math.max(0, candidates.length - cursor)} en file</span>
             {/if}
           </div>
-          {#if extractor.session_error}
-            <div class="banner bad">
-              <Icon name="alert" size={16} /><span>{extractor.session_error}</span>
-            </div>
-          {:else if extractor.session_state === "checking"}
-            <p class="muted small">Vérification du modèle…</p>
-          {/if}
-          {#if embed?.error}
-            <div class="banner bad">
-              <Icon name="alert" size={16} /><span>{embed.error}</span>
-            </div>
-          {/if}
-          <JobFailures job={embed} label="empreintes" />
-        {/if}
-
-        <div class="analysis-bar" class:running={analysis?.running}>
-          {#if analysis?.running}
-            <div class="progress"><i style={`width:${analysisPct}%`}></i></div>
-            <div class="embed-stats muted small">
-              <span>{analysis.scanned}/{analysis.total || "?"} analysés</span>
-              <span class="sep">·</span>
-              <span><strong>{analysis.done}</strong> à jour</span>
-              {#if analysis.failed}
-                <span class="sep">·</span>
-                <span class="bad">{analysis.failed} en échec</span>
-              {/if}
-              <span class="sep">·</span>
-              <span>{analysis.workers} en parallèle</span>
-            </div>
-          {:else}
-            <button class="ghost" on:click={startAnalysis}>
-              <Icon name="activity" size={16} /> Analyser les sons
-            </button>
-            <label class="inline-field">
-              Parallèle
-              <!-- 0 means "ask the machine": half its cores, so the other half
-                   keeps streaming. Nobody should have to know how many cores
-                   their server has to get more than one of them used. -->
-              <input type="number" min="0" max="8" bind:value={analysisWorkers} />
-              <span class="muted small"
-                >{analysisWorkers > 0 ? "fixé" : `auto · ${analysisWorkersAuto}`}</span
-              >
-            </label>
-            <label class="inline-check">
-              <input type="checkbox" bind:checked={analysisForce} />
-              Reclasser tout
-            </label>
-            {#if analysis && (analysis.done || analysis.failed)}
-              <span class="muted small">
-                Dernier passage : <strong>{analysis.done}</strong> analysé{analysis.done > 1 ? "s" : ""}{#if analysis.failed},
-                  <span class="bad">{analysis.failed} en échec</span>{/if}
-              </span>
-            {:else}
-              <span class="muted small">
-                Tempo + style (+ empreintes). « Reclasser tout » remesure même ce qui
-                a déjà un verdict.
-              </span>
-            {/if}
-          {/if}
         </div>
-        {#if analysis?.error}
-          <div class="banner bad">
-            <Icon name="alert" size={16} /><span>{analysis.error}</span>
+
+        {#if reviewing}
+          <div class="review-bar">
+            <Icon name="alert" size={16} />
+            <span>
+              <strong>Révision</strong> — {candidates.length} étiquette{candidates.length > 1 ? "s" : ""}
+              que le modèle conteste. Confirmez ou corrigez.
+            </span>
+            <button class="ghost small-btn" on:click={endReview}>Terminer</button>
+          </div>
+        {:else}
+          <!-- The order switch: "les plus écoutés" improves the model on the
+               music you actually play, "les plus incertains" improves it
+               fastest overall. Neither dominates, so it is a choice. -->
+          <div class="sortbar" role="tablist" aria-label="Ordre des titres à étiqueter">
+            <button
+              class:on={candidateSort === "plays"}
+              role="tab"
+              aria-selected={candidateSort === "plays"}
+              on:click={() => switchSort("plays")}
+            >Les plus écoutés</button>
+            <button
+              class:on={candidateSort === "active"}
+              role="tab"
+              aria-selected={candidateSort === "active"}
+              on:click={() => switchSort("active")}
+            >Là où le modèle hésite</button>
           </div>
         {/if}
-        <!-- The banner is the headline; this is the report. A counter with no
-             per-track reason sent the operator to the container log, which is
-             exactly what somebody using the app from a phone cannot read. -->
-        <JobFailures job={analysis} label="analyse" />
+
+        {#if embed?.running || analysis?.running}
+          <!-- The jobs live in the Modèle tab; here only the fact that one is
+               running, since it is what fills this list. -->
+          <button class="job-line" on:click={() => (tab = "model")}>
+            <span class="progress slim"><i style={`width:${embed?.running ? embedPct : analysisPct}%`}></i></span>
+            <span class="muted small">
+              {embed?.running ? "Calcul des empreintes" : "Analyse des sons"} —
+              {embed?.running ? `${embed.scanned}/${embed.total || "?"}` : `${analysis.scanned}/${analysis.total || "?"}`}
+            </span>
+          </button>
+        {/if}
 
         {#if !tags.length}
           <p class="muted empty">
@@ -1437,24 +1525,24 @@
               <p>Plus rien à étiqueter pour l'instant.</p>
             {:else}
               <p>Aucun titre ne porte encore d'empreinte.</p>
-              {#if !extractor.available}
-                <p class="small">
-                  Installez d'abord l'extracteur, puis lancez le calcul des
-                  empreintes.
-                </p>
-                <button class="primary" on:click={openExtractor}>
-                  <Icon name="download" size={16} /> Installer l'extracteur
-                </button>
-              {:else}
-                <p class="small">
-                  Lancez « Calculer les empreintes » ci-dessus : le studio ne peut
-                  entraîner que sur les titres déjà mesurés.
-                </p>
-              {/if}
+              <p class="small">
+                {extractor.available
+                  ? "Lancez le calcul des empreintes : le studio ne propose que les titres déjà mesurés."
+                  : "Installez d'abord l'extracteur, puis lancez le calcul des empreintes."}
+              </p>
+              <button class="primary" on:click={openExtractor}>
+                <Icon name={extractor.available ? "activity" : "download"} size={16} />
+                {extractor.available ? "Calculer les empreintes" : "Installer l'extracteur"}
+              </button>
             {/if}
-            <button class="ghost" on:click={loadCandidates}>
-              <Icon name="refresh" size={16} /> Recharger
-            </button>
+            <div class="empty-actions">
+              {#if lastAction}
+                <button class="ghost" on:click={undo}><Icon name="prev" size={16} /> Annuler la dernière</button>
+              {/if}
+              <button class="ghost" on:click={loadCandidates}>
+                <Icon name="refresh" size={16} /> Recharger
+              </button>
+            </div>
           </div>
         {:else if current}
           <div class="candidate">
@@ -1474,126 +1562,163 @@
             <div class="meta">
               <h3>{current.title}</h3>
               <p class="who">{current.artist}</p>
-              {#if current.album}<p class="muted small">{current.album}</p>{/if}
-              {#if current.predicted}
-                <div class="guess" style={`--c:${suggestion?.color || "var(--accent)"}`}>
-                  <span class="guess-k">Proposition</span>
-                  <div class="guess-line">
-                    <span class="guess-v">{current.predicted}</span>
-                    <span class="guess-c">{pct(current.confidence)} %</span>
-                  </div>
-                  <span class="guess-bar">
-                    <i style={`width:${pct(current.confidence)}%`}></i>
-                  </span>
-                  {#if current.uncertainty !== undefined && current.uncertainty !== null}
-                    <span class="guess-sub">
-                      {#if current.uncertainty >= 0.6}
-                        La tête hésite — étiqueter ce titre lui apprend beaucoup.
-                      {:else if current.uncertainty <= 0.15}
-                        La tête est sûre. Confirmer est surtout une vérification.
-                      {:else}
-                        Hésitation moyenne.
-                      {/if}
-                    </span>
-                  {/if}
-                </div>
-              {:else}
-                <p class="muted small guess-none">
-                  Aucun modèle ne s'est encore prononcé sur ce titre.
+              {#if current.album}<p class="muted small album">{current.album}</p>{/if}
+              {#if current.review}
+                <p class="was">
+                  Étiqueté <b>{current.review.label}</b> · le modèle entend
+                  <b>{current.review.predicted}</b> ({pct(current.review.other)} %)
                 </p>
-              {/if}
-              {#if current.prototype}
-                <!-- The prototype exists precisely when the head has nothing
-                     useful to say. Shown as a second opinion, never as the
-                     proposition: it has no confidence to gate on, so it is
-                     allowed to suggest and not allowed to decide. -->
-                <p class="proto">
-                  <Icon name="tag" size={13} />
-                  Plus proche genre étiqueté : <b>{current.prototype.label}</b>
-                  <span class="muted">({pct(current.prototype.similarity)} % de ressemblance)</span>
+              {:else if !scored}
+                <p class="muted small">
+                  Pas encore d'avis sur ce titre : les genres sont classés par usage.
                 </p>
+              {:else if current.uncertainty != null && current.uncertainty >= 0.6}
+                <p class="muted small">Le modèle hésite : ce titre lui apprendra beaucoup.</p>
               {/if}
+              <div class="preview-bar" class:on={previewId === current.id}>
+                <button
+                  class="icon-btn"
+                  on:click={togglePreview}
+                  aria-label={previewing && previewId === current.id ? "Pause" : "Écouter un extrait"}
+                >
+                  <Icon name={previewing && previewId === current.id ? "pause" : "play"} size={16} />
+                </button>
+                <span class="ptime">{fmtClock(previewTime)}</span>
+                <input
+                  class="seek"
+                  type="range"
+                  min="0"
+                  max={previewTotal}
+                  step="0.1"
+                  value={previewTime}
+                  on:input={seekPreview}
+                  disabled={!previewTotal}
+                  aria-label="Position de la préécoute"
+                />
+                <span class="ptime">{fmtClock(previewTotal)}</span>
+                <button
+                  class="icon-btn vol-btn"
+                  on:click={() => player.toggleMute()}
+                  aria-label={$player.muted ? "Rétablir le son" : "Muet"}
+                >
+                  <Icon name={$player.muted || $player.volume === 0 ? "mute" : "volume"} size={15} />
+                </button>
+                <input
+                  class="pvol"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={$player.muted ? 0 : $player.volume}
+                  on:input={(e) => player.setVolume(+e.target.value)}
+                  aria-label="Volume"
+                />
+              </div>
             </div>
           </div>
 
-          <div class="preview-bar" class:on={previewId === current.id}>
-            <button
-              class="icon-btn"
-              on:click={togglePreview}
-              aria-label={previewing && previewId === current.id ? "Pause" : "Écouter un extrait"}
-            >
-              <Icon
-                name={previewing && previewId === current.id ? "pause" : "play"}
-                size={16}
-              />
-            </button>
-            <span class="ptime">{fmtClock(previewTime)}</span>
-            <input
-              class="seek"
-              type="range"
-              min="0"
-              max={previewTotal}
-              step="0.1"
-              value={previewTime}
-              on:input={seekPreview}
-              disabled={!previewTotal}
-              aria-label="Position de la préécoute"
-            />
-            <span class="ptime">{fmtClock(previewTotal)}</span>
-            <button
-              class="icon-btn"
-              on:click={() => player.toggleMute()}
-              aria-label={$player.muted ? "Rétablir le son" : "Muet"}
-            >
-              <Icon
-                name={$player.muted || $player.volume === 0 ? "mute" : "volume"}
-                size={15}
-              />
-            </button>
-            <input
-              class="pvol"
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={$player.muted ? 0 : $player.volume}
-              on:input={(e) => player.setVolume(+e.target.value)}
-              aria-label="Volume"
-            />
-          </div>
-
-          <div class="choices">
-            {#each tags as tag, i}
+          <!-- The nine genres most likely for THIS track, best first, on the
+               number keys. The bar is the blended score; it orders, it is not
+               a promise. -->
+          <div class="picks" role="group" aria-label="Genres proposés">
+            {#each picks as r, i (r.tag.id)}
               <button
-                class="choice"
-                class:sugg={suggestion && suggestion.id === tag.id}
-                style={`--c:${tag.color || "var(--accent)"}`}
-                on:click={() => label(tag)}
+                class="pick"
+                class:first={i === 0 && scored}
+                class:was={current.review && current.review.label === r.tag.name}
+                style={`--c:${r.tag.color || "var(--accent)"}`}
+                on:click={() => label(r.tag)}
               >
-                {#if i < 9}<kbd>{i + 1}</kbd>{/if}
-                <span>{tag.name}</span>
+                <kbd>{i + 1}</kbd>
+                <span class="pick-name">{r.tag.name}</span>
+                {#if r.score != null}
+                  <span class="pick-pct">{pct(r.score)}<small>%</small></span>
+                  <span class="pick-bar"><i style={`width:${Math.max(3, pct(r.score))}%`}></i></span>
+                {:else if r.used}
+                  <span class="pick-pct used">{r.used}</span>
+                {/if}
               </button>
             {/each}
           </div>
 
+          <div class="finder">
+            <div class="search">
+              <Icon name="search" size={16} />
+              <input
+                bind:this={searchEl}
+                bind:value={query}
+                on:keydown={onSearchKey}
+                type="search"
+                placeholder="Autre genre…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Chercher un genre"
+              />
+              {#if !query}<kbd class="slash">/</kbd>{/if}
+            </div>
+            {#if query.trim()}
+              <div class="chips-row">
+                {#each found as r, i (r.tag.id)}
+                  <button class="tchip" class:hot={i === 0} style={`--c:${r.tag.color || "var(--accent)"}`} on:click={() => label(r.tag)}>
+                    <span class="dot"></span>{r.tag.name}
+                    {#if r.score != null}<small>{pct(r.score)} %</small>{/if}
+                  </button>
+                {/each}
+                {#if !found.length}<span class="muted small">Aucun genre ne correspond — créez-le dans l'onglet « Genres ».</span>{/if}
+              </div>
+              {#if found.length}<p class="hint muted"><kbd>↵</kbd> choisit « {found[0].tag.name} » · <kbd>échap</kbd> efface</p>{/if}
+            {:else}
+              {#if recentRows.length}
+                <div class="chips-row">
+                  <span class="row-k muted">Récents</span>
+                  {#each recentRows as r (r.tag.id)}
+                    <button class="tchip" style={`--c:${r.tag.color || "var(--accent)"}`} on:click={() => label(r.tag)}>
+                      <span class="dot"></span>{r.tag.name}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+              <button class="all-toggle" on:click={() => (showAll = !showAll)} aria-expanded={showAll}>
+                <Icon name={showAll ? "chevronUp" : "chevronDown"} size={14} />
+                Tous les genres ({ranked.length}){scored ? ", du plus au moins probable" : ""}
+              </button>
+              {#if showAll}
+                <div class="chips-row all">
+                  {#each ranked.slice(9) as r (r.tag.id)}
+                    <button class="tchip" style={`--c:${r.tag.color || "var(--accent)"}`} on:click={() => label(r.tag)}>
+                      <span class="dot"></span>{r.tag.name}
+                      {#if r.score != null && r.score >= 0.005}<small>{pct(r.score)} %</small>{/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            {/if}
+          </div>
+
           <div class="tag-actions">
             <button class="ghost" on:click={back} disabled={cursor === 0}>
-              <Icon name="prev" size={16} /> Précédent
+              <Icon name="prev" size={16} /> <span class="lbl">Précédent</span>
             </button>
+            {#if lastAction}
+              <button class="ghost" on:click={undo} title="Annuler « {lastAction.tag.name} » sur « {lastAction.track.title} »">
+                Annuler <kbd>z</kbd>
+              </button>
+            {/if}
+            <span class="grow"></span>
             {#if suggestion}
               <button class="primary confirm" on:click={confirmSuggestion}>
                 <Icon name="check" size={16} />
-                <span class="confirm-label">Confirmer « {suggestion.name} »</span>
+                <span class="confirm-label">{suggestion.name}</span>
                 <kbd>↵</kbd>
               </button>
             {/if}
             <button class="ghost" on:click={skip}>
-              Passer <kbd>→</kbd>
+              <span class="lbl">Passer</span> <kbd>→</kbd>
             </button>
           </div>
-          <p class="hint muted">
-            <kbd>1</kbd>…<kbd>9</kbd> choisir · <kbd>↵</kbd> confirmer ·
-            <kbd>espace</kbd> écouter · <kbd>→</kbd> passer
+          <p class="hint muted keys">
+            <kbd>1</kbd>…<kbd>9</kbd> choisir · <kbd>↵</kbd> le premier · <kbd>/</kbd> chercher ·
+            <kbd>espace</kbd> écouter · <kbd>→</kbd> passer · <kbd>z</kbd> annuler
           </p>
         {:else if !candidatesLoaded}
           <p class="muted empty">Chargement…</p>
@@ -1608,6 +1733,118 @@
     {/if}
 
     {#if tab === "model"}
+      <section class="card">
+        <h2><Icon name="activity" size={18} /> Mesures</h2>
+        <p class="sub muted">
+          Ce que le studio sait d'un titre vient de deux passes sur le fichier : son
+          empreinte (ce que le modèle lit) et l'analyse (tempo, style). Seuls les
+          titres mesurés peuvent être proposés à l'étiquetage et servir d'exemple.
+        </p>
+          {#if extractor.available}
+            <div class="embed-bar" class:running={embed?.running}>
+              {#if embed?.running}
+                <div class="progress"><i style={`width:${embedPct}%`}></i></div>
+                <div class="embed-stats muted small">
+                  <span>{embed.scanned}/{embed.total || "?"} analysés</span>
+                  <span class="sep">·</span>
+                  <span><strong>{embed.done}</strong> calculées</span>
+                  {#if embed.failed}
+                    <span class="sep">·</span>
+                    <span class="bad">{embed.failed} en échec</span>
+                  {/if}
+                </div>
+              {:else}
+                <button
+                  class="ghost"
+                  on:click={startEmbed}
+                  disabled={!!extractor.session_error}
+                >
+                  <Icon name="activity" size={16} /> Calculer les empreintes
+                </button>
+                {#if embed && (embed.done || embed.failed)}
+                  <span class="muted small">
+                    Dernier passage : <strong>{embed.done}</strong> calculée{embed.done > 1 ? "s" : ""}{#if embed.failed},
+                      <span class="bad">{embed.failed} en échec</span>{/if}
+                  </span>
+                {:else}
+                  <span class="muted small">
+                    Mesure les titres qui n'en ont pas encore — l'entraînement ne voit
+                    que ce qui a été mesuré.
+                  </span>
+                {/if}
+              {/if}
+            </div>
+            {#if extractor.session_error}
+              <div class="banner bad">
+                <Icon name="alert" size={16} /><span>{extractor.session_error}</span>
+              </div>
+            {:else if extractor.session_state === "checking"}
+              <p class="muted small">Vérification du modèle…</p>
+            {/if}
+            {#if embed?.error}
+              <div class="banner bad">
+                <Icon name="alert" size={16} /><span>{embed.error}</span>
+              </div>
+            {/if}
+            <JobFailures job={embed} label="empreintes" />
+          {/if}
+
+          <div class="analysis-bar" class:running={analysis?.running}>
+            {#if analysis?.running}
+              <div class="progress"><i style={`width:${analysisPct}%`}></i></div>
+              <div class="embed-stats muted small">
+                <span>{analysis.scanned}/{analysis.total || "?"} analysés</span>
+                <span class="sep">·</span>
+                <span><strong>{analysis.done}</strong> à jour</span>
+                {#if analysis.failed}
+                  <span class="sep">·</span>
+                  <span class="bad">{analysis.failed} en échec</span>
+                {/if}
+                <span class="sep">·</span>
+                <span>{analysis.workers} en parallèle</span>
+              </div>
+            {:else}
+              <button class="ghost" on:click={startAnalysis}>
+                <Icon name="activity" size={16} /> Analyser les sons
+              </button>
+              <label class="inline-field">
+                Parallèle
+                <!-- 0 means "ask the machine": half its cores, so the other half
+                     keeps streaming. Nobody should have to know how many cores
+                     their server has to get more than one of them used. -->
+                <input type="number" min="0" max="8" bind:value={analysisWorkers} />
+                <span class="muted small"
+                  >{analysisWorkers > 0 ? "fixé" : `auto · ${analysisWorkersAuto}`}</span
+                >
+              </label>
+              <label class="inline-check">
+                <input type="checkbox" bind:checked={analysisForce} />
+                Reclasser tout
+              </label>
+              {#if analysis && (analysis.done || analysis.failed)}
+                <span class="muted small">
+                  Dernier passage : <strong>{analysis.done}</strong> analysé{analysis.done > 1 ? "s" : ""}{#if analysis.failed},
+                    <span class="bad">{analysis.failed} en échec</span>{/if}
+                </span>
+              {:else}
+                <span class="muted small">
+                  Tempo + style (+ empreintes). « Reclasser tout » remesure même ce qui
+                  a déjà un verdict.
+                </span>
+              {/if}
+            {/if}
+          </div>
+          {#if analysis?.error}
+            <div class="banner bad">
+              <Icon name="alert" size={16} /><span>{analysis.error}</span>
+            </div>
+          {/if}
+          <!-- The banner is the headline; this is the report. A counter with no
+               per-track reason sent the operator to the container log, which is
+               exactly what somebody using the app from a phone cannot read. -->
+          <JobFailures job={analysis} label="analyse" />
+      </section>
+
       <section class="card">
         <h2><Icon name="activity" size={18} /> Extracteur</h2>
         <p class="sub muted">
@@ -1767,39 +2004,23 @@
           <em>vos</em> genres — quelques secondes, dans cet onglet, sans rien installer.
         </p>
 
-        {#if thin.length}
-          <div class="banner soft">
-            <Icon name="info" size={16} />
-            <span>
-              Peu d'exemples pour {thin.map((t) => t.name).join(", ")} — huit par genre
-              est le minimum pour un chiffre qui veut dire quelque chose.
-            </span>
+        <p class="sub muted guard">
+          L'entraînement se surveille lui-même : il écarte ce qui fausserait le
+          modèle (doublons, artiste trop présent, genre trop maigre), le note sur
+          des titres et des artistes qu'il n'a pas vus, et ne garde un modèle plus
+          gros que s'il fait vraiment mieux.
+        </p>
+
+        <details class="advanced" bind:open={advanced}>
+          <summary>Réglages avancés</summary>
+          <div class="modes">
+            {#each MODES as m}
+              <button class="mode" class:sel={mode === m.id} on:click={() => (mode = m.id)}>
+                <strong>{m.label}</strong>
+                <span class="muted">{m.desc}</span>
+              </button>
+            {/each}
           </div>
-        {/if}
-
-        <div class="modes">
-          {#each MODES as m}
-            <button class="mode" class:sel={mode === m.id} on:click={() => (mode = m.id)}>
-              <strong>{m.label}</strong>
-              <span class="muted">{m.desc}</span>
-            </button>
-          {/each}
-        </div>
-
-        <label class="option" class:on={byArtist}>
-          <input type="checkbox" bind:checked={byArtist} />
-          <span class="option-text">
-            <strong>Tester sur des artistes inconnus</strong>
-            <span class="muted">
-              La note est mesurée sur des artistes que le modèle n'a jamais entendus :
-              deux titres d'un même album ne s'entraident plus. Le chiffre est plus
-              bas, mais c'est celui qui dit si le modèle a appris le genre ou
-              seulement reconnu des albums — et le serveur fera moins confiance à un
-              modèle qui ne sait que les seconds.
-            </span>
-          </span>
-        </label>
-
         <label class="option" class:on={useConstruction}>
           <input type="checkbox" bind:checked={useConstruction} />
           <span class="option-text">
@@ -1813,6 +2034,7 @@
             </span>
           </span>
         </label>
+        </details>
         <!-- Outside the label: a button inside one would be a second control it
              labels, and a click on it would tick the box. -->
         {#if useConstruction && constr && constr.labelled}
@@ -1844,7 +2066,7 @@
           </button>
           {#if !trainable}
             <span class="muted">
-              Il faut au moins deux genres et trois titres par genre.
+              Il faut au moins deux genres de {MIN_EXAMPLES} titres chacun.
             </span>
           {/if}
         </div>
@@ -1858,6 +2080,40 @@
 
         {#if head}
           <div class="results">
+            {#if head.health}
+              {@const h = head.health}
+              <div class="health {h.level}">
+                <div class="health-head">
+                  <Icon name={h.level === "good" ? "check" : "alert"} size={18} />
+                  <strong>{h.headline}</strong>
+                </div>
+                {#if h.issues.length}
+                  <ul class="issues">
+                    {#each h.issues as it}
+                      <li class={it.severity}>
+                        <span class="it-title">{it.title}</span>
+                        <span class="muted small">{it.detail}</span>
+                        {#if it.action === "review"}
+                          <button class="ghost small-btn" on:click={startReview}>
+                            <Icon name="tag" size={14} /> Revoir ces titres
+                          </button>
+                        {:else if it.action}
+                          <span class="it-act small">{it.action}</span>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if h.done.length}
+                  <p class="done muted small">
+                    <Icon name="sparkles" size={13} /> Fait automatiquement : {h.done.join(" · ")}.
+                  </p>
+                {/if}
+              </div>
+            {/if}
+
+            <details class="details">
+              <summary>Détails{h_more(head)}</summary>
             <div class="scores">
               <div class="score">
                 <span class="k">Justesse équilibrée</span>
@@ -1872,6 +2128,16 @@
                   {head.metrics.examples} titres
                 </span>
               </div>
+              {#if Number.isFinite(head.metrics.fitBalanced)}
+                <div class="score">
+                  <span class="k">Sur ses propres exemples</span>
+                  <span class="v">{pct(head.metrics.fitBalanced)} %</span>
+                  <span class="muted small">
+                    l'écart avec la note ci-dessus mesure l'apprentissage par cœur
+                    ({pct(head.metrics.fitBalanced - head.metrics.balanced)} points)
+                  </span>
+                </div>
+              {/if}
               {#if head.metrics.temperature && Math.abs(head.metrics.temperature - 1) > 0.03}
                 <div class="score">
                   <span class="k">Calibration</span>
@@ -2002,6 +2268,8 @@
               {/if}
             </div>
 
+            </details>
+
             {#if head.skipped}
               <p class="muted small">
                 {head.skipped} titre{head.skipped > 1 ? "s" : ""} ignoré{head.skipped > 1 ? "s" : ""} :
@@ -2009,9 +2277,14 @@
               </p>
             {/if}
 
-            <button class="primary big" on:click={sendModel} disabled={sending}>
+            <button
+              class="primary big"
+              class:risky={head.health?.level === "poor"}
+              on:click={sendModel}
+              disabled={sending}
+            >
               <Icon name="upload" size={16} />
-              {sending ? "Envoi…" : "Envoyer au serveur"}
+              {sending ? "Envoi…" : head.health?.level === "poor" ? "Envoyer quand même" : "Envoyer au serveur"}
             </button>
           </div>
         {/if}
@@ -2030,6 +2303,13 @@
                 {/if}
                 {new Date(status.model.created).toLocaleString("fr-FR")}
               </p>
+              {#if status.model.metrics?.health?.level && status.model.metrics.health.level !== "good"}
+                <p class="small" class:bad={status.model.metrics.health.level === "poor"}>
+                  {status.model.metrics.health.level === "poor"
+                    ? "Jugé peu fiable à l'entraînement."
+                    : "Utilisable, à surveiller (voir l'entraînement)."}
+                </p>
+              {/if}
               {#if !status.model.usable}
                 <p class="bad small">Le serveur ne parvient pas à le relire.</p>
               {/if}
@@ -2528,63 +2808,10 @@
   }
   /* The proposition is what you confirm four times out of five — it gets the
      weight, not the small print. */
-  .guess {
-    margin-top: 14px;
-    max-width: 360px;
-  }
   /* Label above, value and confidence on the row under it. On a phone the
      metadata column is 158px wide and "Proposition zaag 100 %" needs 179 — one
      line could only ever be one line by truncating the genre, which is the one
      word the row exists to show. */
-  .guess-line {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    margin-top: 2px;
-  }
-  .guess-k {
-    display: block;
-    font-size: 0.78rem;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    color: var(--text-dim, #9aa0a6);
-  }
-  .guess-v {
-    flex: 1 1 auto;
-    min-width: 0;
-    font-weight: 700;
-    font-size: 1.06rem;
-    color: var(--c);
-  }
-  .guess-c {
-    margin-left: auto;
-    flex: none;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-dim, #9aa0a6);
-  }
-  .guess-v {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .guess-bar {
-    display: block;
-    height: 4px;
-    margin-top: 6px;
-    border-radius: 2px;
-    background: var(--surface-3, #24262b);
-    overflow: hidden;
-  }
-  .guess-bar i {
-    display: block;
-    height: 100%;
-    background: var(--c);
-    transition: width 0.25s;
-  }
-  .guess-none {
-    margin-top: 12px;
-  }
   /* The order switch, above the tagging card. Quiet by default so it does not
      read as a call to action; the chosen side carries the accent. */
   .sortbar {
@@ -2618,27 +2845,9 @@
   }
   /* The uncertainty readout. Deliberately one quiet line rather than a badge:
      it is a hint about what to do next, not a score to chase. */
-  .guess-sub {
-    display: block;
-    margin-top: 6px;
-    font-size: 11.5px;
-    line-height: 1.4;
-    opacity: 0.72;
-  }
   /* The prototype's second opinion. Visually subordinate to the proposition —
      smaller, indented, no colour — because it is the weaker of the two claims
      and must not read like a competing verdict. */
-  .proto {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 8px 0 0;
-    font-size: 12px;
-    opacity: 0.8;
-  }
-  .proto b {
-    font-weight: 600;
-  }
 
   /* The confused pairs, below the matrix that produced them. */
   .pairs {
@@ -2668,34 +2877,6 @@
     font-weight: 600;
   }
 
-  .choices {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin: 16px 0 4px;
-  }
-  .choice {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: var(--surface-2, #1b1d21);
-    border: 1px solid var(--border, #2a2d33);
-    border-left: 3px solid var(--c);
-    border-radius: 11px;
-    color: inherit;
-    font: inherit;
-    font-weight: 600;
-    padding: 9px 13px;
-    cursor: pointer;
-    transition: transform 0.12s, background 0.12s;
-  }
-  .choice:hover {
-    background: var(--surface-3, #24262b);
-    transform: translateY(-1px);
-  }
-  .choice.sugg {
-    box-shadow: 0 0 0 1px var(--c) inset;
-  }
   kbd {
     background: rgba(255, 255, 255, 0.08);
     border-radius: 5px;
@@ -3243,9 +3424,6 @@
     .meta h3 {
       font-size: 1.1rem;
     }
-    .guess {
-      margin-top: 10px;
-    }
     /* Confirm on its own line and full width — it is the one target the thumb
        aims at, over and over. */
     .tag-head {
@@ -3268,5 +3446,326 @@
     .tag-actions .ghost {
       justify-content: center;
     }
+  }
+
+  /* -- the tagger, ranked ------------------------------------------------ */
+  .review-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    font-size: 0.88rem;
+  }
+  .review-bar span {
+    flex: 1;
+  }
+  .job-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin: 0 0 14px;
+    padding: 6px 0;
+    text-align: left;
+  }
+  .progress.slim {
+    flex: 0 0 120px;
+    height: 4px;
+    margin: 0;
+  }
+  .candidate .meta .album {
+    margin-bottom: 4px;
+  }
+  .candidate .meta .was {
+    margin: 6px 0 2px;
+    font-size: 0.86rem;
+  }
+  .candidate .meta .preview-bar {
+    margin-top: 10px;
+  }
+  .picks {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin: 18px 0 14px;
+  }
+  .pick {
+    position: relative;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+    min-height: 52px;
+    padding: 10px 12px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg-elev);
+    color: var(--text);
+    text-align: left;
+    overflow: hidden;
+    transition: border-color 0.12s, background 0.12s, transform 0.08s;
+  }
+  .pick:hover {
+    border-color: var(--c);
+    background: color-mix(in srgb, var(--c) 8%, var(--bg-elev));
+  }
+  .pick:active {
+    transform: scale(0.985);
+  }
+  .pick.first {
+    border-color: color-mix(in srgb, var(--c) 70%, transparent);
+    background: color-mix(in srgb, var(--c) 12%, var(--bg-elev));
+  }
+  .pick.was {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 30%, transparent);
+  }
+  .pick kbd {
+    min-width: 20px;
+    text-align: center;
+  }
+  .pick-name {
+    font-weight: 650;
+    font-size: 0.92rem;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pick-pct {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.85rem;
+    font-weight: 650;
+    color: var(--text-dim);
+  }
+  .pick-pct small {
+    font-size: 0.7rem;
+    margin-left: 1px;
+  }
+  .pick-pct.used {
+    font-weight: 500;
+    font-size: 0.75rem;
+  }
+  .pick-bar {
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: 6px;
+    height: 3px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    overflow: hidden;
+  }
+  .pick-bar i {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--c);
+  }
+  .finder {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    height: 44px;
+    border-radius: 12px;
+    background: var(--bg-elev);
+    border: 1px solid var(--bg-hover);
+    color: var(--text-dim);
+  }
+  .search:focus-within {
+    border-color: var(--accent);
+  }
+  .search input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    background: none;
+    border: 0;
+    outline: none;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  .chips-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .chips-row.all {
+    max-height: 260px;
+    overflow-y: auto;
+    padding: 2px;
+  }
+  .row-k {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-right: 4px;
+  }
+  .tchip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 36px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg-elev);
+    color: var(--text);
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+  .tchip:hover,
+  .tchip.hot {
+    border-color: var(--c);
+    background: color-mix(in srgb, var(--c) 10%, var(--bg-elev));
+  }
+  .tchip .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--c);
+    flex: none;
+  }
+  .tchip small {
+    color: var(--text-dim);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .all-toggle {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 2px;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .all-toggle:hover {
+    color: var(--text);
+  }
+  .tag-actions .grow {
+    flex: 1;
+  }
+  .empty-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  @media (max-width: 720px) {
+    .picks {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .hint.keys,
+    .search .slash {
+      display: none;
+    }
+    .tag-actions .lbl {
+      display: none;
+    }
+    .candidate .meta .preview-bar .pvol,
+    .candidate .meta .preview-bar .vol-btn {
+      display: none;
+    }
+  }
+
+  /* -- training health ----------------------------------------------------- */
+  .guard {
+    margin-top: -4px;
+  }
+  .advanced {
+    margin: 4px 0 14px;
+  }
+  .advanced > summary,
+  .details > summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 0.88rem;
+    font-weight: 600;
+    padding: 6px 0;
+    list-style-position: inside;
+  }
+  .advanced[open] > summary,
+  .details[open] > summary {
+    margin-bottom: 10px;
+  }
+  .health {
+    --hc: #10b981;
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    background: color-mix(in srgb, var(--hc) 9%, var(--bg-elev));
+    border: 1px solid color-mix(in srgb, var(--hc) 35%, transparent);
+  }
+  .health.watch {
+    --hc: #eab308;
+  }
+  .health.poor {
+    --hc: #f43f5e;
+  }
+  .health-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--hc);
+  }
+  .health-head strong {
+    color: var(--text);
+    font-size: 0.98rem;
+  }
+  .issues {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .issues li {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding-left: 12px;
+    border-left: 2px solid color-mix(in srgb, var(--text) 18%, transparent);
+  }
+  .issues li.bad {
+    border-left-color: #f43f5e;
+  }
+  .issues li.watch {
+    border-left-color: #eab308;
+  }
+  .it-title {
+    font-weight: 650;
+    font-size: 0.9rem;
+  }
+  .it-act {
+    color: var(--text);
+    opacity: 0.85;
+  }
+  .issues .small-btn {
+    margin-top: 4px;
+  }
+  .health .done {
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+    margin: 12px 0 0;
+    line-height: 1.45;
+  }
+  .primary.risky {
+    background: color-mix(in srgb, #f43f5e 75%, var(--accent));
   }
 </style>

@@ -17,6 +17,9 @@
 //   half    the served figure is HALF the real tempo — what Deezer publishes
 //           for a good share of hardcore — and no genre.
 //   genre   the genre is known (a tag, the server's style) but no tempo.
+//   served  what the app does with a measured verdict: at four seconds the
+//           family is PINNED and the tempo LOCKED — nothing is classified or
+//           estimated again, only the phase and the events are this side's.
 //
 // METRICS, all standard in the beat-tracking literature except where noted:
 //   F70 / F35   beat F-measure at ±70 ms (MIREX) and at ±35 ms — the second is
@@ -199,6 +202,7 @@ const BASELINE = JSON.parse(readFileSync(join(here, "baseline-js.json"), "utf8")
 function scenarioOpts(sc, truth) {
   const genre = truth.genre;
   if (sc === "seeded") return { seed: truth.bpm, seedAt: SEED_AT, genre };
+  if (sc === "served") return { seed: truth.bpm, seedAt: SEED_AT, genre, served: true };
   if (sc === "half") return { seed: truth.bpm / 2, seedAt: SEED_AT };
   if (sc === "genre") return { genre };
   return {};
