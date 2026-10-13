@@ -1104,12 +1104,22 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   pinned: the tracks, their tags and the head, not a query per row.
 - **Each genre can open a short list of its textbook recordings** (`deezer/references.py`,
   `/genre/references`, the disc button on a row of the *Genres* tab), because a genre's first eight
-  examples are the hardest to find in a library nobody sorted by genre. The list's rule is that
-  **nothing in it is a guess**: a pair is there only if that recording exists under that artist and
-  the genre's literature names it; the young local scenes this app cares most about (Pieep,
-  Deutscher Krach, Hardtekk, Zaag, Uptempo, Frenchcore) have NO track list — a test says so — and a
-  few of them list their scene's established artists instead, as links to artist pages where bulk
-  tagging (with its review) takes over. Every pair is looked up on Deezer when shown and offered
+  examples are the hardest to find in a library nobody sorted by genre. The curated list's rule is
+  that **nothing in it is a guess**: a pair is there only if that recording exists under that artist
+  and the genre's literature names it. The scenes with no sourced list at all (Pieep, Hardtekk,
+  Zaag, Uptempo) have NO track list — a test says so — and a few scenes list their established
+  artists instead, as links to artist pages where bulk tagging (with its review) takes over.
+  **The sub-genre lists are the other half** (`deezer/subgenre_tracks.py`, merged into
+  `REFERENCES`): ~120 sub-genres, ~1 090 pairs, hand-written from published essentials, DJ
+  tracklists, forum threads (Psynews) and, for Deutscher Krach, the scene's own label's release list
+  — each group names its sources and says when it is under ten. They are NOT a canon: no artist is
+  filed under a genre from its titles alone (Dr Donk's Bandcamp was, under Zaag, and it was wrong).
+  **They are the DEFAULT sounds** (`webui/genre.py#start_sounds_if_due`, `/genre/sounds`): on the
+  first admin visit after the lists change, each pair Deezer carries is imported and tagged with its
+  sub-genre unless the track already wears a tag — one tag per track, so a sound somebody chose is
+  never overwritten — then re-decided in one pass like a bulk tag. Nothing is downloaded (a tagged
+  row is archived when played or by the labelled backfill); five Deezer failures in a row stop the
+  run, unrecorded, retried after ten minutes. The user tags more on top. Every pair is looked up on Deezer when shown and offered
   only if the artist AND the title match (`references.match`: accents and punctuation folded, the
   title at a word start, a live take or a remix only when nothing else is there, never a cover); a
   pair Deezer does not carry reads "introuvable", never whatever the search returned. Answers are

@@ -1472,9 +1472,11 @@ def _sounds_json():
 
 
 def _tag_default_sound(dzapi, provider, artist, title, tag):
-    """Bring one default recording in and tag it: "tagged", "kept" (the track
-    already wears a tag) or "not_found" (Deezer does not carry THAT artist and
-    THAT title). A Deezer failure raises, so the caller can tell it apart."""
+    """Bring one default recording in and tag it. Returns ``(outcome, track
+    id)``: "tagged", "kept" (the track already wears a tag) or "not_found"
+    (Deezer does not carry THAT artist and THAT title). A Deezer failure
+    raises, so the caller can tell it apart. The verdict is NOT re-decided
+    here: the run does it in one pass at the end, as the bulk tag does."""
     from ..deezer import library
     from ..deezer import references as refs
     from . import _ensure_track_row
@@ -1482,25 +1484,27 @@ def _tag_default_sound(dzapi, provider, artist, title, tag):
     found = (dzapi.advanced_search(artist=refs.first_artist(artist), track=title, limit=10) or {}).get("data") or []
     hit = refs.match(artist, title, found)
     if hit is None:
-        return "not_found"
+        return "not_found", None
     track = _resolve(hit["id"])
     if track is None:
         root = library.get_root_folder(provider.archive_dir)
         track = _ensure_track_row(provider, str(hit["id"]), root, library.ImportCache())
     if TrackTag.select().where(TrackTag.track == track).exists():
-        return "kept"
+        return "kept", track.id
     TrackTag.create(track=track, tag=tag)
-    _redecide(track)
-    return "tagged"
+    return "tagged", track.id
 
 
 def _run_sounds(app):
     from ..db import close_connection, open_connection
     from ..deezer import subgenre_tracks as sg
+    from ..deezer.workload import renice
     from . import _dz_api, _dz_live
 
+    renice(12)
     with app.app_context():
         complete = False
+        tagged_ids = []
         try:
             open_connection(reuse=True)
             dzapi, provider = _dz_api(), _dz_live()
@@ -1516,15 +1520,22 @@ def _run_sounds(app):
             fails = 0
             for genre, artist, title in pairs:
                 tag = tags.get(genre)
+                if tag is None:
+                    # A tag the admin deleted: nothing to add to, and nothing to
+                    # do with Deezer answering or not.
+                    with _sounds_lock:
+                        _sounds_job["done"] += 1
+                        _sounds_job["failed"] += 1
+                    continue
                 try:
-                    if tag is None:
-                        raise LookupError("no tag named %r" % genre)
-                    outcome = _tag_default_sound(dzapi, provider, artist, title, tag)
+                    outcome, track_id = _tag_default_sound(dzapi, provider, artist, title, tag)
                     fails = 0
                 except Exception:
                     logger.info("genre: default sound %s - %s failed", artist, title, exc_info=True)
-                    outcome = "failed"
+                    outcome, track_id = "failed", None
                     fails += 1
+                if outcome == "tagged":
+                    tagged_ids.append(track_id)
                 with _sounds_lock:
                     _sounds_job["done"] += 1
                     _sounds_job[outcome] += 1
@@ -1537,12 +1548,22 @@ def _run_sounds(app):
         except Exception:
             logger.warning("genre: default sounds crashed", exc_info=True)
         finally:
+            if complete:
+                _mark_sounds_done(_sounds_signature())
+            if tagged_ids:
+                # What the bulk tag does after applying: the prototypes and the
+                # cached opinions are stale, and the verdicts are re-decided in
+                # one pass that tells the devices (the generation) if any moved.
+                _forget_centroids()
+                invalidate_predictions()
+                _run_redecide(app, tagged_ids)
             with _sounds_lock:
                 _sounds_job["running"] = False
                 _sounds_job["finished"] = now().isoformat()
-            if complete:
-                _mark_sounds_done(_sounds_signature())
-            close_connection()
+            try:
+                close_connection()
+            except Exception:
+                pass
 
 
 def _mark_sounds_done(signature):

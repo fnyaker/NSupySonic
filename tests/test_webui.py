@@ -6986,10 +6986,60 @@ class GenreStudioTestCase(unittest.TestCase):
             provider = self.app.deezer
             techno = GenreTag.get(GenreTag.name == "Techno")
             hardtek = GenreTag.get(GenreTag.name == "Hardtekk")
-            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "The Bells", techno), "tagged")
-            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "The Bells", hardtek), "kept")
-            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "Nowhere Man", hardtek), "not_found")
+            got = wg._tag_default_sound(api, provider, "Jeff Mills", "The Bells", techno)
+            self.assertEqual(got[0], "tagged")
+            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "The Bells", hardtek), ("kept", got[1]))
+            self.assertEqual(wg._tag_default_sound(api, provider, "Jeff Mills", "Nowhere Man", hardtek), ("not_found", None))
         self.assertEqual([tt.tag.name for tt in TrackTag.select()], ["Techno"])
+
+    def _run_default_sounds(self, lists):
+        """One whole run over these lists, on a thread of its own as in
+        production (the worker renices the thread it runs on)."""
+        import threading
+        from unittest import mock
+
+        from supysonic.deezer import subgenre_tracks as sg
+        from supysonic.webui import genre as wg
+
+        with mock.patch.dict(sg.SUBGENRE_TRACKS, lists, clear=True):
+            wg._sounds_job.update(running=True, stopped=False, retry_at=0.0)
+            t = threading.Thread(target=wg._run_sounds, args=(self.app,))
+            t.start()
+            t.join(timeout=10)
+            self.assertFalse(t.is_alive())
+            return wg._sounds_json(), wg._sounds_signature()
+
+    def test_a_default_sounds_run_counts_what_it_did_and_remembers_it(self):
+        from supysonic.db import Meta, TrackTag
+        from supysonic.webui import genre as wg
+
+        self._with_catalogue(tracks=[self._hit(11, "The Bells", "Jeff Mills")])
+        self._login()
+        self._tag("Techno", "groove")
+        job, sig = self._run_default_sounds({
+            "Techno": (("Jeff Mills", "The Bells"), ("Jeff Mills", "Nowhere Man")),
+            # A tag the admin deleted: counted as failed, and NOT taken for Deezer being down.
+            "Gone": (("A", "B"),) * 6,
+        })
+        self.assertEqual(
+            {k: job[k] for k in ("running", "stopped", "total", "done", "tagged", "kept", "not_found", "failed")},
+            {"running": False, "stopped": False, "total": 8, "done": 8, "tagged": 1, "kept": 0, "not_found": 1, "failed": 6},
+        )
+        self.assertEqual([tt.tag.name for tt in TrackTag.select()], ["Techno"])
+        self.assertEqual(Meta.get(Meta.key == wg.SOUNDS_META_KEY).value, sig, "a finished run is not repeated")
+
+    def test_a_default_sounds_run_stops_when_deezer_does_not_answer(self):
+        from supysonic.db import Meta, TrackTag
+        from supysonic.webui import genre as wg
+
+        self._with_catalogue(fail=True)
+        self._login()
+        self._tag("Techno", "groove")
+        job, _sig = self._run_default_sounds({"Techno": tuple(("Jeff Mills", "T%d" % i) for i in range(20))})
+        self.assertTrue(job["stopped"])
+        self.assertEqual((job["done"], job["failed"]), (5, 5), "five failures in a row, then it stops")
+        self.assertEqual(TrackTag.select().count(), 0)
+        self.assertIsNone(Meta.get_or_none(Meta.key == wg.SOUNDS_META_KEY), "an interrupted run is tried again later")
 
     def test_removing_a_tag_gives_the_verdict_back(self):
         """A tag removed left the row naming the tag's genre with source "tag" —

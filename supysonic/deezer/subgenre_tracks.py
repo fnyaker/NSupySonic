@@ -62,7 +62,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Aphex Twin", "Windowlicker"), ("Aphex Twin", "Tha"), ("Squarepusher", "Do You Nnow Squarepusher"),
         ("Boards of Canada", "1969"), ("Autechre", "Drane2"),
     ),
-    # DJ Brisk / Mixmag / Electronic Beats: Chicago, Dance Mania, French and Italian house lists below
+    # Magnetic, Le Visiteur (DJ lists), Nightclubber (Adham Zahran)
     "Deep house": (
         ("Larry Heard", "Mystery of Love"), ("Larry Heard", "Can You Feel It"),
         ("Mr. White", "The Sun Can't Compare"), ("Chez Damier", "The Choice"),
@@ -71,13 +71,13 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Black Rascals", "Keeping My Mind"), ("Schmoov!", "Playground"),
         ("Suba", "Felicidade"), ("Kink", "Bitter Sweet"),
     ),
-    # Glitterbox / Roland / DJ Mag: French touch classics
+    # Roland listening guide, Glitterbox, Lifelike (Data Transmission): French touch classics
     "French house": (
         ("Daft Punk", "Around the World"), ("Télépopmusik", "Breathe"), ("Together", "So Much Love To Give"),
         ("Bob Sinclar", "Gym Tonic"), ("Pepe Bradock", "Deep Burnt"), ("St. Germain", "Rose Rouge"),
         ("Modjo", "Lady (Hear Me Tonight)"), ("Alan Braxe & Fred Falke", "Intro"), ("Alex Gopher", "The Child"),
     ),
-    # Steve Poindexter / Dance Mania (Ghetto Madness, Life in the Underground), Mixmag Chicago list
+    # Wikipedia (Work That Mutha Fucker), Strut (Ghetto Madness), Turntable Lab (Life in the Underground): below ten
     "Ghetto house": (
         ("Steve Poindexter", "Work That Mutha Fucker"), ("DJ Deeon", "The Freaks"),
         ("Paul Johnson", "Give Me Ecstacy"), ("Tyree", "Nuthin' Wrong"), ("Parris Mitchell", "Ghetto Booty"),
@@ -88,14 +88,14 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Citizen Boy & Mafia Boyz", "Night Cries"), ("Citizen Boy & Mafia Boyz", "Seasons"),
         ("Citizen Boy & Mafia Boyz", "WOZA"), ("Okmalumkoolkat", "Gqi"),
     ),
-    # Complex / Red Bull / Glitterbox / Kraak & Smaak: Italo classics and Strut compilation
+    # Complex 15, Red Bull (Manuel Darquart), Le Visiteur (Capofortuna), Record Collector (Strut compilation)
     "Italo disco": (
         ("Klein & MBO", "Dirty Talk"), ("Kano", "Another Life"), ("Baltimora", "Tarzan Boy"),
         ("Gazebo", "I Like Chopin"), ("Raf", "Self Control"), ("Helen", "Witch"), ("Charlie", "Spacer Woman"),
         ("Chrisma", "U (Part 2)"), ("Valentine", "Tina Are You Ready"), ("Number One Ensemble", "Flor De Coca"),
         ("Ryan Paris", "Dolce Vita"), ("Savage", "Don't Cry Tonight"), ("Ken Laszlo", "Tonight"),
     ),
-    # Thomann / Complex / Snap! and Eurodance canon
+    # Complex, Thomann
     "Eurodance": (
         ("Darude", "Sandstorm"), ("Basshunter", "All I Ever Wanted"), ("Snap!", "Rhythm Is a Dancer"),
         ("Culture Beat", "Mr. Vain"), ("Haddaway", "What Is Love"), ("Mr. President", "Coco Jamboo"),
@@ -111,13 +111,13 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Steve Monite", "Only You"), ("Gwen Guthrie", "Seventh Heaven"), ("Prince", "Head"),
         ("Loose Ends", "Hanging on a String"),
     ),
-    # Red Bull / Complex / Point Blank / Mixmag (UK garage essentials)
+    # Maze35 (Istituto Marangoni), Red Bull, Point Blank, Vice: below ten
     "Two step": (
         ("Dem 2", "Destiny"), ("Tina Moore", "Never Gonna Let You Go"), ("MJ Cole", "Crazy Love"),
         ("Ms. Dynamite", "Booo!"), ("So Solid Crew", "21 Seconds"), ("Master Stepz", "Melody"),
         ("Groove Chronicles", "Stone Cold"), ("Active Minds", "Hobson's Choice"), ("Eliza Rose", "B.O.T.A."),
     ),
-    # Vinyl Factory / Mixmag / Point Blank / Wikipedia (speed garage)
+    # Vinyl Factory, Mixmag (1997-98), Point Blank, 12edit: below ten
     "Speed garage": (
         ("187 Lockdown", "Gunman"), ("Double 99", "RIP Groove"), ("Tail Spin", "All Massive"),
         ("Livin' Large", "Feel Free"), ("49° South", "Love Somebody's Trigger Finger"),
@@ -129,16 +129,16 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Plump DJs", "Morning Sun"), ("Plump DJs", "Rocket Soul"), ("Plump DJs", "The Funk Hits the Fan"),
         ("Plump DJs", "System Addict"), ("Plump DJs", "You Will Remember My Name"), ("Plump DJs", "Soul Vibrates"),
     ),
-    # Dummy (R3LL), Dancing Astronaut "10 Jersey Club Classics", FACT, Complex, NTS
+    # Complex, Dancing Astronaut, NTS guide to Jersey club: below ten
     "Jersey club": (
         ("Dougie F & DJ Fire", "Back Up On It (Jasmine)"), ("DJ Tim Dolla", "Hey Ladies"),
-        ("DJ Fresh", "Gitty Up"), ("DJ Frosty", "Ride That Wave"), ("Trippie Redd", "Love Scars"),
+        ("DJ Fresh", "Gitty Up"), ("DJ Frosty", "Ride That Wave"),
     ),
-    # UKF, Serato, Dave Nada / DJ Ayres history
+    # UKF, DJ Ayres (Moombahton Forever): below ten
     "Moombahton": (
         ("Munchi", "Esta Noche"), ("Dillon Francis", "Masta Blasta"), ("Porter Robinson", "100% In The Bitch"),
     ),
-    # Future bass: Emastered, Run The Trap, iSpy, Epidemic
+    # Emastered, Stereofox, Run The Trap (top 50 of the decade), iSpyTunes: below ten
     "Future bass": (
         ("Rustie", "After Light"), ("San Holo", "Light"), ("Louis The Child", "It's Strange"),
         ("RL Grime", "I Wanna Know"), ("Porter Robinson", "Sad Machine"), ("Marshmello", "Alone"),
@@ -226,21 +226,21 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Rui Da Silva", "Touch Me"), ("OceanLab", "Satellite"), ("Motorcycle", "As The Rush Comes"),
         ("York", "On The Beach"), ("Signum", "Coming On Strong"), ("Fragile", "Inertia"),
     ),
-    # Armada / DJ Brisk / Anjunabeats playlist / Mixmag 15 (mid-90s)
+    # Digital DJ Tips, DJ Mag, Dancing Astronaut, Anjunabeats "Trance Classics" playlist
     "Uplifting trance": (
         ("Chicane", "Saltwater"), ("System F", "Out of the Blue"), ("Delerium", "Silence"),
         ("Binary Finary", "1999"), ("Paul van Dyk", "For An Angel"), ("Robert Miles", "Children"),
         ("Energy 52", "Café Del Mar"), ("Da Hool", "Meet Her At The Love Parade"),
         ("Above & Beyond", "Blue Monday"), ("Angelic", "It's My Turn"),
     ),
-    # Vinyl Factory (Nathan Micay), Mixmag, DJ Mag: prog trance from the early 90s
+    # Vinyl Factory (Nathan Micay), Digital DJ Tips, Mixprism: below ten
     "Prog trance": (
         ("Jam & Spoon", "The Age of Love"), ("Paul van Dyk", "For an Angel"), ("Josh Wink", "Higher State of Consciousness"),
         ("Sasha", "Xpander"), ("Vapourspace", "Gravitational Arch of 10"), ("Mystic Force", "Psychic Harmony"),
         ("Infected Mushroom", "Bust a Move"), ("Nathan Fake", "The Sky Was Pink"), ("Robert Miles", "Children"),
     ),
     # Gabber, hardcore, happy, industrial ------------------------------------
-    # The Hard Data, DJ Mag, Wikipedia, CTM, Google Arts & Culture, Serato
+    # Wikipedia (Gabber, Rotterdam Records, Euromasters), CTM Festival, Google Arts & Culture: below ten
     "Gabber": (
         ("Euromasters", "Amsterdam Waar Lech Dat Dan?"), ("Euromasters", "Alles Naar De Klote"),
         ("Rotterdam Termination Source", "Feyenoord Reactivate"), ("Rotterdam Termination Source", "Poing"),
@@ -252,13 +252,13 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Angerfist", "Riotstarter"), ("Angerfist", "Dance with the Wolves"), ("Angerfist", "Messing With The Wrong Man"),
         ("Angerfist & Dr. Peacock", "Inframan"), ("Angerfist & Dr. Peacock", "Caveman"),
     ),
-    # Last.fm frenchcore tag chart, sets 2023-2025
+    # Last.fm frenchcore tag chart, Serato DJ sets: below ten
     "Frenchcore": (
         ("Dr. Peacock", "Trip to Valhalla"), ("Dr. Peacock", "Trip To Ireland"), ("Dr. Peacock", "Trip to Romania"),
         ("Dr. Peacock", "Take The Pills"), ("Sefa", "Dear God"), ("D-Sturb & Sefa", "Nothing Like The Old School"),
         ("Sefa & Crypton", "Nobody Knows"), ("Dr. Peacock & Sefa", "Everything Is A Lie"),
     ),
-    # Serato sets, Deezer listing of Warface's album Rest In Pieces
+    # Serato set, Deezer listing of Warface's album Rest In Pieces: below ten
     "Rawstyle": (
         ("Radical Redemption", "Cross of Blood"), ("Radical Redemption", "Brutal 4.0"),
         ("Radical Redemption", "Secret Syndicates"), ("Warface", "Down To Earth"), ("Warface", "LEVITATE"),
@@ -272,12 +272,6 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("DNA", "Go Insane"), ("Elysium", "Every Time I Close My Eyes"), ("Unknown & Temptation", "Feel It"),
         ("DJ Demand", "The Ultimate Seduction"),
     ),
-    # Fan tracklists (Last.fm, Reddit-style): below ten
-    "Crossbreed": (
-        ("Crossbreed", "Seasons"), ("Crossbreed", "Underlined"), ("Crossbreed", "Pure Energy"),
-        ("Crossbreed", "Severed"), ("Crossbreed", "Painted Red"), ("Crossbreed", "Machines"),
-        ("Crossbreed", "Stem"), ("Crossbreed", "Release Me"),
-    ),
     # Miro / Stickhead / Meta-Morph, Doomcore Records
     "Doomcore": (
         ("Miro", "Shining"), ("Stickhead & Don Demon", "Conquer The World"),
@@ -286,7 +280,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
     # Mixmag (Schak's makina picks): below ten
     "Makina": (("Le Marrant", "Voulez Vous Un Rendez Vous (Happy Mix)"), ("Virthu", "All Rainbow")),
     # Djent, metal, hard rock ----------------------------------------------
-    # Loudwire, Louder, Treble, metal reference lists
+    # Guitar World, Loaded Radio, Metal Kingdom: below ten
     "Death metal": (
         ("Sepultura", "Beneath the Remains"), ("Sepultura", "Inner Self"), ("Sepultura", "Mass Hypnosis"),
         ("Sepultura", "Primitive Future"), ("Entombed", "Left Hand Path"),
@@ -298,35 +292,35 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Darkthrone", "Transilvanian Hunger"), ("Darkthrone", "Skald av Satans Sol"),
         ("Samael", "Into the Pentagram"), ("Rotting Christ", "King of a Stellar War"),
     ),
-    # Louder / Guitar World: heavy metal
+    # Ultimate Classic Rock, uDiscover, Metalwani, NME
     "Heavy metal": (
         ("Black Sabbath", "Iron Man"), ("Black Sabbath", "Planet Caravan"), ("Black Sabbath", "War Pigs"),
-        ("Deep Purple", "Highway Star"), ("Metallica", "Master of Puppets"), ("Venom", "Breaking the Law"),
-        ("Venom", "Living After Midnight"), ("Dio", "Rainbow in the Dark"), ("Dio", "Don't Talk to Strangers"),
+        ("Deep Purple", "Highway Star"), ("Metallica", "Master of Puppets"), ("Judas Priest", "Breaking the Law"),
+        ("Judas Priest", "Living After Midnight"), ("Dio", "Rainbow in the Dark"), ("Dio", "Don't Talk to Strangers"),
         ("Iron Maiden", "The Trooper"), ("Megadeth", "Peace Sells"), ("Quiet Riot", "Cum On Feel the Noize"),
         ("Diamond Head", "Am I Evil?"),
     ),
-    # Louder / TheTopTens / Loudwire thrash picks
+    # Loudwire, Louder (essential thrash playlist, golden age of thrash), Treble
     "Thrash": (
         ("Metallica", "For Whom the Bell Tolls"), ("Metallica", "Fade to Black"), ("Metallica", "Creeping Death"),
         ("Anthrax", "Caught in a Mosh"), ("Anthrax", "I Am the Law"), ("Testament", "Over the Wall"),
         ("Megadeth", "Hangar 18"), ("Megadeth", "Tornado of Souls"), ("Kreator", "Pleasure to Kill"),
         ("Sodom", "Nuclear Winter"), ("Dark Angel", "The Burning of Sodom"), ("Overkill", "Elimination"),
     ),
-    # Noecho, Treble, Metal Injection doom picks
+    # Noecho, Treble, deathdoom.com: below ten
     "Doom": (
         ("Evoken", "A Caress of the Void"), ("Swallow the Sun", "The Ship"), ("The Fall of Every Season", "From Below"),
         ("Woods of Ypres", "Distractions of Living Alone"), ("Candlemass", "Dark Are the Veils of Death"),
         ("Candlemass", "Dark Reflections"), ("Black Sabbath", "Black Sabbath"),
     ),
-    # Djent (Loudwire, Louder, TVTropes, Metal Music Archives)
+    # Louder (TesseracT's picks), Loudwire
     "Djent": (
         ("Meshuggah", "Soul Burn"), ("Meshuggah", "Bleed"), ("Meshuggah", "Closed Eye Visuals"),
         ("SikTh", "Hold My Finger"), ("SikTh", "Skies of the Millennium Night"), ("Textures", "Laments of an Icarus"),
         ("Periphery", "Zyglrox"), ("Chimp Spanner", "Bad Code"), ("The Algorithm", "Isometry"),
         ("Animals as Leaders", "Arithmophobia"), ("Destiny Potato", "Addict"), ("TesseracT", "Luminary"),
     ),
-    # Metalcore / deathcore (The Agony Scene, Alt Press, VH1, Louder)
+    # Louder (The Agony Scene's picks), Alternative Press, TheTopTens
     "Metalcore": (
         ("Killswitch Engage", "The End of Heartache"), ("Killswitch Engage", "Fixation on the Darkness"),
         ("Hatebreed", "Proven"), ("Bleeding Through", "Love Lost in a Hail of Gunfire"),
@@ -334,19 +328,20 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Zao", "Savannah"), ("Drop Dead, Gorgeous", "Dressed for Friend Requests"),
         ("Woe, Is Me", "[&] Delinquents"), ("Iwrestledabearonce", "Tastes Like Kevin Bacon"),
     ),
-    # Louder / Metal Injection (Suicide Silence, Whitechapel)
+    # Louder, MetalSucks, The Metalverse: below ten
     "Deathcore": (
         ("Suicide Silence", "No Pity for a Coward"), ("Suicide Silence", "Unanswered"),
         ("Whitechapel", "Breeding Violence"), ("Job for a Cowboy", "Entombment of a Machine"),
-        ("Chelsea Grin", "Cheyne Srokes"), ("Chelsea Grin", "Crewcabanger"),
+        ("Chelsea Grin", "Cheyne Stokes"), ("Chelsea Grin", "Crewcabanger"),
     ),
-    # Power and symphonic metal (Louder, Impericon, Nuclear Blast, Loudwire)
+    # Classic Rock History (Helloween), Metal Pigeon, Louder
     "Power metal": (
         ("Helloween", "Future World"), ("Helloween", "Halloween"), ("Helloween", "A Tale That Wasn't Right"),
         ("DragonForce", "Through The Fire And Flames"), ("DragonForce", "Operation Ground And Pound"),
         ("Avantasia", "Reach Out For The Light"), ("Avantasia", "Farewell"), ("Avantasia", "Sign Of The Cross"),
         ("Nightwish", "FantasMic"), ("Nightwish", "Wishmaster"),
     ),
+    # Impericon and Nuclear Blast (Nightwish), Season of Mist (Therion): below ten
     "Symphonic metal": (
         ("Nightwish", "Wish I Had an Angel"), ("Nightwish", "Amaranth"), ("Nightwish", "The Phantom of the Opera"),
         ("Nightwish", "Élan"), ("Nightwish", "Bye Bye Beautiful"), ("Nightwish", "Storytime"),
@@ -357,7 +352,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Melvins", "Hooch"), ("Melvins", "Honey Bucket"), ("Melvins", "Lizzy"), ("Melvins", "Eye Flys"),
         ("Black Flag", "Nothing Left Inside"), ("Black Flag", "Three Nights"), ("Black Flag", "Scream"),
     ),
-    # Louder, Treble and Metal Hammer picks for nu metal: below ten
+    # Loudwire, NME, Metal Insider (Metal Hammer's 40), Alternative Press, Spin
     "Nu metal": (
         ("Korn", "Blind"), ("Korn", "Freak on a Leash"), ("Korn", "Got the Life"),
         ("Deftones", "My Own Summer (Shove It)"), ("Deftones", "Mascara"),
@@ -367,7 +362,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Incubus", "Drive"), ("Machine Head", "Crashing Around You"), ("Soulfly", "Bleed"),
         ("Spineshank", "New Disease"), ("Taproot", "Poem"),
     ),
-    # Louder / Metal Hammer / Treble guitar riff lists
+    # Alternative Press, Westword, Phoenix New Times, NME, X96
     "Pop punk": (
         ("Blink-182", "All the Small Things"), ("Green Day", "Longview"), ("Paramore", "Misery Business"),
         ("Jimmy Eat World", "The Middle"), ("MxPx", "Punk Rawk Show"), ("All Time Low", "Dear Maria, Count Me In"),
@@ -377,32 +372,32 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Ramones", "Blitzkrieg Bop"), ("Descendents", "Suburban Home"), ("Buzzcocks", "What Do I Get?"),
     ),
     # Rock and punk --------------------------------------------------------
-    # Treble / BrooklynVegan / Stereogum / Paste grunge lists
+    # Paste 50, Stereogum 30, American Songwriter: below ten
     "Grunge": (
         ("Nirvana", "Smells Like Teen Spirit"), ("Nirvana", "Come As You Are"), ("Nirvana", "Blew"),
         ("Soundgarden", "Black Hole Sun"), ("Mother Love Bone", "Crown of Thorns"), ("Paw", "Jessie"),
         ("Mudhoney", "Touch Me I'm Sick"), ("Alice in Chains", "Down in a Hole"),
     ),
-    # Loudersound / PopMatters / Far Out / Culture Catch
+    # SiriusXM Deep Tracks, PopMatters 100, Culture Catch
     "Prog rock": (
         ("Pink Floyd", "Money"), ("Pink Floyd", "Time"), ("Pink Floyd", "Us and Them"), ("Pink Floyd", "Fearless"),
         ("Yes", "And You and I"), ("Yes", "Siberian Khatru"), ("Yes", "Starship Trooper"),
         ("Genesis", "Firth of Fifth"), ("King Crimson", "21st Century Schizoid Man"), ("King Crimson", "Trio"),
         ("Gentle Giant", "The Advent of Panurge"),
     ),
-    # American Songwriter, Far Out, Treble (psych 1967-68)
+    # American Songwriter, Ultimate Classic Rock: below ten
     "Psych rock": (
         ("Pink Floyd", "Interstellar Overdrive"), ("Tomorrow", "My White Bicycle"), ("Tintern Abbey", "Vacuum Cleaner"),
         ("The Jimi Hendrix Experience", "Purple Haze"), ("Jefferson Airplane", "White Rabbit"),
         ("The Doors", "Light My Fire"), ("Cream", "Sunshine of Your Love"), ("Pink Floyd", "Astronomy Domine"),
     ),
-    # Garage rock: Paul Revere & the Raiders, The Belles, The Sonics, The Nashville Teens
+    # Treble, Louder, American Songwriter, Far Out: below ten
     "Garage rock": (
         ("Paul Revere & the Raiders", "Kicks"), ("The Belles", "Melvin"), ("The Nashville Teens", "Tobacco Road"),
         ("The Del-Vetts", "Last Time Around"), ("The Sonics", "Strychnine"), ("The Sonics", "Psycho"),
         ("The Sonics", "The Witch"), ("13th Floor Elevators", "You're Gonna Miss Me"),
     ),
-    # Minor Threat, Negative Approach, Dead Kennedys (xXx Fanzine, Treble, Miami New Times, Salt Lake City)
+    # Mike Gitter's 25 (MetalSucks), Treble, Miami New Times, Alternative Press, X96
     "Hardcore punk": (
         ("Minor Threat", "Look Back and Laugh"), ("Minor Threat", "I Don't Want To Hear It"),
         ("Negative Approach", "Evacuate"), ("G.I.S.M.", "Endless Blockade For The Pussyfooter"),
@@ -412,7 +407,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Murphy's Law", "Sit Home and Rot"), ("Agent Orange", "Bloodstains"), ("Circle Jerks", "Wild In The Streets"),
         ("Adolescents", "I Hate Children"), ("Middle Class", "Out Of Vogue"), ("Suicidal Tendencies", "Fascist Pig"),
     ),
-    # Post-punk: Far Out 40, Deezer playlist, Days of Punk, Rough Trade
+    # Far Out 40, Deezer "Post-Punk Essentials" playlist, Days of Punk
     "Post punk": (
         ("Joy Division", "Love Will Tear Us Apart"), ("Joy Division", "Disorder"), ("Gang of Four", "Damaged Goods"),
         ("The Fall", "Totally Wired"), ("Talking Heads", "Once in a Lifetime"), ("The Cure", "A Forest"),
@@ -421,13 +416,13 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Bauhaus", "Bela Lugosi's Dead"),
     ),
     # Gothic and darkwave ---------------------------------------------------
-    # Side-Line, Dark Entries (Josh Cheon), Treble, American Songwriter
+    # Side-Line, Metro Times (Josh Cheon of Dark Entries): below ten
     "Darkwave": (
         ("Depeche Mode", "Blasphemous Rumours"), ("Dead Can Dance", "Opium"), ("Molchat Doma", "Sudno"),
         ("Martin L. Gore", "Compulsion"), ("Clan of Xymox", "Call it Weird"), ("Ministry", "Revenge"),
         ("Cetu Javu", "Situations"),
     ),
-    # American Songwriter / Treble on goth; Nick Cave / Christian Death
+    # American Songwriter, Treble: below ten
     "Gothic": (
         ("The Cure", "A Forest"), ("Bauhaus", "Bela Lugosi's Dead"), ("Type O Negative", "Haunted"),
         ("Christian Death", "Romeo's Distress"), ("Nick Cave", "The Mercy Seat"),
@@ -442,14 +437,14 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Purity Ring", "Fineshrine"),
     ),
     # Dark ambient and drone ------------------------------------------------
-    # Reddit DarkAmbient wiki, forum picks; tracks only
+    # This Is Darkness, the r/DarkAmbient wiki, Head-Fi forum picks; tracks only: below ten
     "Dark ambient": (
         ("Tangerine Dream", "Zeit"), ("Kammarheit", "Asleep And Well Hidden"), ("Stig Berg", "Passage Nacrastan"),
         ("Stig Berg", "Lilin"), ("Konau", "Contemplation"), ("Konau", "Crawling Darkness"),
     ),
-    # Andrew Frost (The Art Life), Sonic State: tracks named in the search only
+    # The Art Life (Andrew Frost), Reckless Records: below ten
     "Drone": (("Pelt", "Empty Bell Ringing In The Sky"), ("Terry Riley", "Poppy Nogood and the Phantom Band")),
-    # Serious minimalism -----------------------------------------------------
+    # Wikipedia (minimal music), Gramophone (the Bl!ndman American minimalists set): below ten
     "Minimalism": (
         ("Steve Reich", "Piano Phase"), ("Terry Riley", "In C"), ("Philip Glass", "Music in Fifths"),
         ("Philip Glass", "Music in Similar Motion"), ("Steve Reich", "Electric Counterpoint"),
@@ -472,23 +467,23 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Duke Ellington", "Satin Doll"), ("Count Basie", "Squeeze Me"), ("Harry James", "Sugar Foot Stomp"),
         ("Charlie Barnet", "Skyliner"),
     ),
-    # Playlists and editorial picks: below ten
+    # Jazzfuel, Shazam playlist, Music Gateway: below ten
     "Smooth jazz": (
         ("Sade", "Smooth Operator"), ("Bob James", "Since I Fell For You"), ("Incognito", "Pieces of a Dream"),
         ("Earl Klugh", "Acoustic Lady"), ("Earl Klugh", "Alicia"),
     ),
-    # 33 1/3 / crowd list / Treble
+    # 333sound, Vinyl Factory, Far Out, Treble: below ten
     "Jazz fusion": (
         ("Miles Davis", "Pharoah's Dance"), ("Weather Report", "Birdland"), ("Freddie Hubbard", "Red Clay"),
         ("Pat Metheny Group", "Last Train Home"),
     ),
-    # Bebop: Jazzadvice 30 tunes, Quora recordings
+    # Jazzadvice and Learn Jazz Standards (tunes), Quora (recordings): below ten
     "Bebop": (
         ("Charlie Parker", "Billie's Bounce"), ("Charlie Parker", "Ornithology"), ("Charlie Parker", "Scrapple from the Apple"),
         ("Charlie Parker", "Yardbird Suite"), ("Charlie Parker", "Confirmation"), ("Charlie Parker", "Donna Lee"),
-        ("Dizzy Gillespie", "Groovin' High"), ("Thelonious Monk", "'Round Midnight"), ("Thelonious Monk", "Now's the Time"),
+        ("Dizzy Gillespie", "Groovin' High"), ("Thelonious Monk", "'Round Midnight"), ("Charlie Parker", "Now's the Time"),
     ),
-    # Mississippi Delta: AOL 25, Paste 15, Rough Guide to Legends
+    # AOL 25, Paste 15, Rough Guide to Legends of the Delta Blues: below ten
     "Delta blues": (
         ("Mississippi John Hurt", "Spike Driver Blues"), ("Charley Patton", "Mississippi Boweavil Blues"),
         ("Son House", "Walking Blues"), ("Elmore James", "Dust My Broom"), ("Geeshie Wiley", "Last Kind Words Blues"),
@@ -501,64 +496,64 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Bill Monroe", "Uncle Pen"), ("Bill Monroe", "Muleskinner Blues"), ("The Stanley Brothers", "Molly & Tenbrooks"),
         ("Bill Monroe", "In the Pines"), ("Flatt & Scruggs", "Foggy Mountain Special"), ("The Bailey Brothers", "John Henry"),
     ),
-    # Louder / American Songwriter (singer-songwriter standards)
+    # Louder, American Songwriter: below ten
     "Singer songwriter": (
         ("Bob Dylan", "Lay Lady Lay"), ("Bob Dylan", "Tangled Up In Blue"), ("Bob Dylan", "Shelter From The Storm"),
         ("Simon & Garfunkel", "The Sound of Silence"), ("Simon & Garfunkel", "Mrs. Robinson"),
     ),
     # Latin, world and dance ----------------------------------------------
-    # Gardel and Piazzolla in the 50 Essential Tangos and Songlines lists
+    # Songlines, Milan's 50 Essential Tangos, World Music Central: below ten
     "Tango": (
         ("Carlos Gardel", "Volver"), ("Carlos Gardel", "Soledad"), ("Carlos Gardel", "Lejana Tierra Mia"),
         ("Astor Piazzolla", "Adiós Nonino"), ("Astor Piazzolla", "Vuelvo al Sur"), ("Astor Piazzolla", "Tanguedia 3"),
         ("Julio De Caro", "Flores Negras"), ("Julio De Caro", "Copacabana"),
     ),
-    # Billboard (classic salsa), Al Día, Héctor Lavoe
+    # Billboard (classic salsa), Al Día: below ten
     "Salsa": (
         ("Héctor Lavoe", "Periódico de Ayer"), ("Héctor Lavoe", "El Cantante"), ("Héctor Lavoe", "Mi Gente"),
         ("Fruko y Sus Tesos", "El Preso"), ("La Sonora Ponceña", "Fuego en el 23"),
-        ("Kings of Salsa", "Sonido Bestial"), ("Grupo Niche", "Cali Pachanguero"), ("Celia Cruz", "La Negra Tiene Tumbao"),
+        ("Richie Ray & Bobby Cruz", "Sonido Bestial"), ("Grupo Niche", "Cali Pachanguero"), ("Celia Cruz", "La Negra Tiene Tumbao"),
     ),
-    # Vinyl Factory 20 essential records, cumbia.fm 2026 playlist
+    # Vinyl Factory 20 essential records, cumbia.fm 2026 playlist: below ten
     "Cumbia": (
         ("Los Palmeras", "El Pescador"), ("Los Ángeles Azules", "Nunca Es Suficiente"),
         ("Grupo Cañaveral de Humberto Pabón", "Amor de Lejos"), ("Los Ángeles Azules", "17 Años"),
         ("Los Ángeles Azules", "Como Te Voy a Olvidar"),
     ),
-    # Brazilian samba lists (Culture Trip, Calpoly, Latino Life)
+    # Culture Trip, Latino Life, World Music Central: below ten
     "Samba": (
         ("Ary Barroso", "Aquarela do Brasil"), ("Jorge Ben Jor", "Mas Que Nada"), ("Demônios da Garoa", "Trem das Onze"),
         ("Alcione", "Não Deixe o Samba Morrer"), ("Beth Carvalho", "Ainda é Tempo pra Ser Feliz"),
         ("Reinaldo", "Retrato Cantado de um Amor"),
     ),
-    # Rough Guide, Rocksteady compilations, classified mix
+    # First Class Rock Steady (reviews), the Classified rocksteady mix, Sounds of the Universe: below ten
     "Rocksteady": (
         ("Hopeton Lewis", "Take It Easy"), ("The Paragons", "The Tide Is High"), ("Roy Shirley", "Hold Them"),
         ("Phyllis Dillon", "Don't Stay Away"), ("Keith & Tex", "Stop That Train"), ("Delroy Wilson", "I Don't Know Why"),
         ("Cliff & the Diamonds", "Mother Benge"), ("Alton Ellis", "Girl I've Got a Date"),
         ("The Melodians", "Last Train to Expo '67"),
     ),
-    # Fela Kuti / Koola Lobitos from the Treble guide and Vinyl Factory (below ten)
+    # Treble's Fela Kuti guide: below ten
     "Afrobeat": (("Koola Lobitos", "Highlife Time"), ("Fela Kuti", "Fight to Finish"), ("Fela Kuti", "Expensive Shit")),
     # Zikoko, Vinyl Factory, Songlines, Starr FM (Ghana)
     "Highlife": (
         ("Bobby Benson", "Taxi Driver"), ("Victor Olaiya", "Mofe Mu'yan"), ("Oliver De Coque", "Identity"),
-        ("Chief Osita Osadebe", "Osondi Owendi"), ("Sir Victor Uwaifo", "Joromo"), ("Koo Nimo", "Yaa Amponsah"),
+        ("Chief Osita Osadebe", "Osondi Owendi"), ("Sir Victor Uwaifo", "Joromi"), ("Koo Nimo", "Yaa Amponsah"),
         ("Ebo Taylor", "Love and Death"), ("E.T. Mensah", "All For You"), ("F Kenya", "Nzema Kotoko"),
         ("Daddy Lumba", "Aben Wo Ha"),
     ),
-    # Blog top-10, Deezer 100% Kizomba Vol. 1, DJ mixes
+    # Salsa Nueva blog top 10, Deezer "100% Kizomba Vol. 1", Viberate
     "Kizomba": (
         ("Daniel Santacruz", "Lento"), ("Stony", "Danca Kizomba"), ("Djodje", "I.L.Y."), ("Master Jake", "Jajão"),
         ("Nelson Freitas", "You're So Hot"), ("Anselmo Ralph", "Como Te Sentes Tu?"), ("Johnny Ramos", "My Lady"),
         ("Anselmo Ralph", "Te Vais Lembrar de Mim"), ("Nelson Freitas", "Bo Tem Mel"), ("Nelson Freitas", "Essa Mboa"),
     ),
-    # Umm Kulthum, Fairuz (Arabic canon from album-level sources)
+    # Hello Music Theory, Oud for Guitarists: below ten
     "Arabic": (
         ("Umm Kulthum", "Raqq Il-Habib"), ("Umm Kulthum", "Al-Atlal"), ("Fairuz", "Zahrat al-Mada'en"),
         ("Fairuz", "Habbaytak Bissayf"), ("Fairuz", "Biktub Ismak"), ("Fairuz", "Barda"),
     ),
-    # Planxty, Clannad (Planète Celtique, ThistleRadio)
+    # Mainly Norfolk (Planète Celtique sampler), Slipcue, Toppermost: below ten
     "Celtic": (
         ("Planxty", "The Cliffs of Dooneen"), ("Planxty", "The Jolly Beggar"), ("Planxty", "As I Roved Out"),
         ("Clannad", "Newgrange"), ("Clannad", "Skellig"), ("Clannad", "Theme From Harry's Game"),
@@ -571,7 +566,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Los del Río", "La Macarena"), ("Aventura", "Obsesión"), ("Shakira", "Hips Don't Lie"),
         ("Luis Fonsi", "No Me Doy Por Vencido"), ("Nicky Jam", "El Perdón"),
     ),
-    # Edith Piaf, Aznavour, Montand, Chevalier, Brassens, Ferré (chartsinfrance 100)
+    # chartsinfrance (100 Classic French Songs), Snippets of Paris, StoryLearning
     "Chanson": (
         ("Édith Piaf", "La Vie En Rose"), ("Édith Piaf", "Non, Je Ne Regrette Rien"), ("Édith Piaf", "Hymne À L'Amour"),
         ("Charles Aznavour", "Tu t'laisses aller"), ("Johnny Hallyday", "L'idole des jeunes"),
@@ -579,7 +574,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Joséphine Baker", "C'est lui"), ("Bourvil", "A bicyclette"), ("Georges Brassens", "Les amoureux des bancs publics"),
         ("Léo Ferré", "Le pont Mirabeau"), ("Nino Ferrer", "Le sud"), ("Claude François", "Chanson populaire"),
     ),
-    # Udo Jürgens, Roy Black, Helene Fischer and the German top-100 lists
+    # Wikipedia (Schlager music), Boosey (Das Schlagerbuch), Wuppertal University
     "Schlager": (
         ("Udo Jürgens", "Griechischer Wein"), ("Udo Jürgens", "Mit 66 Jahren"), ("Roy Black", "Ganz in Weiß"),
         ("Fred Bertelsmann", "Der lachende Vagabund"), ("Freddy Quinn", "Junge, komm bald wieder"),
@@ -589,19 +584,19 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("DJ Ötzi", "Ein Stern (der deinen Namen trägt)"), ("Michael Holm", "Mendocino"),
     ),
     # Hip-hop, R&B, funk, electronic and party ------------------------------
-    # Rock the Bells, BrooklynVegan (Andrew Bailey's list), Serato classics
+    # BrooklynVegan (Andrew Bailey of DIIV), a Serato set: below ten
     "Boom bap": (
         ("Jeru the Damaja", "You Can't Stop the Prophet"), ("E.C. Illa", "On Ill"), ("Blahzay Blahzay", "Good Cop / Bad Cop"),
         ("Smif-n-Wessun", "Bucktown"), ("Souls of Mischief", "Cab Fare"),
     ),
-    # Stormzy-era UK drill: Dummy (67), Capital XTRA, Gigwise, Vice
+    # Dummy (67's picks), Capital XTRA, Gigwise
     "UK drill": (
-        ("Stickz", "Let's Get It"), ("Grizzy", "Look Like You"), ("67", "Live Corn"), ("Young Teflon", "Nandos"),
+        ("Stickz", "Let's Get It"), ("Grizzy", "Look Like You"), ("LD", "Livecorn"), ("Young Teflon", "Nandos"),
         ("Loski", "Hazard"), ("Reekz", "War Spelt Backwards"), ("DigDat", "Air Force"), ("Headie One", "The Jugg"),
         ("M Huncho", "Take Away The Pain"), ("67", "Things & Stuff"), ("Loski", "Money and Beef"),
         ("Harlem Spartans", "Riders"), ("Digga D", "Woi"),
     ),
-    # NTS guides, Serato, Mixmag: cloud rap canon
+    # NTS (guide to cloud rap, Angst & Autotune), Crystallmess on NTS
     "Cloud rap": (
         ("Lil B", "I'm God"), ("SpaceGhostPurrp", "R.I.P. Actavis"), ("Main Attrakionz", "Have Funds"),
         ("Xavier Wulf", "Kemuri"), ("Ecco2k", "HOLDMEDOWNLIKEGRAVITY"), ("A$AP Rocky", "Peso"), ("Yung Lean", "Hurt"),
@@ -613,38 +608,38 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Convolk", "Get Lost"), ("XXXTentacion", "Jocelyn Flores"), ("Lil Uzi Vert", "XO Tour Llif3"),
         ("Trippie Redd", "Love Scars"), ("Post Malone", "I Fall Apart"), ("Juice WRLD", "Lucid Dreams"), ("Joji", "Will He"),
     ),
-    # NTS guide, Dr Dre era: G-funk canon (OkayPlayer, FACT, FADER)
+    # Okayplayer, FACT, The FADER: below ten
     "G funk": (
         ("Dr. Dre", "Nuthin' But a G Thang"), ("Warren G", "Regulate"), ("Dr. Dre", "Deep Cover"),
         ("Snoop Dogg", "Gin and Juice"), ("DJ Quik", "Tonite"), ("Nate Dogg", "Never Leave Me Alone"),
         ("Ice Cube", "You Know How We Do It"), ("Shade Sheist", "Where I Wanna Be"), ("Hostyle", "Friday Night"),
     ),
-    # Grime: MusicTech, Stereogum, Highsnobiety, The Source
+    # MusicTech, Stereogum, Highsnobiety, The Source: below ten
     "Grime": (
         ("Wiley", "Eskimo"), ("Dizzee Rascal", "I Luv U"), ("Kano", "P's & Q's"), ("XTC", "Functions on the Low"),
         ("Lethal Bizzle", "Pow"), ("Roll Deep", "When I'm 'Ere"), ("Musical Mob", "Pulse X"),
     ),
-    # Dembow: Istituto Marangoni, AUB Graduate School list (Shabba Ranks, Nando Boom…)
+    # Maze35 (Istituto Marangoni), "15 Essential Reggaeton Tracks": below ten
     "Dembow": (
         ("Shabba Ranks", "Dem Bow"), ("Nando Boom", "Ellos Benia Dem Bow"), ("El General", "Te Ves Buena"),
         ("Ivy Queen", "Yo Quiero Bailar"), ("Lorna", "Papi Chulo"),
     ),
-    # Electronic Beats / Odyssey / Richmond playlist / Dailylobo / Blog picks
+    # Varaxes, The Odyssey Online, University of Richmond playlist
     "Vaporwave": (
         ("Vaperror", "Pretty Beam (Computer Love)"), ("Vaperror", "Error on the Dance Floor"), ("Vaperror", "Krystal GB"),
         ("Blank Banshee", "Wavestep"), ("Blank Banshee", "Hyper Object"), ("Blank Banshee", "Dreamcast"),
         ("Blank Banshee", "LSD Polyphony"), ("Sunset Rollercoaster", "Villa"), ("Limes", "Jovial"),
         ("Desired", "Crystal Tokyo"), ("Hotel Pools", "Coast"), ("Windows96", "Rituals"),
-        ("Memorex Memories", "Thanks For Listening"), ("Mariya Takeuchi", "Plastic Love"),
+        ("Memorex Memories", "Thanks For Listening"),
     ),
-    # Plastic Love, Mayonaka no Door, Tatsuro Yamashita: City pop sources (Goosebumps Radio, Electronic Beats)
+    # Goosebumps Radio, Tokyo Weekender, Tickets in Japan: below ten
     "City pop": (
         ("Mariya Takeuchi", "Plastic Love"), ("Miki Matsubara", "Mayonaka no Door (Stay With Me)"),
         ("Tatsuro Yamashita", "Christmas Eve"), ("Tatsuro Yamashita", "Sparkle"), ("Junko Ohashi", "Telephone Number"),
         ("Junko Yagami", "Communication"), ("Kingo Hamada", "Machi No Dorufin"), ("Yumi Arai", "Chuo Freeway"),
     ),
     # Soul, R&B and pop ----------------------------------------------------
-    # Capital FM 90s list, Trouvelagroove, Essence
+    # Capital FM (90s neo soul), Essence, The Post
     "Neo soul": (
         ("D'Angelo", "Brown Sugar"), ("D'Angelo", "Untitled (How Does It Feel)"), ("Erykah Badu", "On & On"),
         ("Erykah Badu", "Otherside of the Game"), ("Erykah Badu", "Bag Lady"), ("Maxwell", "Ascension (Don't Ever Wonder)"),
@@ -652,7 +647,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Jill Scott", "Ex-Factor"), ("Lauryn Hill", "Nothing Even Matters"), ("Joe", "All That I Am"),
         ("Anthony Hamilton", "Nobody Else"), ("Tony! Toni! Toné!", "Lay Your Head on My Pillow"),
     ),
-    # UDiscover, USA Today, Essence Motown lists
+    # Ohio State exhibit, uDiscover, Rolling Stone, Paste: below ten
     "Motown": (
         ("Marvin Gaye", "I Heard It Through the Grapevine"), ("The Supremes", "Baby Love"),
         ("Stevie Wonder", "Superstition"), ("Martha & The Vandellas", "Dancing in the Street"),
@@ -667,7 +662,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Eurythmics", "Sweet Dreams"), ("Blondie", "Heart of Glass"), ("OMD", "Electricity"),
         ("Jean-Michel Jarre", "Oxygène, Pt. 4"), ("Gershon Kingsley", "Popcorn"),
     ),
-    # Cocteau Twins, The Church, Mazzy Star, Julee Cruise, The Sundays (blogs, reviews)
+    # Treble, A Girl's Two Sound Cents, Systems of Romance, Key Mag
     "Dream pop": (
         ("Cocteau Twins", "Iceblink Luck"), ("Cocteau Twins", "I Wear Your Ring"), ("Cocteau Twins", "Wolf in the Breast"),
         ("This Mortal Coil", "Song to the Siren"), ("The Church", "Under the Milky Way"), ("Mazzy Star", "Ghost Highway"),
@@ -676,26 +671,26 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Mojave 3", "Love Songs on the Radio"), ("A.R. Kane", "When You're Sad"), ("The Ocean Blue", "Ballerina Out of Control"),
         ("Saint Etienne", "California Snow Story"),
     ),
-    # Treble, DJ Mag, SONY: hyperpop picks from articles and playlists
+    # MusicTech, Roar News, Far Out, Talkhouse, XPN: below ten
     "Hyperpop": (
         ("100 gecs", "money machine"), ("Hannah Diamond", "Drop FM"), ("SOPHIE", "Nothing More To Say"),
         ("Bladee", "Sun"), ("Gupi & Fraxiom", "Thos Moser"), ("M.I.A.", "XXXO"), ("Gwen Stefani", "Bubble Pop Electric"),
     ),
-    # Marie Claire, Vox, Soompi, Digital Trends
+    # Marie Claire, VOX ATL, Soompi, Digital Trends
     "K-pop": (
         ("Seo Taiji and Boys", "I Know"), ("H.O.T.", "Candy"), ("DBSK", "Hug"), ("DBSK", "Mirotic"),
         ("SHINee", "Sherlock"), ("SHINee", "Replay"), ("SHINee", "Lucifer"), ("miss A", "Bad Girl, Good Girl"),
         ("2NE1", "I Am The Best"), ("KARA", "Step"), ("Girls' Generation", "Into the New World"),
         ("PSY", "Gangnam Style"), ("Fin.K.L", "Eternal Love"), ("BoA", "No.1"), ("Jinusean", "Tell Me"),
     ),
-    # Trip hop: Massive Attack and Portishead (Far Out, Treble, UDiscover, Reddit poll)
+    # Far Out, WDET, Treble, uDiscover
     "Trip hop": (
         ("Massive Attack", "Unfinished Sympathy"), ("Massive Attack", "Safe From Harm"),
         ("Massive Attack", "Hymn of the Big Wheel"), ("Massive Attack", "Protection"), ("Massive Attack", "Karmacoma"),
         ("Portishead", "Sour Times"), ("Portishead", "Glory Box"), ("Portishead", "Numb"),
         ("Portishead", "Wandering Star"), ("Tricky", "Daydreaming"),
     ),
-    # Big beat: NPR 11 essential songs, Treble, Shazam, Wikipedia
+    # NPR (11 essential songs), Treble, Future Proof genre explorer: below ten
     "Big beat": (
         ("The Dust Brothers", "Chemical Beats"), ("The Prodigy", "Firestarter"), ("The Chemical Brothers", "Block Rockin' Beats"),
         ("The Chemical Brothers", "Setting Sun"), ("Fatboy Slim", "The Rockafeller Skank"),
@@ -709,7 +704,7 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Hank Williams", "I Saw the Light"), ("Marvin Sapp", "Never Would Have Made It"), ("Kirk Franklin", "Stomp"),
         ("Mary Mary", "Shackles"), ("Donnie McClurkin", "Stand"), ("Richard Smallwood", "Total Praise"),
     ),
-    # Choral and sacred masterworks (composer as artist, title as the work)
+    # MasterVoices, Carus Verlag (composer as artist, title as the work)
     "Choral": (
         ("Handel", "Messiah"), ("Bach", "Mass in B Minor"), ("Bach", "St Matthew Passion"),
         ("Beethoven", "Missa Solemnis"), ("Brahms", "Ein Deutsches Requiem"), ("Verdi", "Requiem"),
@@ -790,12 +785,12 @@ SUBGENRE_TRACKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Inferno Bros.", "Slaves To The Rave"), ("Wedlock vs. Comababy", "Void Sector"),
         ("Catscan", "Midnight Impact"), ("Catscan", "The World Is Mine"),
     ),
-    # Paula Temple's picks (Electronic Beats), a Reddit-era request thread quoted in search
+    # Paula Temple's picks (Electronic Beats), an r/Techno request quoted in search: below ten
     "Industrial techno": (
         ("Technoise", "System"), ("Death Abyss", "We Are What You Should Fear"), ("Clouds", "Nokia"),
         ("Clouds", "Wolverhampton"),
     ),
-    # Ska punk and ska: sources named in the search results (Flexco, BrooklynVegan, Tildes thread)
+    # A Flexco-hosted ska list (low quality, to be listened to): below ten
     "Ska punk": (
         ("Sublime", "Santeria"), ("Reel Big Fish", "Sell Out"), ("Goldfinger", "Superman"),
         ("The Interrupters", "She's Kerosene"),
