@@ -3,9 +3,15 @@
 // Decoding has to happen here — a Worker has no AudioContext — so each track
 // is fetched (Opus 128, FLAC where Opus does not decode), decoded by an
 // OfflineAudioContext at 48 kHz, mixed to mono and
-// handed to the worker, which runs the player's analyser over it. One track at
-// a time: a decoded track is tens of megabytes, and this is a background task
-// the admin started, not something to race through.
+// handed to a worker, which runs the player's analyser over it.
+//
+// SEVERAL tracks at a time (`measureParallelism`), each on its own worker: one
+// at a time, a library of a thousand tagged tracks was an evening, with all
+// but one core idle and the next download waiting for the previous analysis.
+// The bound is the smallest of three: half the cores (the page keeps the rest),
+// the device's memory (a decoded track is tens of megabytes while it is being
+// mixed down), and the server's quota for background requests (a quarter of
+// its 16 threads — past it the fetch is refused and waits).
 
 import { api } from "../api.js";
 
@@ -17,42 +23,62 @@ const QUALITY = "OPUS_128";
 // A DJ set or an hour-long mix is not one genre, and it is hundreds of MB.
 const MAX_SECONDS = 15 * 60;
 
-let worker = null;
-let seq = 0;
-const jobs = new Map();
+// The server lets a quarter of its 16 request threads serve background work.
+const SERVER_SHARE = 4;
 
-function ensure() {
-  if (worker) return worker;
-  worker = new Worker(new URL("./measure.worker.js", import.meta.url), { type: "module" });
-  worker.onmessage = (ev) => {
+/** How many tracks the studio measures at once on this device. */
+export function measureParallelism() {
+  const nav = typeof navigator !== "undefined" ? navigator : {};
+  const cores = +nav.hardwareConcurrency || 2;
+  // deviceMemory is Chromium-only and rounded (0.25 .. 8 GB); unknown is
+  // taken as a middling machine.
+  const mem = +nav.deviceMemory || 4;
+  const byMem = mem <= 2 ? 1 : mem <= 4 ? 2 : SERVER_SHARE;
+  return Math.max(1, Math.min(SERVER_SHARE, Math.floor(cores / 2), byMem));
+}
+
+// One worker per track in flight, each with at most one job: the callers bound
+// how many there are (measureParallelism), so the pool never outgrows them.
+const pool = []; // { worker, job: { id, resolve, reject } | null }
+let seq = 0;
+
+function idleSlot() {
+  let slot = pool.find((s) => !s.job);
+  if (slot) return slot;
+  slot = { worker: new Worker(new URL("./measure.worker.js", import.meta.url), { type: "module" }), job: null };
+  slot.worker.onmessage = (ev) => {
     const msg = ev.data || {};
-    const job = jobs.get(msg.id);
-    if (!job) return;
-    jobs.delete(msg.id);
+    const job = slot.job;
+    if (!job || job.id !== msg.id) return;
+    slot.job = null;
     if (msg.type === "done") job.resolve(msg.summary);
     else job.reject(new Error(msg.message || "measurement failed"));
   };
-  worker.onerror = (ev) => {
-    const err = new Error(ev.message || "measurement worker failed");
-    for (const [, job] of jobs) job.reject(err);
-    jobs.clear();
-    worker.terminate();
-    worker = null;
+  slot.worker.onerror = (ev) => {
+    const job = slot.job;
+    slot.job = null;
+    slot.worker.terminate();
+    const i = pool.indexOf(slot);
+    if (i >= 0) pool.splice(i, 1);
+    if (job) job.reject(new Error(ev.message || "measurement worker failed"));
   };
-  return worker;
+  pool.push(slot);
+  return slot;
 }
 
-/** Drop the worker (the studio calls this when it unmounts). */
+/** Drop the workers (the studio calls this when it unmounts). */
 export function releaseMeasurer() {
-  if (!worker) return;
-  worker.terminate();
-  worker = null;
-  for (const [, job] of jobs) job.reject(new Error("cancelled"));
-  jobs.clear();
+  for (const slot of pool.splice(0)) {
+    slot.worker.terminate();
+    if (slot.job) slot.job.reject(new Error("cancelled"));
+    slot.job = null;
+  }
 }
 
 async function fetchAudio(id, quality, signal) {
-  for (let attempt = 0; attempt < 4; attempt++) {
+  // Patient with refusals: several measurers share the server's background
+  // quota with the player's own prefetches.
+  for (let attempt = 0; attempt < 8; attempt++) {
     // A background request: the server holds these to a share of its threads
     // and refuses the excess (503 + Retry-After) rather than queueing them.
     const res = await fetch(api.streamUrl(encodeURIComponent(id), quality), {
@@ -94,11 +120,11 @@ export async function measureTrack(id, bpm, signal) {
     for (let i = 0; i < n; i++) mono[i] += data[i] / channels;
   }
   if (signal?.aborted) throw new Error("cancelled");
-  const w = ensure();
+  const slot = idleSlot();
   const jobId = ++seq;
   const summary = await new Promise((resolve, reject) => {
-    jobs.set(jobId, { resolve, reject });
-    w.postMessage(
+    slot.job = { id: jobId, resolve, reject };
+    slot.worker.postMessage(
       { type: "measure", id: jobId, pcm: mono.buffer, sampleRate: audio.sampleRate, bpm: +bpm || 0 },
       [mono.buffer]
     );

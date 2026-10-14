@@ -41,6 +41,7 @@
     setTrackGain,
     setElementGain,
     fadeElement,
+    fadeDone,
     setFade,
     canCrossfade,
     wireAudio,
@@ -981,7 +982,9 @@
     const srcPromise = resolveSource(track.deezer_id, curQ);
     if (soften) {
       fadeElement(audio, 0, SKIP_FADE);
-      await new Promise((r) => setTimeout(r, SKIP_FADE * 1000));
+      // On the fade's own clock, never a bare timer: in the background a
+      // timer can hold the skip for up to a minute (graph.js#fadeDone).
+      await fadeDone(audio, SKIP_FADE);
     }
     const src = await srcPromise;
     // A newer load may have superseded us while reading the blob from IndexedDB.
@@ -1727,6 +1730,7 @@
     // A direct crossfade's envelope steps on the media pipeline's clock too
     // (graph.js#tickVolumes): timers may be throttled in the background.
     tickVolumes();
+    xfadeTick();
     if (e && e.target !== audio) return; // ignore the idle/preloading element
     if (loadingTrack) return; // a track change is mid-flight — position is stale
     if (chasing) return; // chasing a seek — hold the bar at the target
@@ -1997,6 +2001,13 @@
       startTimer: null,
       endTimer: null,
       giveUp: null,
+      // The same three deadlines as wall-clock instants, checked on every
+      // `timeupdate` too (xfadeTick): the timers above may be throttled to
+      // once a minute in a backgrounded page, the media pipeline's events
+      // are not.
+      beginAt: 0,
+      giveUpAt: 0,
+      endsAt: 0,
       onMeta: null,
       onReady: null,
       startAt: 0,
@@ -2043,7 +2054,12 @@
       incoming.addEventListener("loadedmetadata", onMeta);
       mine.onMeta = onMeta;
     }
-    mine.startTimer = setTimeout(beginCrossfade, Math.max(0, delay * 1000));
+    // A skip starts NOW: a setTimeout(0) is still a timer, and a throttled one
+    // was what kept the old track playing after "next" in the background.
+    if (delay > 0) {
+      mine.beginAt = Date.now() + delay * 1000;
+      mine.startTimer = setTimeout(beginCrossfade, delay * 1000);
+    } else beginCrossfade();
     return true;
   }
 
@@ -2092,10 +2108,11 @@
         const onReady = () => beginCrossfade();
         el.addEventListener("canplay", onReady);
         x.onReady = onReady;
-        x.giveUp = setTimeout(
-          () => cancelCrossfade(),
-          x.skip ? SKIP_READY_MS : (x.fade + 1) * 1000
-        );
+        const wait = x.skip ? SKIP_READY_MS : (x.fade + 1) * 1000;
+        x.giveUpAt = Date.now() + wait;
+        x.giveUp = setTimeout(() => {
+          if (xfade === x) cancelCrossfade();
+        }, wait);
       }
       return;
     }
@@ -2135,8 +2152,24 @@
     fadeElement(el, 1, x.fade);
     fadeElement(old, 0, x.fade);
     adoptIncoming(x);
+    x.endsAt = Date.now() + x.fade * 1000;
     x.endTimer = setTimeout(finishCrossfade, x.fade * 1000);
     if (xfade === x && x.skip) x.skip.resolve(true);
+  }
+
+  // The crossfade's deadlines, on the media pipeline's clock: called on every
+  // `timeupdate` of either element (four a second, whatever the page's timers
+  // are doing). The timers stay the precise path; this is the floor under them.
+  function xfadeTick() {
+    const x = xfade;
+    if (!x) return;
+    const now = Date.now();
+    if (x.phase === "fading") {
+      if (x.endsAt && now >= x.endsAt) finishCrossfade();
+    } else if (x.phase === "arming") {
+      if (x.giveUpAt && now >= x.giveUpAt) cancelCrossfade();
+      else if (x.beginAt && !x.giveUp && now >= x.beginAt) beginCrossfade();
+    }
   }
 
   // Make the incoming element the current one and advance the queue to match,

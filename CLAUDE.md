@@ -109,6 +109,8 @@ cd webapp && node test/panel/run.mjs [--desktop]     # what is under the full-sc
 cd webapp && node test/repeat/run.mjs               # repeat one / all on a 4 s track: an ARCHIVED file served by the real server (byte ranges,
                                                      # tools/perf_api.py --audio) and a live first-play stream, with the trim and the crossfade:
                                                      # every pass reaches its end, none jumps back from the middle, no dead air
+cd webapp && node test/skip/run.mjs                 # a crossfaded skip in a HIDDEN page whose timers are throttled (the phone behind a car
+                                                     # radio): the next track must be heard at once, graph and direct paths
 cd webapp && node test/fullscreen/run.mjs           # the desktop full-screen player from 700x900 to 1920x1080: every control on screen,
                                                      # inside its column and the element a click at its centre lands on
                                                      # (the four browser tests above start tools/perf_api.py --serve; PYTHON=<venv python>, SHOTS=<dir> keeps pictures)
@@ -1062,7 +1064,9 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   frames where the grid is locked and the level is up (≥ 1900 of them, ~20 s), fed by the PLAYER at
   the smart level (thirteen additions a frame, posted on the next track to
   `POST /api/analysis/<id>/live`) and by the studio's own measurer (`measure.js` + a worker running
-  the same `rhythm.wasm` over a decoded Opus 128 copy, for tagged tracks nobody played that way).
+  the same `rhythm.wasm` over a decoded Opus 128 copy, for tagged tracks nobody played that way —
+  several tracks at once, one worker each, `measureParallelism`: half the cores, two on a 4 GB
+  device, never past the server's four background threads).
   Measured through the shipped binary: piep 0.95 on the pieep record against ≤ 0.10 everywhere else;
   kick pitch 63 Hz on techno against 173-175 on uptempo and Krach; four on the floor 0.90-0.95 on
   every 4/4 record against 0.33 on dnb. The summary is a `<track>.live.json` beside the audio,
@@ -2156,6 +2160,14 @@ to kill the click of a cut mid-waveform and short enough to be inaudible as a de
 needs the Web Audio graph, so like the effects it is off by default (see the note in `graph.js`
 about a suspended AudioContext silencing a backgrounded tab) — except on the direct path (below),
 where the same equal-power curve runs on the two elements' volumes.
+**No skip waits on a timer.** A backgrounded WebView fires timers as little as once a minute, and a
+crossfaded skip used to start its overlap on a `setTimeout(0)` and its softened cut on a 60 ms one:
+"next" on a car radio sat on the old track for anything up to that minute (measured with timers on
+20 s boundaries: 2-17 s, now 0.15 s — `test/skip/run.mjs`). A skip's overlap starts synchronously,
+the short ramp's wait follows the fade's own clock (`graph.js#fadeDone`: an `ended` from the audio
+thread for a routed element; a hidden page snaps a direct ramp under 0.3 s, which nothing could step
+anyway), and every crossfade deadline (start, give-up, end) is also checked on `timeupdate`
+(`xfadeTick`), which the media pipeline fires whatever the page's timers do.
 
 **WHERE THE SOUND GOES: DIRECT OR PROCESSED** (`lib/audio/output.js`, `lib/audio/timekeeper.js`,
 `graph.js`, `Player.svelte#renewElements`, `android/…/AudioRoute.kt`). Played through a Bluetooth car
