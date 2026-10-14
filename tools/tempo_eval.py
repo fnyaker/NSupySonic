@@ -10,8 +10,9 @@ directory of steady sounds that have NO beat — held notes, a held chord, a
 detuned-saw pad — which --render also makes with ffmpeg. Any other audio file
 dropped in DIR/real is measured and listed without a verdict.
 
-A change to supysonic/deezer/analysis.py's tempo pass is an ANALYSIS_VERSION
-bump that re-measures every library; run this before and after, and compare.
+It scores analysis._measure_tempo, which is the beat tracker (deezer/beats.py)
+when numpy is installed and the envelope estimator otherwise. A change to
+either is an ANALYSIS_VERSION bump that re-measures every library; run this before and after, and compare.
 """
 
 import argparse

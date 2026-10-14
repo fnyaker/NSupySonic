@@ -74,6 +74,7 @@ def setup_deezer(app):
             from .webui import genre as _wg
 
             _wa.resume_if_interrupted(app)
+            _wa.reanalyse_if_stale(app)
             _wg.resume_if_interrupted(app)
             _wg.relabel_if_stale(app)
     return app.deezer
