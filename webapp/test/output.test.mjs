@@ -57,6 +57,7 @@ import {
   getContext,
   releaseElement,
   tickVolumes,
+  fadeDone,
 } from "../src/lib/audio/graph.js";
 
 const BT = normalizeRoute({ kind: "bluetooth", name: "KMM-BT309", conn: "1700000000000-3", source: "native" });
@@ -475,3 +476,45 @@ test("direct: an interrupted fade continues from where it audibly is", async () 
   releaseElement(el);
   audioOutput.set("auto");
 });
+
+test("direct, page hidden: a skip's short ramp is a snap, and nothing waits on a timer for it", async () => {
+  // A backgrounded WebView throttles timers to as little as once a minute (the
+  // phone behind a car radio's "next" button): the skip waited on a 60 ms
+  // setTimeout and sat on the old track for anything up to that minute. Hidden,
+  // a ramp shorter than the gap between two timeupdates is a snap, and the
+  // wait for it is over at once.
+  audioOutput.set("direct");
+  normalization.set("off");
+  const hadDoc = "document" in globalThis;
+  const prevDoc = globalThis.document;
+  globalThis.document = { visibilityState: "hidden" };
+  const el = fakeEl();
+  try {
+    registerSource(el);
+    setPlayerVolume(1, [el]);
+    fadeElement(el, 0, 0.06);
+    assert.equal(el.volume, 0, "snapped, not left for a throttled timer to step");
+    const first = await Promise.race([fadeDone(el, 0.06).then(() => "done"), tick()]);
+    assert.equal(first, "done");
+    // A crossfade's long ramp is still a ramp: timeupdate steps it.
+    fadeElement(el, 1, 2);
+    assert.ok(el.volume < 0.05, `long ramp started at ${el.volume}`);
+    // Visible, the same short ramp is a ramp and the wait is its length.
+    globalThis.document = { visibilityState: "visible" };
+    setFade(el, 1);
+    fadeElement(el, 0, 0.06);
+    assert.ok(el.volume > 0.9, `visible ramp started at ${el.volume}`);
+    const t0 = performance.now();
+    await fadeDone(el, 0.06);
+    assert.ok(performance.now() - t0 >= 55, "waited for the ramp");
+  } finally {
+    releaseElement(el);
+    if (hadDoc) globalThis.document = prevDoc;
+    else delete globalThis.document;
+    audioOutput.set("auto");
+  }
+});
+
+function tick() {
+  return new Promise((r) => setTimeout(() => r("timer"), 0));
+}

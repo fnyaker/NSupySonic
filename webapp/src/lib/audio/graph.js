@@ -558,6 +558,60 @@ export function fadeElement(el, to, seconds) {
   return true;
 }
 
+// Resolve once a fade of `seconds` just started on `el` is over — what a skip
+// waits for before it swaps the source. NOT on a timer alone: a backgrounded
+// page's timers are throttled to as little as once a minute (a WebView behind
+// a car radio's "next" button), and a skip that waited on one sat on the old
+// track for anything up to that minute. So the wait follows the clock the fade
+// itself runs on: a routed element's envelope is on the audio thread, and an
+// AudioScheduledSourceNode's `ended` is dispatched from there, throttled by
+// nothing; the timer still races it, so a visible page changes nothing. An
+// envelope that is not moving (a suspended context: the element is silent
+// anyway; a short direct ramp in a hidden page: fadeVol snapped it) is not
+// waited for at all.
+export function fadeDone(el, seconds) {
+  if (!el || !(seconds > 0)) return Promise.resolve();
+  const strip = strips.get(el);
+  if (!strip) {
+    if (pageHidden() && seconds <= HIDDEN_SNAP) return Promise.resolve();
+    return new Promise((r) => setTimeout(r, seconds * 1000));
+  }
+  if (!ctx || ctx.state !== "running") return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    let node = null;
+    let mute = null;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        node && node.disconnect();
+        mute && mute.disconnect();
+      } catch {
+        /* already gone */
+      }
+      resolve();
+    };
+    const timer = setTimeout(finish, seconds * 1000);
+    try {
+      node = ctx.createConstantSource ? ctx.createConstantSource() : ctx.createOscillator();
+      // Pulled by the destination (an unconnected source may never be
+      // rendered, and then never ends), at a gain of zero.
+      mute = ctx.createGain();
+      mute.gain.value = 0;
+      node.connect(mute);
+      mute.connect(ctx.destination);
+      node.onended = finish;
+      const t = ctx.currentTime;
+      node.start(t);
+      node.stop(t + seconds);
+    } catch {
+      /* the timer alone, then */
+    }
+  });
+}
+
 // Put an element's fade gain back to a known value with no ramp — used to arm
 // an incoming source at 0 before it starts, and to reset one after a fade was
 // cancelled.
@@ -1063,6 +1117,15 @@ let rampTimer = 0;
 // second whatever the page's timers are doing. A fade can come out coarser in
 // the background; it can never stall with the incoming track silent.
 const RAMP_TICK = 25;
+// ...except a ramp shorter than the gap between two `timeupdate`s: in a hidden
+// page nothing would step it before it is over, so it would land as a step
+// anyway, LATE. The skip's anti-click ramp (60 ms) is that case: hidden, it is
+// a snap, and nothing waits for it (fadeDone).
+const HIDDEN_SNAP = 0.3;
+
+function pageHidden() {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
 
 const clamp01 = (v) => (v > 1 ? 1 : v > 0 ? v : 0);
 
@@ -1147,7 +1210,7 @@ function fadeVol(el, to, seconds) {
   // From where the envelope audibly IS, so an interrupted fade continues.
   const from = currentFade(v, now);
   const target = clamp01(to);
-  if (!(seconds > 0.01)) {
+  if (!(seconds > 0.01) || (seconds <= HIDDEN_SNAP && pageHidden())) {
     v.fade = target;
     v.ramp = null;
   } else {

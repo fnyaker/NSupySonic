@@ -18,7 +18,7 @@
   import { decodeEmbedding, encodeHead } from "../lib/genre/wire.js";
   import { genreOf } from "../lib/audio/style.js";
   import { EXTRAS, rawExtras, fitScaler, extrasBlock } from "../lib/genre/construction.js";
-  import { measureTrack, releaseMeasurer } from "../lib/genre/measure.js";
+  import { measureTrack, measureParallelism, releaseMeasurer } from "../lib/genre/measure.js";
   import { train, release } from "../lib/genre/trainer.js";
   import { rankTags, searchTags, recentTags, noteRecent } from "../lib/genre/rank.js";
   import { MIN_EXAMPLES, prepare, canGroup, vectorKey, assess, suspects as findSuspects } from "../lib/genre/health.js";
@@ -830,6 +830,7 @@
   let measureDone = 0;
   let measureTotal = 0;
   let measureFailed = 0;
+  let measureLanes = 1;
   let measureAbort = null;
   async function loadConstruction() {
     try {
@@ -846,17 +847,25 @@
     measureTotal = list.length;
     measureDone = 0;
     measureFailed = 0;
-    try {
-      for (const t of list) {
-        if (measureAbort.signal.aborted) break;
+    // Several lanes pulling from one list: while one track is analysed the
+    // next ones are downloading and decoding (measure.js#measureParallelism).
+    const signal = measureAbort.signal;
+    let next = 0;
+    const lane = async () => {
+      while (next < list.length && !signal.aborted) {
+        const t = list[next++];
         try {
-          await measureTrack(t.id, t.bpm, measureAbort.signal);
+          await measureTrack(t.id, t.bpm, signal);
         } catch {
-          if (measureAbort.signal.aborted) break;
+          if (signal.aborted) return;
           measureFailed++;
         }
         measureDone++;
       }
+    };
+    measureLanes = Math.min(measureParallelism(), list.length);
+    try {
+      await Promise.all(Array.from({ length: measureLanes }, lane));
     } finally {
       measuring = false;
       measureAbort = null;
@@ -2045,7 +2054,7 @@
             </span>
             {#if measuring}
               <span class="muted small">
-                Mesure… {measureDone} / {measureTotal}{#if measureFailed}, {measureFailed} en échec{/if}
+                Mesure… {measureDone} / {measureTotal}{#if measureLanes > 1} · {measureLanes} en parallèle{/if}{#if measureFailed}, {measureFailed} en échec{/if}
               </span>
               <button class="ghost small-btn" on:click={stopMeasuring}>Arrêter</button>
             {:else if constr.missing?.length}
