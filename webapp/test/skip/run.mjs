@@ -21,7 +21,7 @@ const browser = await chromium.launch({ args: ["--autoplay-policy=no-user-gestur
 const song = (id) => ({ deezer_id: id, title: "Song " + id, duration: LEN, artist: { deezer_id: "a1", name: "Band" }, album: { deezer_id: "al1", title: "Album", cover: "" } });
 async function run(output) {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-  await ctx.route(/dzcdn\.net|api\.deezer\.com/, (r) => r.abort());
+  await ctx.route((url) => /(^|\.)(dzcdn\.net|deezer\.com)$/.test(url.hostname), (r) => r.abort());
   await ctx.addInitScript(() => {
     const Native = window.Audio;
     window.__els = [];
