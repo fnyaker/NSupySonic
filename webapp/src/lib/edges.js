@@ -12,8 +12,10 @@ import { api } from "./api.js";
 
 // v2: bounds measured before the server read ffmpeg's EOF-closed trailing
 // silence had an untrimmed end. A new key re-asks once; the old one is dropped.
-const KEY = "audio.edges.v2";
-const LEGACY_KEYS = ["audio.edges"];
+// v3: bounds served before the server capped a trim at 10 s (edges.py
+// MAX_EDGE_TRIM) could cut a quiet outro; they are measured again.
+const KEY = "audio.edges.v3";
+const LEGACY_KEYS = ["audio.edges", "audio.edges.v2"];
 const MAX = 400; // ~40 KB of localStorage; the LRU drops the oldest half
 const mem = new Map(); // id -> { start, end, duration, db } | null (known-absent)
 const pending = new Map();

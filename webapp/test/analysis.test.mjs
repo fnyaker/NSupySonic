@@ -187,3 +187,30 @@ test("a new verdict generation drops every verdict kept on the device", async ()
   await settle();
   assert.equal(asked.get(a), before + 1);
 });
+
+test("a tag set elsewhere reaches a device whose queue is all cached", async () => {
+  // Every verdict of the queue on the device used to mean no request at all,
+  // so the generation a label moves on the server never reached it. Now a
+  // track change past REVALIDATE_MS asks for the generation alone (no id
+  // counted) and re-asks the tracks only when it moved.
+  const id = "3901";
+  let style = "techno";
+  script.set(id, () => ({ verdict: measured(130, style) }));
+  asked.delete(id);
+  primeAnalyses([id]);
+  await settle();
+  assert.equal(knownAnalysis(id).style, "techno");
+  // Nothing moved: a check, but the track is not asked again.
+  mock.timers.tick(31 * 1000);
+  primeAnalyses([id]);
+  await settle();
+  assert.equal(asked.get(id), 1);
+  // A label on another device: the generation moves.
+  style = "schranz";
+  serverGen += 1;
+  mock.timers.tick(31 * 1000);
+  primeAnalyses([id]);
+  await settle();
+  assert.equal(asked.get(id), 2);
+  assert.equal(knownAnalysis(id).style, "schranz");
+});

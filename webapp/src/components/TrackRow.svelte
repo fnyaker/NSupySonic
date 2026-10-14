@@ -192,6 +192,7 @@
   <div
     class="row track"
     class:active={isCurrent}
+    class:noalb={!(showAlbum && track.album)}
     style={dx ? `transform:translate3d(${dx}px,0,0)` : ""}
     on:dblclick={play}
     on:contextmenu={menu}
@@ -258,6 +259,9 @@
     position: relative;
     overflow: hidden;
     border-radius: 8px;
+    /* The row lays itself out on ITS width, not the screen's: a list in the
+       full-screen player's side panel is phone-narrow on a desktop. */
+    container: trackrow / inline-size;
   }
   /* Released: glide home. Held: follow the finger with no transition at all.
      The strip and the row share the SAME curve and duration — they are two
@@ -316,6 +320,11 @@
     padding: 6px 8px;
     border-radius: 8px;
     user-select: none;
+  }
+  /* No album column: its 1fr must not stay in the grid, or the heart falls into
+     it and the title is left a letter wide. */
+  .track.noalb {
+    grid-template-columns: 40px 1fr 30px 44px 30px;
   }
   .track:hover {
     background: var(--bg-hover);
@@ -474,8 +483,25 @@
     }
   }
   @media (max-width: 640px) {
-    .track {
+    .track,
+    .track.noalb {
       grid-template-columns: 36px 1fr 30px 30px;
+    }
+    .alb,
+    .dur {
+      display: none;
+    }
+    .fav,
+    .more {
+      opacity: 1;
+    }
+  }
+  /* The same, for a narrow LIST on a wide screen (the player's side panel). */
+  @container trackrow (max-width: 520px) {
+    .track,
+    .track.noalb {
+      grid-template-columns: 36px 1fr 30px 30px;
+      gap: 10px;
     }
     .alb,
     .dur {

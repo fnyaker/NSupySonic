@@ -2319,8 +2319,13 @@ class WebUITestCase(unittest.TestCase):
             bitrate = 256000
             images = []
 
+        from supysonic.deezer import analysis as ana
+
+        queued = []
         orig = local._load_tag
+        orig_queue = ana.queue_analysis
         local._load_tag = lambda p: FakeTag()
+        ana.queue_analysis = lambda track, provider=None: queued.append(track.title)
         try:
             rv = self.client.post(
                 "/api/upload",
@@ -2329,9 +2334,13 @@ class WebUITestCase(unittest.TestCase):
             )
         finally:
             local._load_tag = orig
+            ana.queue_analysis = orig_queue
         self.assertEqual(rv.status_code, 200)
         j = rv.get_json()
         self.assertEqual(j["count"], 1)
+        # Measured as it lands, so its tempo and genre are the server's answer
+        # by its first play.
+        self.assertEqual(queued, ["Uploaded Song"])
         self.assertTrue(j["imported"][0]["local"])
         self.assertEqual(j["imported"][0]["title"], "Uploaded Song")
         # it lands in /me/local
@@ -3895,16 +3904,25 @@ class AudioEdgesTestCase(unittest.TestCase):
         self.assertEqual(_edges([[30.0, 32.0]], 210.0), (0.0, 210.0))
 
     def test_edges_never_trim_more_than_the_cap(self):
-        from supysonic.webui.edges import MAX_TRIM, _edges
+        from supysonic.webui.edges import _edges
 
         # A track opening on 90 s of near-silence is a hidden-track arrangement:
-        # jumping an arbitrary MAX_TRIM into it is not a trim, so it plays whole.
+        # jumping into it is not a trim, so it plays whole.
         self.assertEqual(_edges([[0.0, 90.0]], 300.0), (0.0, 300.0))
         self.assertEqual(_edges([[10.0, None]], 300.0), (0.0, 300.0))
-        # Just inside the cap, the trim stands.
-        start, end = _edges([[0.0, MAX_TRIM - 1]], 300.0)
-        self.assertEqual(start, MAX_TRIM - 1)
-        self.assertEqual(end, 300.0)
+        # A beat of silence at either end is what the trim is for.
+        self.assertEqual(_edges([[0.0, 9.0], [292.0, None]], 300.0), (9.0, 292.0))
+
+    def test_a_quiet_stretch_is_music_not_an_edge(self):
+        """A trim was heard as a skip in the middle of a song: a quiet outro
+        of a quarter of a minute is part of it. Past 10 s, at either end, the
+        whole file plays; and a gap inside the track never moves either bound."""
+        from supysonic.webui.edges import _edges
+
+        self.assertEqual(_edges([[0.0, 11.0]], 300.0), (0.0, 300.0))
+        self.assertEqual(_edges([[285.0, None]], 300.0), (0.0, 300.0))
+        self.assertEqual(_edges([[120.0, 135.0]], 300.0), (0.0, 300.0))
+        self.assertEqual(_edges([[120.0, 135.0], [296.0, 300.0]], 300.0), (0.0, 296.0))
 
     def test_edges_all_silence_is_not_a_zero_length_track(self):
         from supysonic.webui.edges import _edges
@@ -3954,7 +3972,7 @@ class AudioEdgesTestCase(unittest.TestCase):
 
         def fake_detect(path, threshold):
             calls.append((path, threshold))
-            return [[0.0, 2.5], [180.0, None]], 200.0
+            return [[0.0, 2.5], [195.0, None]], 200.0
 
         orig_detect, orig_have = edges._detect, edges._ffmpeg_available
         edges._detect = fake_detect
@@ -3964,7 +3982,7 @@ class AudioEdgesTestCase(unittest.TestCase):
             data = rv.get_json()
             self.assertTrue(data["ready"])
             self.assertEqual(data["start"], 2.5)
-            self.assertEqual(data["end"], 180.0)
+            self.assertEqual(data["end"], 195.0)
             self.assertEqual(data["duration"], 200.0)
             self.assertEqual(data["threshold"], -45.0)
             # Second call for the same file + threshold is served from the cache
@@ -4186,6 +4204,106 @@ class TrackAnalysisTestCase(unittest.TestCase):
         self.assertEqual(list(batch), [str(t.deezer_id)])
         self.assertEqual(batch[str(t.deezer_id)]["bpm"], 174.0)
 
+    # -- local files: the same road as Deezer's, by their UUID ---------------
+
+    def _local_track(self, genre=None, owner=None):
+        from supysonic.db import Album, Artist, Track
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        artist = Artist.create(name="Me")
+        album = Album.create(name="Mine", artist=artist)
+        # Not written: nothing here may start a background measurement.
+        path = os.path.join(self.archive, "mine.flac")
+        return Track.create(
+            disc=1, number=1, title="Mine", duration=200, genre=genre, album=album,
+            artist=artist, bitrate=900, path=path, last_modification=1,
+            root_folder=root, folder=root, owner=owner,
+        )
+
+    def test_a_local_file_is_answered_by_its_uuid(self):
+        """An upload's id is its row's UUID. The batch used to accept Deezer's
+        numeric ids only, so a local file never had a verdict — measured,
+        tagged in the studio, or carrying its own genre tag."""
+        from supysonic.db import TrackAnalysis
+
+        self._login()
+        t = self._local_track()
+        TrackAnalysis.create(
+            track=t, version=1, bpm=200.0, bpm_confidence=0.9, bpm_source="measured",
+            style="uptempo", style_confidence=0.6, archetype="hard", data="{}",
+        )
+        uid = str(t.id)
+        one = self.client.get(f"/api/analysis/{uid}").get_json()
+        self.assertTrue(one["ready"])
+        self.assertEqual(one["style"], "uptempo")
+        batch = self.client.post("/api/analyses", json={"ids": [uid]}).get_json()
+        self.assertEqual(batch["analyses"][uid]["bpm"], 200.0)
+        # Junk is not an id, and never reaches the database.
+        rv = self.client.post("/api/analyses", json={"ids": ["not-a-uuid", "1' OR 1"]})
+        self.assertEqual(rv.get_json()["analyses"], {})
+
+    def test_a_studio_tag_on_an_upload_is_served(self):
+        from supysonic.db import GenreTag, TrackTag
+
+        self._login()
+        t = self._local_track(genre="Techno")
+        tag = GenreTag.create(name="Frenchcore", color="#f00", archetype="hard")
+        TrackTag.create(track=t, tag=tag)
+        uid = str(t.id)
+        got = self.client.post("/api/analyses", json={"ids": [uid]}).get_json()["analyses"][uid]
+        # The studio tag outranks the genre the file carries.
+        self.assertEqual((got["style"], got["styleSource"]), ("Frenchcore", "tag"))
+
+    def test_a_local_files_own_genre_tag_is_its_genre(self):
+        """What the owner wrote into the file is served, under the name the
+        vocabulary knows it by, before anything has measured it."""
+        self._login()
+        t = self._local_track(genre="frenchcore; hardcore")
+        uid = str(t.id)
+        got = self.client.post("/api/analyses", json={"ids": [uid]}).get_json()["analyses"][uid]
+        self.assertEqual(got["style"], "Frenchcore")
+        self.assertEqual(got["styleSource"], "file")
+        self.assertEqual(got["archetype"], "hard")
+        one = self.client.get(f"/api/analysis/{uid}").get_json()
+        self.assertEqual((one["ready"], one["style"]), (True, "Frenchcore"))
+
+    def test_a_meaningless_file_genre_is_no_genre(self):
+        self._login()
+        t = self._local_track(genre="Other")
+        uid = str(t.id)
+        got = self.client.post("/api/analyses", json={"ids": [uid]}).get_json()
+        self.assertEqual(got["analyses"], {})
+
+    def test_a_deezer_archives_genre_tag_is_not_served(self):
+        """Deezer's archives are tagged with its broad album genre ("Dance"):
+        that must not outrank the measurement."""
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track()
+        t.genre = "Dance"
+        self.assertIsNone(ana.file_genre(t))
+
+    def test_someone_elses_upload_is_not_answered(self):
+        from supysonic.db import User
+
+        UserManager.add("bob", "B0b", admin=False)
+        bob = User.get(name="bob")
+        t = self._local_track(genre="Frenchcore", owner=self._other_owner())
+        self.client.post("/api/login", json={"username": "bob", "password": "B0b"})
+        uid = str(t.id)
+        self.assertEqual(
+            self.client.post("/api/analyses", json={"ids": [uid]}).get_json()["analyses"], {}
+        )
+        self.assertFalse(self.client.get(f"/api/analysis/{uid}").get_json()["ready"])
+        self.assertIsNotNone(bob)
+
+    def _other_owner(self):
+        from supysonic.db import User
+
+        UserManager.add("carol", "C4rol", admin=False)
+        return User.get(name="carol")
+
     def test_batch_rejects_a_non_list(self):
         self._login()
         rv = self.client.post("/api/analyses", json={"ids": "nope"})
@@ -4245,20 +4363,29 @@ class TrackAnalysisTestCase(unittest.TestCase):
         self.assertEqual(len(asked), 1)
         self.assertEqual(str(asked[0].deezer_id), str(t.deezer_id))
 
-    def test_request_analysis_refuses_without_a_way_to_reach_a_verdict(self):
-        """A job that could produce nothing is not started: no head, no model,
-        nothing to gain — and the client is not told to wait for it."""
+    def test_request_analysis_measures_without_a_head(self):
+        """The player runs no classifier of its own any more, so the server's
+        measurement is the only genre and tempo a track gets: a client's ask is
+        accepted with no head and no extractor — only ffmpeg and a file count."""
         from supysonic.deezer import analysis as ana
 
         t = self._deezer_track()
         t.path = __file__
-        orig_can, orig_ff = ana._can_measure, ana.ffmpeg_available
+        queued = []
+        orig_ff, orig_queue = ana.ffmpeg_available, ana.queue_analysis
         ana.ffmpeg_available = lambda: True
-        ana._can_measure = lambda: False
+        ana.queue_analysis = lambda track, provider=None: (
+            queued.append(track.id), ana._inflight.add(str(track.id))
+        )
         try:
+            self.assertTrue(ana.request_analysis(t))
+            self.assertEqual(queued, [t.id])
+            ana.ffmpeg_available = lambda: False
+            ana._inflight.discard(str(t.id))
             self.assertFalse(ana.request_analysis(t))
         finally:
-            ana._can_measure, ana.ffmpeg_available = orig_can, orig_ff
+            ana.ffmpeg_available, ana.queue_analysis = orig_ff, orig_queue
+            ana._inflight.discard(str(t.id))
 
     def test_request_analysis_dedupes_and_reports_acceptance(self):
         """Two asks while the first is in flight start ONE job, and both are
@@ -4268,7 +4395,6 @@ class TrackAnalysisTestCase(unittest.TestCase):
         t = self._deezer_track()
         t.path = __file__
         started = []
-        orig_can = ana._can_measure
         orig_thread = ana.threading.Thread
         orig_queue = ana.queue_analysis
         orig_ff = ana.ffmpeg_available
@@ -4287,7 +4413,6 @@ class TrackAnalysisTestCase(unittest.TestCase):
             FakeThread(name="dz-analysis").start()
 
         ana.ffmpeg_available = lambda: True
-        ana._can_measure = lambda: True
         ana.queue_analysis = fake_queue
         ana.threading.Thread = FakeThread
         try:
@@ -4298,7 +4423,7 @@ class TrackAnalysisTestCase(unittest.TestCase):
             self.assertTrue(ana.request_analysis(t))
             self.assertEqual(len(started), 1)
         finally:
-            ana._can_measure, ana.ffmpeg_available = orig_can, orig_ff
+            ana.ffmpeg_available = orig_ff
             ana.threading.Thread = orig_thread
             ana.queue_analysis = orig_queue
             ana._inflight.discard(str(t.id))
@@ -4600,13 +4725,13 @@ class TrackAnalysisTestCase(unittest.TestCase):
         from supysonic.deezer import analysis as ana
 
         t = self._deezer_track()
-        orig_can = ana._can_measure
-        ana._can_measure = lambda: False
+        orig_ff = ana.ffmpeg_available
+        ana.ffmpeg_available = lambda: False
         ana._inflight.add(str(t.id))
         try:
             self.assertTrue(ana.request_analysis(t))
         finally:
-            ana._can_measure = orig_can
+            ana.ffmpeg_available = orig_ff
             ana._inflight.discard(str(t.id))
 
     # -- the backfill job --------------------------------------------------

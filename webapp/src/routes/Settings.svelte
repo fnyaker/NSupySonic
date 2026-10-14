@@ -28,6 +28,7 @@
     nativeDeezerLoginAvailable,
   } from "../lib/nativeDeezer.js";
   import Icon from "../components/Icon.svelte";
+  import HardReload from "../components/HardReload.svelte";
   import { youtubeStatus, loadYoutubeStatus, setYoutubeEnabled } from "../lib/youtube.js";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
@@ -1037,6 +1038,18 @@
     </div>
   </section>
 {/if}
+
+<section class="card">
+  <h2>Recharger l'application</h2>
+  <p class="muted sub">
+    Repart d'une page neuve&nbsp;: la dernière version est retéléchargée depuis le
+    serveur et ce que l'appareil a appris tout seul est oublié (chemin audio,
+    décalage appris, genres et silences mis en cache). Utile après un plantage
+    ou un gel du GPU, quand les animations restent bloquées sur les barres.
+    Vos réglages, votre file de lecture et vos téléchargements sont conservés.
+  </p>
+  <HardReload />
+</section>
 
 <section class="card">
   <h2>Diagnostic</h2>

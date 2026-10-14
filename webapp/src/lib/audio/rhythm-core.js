@@ -148,6 +148,11 @@ export class Rhythm {
   setRange(lo, hi) {
     this.x.rhythm_set_range(+lo || 0, +hi || 0);
   }
+  // Whether the live family rules run at all (style.rs `classify`): the
+  // player turns them off, the genre being the server's answer alone.
+  setClassify(on) {
+    this.x.rhythm_set_classify(on ? 1 : 0);
+  }
   setLiveRange(on) {
     this.x.rhythm_set_live_range(on ? 1 : 0);
   }

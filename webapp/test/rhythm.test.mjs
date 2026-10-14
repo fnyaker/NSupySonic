@@ -959,3 +959,38 @@ test("a genre with no drum kit publishes no kick", () => {
   assert.equal(none.kicks, 0);
   assert.equal(none.downbeats, kit.downbeats);
 });
+
+// --- the genre is the server's ------------------------------------------------------------
+
+test("with the classifier off, an unpinned track has no genre; a pinned one has the server's", () => {
+  // The player turns the family rules off (engine.js `classify: false`): the
+  // genre is whatever the server served, and nothing at all when it served
+  // none. Measured on 12 s of a frenchcore record: rules on, a family named;
+  // off, dominant -1 and confidence 0 on every frame; pinned, the pin.
+  const { pcm } = renderTrack({ seconds: 12, bpm: 190, kickOpt: KICKS.frenchcore, hats: 1 });
+  const read = (setup) => {
+    const r = analyser();
+    setup(r);
+    let named = 0;
+    let last = { dom: -1, conf: 0 };
+    drive(r, pcm, (t, get) => {
+      const dom = Math.round(get("styleDominant"));
+      if (dom >= 0) named++;
+      last = { dom, conf: get("styleConfidence") };
+    });
+    return { named, ...last };
+  };
+  const live = read(() => {});
+  assert.ok(live.named > 0, "the rules on still name a family (the eval tools use them)");
+  const off = read((r) => r.setClassify(false));
+  assert.equal(off.named, 0);
+  assert.equal(off.conf, 0);
+  const idx = familyIndex("frenchcore");
+  assert.ok(idx >= 0);
+  const pinned = read((r) => {
+    r.setClassify(false);
+    r.pinFamily(idx);
+  });
+  assert.equal(pinned.dom, idx);
+  assert.equal(pinned.conf, 1);
+});

@@ -47,6 +47,11 @@ GONE_RECHECK = timedelta(days=7)
 
 # Stable local id for the synthetic Flow playlist.
 RECO_FLOW = "reco:flow"
+# ...and for "Nouveautés pour toi"'s albums, all in one playlist.
+RECO_NEW_ALBUMS = "reco:newalbums"
+NEW_ALBUMS_NAME = "Deezer · Nouveautés en vrac"
+# Albums, not tracks: the module lists ~100, each fetched whole.
+NEW_ALBUMS_MAX = 100
 
 # Personalized "smart tracklists" exposed as "Deezer · <title>" playlists.
 # Each is one gateway call returning ready-to-use tracks (SONGS.data).
@@ -281,6 +286,50 @@ class DeezerImporter:
         )
         return n
 
+    def sync_new_albums(self, limit=NEW_ALBUMS_MAX) -> int:
+        """Every album of "Nouveautés pour toi", whole and in Deezer's order,
+        as one local playlist. The smart "Nouveautés" mix picks a few tracks;
+        this is the rest of the page, the albums "en vrac".
+
+        Each album is its FULL tracklist (``get_album_tracks``, never the page's
+        first ten). An album that fails is skipped, and a run that found no
+        album at all leaves the previous playlist alone — an outage is not an
+        empty week.
+        """
+        self._progress("Fetching Deezer's new albums...")
+        albums = self.provider.get_new_release_albums(limit=limit)
+        if not albums:
+            self._progress("  • no new album found, playlist kept")
+            return 0
+        raw, seen, failed = [], set(), 0
+        for alb in albums:
+            try:
+                tracks = self.provider.dz.gw.get_album_tracks(alb["id"]) or []
+            except Exception as exc:
+                failed += 1
+                logger.warning("New album %s failed: %s", alb["id"], exc)
+                continue
+            for t in tracks:
+                sid = str((t or {}).get("SNG_ID") or "")
+                if sid and sid != "0" and sid not in seen:
+                    seen.add(sid)
+                    raw.append(t)
+        if not raw:
+            self._progress("  • the new albums could not be read, playlist kept")
+            return 0
+        names = []
+        for a in albums[:3]:
+            if a.get("artist") and a["artist"] not in names:
+                names.append(a["artist"])
+        comment = f"{len(albums) - failed} nouveaux albums"
+        if names:
+            comment += " — avec " + ", ".join(names)
+        _, n = self._materialize_playlist(
+            ids.playlist_uuid(RECO_NEW_ALBUMS), NEW_ALBUMS_NAME, None, raw, comment=comment
+        )
+        self._progress(f"  • {NEW_ALBUMS_NAME} ({len(albums) - failed} albums, {n} tracks)")
+        return n
+
     def _purge_playlist(self, local_id):
         try:
             pl = Playlist[local_id]
@@ -289,13 +338,19 @@ class DeezerImporter:
         except Playlist.DoesNotExist:
             pass
 
-    def sync_recommendations(self, smart_ids=None, flow=True) -> dict:
+    def sync_recommendations(self, smart_ids=None, flow=True, new_albums=False) -> dict:
         result = {}
         if smart_ids:
             # Remove the pre-smart-tracklist "Nouveautés" playlist if it lingers.
             self._purge_playlist(ids.playlist_uuid("reco:newreleases"))
             self._progress("Fetching your Deezer smart playlists...")
             result["smart"] = self.sync_smart_tracklists(smart_ids)
+        if new_albums:
+            try:
+                result["new_albums"] = self.sync_new_albums()
+            except Exception as exc:
+                logger.warning("New albums import failed: %s", exc)
+                self._progress(f"  ! new albums failed: {exc}")
         if flow:
             try:
                 result["flow"] = self.sync_flow()
@@ -383,9 +438,10 @@ class DeezerImporter:
             out["favorites"] = self.sync_favorites()
         if cfg.get("sync_podcasts"):
             out["podcasts"] = self.sync_podcasts(int(cfg.get("podcast_episodes") or 30))
-        if cfg.get("import_new_releases") or cfg.get("import_flow"):
+        if cfg.get("import_new_releases") or cfg.get("import_flow") or cfg.get("import_new_albums"):
             out["recommendations"] = self.sync_recommendations(
                 smart_ids=smart_ids_from_config(cfg) if cfg.get("import_new_releases") else None,
                 flow=cfg.get("import_flow", False),
+                new_albums=cfg.get("import_new_albums", False),
             )
         return out

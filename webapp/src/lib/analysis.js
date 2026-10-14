@@ -26,9 +26,10 @@
 // on the poll until the real one lands or the polls run out, and a later play
 // asks again, at most every REASK_MS.
 //
-// Everything here is best-effort. A track nobody has measured, and nobody can
-// measure, simply has no entry, and the live detector carries it exactly as it
-// did before — so this is an accelerator, never a dependency.
+// A track nobody has measured, and nobody can measure, simply has no entry —
+// and then it has no genre: the player runs no classifier of its own any more
+// (audio/engine.js), so the server's answer is the only one there is. Local
+// files are asked about exactly like Deezer tracks: by their row's UUID.
 
 import { api } from "./api.js";
 
@@ -41,7 +42,19 @@ const mem = new Map(); // id -> verdict | null (null = asked, nothing there)
 // re-applied to the whole library, supysonic/webui/genre.py#start_relabel).
 const stamps = new Map(); // id -> ms
 const VERDICT_TTL = 24 * 3600 * 1000;
+// A MISS is kept for much less: "nothing yet" is exactly what a tag, an
+// upload's analysis or a trained head turns into an answer, and a day of
+// remembering it was a day of the player ignoring a genre the server had.
+const MISS_TTL = 5 * 60 * 1000;
 let generation = null;
+// When the server last told us its generation. Every answer carries it, but an
+// answer only comes when something is ASKED — and a queue whose verdicts are
+// all on the device asks nothing, so a tag set elsewhere never reached it. So
+// when this is older than REVALIDATE_MS, a track change asks for the
+// generation alone — one empty request, the tracks re-asked only if it moved.
+let heardAt = 0;
+const REVALIDATE_MS = 30 * 1000;
+let genCheck = null;
 const pending = new Set();
 let dirty = false;
 let flushTimer = null;
@@ -143,6 +156,7 @@ function announce(id, verdict) {
  */
 function noteGeneration(g) {
   if (!Number.isFinite(g)) return;
+  heardAt = Date.now();
   if (generation !== null && g !== generation) {
     mem.clear();
     stamps.clear();
@@ -153,7 +167,8 @@ function noteGeneration(g) {
   }
 }
 
-const fresh = (id) => Date.now() - (stamps.get(id) || 0) < VERDICT_TTL;
+const fresh = (id) =>
+  Date.now() - (stamps.get(id) || 0) < (mem.get(id) ? VERDICT_TTL : MISS_TTL);
 
 function store(id, verdict) {
   const had = mem.get(id) || null;
@@ -170,6 +185,16 @@ function store(id, verdict) {
 }
 
 const provisional = (v) => !!(v && v.provisional);
+
+// A track the server can answer for: Deezer's numeric id, or the UUID that IS
+// the row's id for everything else — an upload, a scanned library file, a
+// YouTube fallback. Those used to be filtered out here (and refused by the
+// server), so an uploaded file never had a genre, tagged or not.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function verdictId(raw) {
+  const id = raw == null ? "" : String(raw);
+  return /^\d+$/.test(id) || UUID_RE.test(id) ? id : null;
+}
 
 /** Come back for these in a moment; the server has them on its queue. */
 function watch(ids) {
@@ -255,15 +280,32 @@ export function primeAnalyses(ids) {
   const want = [];
   for (const raw of ids || []) {
     if (!raw) continue;
-    const id = String(raw);
-    // Only Deezer's numeric ids: a local upload has no verdict to serve, and
-    // asking for one per play would be a request that can only ever answer no.
-    if (!/^\d+$/.test(id)) continue;
+    const id = verdictId(raw);
+    if (!id) continue;
     if (pending.has(id)) continue;
     if (mem.has(id) && fresh(id) && !(provisional(mem.get(id)) && reaskDue(id))) continue;
     want.push(id);
   }
-  if (!want.length) return;
+  if (!want.length) {
+    // Everything is on the device: ask only for the generation (an empty
+    // list), at most every REVALIDATE_MS, and ask the tracks themselves again
+    // only if it moved — a tag set elsewhere since.
+    if (ids && ids.length && Date.now() - heardAt > REVALIDATE_MS && !genCheck) {
+      heardAt = Date.now();
+      const before = generation;
+      genCheck = api
+        .trackAnalyses([])
+        .then((r) => {
+          noteGeneration(r && r.gen);
+          if (generation !== before) primeAnalyses(ids);
+        })
+        .catch(() => {})
+        .finally(() => {
+          genCheck = null;
+        });
+    }
+    return;
+  }
   for (const id of want) pending.add(id);
   api
     .trackAnalyses(want)
@@ -276,7 +318,10 @@ export function primeAnalyses(ids) {
         // server has caught up, which is the right cadence for something that
         // only changes when the archive does. A published tempo already in
         // hand is kept rather than forgotten when a re-ask comes back empty.
-        store(id, got[id] || mem.get(id) || null);
+        // (Only a PROVISIONAL tempo is kept that way: a real verdict that is
+        // gone — a tag removed — is gone.)
+        const had = mem.get(id);
+        store(id, got[id] || (provisional(had) ? had : null));
       }
       // ...unless the server has just started measuring it, in which case the
       // answer is a moment away and we should be there to catch it — and a

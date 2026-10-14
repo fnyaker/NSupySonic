@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import logging
+import re
 import socket
 import threading
 import time
@@ -744,6 +746,65 @@ class DeezerProvider:
 
     def get_smart_tracklist(self, smarttracklist_id) -> dict:
         return self.dz.gw.get_smart_tracklist(smarttracklist_id)
+
+    # "Nouveautés pour toi" (web app: Accueil → Nouveautés → Tout voir): a CMS
+    # module page, the new-releases mix first, then every new album "en vrac".
+    # Its id is the editorial module's, captured from the web app; should it
+    # ever move, the home page is searched for a module that looks like it.
+    NEW_RELEASES_MODULE = "33d3a14c-5716-4343-87e1-4ec3ac4fd49b"
+    _MODULE_RE = re.compile(r"channels/module/([0-9a-f-]{36})")
+
+    def get_new_release_albums(self, limit=100) -> list[dict]:
+        """The albums of "Nouveautés pour toi", in Deezer's order:
+        ``[{"id", "title", "artist", "date"}]`` (at most ``limit``)."""
+        albums = self._module_albums(self.NEW_RELEASES_MODULE, limit)
+        if albums:
+            return albums
+        for module_id in self._new_release_modules():
+            if module_id == self.NEW_RELEASES_MODULE:
+                continue
+            albums = self._module_albums(module_id, limit)
+            if albums:
+                return albums
+        return []
+
+    def _module_albums(self, module_id, limit):
+        page = self.dz.gw.get_module_page(module_id) or {}
+        out, seen = [], set()
+        for section in page.get("sections") or []:
+            for item in section.get("items") or []:
+                if (item.get("type") or "") != "album":
+                    continue
+                data = item.get("data") or {}
+                aid = str(data.get("ALB_ID") or item.get("id") or "")
+                if not aid.isdigit() or aid in seen or data.get("AVAILABLE") is False:
+                    continue
+                seen.add(aid)
+                out.append({
+                    "id": aid,
+                    "title": data.get("ALB_TITLE") or item.get("title") or "",
+                    "artist": data.get("ART_NAME") or item.get("description") or "",
+                    "date": data.get("DIGITAL_RELEASE_DATE") or data.get("ORIGINAL_RELEASE_DATE") or "",
+                })
+                if len(out) >= limit:
+                    return out
+        return out
+
+    def _new_release_modules(self):
+        """Module ids the home page links to that read like new releases."""
+        try:
+            home = self.dz.gw.get_page("home") or {}
+        except Exception:
+            return []
+        found = []
+        for section in home.get("sections") or []:
+            blob = json.dumps(section, ensure_ascii=False)
+            if not re.search(r"nouveaut|new[_ -]?releases?", blob, re.I):
+                continue
+            for module_id in self._MODULE_RE.findall(blob):
+                if module_id not in found:
+                    found.append(module_id)
+        return found
 
     def get_album_page(self, alb_id) -> dict:
         return self.dz.gw.get_album_page(alb_id)

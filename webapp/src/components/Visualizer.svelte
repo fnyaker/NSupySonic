@@ -30,6 +30,7 @@
   import { api } from "../lib/api.js";
   import { subscribeFrames } from "../lib/audio/engine.js";
   import { createScene, createFallback, levelFor, needsWave } from "../lib/viz/index.js";
+  import { glAvailable } from "../lib/viz/glstatus.js";
   import { createGeometry } from "../lib/viz/geometry.js";
   import { createPalette } from "../lib/viz/palette.js";
   import { resolveTier, tierPreset, createGovernor, TIERS } from "../lib/viz/quality.js";
@@ -134,6 +135,7 @@
       },
     });
     if (!renderer) glFailed = true;
+    glAvailable.set(!!renderer);
     return renderer;
   }
 

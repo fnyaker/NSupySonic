@@ -4,6 +4,9 @@ import "./lib/linkrescue.js";
 import "./app.css";
 import { mount } from "svelte";
 import App from "./App.svelte";
+import { dropFreshMarker } from "./lib/hardreload.js";
+
+dropFreshMarker();
 
 // Note: the Android app (android/) needs no webapp-side bridge — it injects a
 // navigator.mediaSession shim into its WebView and feeds off the mediaSession

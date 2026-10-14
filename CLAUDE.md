@@ -45,7 +45,15 @@ run it through these questions. They are not optional polish; they are the bar.
    the words of the request? Will using it feel good — or are there irritating friction points
    (controls too cramped, targets too small, a fader glued to its neighbour)? If so, fix them
    *now*, not after they complain. Sweat the spacing, rhythm, alignment and feel.
-7. **Premium bar.** Every screen should look and feel like a team of senior engineers and
+7. **Tested before it is pushed — the logic AND the screen.** The user's own words: test what was
+   done before pushing, the logic (bugs, a frozen UI) as much as the design. A suite that passes is
+   not that: a change that touches a component is OPENED in headless Chromium (the benches under
+   `webapp/test/*/run.mjs`, or a throwaway Playwright script on `tools/perf_api.py --serve`) and
+   LOOKED at, at the widths it lives in — a desktop window, a phone, and the narrow side panel of
+   the full-screen player, which is phone-narrow on a desktop (a track list there kept the wide
+   grid and showed one letter of each title). Where a bench can hold the result (a geometry, a
+   request count), it gets a check, and the check is run against the old code once to see it fail.
+8. **Premium bar.** Every screen should look and feel like a team of senior engineers and
    designers sweated it — top-of-the-top, not "good enough". No cramped or default-looking UI, no
    emoji (glyphs go through `Icon.svelte`). When a layout feels off, it *is* off; keep iterating
    until it reads as considered and effortless.
@@ -240,7 +248,12 @@ Three Deezer code layers, from low to high:
      `archive_dir`) and import helpers.
    - `library.py` — DB upsert + deterministic archive paths. `ids.py` — deterministic `uuid5` IDs
      from Deezer IDs (plus nullable `deezer_id` columns on Track/Album/Artist/Playlist).
-   - `importer.py` — Deezer → Subsonic sync (writes straight to DB). `push.py` — Subsonic → Deezer
+   - `importer.py` — Deezer → Subsonic sync (writes straight to DB). Besides the smart tracklists it imports
+     **"Nouveautés pour toi" en vrac** (`sync_new_albums`, `[deezer] import_new_albums`, on): the CMS
+     module page `channels/module/<uuid>` (`gw.get_module_page`, id captured from a HAR, the home page
+     searched should it move) lists the new-releases mix then ~100 new albums; each album's FULL
+     tracklist goes, in Deezer's order, into one local playlist "Deezer · Nouveautés en vrac". A run
+     that reads no album keeps last week's. `push.py` — Subsonic → Deezer
      mirror (star/unstar, playlist CRUD), hooked from `api/playlists.py` & `api/annotation.py`,
      guarded by `push_to_deezer`, fail-soft.
    - `lyrics.py` — archive synced lyrics as a `.lrc` sidecar next to each archived audio file
@@ -807,8 +820,23 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   purpose: the client's live classifier works on its own normalized feature scales and the two must
   not be expected to share a threshold. **Once served, the server's genre and measured tempo ARE the
   answer**: the client pins the family and locks the tempo (see *The server's answers are locked*
-  below) and classifies or estimates neither again — its live classifier only speaks for a track the
-  server has no genre for.
+  below) and classifies or estimates neither again. **And with none served there is NO genre**: the
+  player runs no classifier of its own any more (`style.rs` `classify`, off from `engine.js`; the rules
+  stay, on by default, for the eval tools) — "si le serveur n'a rien, on a rien". That is why a
+  client's ask (`request_analysis`) is no longer gated on a head or the extractor: the server's
+  measurement is the only genre and tempo a track will get.
+- **Local files go down the same road, by their UUID.** `/api/analyses` and `/api/analysis/<id>`
+  accepted Deezer's numeric ids only, and so did `lib/analysis.js#primeAnalyses` and the tag sheet's
+  refresh — an upload never had a verdict, measured, tagged or not. Both take the row's UUID now
+  (`webui/analysis.py#_key`, `analysis.js#verdictId`), a local row only for whoever may read it. An
+  upload is measured as it lands (`/api/upload` → `queue_analysis`). And the genre its owner wrote
+  INTO the file is served (`analysis.file_genre`, `styleSource: "file"`: below a studio tag, above the
+  head and the rules, matched against the vocabulary with case and accents folded, junk like "Other"
+  ignored) — only for local files: Deezer's archives carry its broad album genre.
+- **A verdict reaches the player wherever it was set.** A label moves the verdict generation
+  (`genre._tell_devices`), a device re-asks the track starting when it has not heard the server for
+  30 s (`REVALIDATE_MS`: a queue fully cached asked nothing, so a bump never reached it), and a MISS
+  is kept 5 minutes, not a day.
 - **Its rules were never measured against its own measures, and on the arranged records it named 0
   of 28** — every hard record jazz, strings or dnb. Two faults, both fixed and pinned by
   `tests/base/test_analysis.py` on MEASURED features (the drawn ones it had were on the imagined
@@ -1147,8 +1175,8 @@ genres". The heuristic above knows the styles it was written with; this teaches 
   which is where it gets the vector that makes it a training example.
 - **The genre chip reads the SERVED verdict** (`webapp/src/lib/trackverdict.js`). It used to read
   the live classifier only, so it needed the analysis engine running, the `smart` scene selected AND
-  the classifier past its confidence floor. The served genre is the genre now (the analyser pins it);
-  the engine's own reading only names a track the server has no genre for.
+  the classifier past its confidence floor. The served genre is the genre now (the analyser pins it),
+  and the only one: a track the server has no genre for shows none.
 
 **Audio analysis is RUST, ON THE AUDIO THREAD** (`webapp/rhythm/`, compiled to
 `src/lib/audio/rhythm.wasm`; `webapp/src/lib/audio/` is the delivery). The JavaScript engine read
@@ -1493,8 +1521,8 @@ no amount of signal processing separates them. What separates them is knowing wh
 playing, which the engine does know — the server measured the track, or the live classifier named a
 family. `style.js#tempoRangeFor` is that knowledge written down (frenchcore 170-230, uptempo
 170-260, hardtekk 140-180, hardstyle 140-165, dnb 160-180…), `rhythm_set_range` moves the
-prior's plateau to it, and `engine.js#applyTempoRange` feeds it in from the verdict or, failing
-that, from the live classifier once it is confident. The ranges are deliberately WIDE: they set a
+prior's plateau to it, and `engine.js#applyTempoRange` feeds it in from the verdict (the live
+classifier that used to stand in is off in the player). The ranges are deliberately WIDE: they set a
 plateau, not a target, and all they are for is making the octave either side implausible. **A
 missing row is not a bug** — the tracker falls back to the default 90-200 plateau. This is the
 published result on tempo octave errors in electronic music, and it is the one table in the audio
@@ -2131,6 +2159,15 @@ through a 600 ms fade so the scene winds down rather than freezing, then stops t
 engine subscription and clears the canvas. The projector learns the transport state from the
 heartbeat and does the same.
 
+**Reloading from scratch** (`lib/hardreload.js`, `components/HardReload.svelte`, Réglages →
+*Recharger l'application*). After a GPU crash Chromium refuses WebGL to the page, the visualizer falls
+back to the 2D canvas for good (bars for every mode, the scope for the scope) and nothing inside the
+document can undo it. The button forgets what the DEVICE learnt (verdicts, silence bounds, the
+convicted audio outputs, the learnt look-ahead), unregisters the service worker, empties Cache
+Storage (only the shell lives there) and reloads past every cache; settings, the session and
+IndexedDB (downloads, offline copies) are kept. `lib/viz/glstatus.js` records a refused context and
+the animation settings then show the button with what happened.
+
 **Eco mode** (`ecoMode` in stores.js, `EcoToggle.svelte`) is the switch above all of them: no
 animation anywhere on the device — the visualizer, the backdrop's crossfades and the live lyric line
 — without destroying the setup underneath, so turning it off restores exactly what was there. It
@@ -2148,8 +2185,12 @@ never start a download, and a file that is not on disk simply answers `ready:fal
 untrimmed. A trailing silence is one that runs to EOF — and current ffmpeg CLOSES it at the flush
 (`silence_end` equal to the stream's end, measured on 6.1 across mp3/ogg/opus/m4a/flac), where older
 builds left it open; reading only the open form meant the tail was never trimmed on any recent
-ffmpeg, so both caches are versioned (`edges2-` server-side, `audio.edges.v2` on the device) and a
-fix to the measurement must bump them again. The handover happens at the **start** of the fade, not its end: the incoming element
+ffmpeg, so both caches are versioned (`edges3-` server-side, `audio.edges.v3` on the device) and a
+fix to the measurement must bump them again. **A trim is for the EDGES and nothing else**: at most
+10 s at either end (`MAX_EDGE_TRIM`; it was 30, and a quiet 15-s outro was cut — heard as a skip in
+the middle of the song), never past a decode that stopped short of the container's `Duration`, and
+the player drops bounds measured on a file whose length is not the track's (`Player.svelte#edgesFor`,
+`EDGE_LENGTH_SLACK`). The handover happens at the **start** of the fade, not its end: the incoming element
 becomes `audio` and the queue advances there and then, so the seek bar and the lock screen name the
 track you are beginning to hear. A manual skip is not an overlap — it gets a 60 ms ramp, long enough
 to kill the click of a cut mid-waveform and short enough to be inaudible as a delay. Crossfading

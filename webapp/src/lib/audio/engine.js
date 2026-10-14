@@ -429,7 +429,9 @@ function adoptVerdict(id, late = false) {
   const bpm = +v.bpm || 0;
   const fits = range && (!bpm || (bpm >= range[0] * 0.97 && bpm <= range[1] * 1.03));
   if (range && fits) send({ t: "range", lo: range[0], hi: range[1] });
-  send({ t: "liveRange", on: index < 0 && !(range && fits) });
+  // No live classifier any more: the genre is the server's or nothing, so
+  // nothing on this side may narrow the tempo band either.
+  send({ t: "liveRange", on: false });
   if (name) send({ t: "groove", g: grooveOf(name) });
   if (bpm && !v.provisional) {
     if (Math.abs(bpm / (lockedBpm || 1) - 1) > 0.001) {
@@ -513,7 +515,11 @@ async function startRhythm() {
         level: analysisLevel,
         families: familyTable(),
         gen,
-        liveRange: true,
+        // THE GENRE IS THE SERVER'S ANSWER, NEVER THIS SIDE'S GUESS. The
+        // family rules do not run (style.rs `classify`): a served genre pins
+        // the family, and with none served there is no genre at all.
+        classify: false,
+        liveRange: false,
       },
     };
     let node;
@@ -1058,10 +1064,10 @@ function newTrack(id) {
   seededBpm = 0;
   lockedBpm = 0;
   send({ t: "reset", gen });
-  // No verdict yet: the tempo range back to the default, and the live
-  // classifier's say in it back on.
+  // No verdict yet: the tempo range back to the default, and no family (the
+  // reset released the pin) — the genre is the server's, and none has been
+  // served for this track.
   send({ t: "range", lo: 0, hi: 0 });
-  send({ t: "liveRange", on: true });
   primeAround(id);
   adoptVerdict(id);
 }

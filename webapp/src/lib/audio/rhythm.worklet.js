@@ -44,6 +44,7 @@ class NsRhythm extends AudioWorkletProcessor {
       this.r = Rhythm.fromModule(mod, sampleRate);
       if (o.families && o.families.length) this.r.loadFamilies(o.families);
       this.r.setLevel(o.level | 0);
+      if (o.classify === false) this.r.setClassify(false);
       if (o.liveRange === false) this.r.setLiveRange(false);
       this.port.postMessage({
         t: "ready",

@@ -93,6 +93,9 @@ class DefaultConfig:
         "podcast_episodes": 30,  # recent episodes to import per podcast
         "import_new_releases": True,  # import the smart tracklists below
         "import_flow": True,
+        # "Nouveautés pour toi"'s albums, all of them, as one local playlist
+        # ("Deezer · Nouveautés en vrac"), refreshed on every sync.
+        "import_new_albums": True,
         # Smart tracklists to expose as "Deezer · ..." playlists (None = default
         # set: new-releases, discovery, monthly-top, inspired-by-1..5).
         "smart_tracklists": None,

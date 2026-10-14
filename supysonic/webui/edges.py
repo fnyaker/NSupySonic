@@ -59,6 +59,15 @@ MIN_SILENCE = 0.1
 # opens with a minute of near-silence is a real track, and a player that skipped
 # into it would look broken; past this point the right answer is "play it all".
 MAX_TRIM = 30.0
+# What a trim is FOR is the beat of digital silence a master carries at each
+# end. A quiet stretch longer than this is music — an ambient outro, a held
+# fade, a breath before a last chorus — and cutting it was heard as a skip in
+# the middle of the song. Past it the answer is "play it all", at either end.
+MAX_EDGE_TRIM = 10.0
+# The decode must have reached the file's end for a silence "running to EOF"
+# to be the trailing one: a decode that stopped early (a damaged frame) would
+# otherwise put the "end of the file" in the middle of the track.
+_DECODE_SHORTFALL = 1.0
 
 # How far from the decoded duration a silence_end may land and still be the
 # one ffmpeg printed while flushing at EOF. The measured gap is 0-10 ms (the
@@ -69,6 +78,7 @@ _EOF_SLACK = 0.05
 _SIL_START = re.compile(r"silence_start:\s*(-?[\d.]+)")
 _SIL_END = re.compile(r"silence_end:\s*(-?[\d.]+)")
 _TIME = re.compile(r"time=\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+_DURATION = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
 
 
 def _clamp_threshold(raw):
@@ -136,6 +146,16 @@ def _detect(path, threshold):
     duration = 0.0
     for m in _TIME.finditer(err):
         duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    # The container's own figure. When the decode stopped well short of it, the
+    # "end of the stream" ffmpeg reports is not the end of the track, and a
+    # silence running to it is not a trailing one: no trailing trim then.
+    m = _DURATION.search(err)
+    if m:
+        header = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        if header - duration > _DECODE_SHORTFALL:
+            if intervals and intervals[-1][1] is None:
+                intervals[-1][1] = duration
+            duration = header
     return intervals, duration
 
 
@@ -163,10 +183,10 @@ def _edges(intervals, duration):
     # Past the cap the answer is "play it all", not "skip an arbitrary 30 s":
     # a track opening on ninety seconds of near-silence is a hidden-track
     # arrangement, and jumping a third of the way into it is not a trim.
-    if start > MAX_TRIM:
+    if start > MAX_EDGE_TRIM:
         start = 0.0
     if duration > 0:
-        if end < duration - MAX_TRIM:
+        if end < duration - MAX_EDGE_TRIM:
             end = duration
         end = min(end, duration)
     # A file that measures as silent end to end (a broken decode, a threshold
@@ -195,7 +215,9 @@ def audio_edges(mid):
     # "edges2": bounds cached before the EOF-closed trailing silence was read
     # (see _edges) have an untrimmed end; a new key makes every file measure
     # again once, and the stale entries age out of the LRU.
-    ckey = f"edges2-{key}-{mtime}-{threshold:g}"
+    # "edges3": ...and before a quiet stretch over MAX_EDGE_TRIM stopped being
+    # cut (bounds that skipped part of the song must not be served again).
+    ckey = f"edges3-{key}-{mtime}-{threshold:g}"
     if cache.has(ckey):
         return send_file(cache.get(ckey), mimetype="application/json")
 

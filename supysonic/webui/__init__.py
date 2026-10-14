@@ -3637,6 +3637,15 @@ def upload():
                 used += os.path.getsize(dest)
             except OSError:
                 pass
+            # Measured now, like an archive is: its tempo and its genre (the
+            # one its tags name wins, analysis.file_genre) are then the
+            # server's answer by the time it is first played. Never blocks.
+            try:
+                from ..deezer import analysis as analysis_mod
+
+                analysis_mod.queue_analysis(track, None)
+            except Exception:
+                logger.debug("upload: could not queue the analysis", exc_info=True)
             imported.append(_local_track(track))
         else:
             try:

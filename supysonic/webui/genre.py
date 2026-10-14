@@ -869,6 +869,7 @@ def genre_label():
         # removed has to leave it, not linger for the length of a TTL.
         _forget_centroids()
         _redecide(track)
+        _tell_devices()
         return jsonify({"track": str(track.id), "tag": None})
     tag = GenreTag.get_or_none(GenreTag.id == raw) or GenreTag.get_or_none(
         GenreTag.name == str(raw)
@@ -881,6 +882,7 @@ def genre_label():
     # the label they just applied would be worse than showing none.
     _forget_centroids()
     _redecide(track)
+    _tell_devices()
     return jsonify({"track": str(track.id), "tag": _tag_json(tag)})
 
 
@@ -897,6 +899,19 @@ def _redecide(track):
             ana.redecide(row)
     except Exception:
         logger.debug("genre: could not re-decide %s", track.id, exc_info=True)
+
+
+def _tell_devices():
+    """Move the verdicts' generation: every device drops the verdicts it kept
+    and asks again (lib/analysis.js). A label set in the studio, or on another
+    device, otherwise reached a player only once its cached copy expired — a
+    day later — and a miss cached before the tag never reached it at all."""
+    from ..deezer import analysis as ana
+
+    try:
+        ana.bump_verdict_generation()
+    except Exception:
+        logger.debug("genre: could not move the verdict generation", exc_info=True)
 
 
 def _forget_centroids():

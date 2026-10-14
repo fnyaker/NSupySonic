@@ -349,6 +349,12 @@ pub struct Style {
     /// keep being measured: knowing WHAT is playing is the server's answer,
     /// hearing what it is DOING right now stays this side's job.
     pub pinned: i32,
+    /// Whether the family RULES run at all. The shipped player turns them
+    /// off (`rhythm_set_classify(0)`): the genre is the server's answer and
+    /// nothing else — with no served genre there is no genre, the look and
+    /// the archetypes ease back to neutral, `dominant` is -1. The rules are
+    /// kept (and on by default) for the eval tools that measure them.
+    pub classify: bool,
 }
 
 impl Style {
@@ -368,6 +374,7 @@ impl Style {
             top: [(-1, 0.0); 3],
             kick: KickShape::new(),
             pinned: -1,
+            classify: true,
         }
     }
 
@@ -493,9 +500,14 @@ impl Style {
             return;
         }
         let pinned = self.pinned >= 0 && (self.pinned as usize) < self.families.len();
+        let silent = !pinned && !self.classify;
         let mut sum = 0f32;
         let mut specific = 0f32;
-        if pinned {
+        if silent {
+            // No served genre and no live opinion allowed: every share is
+            // zero, the weights decay and the look eases to neutral below.
+            self.raw.iter_mut().for_each(|r| *r = 0.0);
+        } else if pinned {
             for i in 0..self.families.len() {
                 self.raw[i] = if i as i32 == self.pinned { 1.0 } else { 0.0 };
             }
@@ -514,7 +526,7 @@ impl Style {
         }
         // A pinned family is eased in over most of a second whatever the
         // level: it is an answer, not an opinion waiting for evidence.
-        let a = if pinned {
+        let a = if pinned || silent {
             1.0 - (-dt / 0.8).exp()
         } else {
             (1.0 - (-dt / 2.5).exp()) * (0.04 + 0.96 * dyn_ * dyn_)
@@ -590,6 +602,13 @@ impl Style {
             self.dominant = self.pinned;
             self.pending = -1;
             self.confidence = 1.0;
+            return;
+        }
+        if silent {
+            self.dominant = -1;
+            self.pending = -1;
+            self.confidence = 0.0;
+            self.top = [(-1, 0.0); 3];
             return;
         }
         let (best, best_w) = top[0];
