@@ -293,6 +293,27 @@ class SilenceBoundsTestCase(FfmpegTestCase):
         self.assertEqual(start, 0.0)
         self.assertAlmostEqual(end, 5.0, delta=0.02)
 
+    def test_a_near_silent_passage_mid_track_moves_nothing(self):
+        # 40 s of tone, 15 s at -60 dBFS, 5 s of tone: measured (0.0, 60.0).
+        path = self.file(
+            "hush", "-f", "lavfi", "-i", "sine=f=440:d=60",
+            "-af", "volume='if(between(t,40,55),0.001,1)':eval=frame",
+        )
+        start, end = self._bounds(path)
+        self.assertEqual(start, 0.0)
+        self.assertAlmostEqual(end, 60.0, delta=0.05)
+
+    def test_a_quiet_outro_is_played_whole(self):
+        # The last 15 s at -60 dBFS, to the end: before the 10 s cap this read
+        # (0.0, 45.0) and the player skipped the outro.
+        path = self.file(
+            "outro", "-f", "lavfi", "-i", "sine=f=440:d=60",
+            "-af", "volume='if(gt(t,45),0.001,1)':eval=frame",
+        )
+        start, end = self._bounds(path)
+        self.assertEqual(start, 0.0)
+        self.assertAlmostEqual(end, 60.0, delta=0.05)
+
     def test_a_final_hit_after_a_gap_is_not_trimmed(self):
         # Silence in the middle is not a tail: 2 s of tone, 1 s of nothing,
         # then a last 0.5 s of sound that must still be played.

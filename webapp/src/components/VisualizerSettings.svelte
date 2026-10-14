@@ -50,6 +50,8 @@
   import { FAMILY_LIST } from "../lib/audio/style.js";
   import Visualizer from "./Visualizer.svelte";
   import Icon from "./Icon.svelte";
+  import HardReload from "./HardReload.svelte";
+  import { glAvailable } from "../lib/viz/glstatus.js";
   import EcoToggle from "./EcoToggle.svelte";
   import WorldPicker from "./WorldPicker.svelte";
   import FlashWarning from "./FlashWarning.svelte";
@@ -225,6 +227,10 @@
         {$ecoMode ? "Mode éco actif : aucune animation." : "Aucune animation."}
       </span>
     </div>
+  {/if}
+
+  {#if $glAvailable === false}
+    <HardReload gl />
   {/if}
 
   <div class="block eco-row">

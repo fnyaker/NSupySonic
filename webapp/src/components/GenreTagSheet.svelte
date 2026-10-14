@@ -21,7 +21,7 @@
   import { onDestroy, tick } from "svelte";
   import { api } from "../lib/api.js";
   import { genreTagSheet, closeGenreTag, toasts } from "../lib/stores.js";
-  import { putAnalysis } from "../lib/analysis.js";
+  import { putAnalysis, verdictId } from "../lib/analysis.js";
   import { rankTags, searchTags, noteRecent } from "../lib/genre/rank.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
@@ -111,8 +111,8 @@
   // fetch it and hand it to the player's cache, so the animation adopts the
   // label NOW instead of on the next play (lib/analysis.js broadcasts it).
   async function refreshVerdict(t) {
-    const id = String(t.deezer_id || t.id);
-    if (!/^\d+$/.test(id)) return;
+    const id = verdictId(t.deezer_id || t.id);
+    if (!id) return;
     try {
       const r = await api.trackAnalysis(id);
       if (r && r.ready) putAnalysis(id, r);

@@ -53,4 +53,7 @@ export const styleIsTagged = derived(verdict, ($v) => $v?.styleSource === "tag")
  * trained on the admin's tags. (Chosen or guessed, the served genre is the one
  * the analyser uses — audio/engine.js adoptVerdict pins it.)
  */
-export const styleIsTrusted = derived(verdict, ($v) => $v?.styleSource === "tag" || $v?.styleSource === "model");
+export const styleIsTrusted = derived(
+  verdict,
+  ($v) => $v?.styleSource === "tag" || $v?.styleSource === "file" || $v?.styleSource === "model"
+);

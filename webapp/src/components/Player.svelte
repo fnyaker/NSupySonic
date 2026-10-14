@@ -1895,8 +1895,21 @@
   // something to blend into whatever follows it.
   function edgesFor(track) {
     if (!track || track.podcast || !get(trimSilence)) return null;
-    return knownEdges(track.deezer_id, get(trimThresholdDb));
+    const e = knownEdges(track.deezer_id, get(trimThresholdDb));
+    if (!e) return null;
+    // A trim is for the EDGES: the beat of silence a master carries at each
+    // end. Bounds that would cut more than EDGE_MAX off either end, or that
+    // were measured on a file whose length is not this track's (a re-archive,
+    // another version), would skip part of the song — a "skip in the middle"
+    // the listener hears — so they are no bounds at all.
+    const dur = +e.duration || 0;
+    if (e.start > EDGE_MAX || (dur && dur - e.end > EDGE_MAX)) return null;
+    const meta = +track.duration || 0;
+    if (dur && meta && Math.abs(dur - meta) > EDGE_LENGTH_SLACK) return null;
+    return e;
   }
+  const EDGE_MAX = 10; // s — supysonic/webui/edges.py MAX_EDGE_TRIM
+  const EDGE_LENGTH_SLACK = 2.5; // s — metadata durations are whole seconds
 
   // Measure this track and the one after it. The next one is the point: its
   // bounds have to be in hand BEFORE the crossfade into it starts, and the
@@ -1919,7 +1932,10 @@
     // Guard against bounds measured on a different file than the one playing
     // (a re-archive, a stale cache): anything outside the element's own
     // duration is not describing this audio.
-    return e && e.end > 0 && e.end <= d + 0.5 ? Math.min(e.end, d) : d;
+    if (!e || !(e.end > 0) || e.end > d + 0.5) return d;
+    // The element's own length must agree with the file that was measured.
+    if (e.duration && Math.abs(e.duration - d) > EDGE_LENGTH_SLACK) return d;
+    return Math.min(e.end, d);
   }
 
   // Repeating a queue of one IS repeating the track: it restarts like repeat

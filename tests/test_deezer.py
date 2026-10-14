@@ -860,6 +860,62 @@ class DeezerTestCase(TestBase):
         # An empty smart list is skipped, not written as an empty playlist.
         self.assertIsNone(Playlist.get_or_none(Playlist.id == ids.playlist_uuid("smart:new-releases")))
 
+    # The shape of "Nouveautés pour toi" as the web app received it (a HAR
+    # capture, 2026-10-14), cut down to what is read: the smart mix first, then
+    # the albums "en vrac", one of them unavailable.
+    @staticmethod
+    def _module(album_ids, unavailable=()):
+        items = [{"id": "new-releases", "type": "smarttracklist",
+                  "data": {"SMARTTRACKLIST_ID": "new-releases", "TITLE": "Nouveautés"}}]
+        for aid in album_ids:
+            items.append({
+                "id": str(aid), "type": "album", "title": f"Album {aid}",
+                "data": {"ALB_ID": str(aid), "ALB_TITLE": f"Album {aid}", "ART_ID": "464",
+                         "ART_NAME": "Rammstein", "DIGITAL_RELEASE_DATE": "2026-10-05",
+                         "AVAILABLE": aid not in unavailable, "__TYPE__": "album"},
+            })
+        return {"title": "Nouveautés pour toi", "persistent": True,
+                "sections": [{"layout": "grid", "items": items,
+                              "module_id": "33d3a14c-5716-4343-87e1-4ec3ac4fd49b"}]}
+
+    def test_the_new_albums_become_one_playlist_each_album_whole(self):
+        dz = self.provider._dz
+        asked = []
+        dz.gw.get_module_page = lambda mid: asked.append(mid) or self._module([70, 71, 72], {72})
+        dz.gw.album_tracks = {
+            "70": [raw_track(1, alb=("70", "A")), raw_track(2, alb=("70", "A"))],
+            "71": [raw_track(3, alb=("71", "B")), raw_track(1, alb=("71", "B"))],
+        }
+        n = importer.DeezerImporter(self.provider, "alice").sync_new_albums()
+        self.assertEqual(asked, ["33d3a14c-5716-4343-87e1-4ec3ac4fd49b"])
+        pl = Playlist.get(Playlist.id == ids.playlist_uuid(importer.RECO_NEW_ALBUMS))
+        # Deezer's order, every track of every available album, each track once.
+        self.assertEqual([t.deezer_id for t in pl.get_tracks()], ["1", "2", "3"])
+        self.assertEqual((n, pl.name), (3, "Deezer · Nouveautés en vrac"))
+        self.assertIn("2 nouveaux albums", pl.comment)
+
+    def test_a_week_deezer_cannot_answer_keeps_the_last_new_albums(self):
+        dz = self.provider._dz
+        dz.gw.get_module_page = lambda mid: self._module([70])
+        dz.gw.album_tracks = {"70": [raw_track(1, alb=("70", "A"))]}
+        imp = importer.DeezerImporter(self.provider, "alice")
+        imp.sync_new_albums()
+        dz.gw.get_module_page = lambda mid: {"sections": []}
+        dz.gw.get_page = lambda page: {"sections": []}
+        self.assertEqual(imp.sync_new_albums(), 0)
+        pl = Playlist.get(Playlist.id == ids.playlist_uuid(importer.RECO_NEW_ALBUMS))
+        self.assertEqual([t.deezer_id for t in pl.get_tracks()], ["1"])
+
+    def test_a_moved_module_is_found_from_the_home_page(self):
+        dz = self.provider._dz
+        moved = "0f0f0f0f-1111-2222-3333-444444444444"
+        dz.gw.get_module_page = lambda mid: self._module([80]) if mid == moved else {"sections": []}
+        dz.gw.get_page = lambda page: {"sections": [
+            {"title": "Pour toi", "target": "/channels/module/aaaaaaaa-1111-2222-3333-444444444444"},
+            {"title": "Nouveautés pour toi", "target": f"/channels/module/{moved}"},
+        ]}
+        self.assertEqual([a["id"] for a in self.provider.get_new_release_albums()], ["80"])
+
     def test_the_sync_runs_what_the_config_asks_for_and_nothing_else(self):
         imp = importer.DeezerImporter(self.provider, "alice")
         calls = []
@@ -876,14 +932,22 @@ class DeezerTestCase(TestBase):
         imp.sync({"import_new_releases": True, "smart_tracklists": "discovery, monthly-top"})
         self.assertEqual(
             calls,
-            [("sync_recommendations", (), {"smart_ids": ["discovery", "monthly-top"], "flow": False})],
+            [("sync_recommendations", (), {"smart_ids": ["discovery", "monthly-top"], "flow": False,
+                                           "new_albums": False})],
         )
 
         calls.clear()
         imp.sync({"import_flow": True, "sync_favorites": True})
         self.assertEqual(
             calls,
-            [("sync_favorites", (), {}), ("sync_recommendations", (), {"smart_ids": None, "flow": True})],
+            [("sync_favorites", (), {}),
+             ("sync_recommendations", (), {"smart_ids": None, "flow": True, "new_albums": False})],
+        )
+        calls.clear()
+        imp.sync({"import_new_albums": True})
+        self.assertEqual(
+            calls,
+            [("sync_recommendations", (), {"smart_ids": None, "flow": False, "new_albums": True})],
         )
         # No list configured means the whole default set.
         self.assertEqual(importer.smart_ids_from_config({}), importer.DEFAULT_SMART_TRACKLISTS)

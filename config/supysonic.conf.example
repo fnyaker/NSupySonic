@@ -58,6 +58,9 @@ sync_user = admin
 sync_playlists = yes
 sync_favorites = yes
 import_new_releases = yes
+; Every album of "Nouveautés pour toi" (the new releases picked from your
+; favourites), whole, as one local playlist "Deezer · Nouveautés en vrac".
+import_new_albums = yes
 import_flow = yes
 ; Refresh subscribed podcasts (shows) on each sync + episodes kept per show.
 sync_podcasts = yes

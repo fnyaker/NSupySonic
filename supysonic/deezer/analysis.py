@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 import uuid
 from collections import OrderedDict, deque
 from itertools import accumulate
@@ -1613,6 +1614,14 @@ def _decide_style(track, feats, vec):
         if tag.archetype in ARCHETYPES:
             out["arch"] = tag.archetype
         return out
+    # Next, the genre a LOCAL file's owner wrote into its tags (file_genre):
+    # a person's answer too, only not given here.
+    written = file_genre(track)
+    if written is not None:
+        out.update(style=written[0], conf=1.0, source="file")
+        if written[1] in ARCHETYPES:
+            out["arch"] = written[1]
+        return out
     # Failing that, a head trained on the user's OWN vocabulary outranks the
     # heuristic, and should: the rules encode what genres tend to look like in
     # general, while the head was taught what they look like in THIS library. It
@@ -1732,7 +1741,7 @@ def reapply_head(on_stats=None, should_stop=None, page_size=None):
     from ..db import TrackAnalysis
 
     stats = {"total": TrackAnalysis.select().count(), "scanned": 0, "changed": 0,
-             "model": 0, "family": 0, "tag": 0, "heuristic": 0}
+             "model": 0, "family": 0, "tag": 0, "file": 0, "heuristic": 0}
     size = page_size or PAGE_SIZE
     last = None
     while True:
@@ -1822,7 +1831,57 @@ def mark_relabeled(head_id):
         row.save()
 
 
-def payload_for(row, tag=None):
+# A file's own genre tag that says nothing: not worth serving as a genre.
+_JUNK_GENRES = {
+    "", "other", "others", "unknown", "misc", "miscellaneous", "genre", "none",
+    "various", "na", "undefined", "default", "music", "audio", "autre", "divers",
+    "inconnu",
+}
+
+
+def _fold_genre(name):
+    text = unicodedata.normalize("NFKD", str(name or ""))
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+def file_genre(track):
+    """``(label, archetype)`` from the genre written in a LOCAL file's own tags,
+    or None.
+
+    A file somebody uploaded carries the genre its owner gave it, and that is a
+    person's answer, not a guess — it used to be read into ``Track.genre`` and
+    then ignored by everything that serves a genre. Only for local files: a
+    Deezer track's archive is tagged with Deezer's broad album genre ("Dance"),
+    which must not outrank a trained head. The first of several ("A; B", "A/B")
+    is taken, and it is matched against the studio's tags and the engine's
+    vocabulary (case, accents and punctuation folded) so it comes back under
+    the name the player knows; a genre nobody knows is served under its own.
+    """
+    if track is None or getattr(track, "deezer_id", None) is not None:
+        return None
+    raw = getattr(track, "genre", None)
+    if not raw:
+        return None
+    first = re.split(r"[;,/|\\]|\x00", str(raw))[0].strip()[:64]
+    key = _fold_genre(first)
+    if key in _JUNK_GENRES or len(key) < 2:
+        return None
+    try:
+        for t in GenreTag.select(GenreTag.name, GenreTag.archetype):
+            if _fold_genre(t.name) == key:
+                return t.name, t.archetype
+    except Exception:
+        logger.debug("analysis: could not read the studio's tags", exc_info=True)
+    for label, arch in known_genres():
+        if _fold_genre(label) == key:
+            return label, arch
+    for fid, label, arch, _fn in FAMILIES:
+        if _fold_genre(fid) == key:
+            return label, arch
+    return first, None
+
+
+def payload_for(row, tag=None, from_file=None):
     """What the API serves for one track.
 
     ``tag`` is the track's manual label, when it has one. A hand-applied genre
@@ -1830,9 +1889,32 @@ def payload_for(row, tag=None):
     served in place of the measured style rather than next to it, and its label
     is the tag's own name (a label the user invented has no entry in
     ``FAMILY_LABEL``).
+
+    ``from_file`` is ``file_genre``'s answer for a local file: the genre its
+    owner wrote into it. Below a studio tag (the admin's choice, made here) and
+    above anything measured.
     """
-    if row is None and tag is None:
+    if row is None and tag is None and from_file is None:
         return None
+    if tag is None and from_file is not None:
+        label, arch = from_file
+        return {
+            "bpm": row.bpm if row is not None else None,
+            "bpmConfidence": row.bpm_confidence if row is not None else 0,
+            "bpmSource": row.bpm_source if row is not None else None,
+            "style": label,
+            "styleLabel": label,
+            "styleConfidence": 1.0,
+            "archetype": arch,
+            "archetypes": {},
+            "styleSource": "file",
+            "embedded": False,
+            "pulse": 0,
+            "lufs": None,
+            "lra": None,
+            "version": row.version if row is not None else 0,
+            "analysed": row is not None,
+        }
     if tag is not None:
         return {
             "bpm": row.bpm if row is not None else None,
@@ -1901,12 +1983,9 @@ def manual_tag(track):
 def request_analysis(track: Track, provider=None) -> bool:
     """Queue a measurement because a CLIENT asked, rather than the archiver.
 
-    Same daemon-thread-and-semaphore job as ``queue_analysis``, but gated on
-    something the archiver's call site does not need to care about: there has to
-    be a way to reach a verdict. Without a trained head there is no genre to
-    gain — the rules only ever name the broad families the browser already
-    computes live — but a tempo is still worth having, so the bar is "a head is
-    loaded OR the extractor is usable".
+    Same daemon-thread-and-semaphore job as ``queue_analysis``, gated only on
+    being ABLE to measure (ffmpeg and a file on disk): the player no longer
+    classifies anything itself, so whatever this measures is all it will get.
 
     Returns whether the job was accepted, so the caller can tell the client to
     come back for the answer. A refused request is not an error: it means this
@@ -1925,21 +2004,20 @@ def request_analysis(track: Track, provider=None) -> bool:
         return False
     if not track.path or not os.path.isfile(track.path):
         return False
-    if not _can_measure():
-        return False
+    # No longer gated on a head or the extractor: the player runs no
+    # classifier of its own any more, so the server's measurement — its rules,
+    # its tempo — is the only genre and the only tempo a track will ever get.
     queue_analysis(track, provider)
     with _inflight_lock:
         return key in _inflight
 
 
-def _can_measure() -> bool:
-    try:
-        from . import embedding as emb
-        from . import genre as gen
 
-        if gen.active_head() is not None:
-            return True
-        return emb.available() and bool(emb.model_path())
+def _under_test() -> bool:
+    try:
+        from flask import current_app, has_app_context
+
+        return bool(has_app_context() and current_app.testing)
     except Exception:
         return False
 
@@ -1953,6 +2031,11 @@ def queue_analysis(track: Track, provider=None):
     and must never be the reason a download, a stream or a shutdown waits.
     """
     if not track or not ffmpeg_available():
+        return
+    if _under_test():
+        # Nothing starts in the background under app.testing (the automatch
+        # rule): a job outliving its test decoded files of the next one and
+        # held CPU and the analysis slot while other tests ran.
         return
     key = str(track.id)
     with _inflight_lock:

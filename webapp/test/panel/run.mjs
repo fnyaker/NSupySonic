@@ -110,6 +110,20 @@ if (DESKTOP) {
   check((await page.locator(".more .row.track").count()) >= 5, "and lists similar tracks");
   check((await page.locator(".more .aname").textContent()).trim() === "Le Groupe", "with the artist under them");
   check((await page.locator(".more h4", { hasText: "Artistes similaires" }).count()) === 1, "and related artists");
+  // A list in the side panel is phone-narrow on a desktop: the row lays itself
+  // out on its own width. It kept the wide grid with no album column, the
+  // heart fell into the album's 1fr and the title was left a letter wide.
+  const rows = await page.locator(".more .row.track").evaluateAll((els) =>
+    els.map((el) => {
+      const row = el.getBoundingClientRect();
+      const titles = el.querySelector(".titles").getBoundingClientRect();
+      const fav = el.querySelector(".fav").getBoundingClientRect();
+      return { share: titles.width / row.width, gap: fav.left - titles.right };
+    })
+  );
+  const worst = Math.min(...rows.map((r) => r.share));
+  check(worst > 0.55, "each title takes most of its row", `narrowest ${Math.round(worst * 100)}% of the row`);
+  check(rows.every((r) => r.gap >= 0 && r.gap < 24), "and the heart sits right after it", rows.map((r) => Math.round(r.gap)).join(","));
   if (process.env.SHOTS) await page.screenshot({ path: join(process.env.SHOTS, "panel-desktop.png") });
   await page.locator(".more .pill", { hasText: "Tout lire" }).click();
   await page.waitForTimeout(700);

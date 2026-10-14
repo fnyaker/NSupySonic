@@ -1061,8 +1061,17 @@ impl Analyzer {
         self.set_groove_now(g.min(15) as u8);
     }
 
+    /// Whether the live family rules run (style.rs `classify`). Off, the
+    /// genre is only ever the served one, and the live range goes with it.
+    pub fn set_classify(&mut self, on: bool) {
+        self.style.classify = on;
+        if !on {
+            self.live_range = false;
+        }
+    }
+
     pub fn set_live_range(&mut self, on: bool) {
-        self.live_range = on;
+        self.live_range = on && self.style.classify;
         if on {
             self.range_from = -1;
         }
@@ -1202,6 +1211,13 @@ pub extern "C" fn rhythm_set_range(lo: f32, hi: f32) {
 pub extern "C" fn rhythm_set_groove(gr: u32) {
     if let Some(a) = g().a.as_mut() {
         a.set_groove(gr);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rhythm_set_classify(on: u32) {
+    if let Some(a) = g().a.as_mut() {
+        a.set_classify(on != 0);
     }
 }
 

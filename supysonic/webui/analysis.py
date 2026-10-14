@@ -358,6 +358,26 @@ def analysis_backfill_status():
     )
 
 
+def _key(ident):
+    """The Track primary key an id names: Deezer's numeric id through its uuid5,
+    or the row's own UUID — an upload, a library file, a YouTube fallback.
+    None for anything else (never sent to the database: a malformed UUID in a
+    WHERE poisons a Postgres transaction)."""
+    from ..deezer import ids as dz_ids
+
+    ident = str(ident or "")
+    if _valid_id(ident):
+        return dz_ids.track_uuid(ident)
+    try:
+        return uuid.UUID(ident)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _valid_ident(value):
+    return _key(value) is not None
+
+
 def _rows_for(ids):
     """{universal id -> payload} for the ids that have a verdict to serve.
 
@@ -368,19 +388,17 @@ def _rows_for(ids):
     """
     from ..db import GenreTag, TrackTag
     from ..deezer import analysis as ana
-    from ..deezer import ids as dz_ids
 
     out = {}
     if not ids:
         return out
-    # One query for the lot, keyed by the canonical uuid5 that IS the row's
-    # primary key, so this is an index lookup rather than a scan on deezer_id.
+    # One query for the lot, keyed by the primary key, so this is an index
+    # lookup rather than a scan on deezer_id.
     keys = {}
     for i in ids:
-        try:
-            keys[dz_ids.track_uuid(i)] = i
-        except Exception:
-            continue
+        k = _key(i)
+        if k is not None:
+            keys[k] = i
     if not keys:
         return out
     rows = (
@@ -402,14 +420,27 @@ def _rows_for(ids):
         if ident is None:
             continue
         seen.add(row.track.id)
-        out[ident] = ana.payload_for(row, tag=tagged.get(row.track.id))
+        out[ident] = ana.payload_for(
+            row, tag=tagged.get(row.track.id), from_file=ana.file_genre(row.track)
+        )
     # A tag with no measurement at all still has an answer to give.
     for track_id, tag in tagged.items():
         if track_id in seen:
             continue
         ident = keys.get(track_id)
         if ident is not None:
+            seen.add(track_id)
             out[ident] = ana.payload_for(None, tag=tag)
+    # So does a local file whose own tags name its genre: its owner said so.
+    # Only the ids that are not Deezer's, and only those still unanswered.
+    local = [k for k in keys if k not in seen and not _valid_id(keys[k])]
+    if local:
+        for t in Track.select(Track.id, Track.deezer_id, Track.genre).where(
+            Track.id.in_(local), Track.deezer_id.is_null(True), Track.genre.is_null(False)
+        ):
+            payload = ana.payload_for(None, from_file=ana.file_genre(t))
+            if payload is not None:
+                out[keys[t.id]] = payload
     return out
 
 
@@ -432,7 +463,6 @@ def _queue_missing(ids, limit=ANALYSIS_QUEUE_MAX):
     is about to play is the one measured first.
     """
     from ..deezer import analysis as ana
-    from ..deezer import ids as dz_ids
 
     accepted = []
     if not ids:
@@ -441,9 +471,8 @@ def _queue_missing(ids, limit=ANALYSIS_QUEUE_MAX):
     for ident in ids:
         if len(accepted) >= limit:
             break
-        try:
-            track_id = dz_ids.track_uuid(ident)
-        except Exception:
+        track_id = _key(ident)
+        if track_id is None:
             continue
         track = Track.get_or_none(Track.id == track_id)
         if track is None or not _may_access_track(track):
@@ -465,17 +494,14 @@ def _tempo_hints(ids):
     ``waiting``, for the client to ask again.
     """
     from ..deezer import analysis as ana
-    from ..deezer import ids as dz_ids
 
     provider = getattr(current_app, "deezer", None)
     if provider is None or not ids:
         return {}, []
+    # Deezer's ids only: nobody publishes a tempo for an upload.
     keys = {}
-    for ident in ids[:TEMPO_HINT_MAX]:
-        try:
-            keys[dz_ids.track_uuid(ident)] = ident
-        except Exception:
-            continue
+    for ident in [i for i in ids if _valid_id(i)][:TEMPO_HINT_MAX]:
+        keys[_key(ident)] = ident
     if not keys:
         return {}, []
     allowed = [
@@ -496,37 +522,26 @@ def track_analysis(mid):
 
     When there is nothing to serve and the server CAN measure, the measurement
     is put on the background queue and the id comes back in ``pending``: the
-    client polls, and adopts the genre the moment it exists instead of carrying
-    its own guess for the rest of the track. The request itself never waits on
-    it — see the module docstring.
+    client polls, and adopts the genre the moment it exists. The request itself
+    never waits on it — see the module docstring. A Deezer id and a local
+    file's UUID go down the same road.
     """
-    from ..db import GenreTag, TrackTag
-    from ..deezer import analysis as ana
-
-    if _valid_id(mid):
-        found = _rows_for([str(mid)])
-        if found:
-            return jsonify({"ready": True, **found[str(mid)]})
-        pending = _queue_missing([str(mid)])
-        hints, waiting = _tempo_hints([str(mid)])
-        if hints:
-            return jsonify({"ready": True, **hints[str(mid)], "pending": pending})
-        return jsonify({"ready": False, "pending": pending + [i for i in waiting if i not in pending]})
-    track = Track.get_or_none(Track.id == mid)
-    if track is None or not _may_access_track(track):
+    mid = str(mid)
+    if not _valid_ident(mid):
         return jsonify({"ready": False})
-    row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
-    tag = (
-        TrackTag.select(TrackTag, GenreTag)
-        .join(GenreTag)
-        .where(TrackTag.track == track)
-        .first()
-    )
-    tag = tag.tag if tag is not None else None
-    if row is not None or tag is not None:
-        return jsonify({"ready": True, **ana.payload_for(row, tag=tag)})
-    pending = [str(mid)] if ana.request_analysis(track) else []
-    return jsonify({"ready": False, "pending": pending})
+    if not _valid_id(mid):
+        # A local row is private to whoever may read it; ask before answering.
+        track = Track.get_or_none(Track.id == _key(mid))
+        if track is None or not _may_access_track(track):
+            return jsonify({"ready": False})
+    found = _rows_for([mid])
+    if found:
+        return jsonify({"ready": True, **found[mid]})
+    pending = _queue_missing([mid])
+    hints, waiting = _tempo_hints([mid])
+    if hints:
+        return jsonify({"ready": True, **hints[mid], "pending": pending})
+    return jsonify({"ready": False, "pending": pending + [i for i in waiting if i not in pending]})
 
 
 @webapi.route("/analysis/<mid>/live", methods=["POST"])
@@ -581,7 +596,15 @@ def track_analyses():
     raw = data.get("ids") or []
     if not isinstance(raw, list):
         return jsonify({"error": "ids must be a list"}), 400
-    ids = list(dict.fromkeys(str(x) for x in raw if _valid_id(x)))[:ANALYSIS_BATCH_MAX]
+    ids = list(dict.fromkeys(str(x) for x in raw if _valid_ident(x)))[:ANALYSIS_BATCH_MAX]
+    # A local row is private to whoever may read it (an upload is its owner's):
+    # the ones this caller may not see are answered as if unknown.
+    local = {_key(i): i for i in ids if not _valid_id(i)}
+    if local:
+        allowed = {
+            t.id for t in Track.select().where(Track.id.in_(list(local))) if _may_access_track(t)
+        }
+        ids = [i for i in ids if _valid_id(i) or _key(i) in allowed]
     found = _rows_for(ids)
     missing = _missing(ids, found)
     # Only the tracks the player is about to reach, and only while the server

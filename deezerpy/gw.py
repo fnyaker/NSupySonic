@@ -390,6 +390,24 @@ class GW:
         }
         return self.api_call('page.get', params=params)
 
+    def get_module_page(self, module_id):
+        """A CMS module page (``channels/module/<uuid>``), asked the way the
+        web app asks it (VERSION 2.5, albums in a plain grid) — e.g. "Nouveautés
+        pour toi": the new-releases mix, then every new album, in one grid."""
+        params = {
+            'gateway_input': json.dumps({
+                'PAGE': 'channels/module/' + str(module_id),
+                'VERSION': '2.5',
+                'SUPPORT': {
+                    'grid': ['album', 'smarttracklist', 'playlist'],
+                    'horizontal-grid': ['album', 'smarttracklist', 'playlist'],
+                    'large-card': ['album', 'playlist', 'smarttracklist'],
+                },
+                'LANG': 'fr',
+            })
+        }
+        return self.api_call('page.get', params=params)
+
     def search(self, query, index=0, limit=10, suggest=True, artist_suggest=True, top_tracks=True):
         return self.api_call('deezer.pageSearch', {
             "query": query,

@@ -77,14 +77,10 @@
   $: vmode = effectiveMode($vizMode, $vizBeatDetect, $ecoMode);
   $: fullBleed = $vizFullBleed && (MODE_BY_ID.get(vmode)?.fullBleed ?? false);
   $: stripViz = vmode === "bars";
-  // The served genre is THE genre (the analyser pins it, audio/engine.js
-  // adoptVerdict); the live classifier's reading only names a track the server
-  // has no genre for, once it is reasonably sure — a label that flickers
-  // between four genres in a bar is worse than no label, hence the floor.
-  $: styleLabel = !$vizShowStyle
-    ? ""
-    : $servedStyleLabel ||
-      (vmode === "smart" && $readout.styleConfidence > 0.35 ? $readout.styleLabel : "");
+  // The genre is the SERVER's answer and nothing else (the analyser pins it,
+  // audio/engine.js adoptVerdict, and runs no classifier of its own): a track
+  // the server has no genre for shows none.
+  $: styleLabel = $vizShowStyle ? $servedStyleLabel : "";
 
   function onVisibility() {
     if (document.hidden) {

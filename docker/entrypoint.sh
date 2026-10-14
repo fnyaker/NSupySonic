@@ -71,6 +71,7 @@ render_config() {
             printf 'sync_playlists = %s\n' "${DEEZER_SYNC_PLAYLISTS:-yes}"
             printf 'sync_favorites = %s\n' "${DEEZER_SYNC_FAVORITES:-yes}"
             printf 'import_new_releases = %s\n' "${DEEZER_IMPORT_NEW_RELEASES:-yes}"
+            printf 'import_new_albums = %s\n' "${DEEZER_IMPORT_NEW_ALBUMS:-yes}"
             printf 'push_to_deezer = %s\n' "${DEEZER_PUSH:-yes}"
             printf 'scan_local = %s\n' "${DEEZER_SCAN_LOCAL:-yes}"
             printf 'report_listens = %s\n' "${DEEZER_REPORT_LISTENS:-no}"
