@@ -302,6 +302,8 @@ export const api = {
   genreCandidates: (limit = 40, sort = null) =>
     req("/genre/candidates?limit=" + limit + (sort ? "&sort=" + sort : "")),
   genreLabelled: () => req("/genre/labelled"),
+  // Untagged tracks with a vector, for self-training (lib/genre/core.js `pseudo`).
+  genrePool: (limit = 600) => req("/genre/pool?limit=" + limit),
   // One track's tag and the vocabulary ranked for it (the tag sheet).
   genreTrack: (id) => req("/genre/track/" + encodeURIComponent(id)),
   genreEmbeddings: (ids) =>

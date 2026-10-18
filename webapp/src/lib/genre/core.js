@@ -67,7 +67,10 @@ const now = () => (typeof performance !== "undefined" ? performance.now() : Date
  *                   groups?: Int32Array (an artist id per row, -1 for none) }
  * @param mode     "linear" | "deep"
  * @param options  overrides of DEFAULTS / DEEP_DEFAULTS, plus `grouped` (hold
- *                 out whole artists) and `seed` (repeat a run exactly)
+ *                 out whole artists), `seed` (repeat a run exactly) and
+ *                 `pseudo` (self-training: rows of class -1 are an unlabelled
+ *                 pool, learnt from where a fold's head is at least this sure —
+ *                 the second head ships only if it scores better held out)
  * @param onProgress (stage, pct) — called between epochs, at most every
  *                 `options.progressEvery` ms (80 by default)
  */
@@ -99,6 +102,7 @@ export function trainOn(x, data, mode = "linear", options = {}, onProgress = nul
       seed,
       grouped ? 1 : 0
     );
+    if (x.tr_pseudo) x.tr_pseudo(Math.max(0, Number(opt.pseudo) || 0));
     const err = x.tr_start();
     if (err) throw new Error(ERRORS[err] || `training refused (${err})`);
     const stage = deep ? "deep" : "training";
@@ -160,14 +164,18 @@ function readHead(x, data, deep, opt, seed, grouped, groups) {
   }
 
   const examples = new Array(C).fill(0);
-  for (let i = 0; i < n; i++) examples[y[i]]++;
+  let pool = 0;
+  for (let i = 0; i < n; i++) {
+    if (y[i] >= 0) examples[y[i]]++;
+    else pool++;
+  }
   // How many DIFFERENT artists each genre's examples come from: the number
   // that says whether a score can mean "this genre" or only "these artists".
   let artists = null;
   if (groups) {
     const sets = Array.from({ length: C }, () => new Set());
     let solo = 0;
-    for (let i = 0; i < n; i++) sets[y[i]].add(groups[i] >= 0 ? groups[i] : `solo${solo++}`);
+    for (let i = 0; i < n; i++) if (y[i] >= 0) sets[y[i]].add(groups[i] >= 0 ? groups[i] : `solo${solo++}`);
     artists = sets.map((s) => s.size);
   }
   // Per-class recall is what tells the user where to tag more; precision is
@@ -206,7 +214,7 @@ function readHead(x, data, deep, opt, seed, grouped, groups) {
   confusions.sort((p, q) => q.count - p.count);
 
   const metrics = {
-    examples: n,
+    examples: n - pool,
     classes: C,
     folds: res[1],
     projected: res[2],
@@ -223,6 +231,11 @@ function readHead(x, data, deep, opt, seed, grouped, groups) {
     confusion,
   };
   if (res[7]) metrics.retried = true;
+  // Self-training: how big the pool was, what the self-trained head scored
+  // held out, and how many pool rows the shipped head learnt from (0: the head
+  // trained on the labels alone won).
+  if (opt.pseudo > 0 && pool)
+    metrics.pseudo = { pool, balanced: res[11] >= 0 ? res[11] : null, rows: res[12], threshold: +opt.pseudo };
   if (deep) {
     metrics.hidden = Math.max(1, opt.hidden | 0);
     metrics.hidden2 = Math.max(0, opt.hidden2 | 0);

@@ -574,3 +574,45 @@ test("the Rust trainers are faster than the JavaScript they replaced", async () 
   const tr = await best(() => deep(data, { ...o, seed: 1 }));
   assert.ok(tr < tj, `deep: rust ${tr.toFixed(0)} ms, js+C ${tj.toFixed(0)} ms`);
 });
+
+// -- self-training ----------------------------------------------------------
+
+/** The first `keep` rows of each class labelled, the rest an untagged pool
+ *  (class -1) placed after them, as Genres.svelte's `pack` lays it out. */
+function withPool(data, keep) {
+  const per = data.n / data.labels.length;
+  const lab = [], pool = [];
+  for (let i = 0; i < data.n; i++) (i % per < keep ? lab : pool).push(i);
+  const rows = (ids) => {
+    const X = new Float32Array(ids.length * data.d);
+    ids.forEach((r, j) => X.set(data.X.subarray(r * data.d, (r + 1) * data.d), j * data.d));
+    return X;
+  };
+  const only = { ...data, X: rows(lab), y: Int32Array.from(lab, (r) => data.y[r]), n: lab.length };
+  const all = lab.concat(pool);
+  const mixed = { ...data, X: rows(all), y: Int32Array.from(all, (r, j) => (j < lab.length ? data.y[r] : -1)), n: all.length };
+  return { only, mixed, pool: pool.length };
+}
+
+test("untagged rows change nothing unless self-training is asked for", () => {
+  const { only, mixed } = withPool(clusters(4, 16, 64, 0.9, 21), 5);
+  const a = linear(only, { proj: 0, bag: 1, epochs: 10, seed: 3 });
+  const b = linear(mixed, { proj: 0, bag: 1, epochs: 10, seed: 3 });
+  assert.deepEqual(Array.from(b.W), Array.from(a.W));
+  assert.equal(b.metrics.examples, only.n);
+  assert.equal(b.metrics.pseudo, undefined);
+});
+
+test("self-training reports its pool, and ships its head only on a held-out gain", () => {
+  const { only, mixed, pool } = withPool(clusters(4, 16, 64, 0.9, 21), 5);
+  const opts = { proj: 0, bag: 1, epochs: 10, seed: 3 };
+  const teacher = linear(only, opts);
+  const self = linear(mixed, { ...opts, pseudo: 0.9 });
+  const ps = self.metrics.pseudo;
+  assert.equal(ps.pool, pool);
+  assert.equal(ps.threshold, 0.9);
+  assert.equal(self.metrics.examples, only.n);
+  assert.ok(ps.rows >= 0 && ps.rows <= pool, `rows ${ps.rows}`);
+  if (ps.rows === 0) assert.deepEqual(Array.from(self.W), Array.from(teacher.W));
+  else assert.ok(ps.balanced >= teacher.metrics.balanced + 0.01, `${ps.balanced} vs ${teacher.metrics.balanced}`);
+});

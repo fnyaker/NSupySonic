@@ -167,6 +167,7 @@ export function suspects(heldProbs, y, labels, max = 30) {
   const C = labels.length;
   const out = [];
   for (let i = 0; i < y.length; i++) {
+    if (y[i] < 0) continue; // an untagged row (self-training) has no label to doubt
     const own = heldProbs[i * C + y[i]];
     if (!Number.isFinite(own) || own >= SUSPECT_OWN) continue;
     let best = -1;
