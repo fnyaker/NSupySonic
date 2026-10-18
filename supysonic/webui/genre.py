@@ -1806,25 +1806,38 @@ def genre_model():
         start_relabel(current_app._get_current_object())
         return jsonify({"deleted": True, "relabel": _relabel_json()})
 
-    data = request.get_json(silent=True) or {}
+    result, status = store_head(request.get_json(silent=True) or {})
+    if status != 200:
+        return jsonify(result), status
+    # The new head reaches the whole library from what is already measured.
+    start_relabel(current_app._get_current_object())
+    return jsonify({**result, "relabel": _relabel_json()})
+
+
+def store_head(data):
+    """Store a head as the active one, or refuse it: ``(json, status)``. Shared
+    by the studio's PUT and a shared model file's import (genreshare.py). The
+    caller starts the relabel."""
+    from ..deezer import genre as gen
+
     labels = data.get("labels")
     weights = data.get("weights")
     dim = int(data.get("dim") or 0)
     if not isinstance(labels, list) or len(labels) < 2:
-        return jsonify({"error": "at least two labels are needed"}), 400
+        return {"error": "at least two labels are needed"}, 400
     if not isinstance(weights, str) or not weights:
-        return jsonify({"error": "weights required"}), 400
+        return {"error": "weights required"}, 400
     if len(weights) > MODEL_MAX_BYTES:
-        return jsonify({"error": "weights too large"}), 413
+        return {"error": "weights too large"}, 413
     if dim <= 0 or dim > 8192:
-        return jsonify({"error": "bad dim"}), 400
+        return {"error": "bad dim"}, 400
 
     kind = str(data.get("kind") or "linear").lower()
     if kind not in ("linear", "mlp", "mlp2"):
-        return jsonify({"error": "unknown kind"}), 400
+        return {"error": "unknown kind"}, 400
     hidden = int(data.get("hidden") or 0)
     if kind in ("mlp", "mlp2") and not (1 <= hidden <= 2048):
-        return jsonify({"error": "bad hidden size"}), 400
+        return {"error": "bad hidden size"}, 400
 
     row = GenreModel.create(
         version=(GenreModel.select().count() + 1),
@@ -1852,9 +1865,7 @@ def genre_model():
     if problem:
         row.delete_instance()
         gen.invalidate()
-        return jsonify({"error": problem}), 400
+        return {"error": problem}, 400
     GenreModel.update(active=False).where(GenreModel.id != row.id).execute()
     gen.invalidate()
-    # The new head reaches the whole library from what is already measured.
-    start_relabel(current_app._get_current_object())
-    return jsonify({"stored": True, "version": row.version, "relabel": _relabel_json()})
+    return {"stored": True, "version": row.version}, 200

@@ -1134,6 +1134,16 @@ genres". The heuristic above knows the styles it was written with; this teaches 
 - **The CSP had to be widened by exactly one token.** `script-src 'self' 'wasm-unsafe-eval'` permits
   WebAssembly compilation and nothing else — not `eval()`, not `new Function`, not inline script.
   Without it `WebAssembly.instantiate` is refused outright and deep training cannot run at all.
+- **A model travels as ONE FILE** (`supysonic/webui/genreshare.py`, the *Partager le modèle* card on the
+  Modèle tab): `/genre/share/export` writes the genres, every label (genre + Deezer id, YouTube id, or
+  artist and title for an upload) and the active head; `/genre/share/preview` then `/genre/share/import`
+  read one back. The two halves serve different cases: the head serves at once but only where the
+  vectors live in the same space (same extractor, a width this server reads — refused at the preview,
+  and `genre.store_head` still stores, re-reads and refuses before the working head is retired); the
+  labels outlive any extractor and ADD to the receiver's tags — a track already tagged here keeps its
+  tag, a track missing here is made from Deezer's record (no download), Deezer unreachable is
+  "non récupéré", never a verdict. Everything in the file is someone else's text: bounded, typed,
+  colours and archetypes validated, ids checked. `tests/test_genreshare.py`.
 - **One tag per track, admin-only, one model.** A track labelled both frenchcore and uptempo teaches
   the head that the two describe the same sound; a track that genuinely sits between them is better
   left out. And two users disagreeing about what hardtekk is would train the single shared model

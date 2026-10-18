@@ -310,6 +310,11 @@ export const api = {
   genreModelPut: (payload) =>
     req("/genre/model", { method: "PUT", body: body(payload) }),
   genreModelDelete: () => req("/genre/model", { method: "DELETE" }),
+  // A model as a file (supysonic/webui/genreshare.py): what it would do, then do it.
+  genreSharePreview: (file) => req("/genre/share/preview", { method: "POST", body: body(file) }),
+  genreShareImport: (file, opts) =>
+    req("/genre/share/import", { method: "POST", body: body({ file, ...opts }) }),
+  genreShareStatus: () => req("/genre/share/import"),
   // Re-deciding the stored verdicts under the active head (no re-measure).
   genreRelabel: () => req("/genre/relabel"),
   // How a track is built, as the analyser heard it (lib/genre/construction.js).

@@ -876,6 +876,121 @@
     measureAbort?.abort();
   }
 
+  // -- the model as a file (genreshare.py) --------------------------------------
+  // Out: the genres, the labels and the active head in one JSON file. In: a
+  // preview first (what is already here, what Deezer would have to supply, and
+  // whether this server can read the head), then the admin picks what to keep.
+  const SHARE_MAX_BYTES = 48 * 1024 * 1024;
+  let shareFile = null; // the parsed file being reviewed
+  let shareName = "";
+  let sharePreview = null;
+  let shareHead = false;
+  let shareTags = true;
+  let shareBusy = false;
+  let shareJob = null;
+  let shareTimer = null;
+  let shareInput;
+
+  async function exportShare() {
+    if (shareBusy) return;
+    shareBusy = true;
+    try {
+      const res = await fetch("/api/genre/share/export", { credentials: "include" });
+      if (!res.ok) throw new Error("export impossible (" + res.status + ")");
+      const text = await res.text();
+      const name = "modele-genres-" + new Date().toISOString().slice(0, 10) + ".nsgenre.json";
+      // The Android host cannot download a blob: URL (lib/log.js says why).
+      if (window.NSNative && typeof window.NSNative.saveText === "function") {
+        window.NSNative.saveText(name, text);
+      } else {
+        const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      }
+      toasts.push("Modèle exporté");
+    } catch (e) {
+      toasts.push(e?.message || "export impossible", "error");
+    } finally {
+      shareBusy = false;
+    }
+  }
+
+  async function pickShare(ev) {
+    const f = ev.target.files?.[0];
+    ev.target.value = "";
+    if (!f) return;
+    if (f.size > SHARE_MAX_BYTES) {
+      toasts.push("Fichier trop volumineux", "error");
+      return;
+    }
+    shareBusy = true;
+    try {
+      let parsed;
+      try {
+        parsed = JSON.parse(await f.text());
+      } catch {
+        throw new Error("Ce fichier n'est pas un modèle de genres");
+      }
+      const p = await api.genreSharePreview(parsed);
+      shareFile = parsed;
+      shareName = f.name;
+      sharePreview = p;
+      shareHead = !!p.head?.compatible;
+      shareTags = (p.tags?.total || 0) > 0;
+    } catch (e) {
+      toasts.push(e?.message || "fichier illisible", "error");
+    } finally {
+      shareBusy = false;
+    }
+  }
+
+  function cancelShare() {
+    shareFile = null;
+    sharePreview = null;
+  }
+
+  function watchShare() {
+    clearTimeout(shareTimer);
+    if (!shareJob?.running) return;
+    shareTimer = setTimeout(async () => {
+      try {
+        shareJob = await api.genreShareStatus();
+      } catch {}
+      if (shareJob?.running) watchShare();
+      else refresh();
+    }, 1000);
+  }
+
+  async function importShare() {
+    if (!shareFile || shareBusy || !(shareHead || shareTags)) return;
+    if (shareHead && status.model && !window.confirm("Le modèle du fichier remplacera le modèle actif. Continuer ?")) return;
+    shareBusy = true;
+    try {
+      const res = await api.genreShareImport(shareFile, { head: shareHead, tags: shareTags });
+      if (res.head) {
+        toasts.push("Modèle importé — il est appliqué à toute la bibliothèque");
+        relabel = null;
+        try {
+          relabel = (await api.genreRelabel()) || null;
+          watchRelabel();
+        } catch {}
+      }
+      shareJob = shareTags ? res.job : null;
+      cancelShare();
+      watchShare();
+      await refresh();
+    } catch (e) {
+      toasts.push(e?.message || "import impossible", "error");
+    } finally {
+      shareBusy = false;
+    }
+  }
+
   async function sendModel() {
     if (!head || sending) return;
     if (
@@ -1230,6 +1345,7 @@
     loadCandidates();
   });
   onDestroy(() => {
+    clearTimeout(shareTimer);
     clearTimeout(probeTimer);
     stopPreview();
     stopExtPoll();
@@ -2360,6 +2476,95 @@
           </button>
         {/if}
       </section>
+
+      <section class="card">
+        <h2><Icon name="share" size={18} /> Partager le modèle</h2>
+        <p class="sub muted">
+          Un fichier avec vos genres, vos étiquettes et le modèle actif. Sur un autre
+          serveur, le modèle sert tel quel et les étiquettes s'ajoutent aux siennes :
+          un titre déjà étiqueté là-bas garde son genre.
+        </p>
+        {#if sharePreview}
+          {@const t = sharePreview.tags}
+          {@const h = sharePreview.head}
+          <div class="share-review">
+            <p class="share-file"><Icon name="archive" size={15} /> <strong>{shareName}</strong></p>
+            <label class="share-opt" class:off={!h?.compatible}>
+              <input type="checkbox" bind:checked={shareHead} disabled={!h?.compatible} />
+              <span>
+                <strong>Utiliser ce modèle</strong>
+                <span class="muted small">
+                  {#if !h}
+                    Le fichier n'en contient pas.
+                  {:else}
+                    {[
+                      `${h.labels.length} genres`,
+                      h.kind === "linear" ? "linéaire" : "réseau",
+                      h.balanced ? `${pct(h.balanced)} % équilibré` : null,
+                      h.examples ? `${h.examples} exemples` : null,
+                      h.compatible && status.model ? "remplace le modèle actif" : null,
+                    ].filter(Boolean).join(" · ")}
+                    {#if !h.compatible}<span class="bad">{" · "}inutilisable ici : {h.reason}</span>{/if}
+                  {/if}
+                </span>
+              </span>
+            </label>
+            <label class="share-opt" class:off={!t.total}>
+              <input type="checkbox" bind:checked={shareTags} disabled={!t.total} />
+              <span>
+                <strong>Ajouter les étiquettes</strong>
+                <span class="muted small">
+                  {t.total} titre{t.total > 1 ? "s" : ""} : {t.local} déjà dans la bibliothèque{#if t.deezer}, {t.deezer} à récupérer sur Deezer{/if}{#if t.unknown}, {t.unknown} introuvable{t.unknown > 1 ? "s" : ""} ici{/if}.{#if t.already}{" "}{t.already} {t.already > 1 ? "portent" : "porte"} déjà ce genre.{/if}{#if t.kept}{" "}{t.kept} {t.kept > 1 ? "ont" : "a"} déjà un autre genre et le {t.kept > 1 ? "gardent" : "garde"}.{/if}
+                  {#if sharePreview.new_genres.length}
+                    {sharePreview.new_genres.length} genre{sharePreview.new_genres.length > 1 ? "s" : ""} nouveau{sharePreview.new_genres.length > 1 ? "x" : ""}.
+                  {/if}
+                </span>
+              </span>
+            </label>
+            <div class="share-actions">
+              <button class="primary" on:click={importShare} disabled={shareBusy || !(shareHead || shareTags)}>
+                <Icon name="upload" size={16} /> {shareBusy ? "Import…" : "Importer"}
+              </button>
+              <button class="ghost" on:click={cancelShare} disabled={shareBusy}>Annuler</button>
+            </div>
+          </div>
+        {:else}
+          <div class="share-actions">
+            <button class="ghost" on:click={exportShare} disabled={shareBusy || !(status.model || status.labelled)}>
+              <Icon name="download" size={16} /> Exporter
+            </button>
+            <button class="ghost" on:click={() => shareInput.click()} disabled={shareBusy || shareJob?.running}>
+              <Icon name="upload" size={16} /> Importer un fichier
+            </button>
+            <input
+              bind:this={shareInput}
+              type="file"
+              accept=".json,application/json"
+              hidden
+              on:change={pickShare}
+            />
+          </div>
+        {/if}
+        {#if shareJob && (shareJob.running || shareJob.done)}
+          <div class="relabel">
+            {#if shareJob.running}
+              <div class="progress">
+                <i style={`width:${pct(shareJob.total ? shareJob.done / shareJob.total : 0)}%`}></i>
+              </div>
+            {/if}
+            <span class="muted small">
+              {shareJob.running ? "Import des étiquettes…" : "Étiquettes importées :"}
+              {[
+                `${shareJob.done} / ${shareJob.total}`,
+                `${shareJob.tagged} ajoutée${shareJob.tagged > 1 ? "s" : ""}`,
+                shareJob.already ? `${shareJob.already} déjà là` : null,
+                shareJob.kept ? `${shareJob.kept} ${shareJob.kept > 1 ? "gardent" : "garde"} son genre` : null,
+                shareJob.not_found ? `${shareJob.not_found} introuvable${shareJob.not_found > 1 ? "s" : ""}` : null,
+              ].filter(Boolean).join(" · ")}{#if shareJob.failed}<span class="bad">{" · "}{shareJob.failed} non récupéré{shareJob.failed > 1 ? "s" : ""} (Deezer injoignable)</span>{/if}
+            </span>
+          </div>
+        {/if}
+      </section>
     {/if}
   {/if}
 </div>
@@ -2967,6 +3172,47 @@
   .small-btn {
     margin-top: 10px;
     font-size: 0.84rem;
+  }
+  .share-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .share-review {
+    display: grid;
+    gap: 12px;
+  }
+  .share-file {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0;
+    font-size: 0.9rem;
+    overflow-wrap: anywhere;
+  }
+  .share-opt {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 12px 14px;
+    border: 1px solid var(--border, #2a2d33);
+    border-radius: 14px;
+    background: var(--surface-2, #1b1d21);
+    cursor: pointer;
+  }
+  .share-opt.off {
+    cursor: default;
+    opacity: 0.7;
+  }
+  .share-opt input {
+    margin-top: 3px;
+    accent-color: var(--accent, #22d3ee);
+    flex: none;
+  }
+  .share-opt > span {
+    display: grid;
+    gap: 3px;
+    line-height: 1.45;
   }
   .refs {
     margin: -2px 0 10px 22px;
