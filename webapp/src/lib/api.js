@@ -372,6 +372,16 @@ export const api = {
   // The YouTube fallback: opt-in per search (lib/youtube.js). Its hits are
   // ordinary tracks whose id is the row they become once played or kept.
   youtubeSearch: (q) => req("/youtube/search?q=" + encodeURIComponent(q)),
+
+  // A playlist somebody shared (Deezer, Spotify, YouTube, Apple Music): read
+  // and matched on the server as a job — see supysonic/webui/playlist_import.py.
+  importPlaylist: (url) => req("/import/playlist", { method: "POST", body: body({ url }) }),
+  importStatus: (id) => req("/import/playlist/" + encodeURIComponent(id)),
+  importSave: (id, title, keep) =>
+    req("/import/playlist/" + encodeURIComponent(id) + "/save", {
+      method: "POST",
+      body: body({ title, keep }),
+    }),
   youtubeStatus: () => req("/youtube/status"),
   setYoutubeEnabled: (enabled) =>
     req("/youtube/settings", { method: "PUT", body: body({ enabled }) }),

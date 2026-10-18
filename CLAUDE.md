@@ -119,6 +119,7 @@ cd webapp && node test/repeat/run.mjs               # repeat one / all on a 4 s 
                                                      # every pass reaches its end, none jumps back from the middle, no dead air
 cd webapp && node test/skip/run.mjs                 # a crossfaded skip in a HIDDEN page whose timers are throttled (the phone behind a car
                                                      # radio): the next track must be heard at once, graph and direct paths
+cd webapp && node test/import/run.mjs [--phone]       # a shared playlist link: pasted into the search, read, played, kept
 cd webapp && node test/fullscreen/run.mjs           # the desktop full-screen player from 700x900 to 1920x1080: every control on screen,
                                                      # inside its column and the element a click at its centre lands on
                                                      # (the four browser tests above start tools/perf_api.py --serve; PYTHON=<venv python>, SHOTS=<dir> keeps pictures)
@@ -435,6 +436,19 @@ by default, asked on Enter or when ticked — never per keystroke) and the repla
   minute and a refusal (429, "confirm you're not a bot") for fifteen (`held`), during which nothing
   is asked. The admin switch (Réglages → *Source de secours : YouTube*, `Meta yt.enabled`) turns
   it off for everyone; what is archived keeps playing. `tests/test_youtube.py` counts the requests.
+
+**Importing a shared playlist** (`supysonic/linkimport.py` reads the link, `webui/playlist_import.py`
+matches and keeps it, `routes/Import.svelte`; reached from a link pasted into the search box and from
+the library). Deezer, Spotify (its public embed page), YouTube (`ytmusicapi`) and Apple Music (the
+share page's own JSON): no account, no token. **The pasted text is only ever parsed** — every request
+goes to a fixed host with a validated id, and a short link's redirect is followed by hand, each hop
+required to stay on the same service. Each line is matched library first (on disk: free, and it
+never vanishes), then Deezer (the ISRC when given, else a search), then YouTube (a YouTube link's own
+video, or one search) — by the replacement sheet's own `match_score`, or `closeness` ≥ `PLAUSIBLE`
+with the artist credited (`sure: false`, listed under "À vérifier"); anything less stays unmatched,
+since a wrong song is worse than a hole. A worker job (4 searches in flight), polled; the result is
+TEMPORARY (process memory, 3 h) and plays as it is. *Enregistrer* (admin) makes a LOCAL playlist —
+not created on the Deezer account — and queues its tracks for archiving.
 
 **Unavailable means BOTH sources are gone** — not "Deezer dropped it". `DELETE /api/track/<id>` is
 the third answer next to replace-and-upload, and `availability.verify_gone` re-checks *at the moment
