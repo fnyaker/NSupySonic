@@ -1,12 +1,28 @@
 # Se détacher de Deezer : Deezer comme pure source de sons
 
 Objectif (demande du propriétaire, 18/10/2026) : Deezer ne doit plus être qu'un **fournisseur de
-fichiers FLAC**. Un titre archivé depuis Deezer doit être, pour le reste de l'application, **un
-fichier comme un autre, comme si l'utilisateur l'avait uploadé** : l'audio, la pochette, le titre,
-l'album, le nom (et l'id) de l'artiste. Rien d'autre ne vient de Deezer : ni ses algorithmes
-(Flow, mixes, radios, recommandations, classements), ni ses données pré-calculées (gain, BPM,
-genre, crédits, paroles, ISRC, label…), ni la synchronisation de nos playlists et favoris vers
-le compte Deezer.
+fichiers FLAC** et de **faits sur ces fichiers**. Un titre archivé depuis Deezer doit être, pour le
+reste de l'application, **un fichier comme un autre, comme si l'utilisateur l'avait uploadé**. On
+ne dépend plus des **algorithmes** de Deezer (Flow, mixes, radios, recommandations, classements),
+et on arrête de synchroniser nos playlists et nos favoris vers le compte Deezer.
+
+**Ce qu'on garde de Deezer, et ce qu'on cherche ailleurs** (précision du propriétaire, 18/10/2026).
+La ligne de partage est la fiabilité :
+
+- **Les faits déterministes, qui ne dépendent pas de la plateforme, viennent de Deezer** comme
+  aujourd'hui : titre, album, artistes (et featurings), pochette, numéros de piste et de disque,
+  **date de sortie**, ISRC, durée, label, crédits de l'enregistrement, et **le BPM quand Deezer en
+  publie un** (utile comme étiquette pour entraîner et évaluer nos modèles).
+- **Ce qui n'est pas fiable chez Deezer est cherché ailleurs** : les **paroles** (LRCLIB, D11), le
+  **genre** (nos mesures et nos étiquettes, D13 — Deezer ne donne qu'un genre d'album très large),
+  et ce que Deezer **calcule** plutôt qu'il ne constate, comme le gain (mesuré par nous, D9).
+- **Nos algorithmes doivent fonctionner sans aucune de ces données** : la normalisation, le tempo,
+  le genre, les recommandations donnent un résultat juste sur un upload qui n'a que son audio. Une
+  donnée importée peut les aider quand elle est là ; elle n'est jamais une condition.
+
+L'« IMDb de la musique » évoqué par le propriétaire existe : c'est **MusicBrainz**. Il est évalué
+en D19, comme complément là où Deezer ne dit rien (les uploads surtout) et comme recoupement, pas
+comme remplaçant des faits Deezer.
 
 Ce document est un **inventaire**, pas une implémentation. Chaque section `D<n>` est un chantier
 indépendant, qui peut devenir sa propre tâche et sa propre PR. Les dépendances entre chantiers
@@ -19,10 +35,11 @@ Pour que la liste ci-dessous soit lisible, voici la frontière visée :
 | Reste chez Deezer | Pourquoi |
 |---|---|
 | L'ARL, la connexion, le jeton de média, le téléchargement et le déchiffrement du FLAC (`provider.py`, `deezerpy/`, `archive.ensure_archived`) | C'est la source des sons. |
-| La **recherche de catalogue** (`/api/search`, côté Deezer) et la lecture d'une page album / artiste / playlist **pour trouver** des sons à récupérer | Il faut bien savoir quoi télécharger. Ces pages servent à choisir ; elles n'alimentent plus la bibliothèque au-delà des cinq champs. |
-| La pochette d'album (téléchargée une fois, stockée en `cover.jpg`) | Explicitement gardée. |
-| Le titre, l'album, le nom et l'id de l'artiste (et les artistes crédités en featuring, qui sont des noms d'artistes) | Explicitement gardés. |
-| Le numéro de piste et de disque | **Choix par défaut** : gardés, car c'est ce qu'un fichier uploadé porte dans ses tags et l'ordre d'un album en dépend. À retirer si le propriétaire en décide autrement. |
+| La **recherche de catalogue** (`/api/search`, côté Deezer) et la lecture d'une page album / artiste / playlist **pour trouver** des sons à récupérer | Il faut bien savoir quoi télécharger. Ces pages servent à choisir, pas à recommander. |
+| La pochette d'album (téléchargée une fois, stockée en `cover.jpg`) | Un fait sur la sortie. |
+| Titre, album, artistes et featurings (noms et ids), numéros de piste et de disque, durée | Des faits sur le fichier. |
+| La **date de sortie**, l'**ISRC**, le label, le copyright, les crédits (`SNG_CONTRIBUTORS` : auteur, compositeur, producteur…) | Des faits, les mêmes sur toutes les plateformes. L'ISRC est en plus la clé la plus sûre vers MusicBrainz (D19). |
+| Le **BPM publié par Deezer**, quand il existe | Gardé comme étiquette de référence (entraînement, évaluation, `bpm-audit`). Nos algorithmes savent s'en passer : Deezer n'en publie presque pas en hard dance (2 fichiers sur 3 462 ici). Voir D13. |
 | `Track.deezer_id` et les ids déterministes (`ids.py`) | Ils ne sont plus une identité exposée (voir D14), seulement la « référence de source » qui permet de re-télécharger un fichier supprimé par le nettoyage. |
 | Les podcasts (shows / épisodes) | Hors périmètre de la demande ; seule la **réécriture vers Deezer** est coupée (D3). |
 
@@ -180,33 +197,35 @@ entièrement les classements et genres éditoriaux de l'API publique Deezer.
 
 Fini quand : l'écran n'existe plus, ou ne lit plus que la base.
 
-## D8. Ce qu'on écrit sur disque à l'archivage : cinq champs, pas plus
+## D8. Ce qu'on écrit sur disque à l'archivage : les faits, pas les calculs ni les jetons
 
 État actuel :
 - `metadata.meta_from_gw` + `tag_file` écrivent dans le FLAC : titre, artistes, album,
-  albumartist, piste, disque, **date, ISRC, ReplayGain dérivé du `GAIN` Deezer** (`TXXX`,
+  albumartist, piste, disque, date, ISRC, **un ReplayGain dérivé du `GAIN` Deezer** (`TXXX`,
   `REPLAYGAIN_TRACK_GAIN`), paroles embarquées.
 - `library.save_track_metadata` écrit `<track>.json` avec un bloc `gw` de `_KEEP_FIELDS` : `ISRC`,
   `GAIN`, `EXPLICIT_LYRICS`, `COPYRIGHT`, `LYRICS_ID`, `PROVIDER_ID`, `RANK_SNG`,
   `SNG_CONTRIBUTORS`, `LABEL_NAME`, dates de sortie…
 - `library.refresh_track_metadata` « améliore » la ligne depuis `song.getData` (gain, année…).
+- Le BPM Deezer n'est **pas** gardé sur disque : `analysis.tempo_hints` le met en cache un jour.
 
 À faire :
-- Tags : titre, artiste(s), album, artiste de l'album, piste / disque (voir le choix par défaut en
-  tête), pochette. Plus d'ISRC, de date Deezer, de gain Deezer.
-- Sidecar : réduit aux ids de source (`deezer_id`, `artist_deezer_id`, `album_deezer_id`) et aux
-  cinq champs ; plus de bloc `gw`.
-- `refresh_track_metadata` ne garde que ces champs.
+- Garder dans les tags et le sidecar tous les faits du tableau en tête, **BPM Deezer compris**
+  (dans le sidecar, sous un nom qui dit sa source : `deezer_bpm`, jamais dans le tag `BPM`, qui
+  est celui que lisent les autres lecteurs et que notre mesure remplit, voir D13).
+- Retirer ce qui est un **calcul ou un signal de plateforme** : le ReplayGain dérivé de `GAIN`
+  (remplacé par notre mesure, D9), `RANK_SNG` (popularité Deezer), `PROVIDER_ID`, `LYRICS_ID`.
+- Les paroles Deezer ne sont plus embarquées (D11).
 - Migration de l'existant : un job (bouton + CLI, reprise sur checkpoint comme les autres
-  backfills) qui réécrit les sidecars et retire les tags superflus des archives déjà présentes,
-  sans retélécharger l'audio. Le tag doit être réécrit hors du fichier publié puis remplacé
-  (même règle que `archive._tag_archive`).
+  backfills) qui met les sidecars et les tags des archives déjà présentes au nouveau format, sans
+  retélécharger l'audio, et qui va chercher le BPM des titres qui n'en ont pas encore dans leur
+  sidecar (une requête publique par titre, au rythme de la file de fond). Le tag est réécrit hors
+  du fichier publié puis remplacé (même règle que `archive._tag_archive`).
 
-Dépend de : D9 (gain), D10 (crédits), D11 (paroles), D12 (année) pour savoir ce qui remplace chaque
-champ retiré.
+Dépend de : D9 (gain), D11 (paroles).
 
-Fini quand : une archive neuve et une archive migrée portent exactement les mêmes champs qu'un
-upload tagué proprement.
+Fini quand : une archive porte ses faits et rien de calculé par Deezer, et un upload tagué
+proprement passe exactement par le même code.
 
 ## D9. Normalisation du volume mesurée par nous, pour tout le monde
 
@@ -228,67 +247,97 @@ prix (à mesurer : l'analyse tourne juste après l'archivage).
 
 Fini quand : aucun gain ne vient de Deezer, et un upload est normalisé comme une archive.
 
-## D10. Crédits : performeurs depuis nos données, le reste depuis les tags du fichier
+## D10. Crédits : ceux de Deezer restent, sans aller les chercher en direct
 
 État actuel : `supysonic/webui/credits.py` (`/api/track/<id>/credits`) lit `SNG_CONTRIBUTORS`,
 `LABEL_NAME`, ISRC, copyright dans le sidecar, sinon **demande à Deezer** et réécrit le sidecar.
 `NowPlayingMore.svelte` affiche le panneau.
 
-À faire : garder les artistes crédités (`TrackArtist`, ce sont des noms d'artistes) ; le reste
-(auteur, compositeur, producteur, label) vient des **tags du fichier** quand il y en a (cas d'un
-upload), jamais de Deezer. Retirer l'appel réseau et l'écriture dans le sidecar. Le panneau masque
-ce qui manque.
+Les crédits sont des faits : ils restent importés de Deezer. Ce qui change :
+- ils sont pris **à l'archivage** (le payload `song.getData` les a déjà), donc la route n'a plus
+  besoin d'appeler Deezer pour un titre archivé ;
+- un upload lit les siens dans ses **tags** (compositeur, parolier, label…), et MusicBrainz (D19)
+  peut compléter ce qui manque aux deux ;
+- pour un titre pas encore archivé, l'appel à Deezer peut rester (c'est un fait, mis en cache).
 
-Fini quand : la route ne touche plus le provider.
+Petit chantier, à faire avec D8.
 
-## D11. Paroles : LRCLIB seulement
+## D11. Paroles : cherchées ailleurs que chez Deezer
+
+Les paroles Deezer ne sont pas fiables (souvent absentes, parfois d'une autre version) : elles
+font partie de ce qu'on cherche autrement.
 
 État actuel : `supysonic/deezer/lyrics.py` cherche d'abord les paroles **de Deezer**
 (`provider.get_lyrics`), puis LRCLIB ; `/api/lyrics/<id>` interroge Deezer en direct pour un titre
 pas encore archivé ; les paroles sont embarquées dans les tags (`embed_lyrics`).
 
-À faire : LRCLIB (titre, artiste, album, durée : exactement les champs qu'on garde) comme seule
-source, pour les archives comme pour les uploads (qui n'en ont pas aujourd'hui). Le `.lrc` déjà
-archivé reste. Le CLI `deezer lyrics` devient `supysonic-cli lyrics`.
+À faire :
+- **LRCLIB** en première source (déjà utilisé en second choix, `lyrics.fetch_lrclib`) : base
+  ouverte et sans clé, cherchée par titre, artiste, album et durée, ce qui la rend utilisable pour
+  les uploads aussi (qui n'ont pas de paroles aujourd'hui). Les paroles synchronisées restent
+  préférées au texte brut.
+- Une version d'un titre (remix, live, edit) ne prend jamais les paroles d'une autre : la durée
+  doit concorder à quelques secondes près.
+- Mesurer la couverture sur la bibliothèque réelle (part des titres avec paroles synchronisées,
+  brutes, ou rien) avant de décider s'il faut une autre source.
+- Le CLI `deezer lyrics` devient `supysonic-cli lyrics`.
 
-Décision du propriétaire possible : retirer aussi les paroles déjà archivées venant de Deezer ?
-**Choix par défaut** : non, un `.lrc` est un fichier à nous, on le garde.
+Rien ne dépend des paroles : la ligne de paroles du lecteur s'affiche quand il y en a, et aucun
+algorithme ne les lit.
 
-Fini quand : le module ne référence plus le provider.
+Décisions du propriétaire possibles, avec leur choix par défaut :
+- Deezer en **dernier recours** quand LRCLIB n'a rien ? **Non**, à rouvrir si la couverture
+  mesurée est trop faible.
+- Retirer les paroles Deezer déjà archivées ? **Non**, un `.lrc` est un fichier à nous ; on le
+  remplace seulement si LRCLIB a une version synchronisée et que celle de Deezer ne l'était pas.
 
-## D12. Année et dates de sortie
+Fini quand : le module ne lit plus de paroles chez Deezer.
 
-État actuel : `Track.year` vient de `PHYSICAL_RELEASE_DATE` / `DIGITAL_RELEASE_DATE` Deezer
-(`normalize_track`), et la date est écrite dans les tags.
+## D12. Dates de sortie : celles de Deezer, complétées pour les uploads
 
-À faire : décision du propriétaire, l'année n'étant pas dans la liste des champs gardés.
-**Choix par défaut** : ne plus l'importer pour les nouvelles archives, laisser la colonne vide ;
-les tris par année ne portent alors que sur les uploads qui la taguent. Le nettoyage de l'existant
-est fait par le job de D8.
+La date de sortie est un fait : elle reste importée de Deezer (`PHYSICAL_RELEASE_DATE` /
+`DIGITAL_RELEASE_DATE`, aujourd'hui réduite à l'année dans `Track.year` par `normalize_track`).
 
-## D13. Tempo et genre : uniquement mesurés ou choisis par nous
+À faire :
+- Garder la date **complète** (AAAA-MM-JJ, parfois seulement AAAA) en plus de l'année, pour
+  l'affichage et le tri (migration de schéma) ; préférer la date physique quand elle est plus
+  ancienne que la numérique (une réédition numérique tardive n'est pas la sortie).
+- Un upload prend la date de ses tags, et MusicBrainz (D19) la complète quand il n'y en a pas.
+- Option à évaluer avec D19 : la **date de première sortie** de MusicBrainz pour un titre qu'on a
+  sur une compilation ou une réédition, où la date Deezer est celle de la compilation.
+
+Aucun algorithme ne lit la date. Petit chantier.
+
+## D13. Tempo et genre : nos algorithmes savent s'en passer
 
 État actuel (`supysonic/deezer/analysis.py`) :
 - `tempo_hints` / `provisional_payload` : le BPM publié par Deezer est servi comme tempo
-  **provisoire** au premier passage.
-- `_deezer_bpm` + `_reconcile_tracked` : le BPM Deezer sert de **témoin d'octave** à la mesure.
-- `supysonic-cli deezer bpm-audit`.
-- `file_genre` n'est appliqué qu'aux fichiers locaux, parce que les archives Deezer « portent le
-  genre large de l'album » : une fois D8 fait, elles n'en portent plus.
+  **provisoire** au premier passage, avant que le fichier soit mesuré.
+- `_deezer_bpm` + `_reconcile_tracked` : le BPM Deezer sert de **témoin d'octave** à la mesure
+  (23/26 disques exacts sans le témoin, 26/26 avec, sur l'éval de `tools/tempo_eval.py`).
+- `supysonic-cli deezer bpm-audit` compare le BPM Deezer à notre mesure, par style.
+- Le genre ne vient jamais de Deezer : nos mesures, les étiquettes de l'utilisateur, le modèle du
+  studio, et le genre écrit dans les tags d'un upload (`file_genre`, appliqué aux fichiers locaux
+  seulement, parce que les archives Deezer portent le genre large de l'album).
 
-À faire :
-- Retirer le tempo provisoire et le témoin d'octave ; garder les autres règles d'octave (doublement
-  par les kicks, garde-fou du saut de demi-temps). Re-mesurer l'éval (`tools/tempo_eval.py`, 28
-  disques) et écrire les chiffres avant / après : le CLAUDE.md dit 23/26 exacts sans le témoin et
-  26/26 avec, la perte est attendue sur 3 disques et doit être chiffrée.
-- `bpm-audit` supprimé.
-- `file_genre` appliqué à toutes les pistes (il ne lira rien sur les archives, ce qui est correct).
-- `ANALYSIS_VERSION` à incrémenter (re-mesure au démarrage, comme d'habitude).
-- `references.py` / `/genre/references` / `/genre/sounds` (sons par défaut du studio) utilisent la
-  recherche Deezer pour **trouver** des enregistrements : c'est de la recherche de catalogue, ça
-  reste ; ils doivent seulement passer par la création de ligne minimale de D8.
+Le BPM Deezer est un fait et reste importé ; le genre Deezer n'est pas fiable et reste ignoré. Ce
+qui change :
+- **Garder le BPM Deezer durablement** (sidecar et base, voir D8) au lieu d'un cache d'un jour, et
+  l'**offrir au studio comme étiquette** : une colonne de référence pour évaluer et entraîner nos
+  modèles de tempo et de genre (le studio lit aujourd'hui le tempo mesuré, `log2(bpm/120)`), avec
+  sa source affichée.
+- **Prouver que l'analyse s'en passe** : l'éval et les tests du tempo tournent aussi sans aucun BPM
+  Deezer et les chiffres sont écrits à côté de ceux avec. Le témoin d'octave et le tempo
+  provisoire restent, puisqu'ils aident quand le chiffre existe, mais ne doivent jamais être la
+  seule chose qui rend un résultat juste.
+- `bpm-audit` reste (c'est exactement l'outil qui dit si le chiffre de Deezer mérite confiance).
+- Les archives ne portent pas le genre d'album Deezer (D8) ; `file_genre` peut alors s'appliquer à
+  tous les fichiers, et ne lira que ce qu'un utilisateur a tagué lui-même.
+- `references.py` / `/genre/references` / `/genre/sounds` utilisent la recherche Deezer pour
+  **trouver** des enregistrements : c'est de la recherche de catalogue, ça reste.
 
-Fini quand : `analysis.py` n'importe plus le provider.
+Fini quand : le BPM Deezer est disponible au studio, et l'éval prouve, chiffres à l'appui, que
+l'analyse est juste sans lui.
 
 ## D14. Une seule identité : l'UUID de la ligne, pour l'API et la SPA
 
@@ -329,8 +378,8 @@ base qu'en repli (« Deezer disabled/unreachable »). `/api/artist/<id>/tracks`,
 
 À faire : une entité présente en base est servie depuis la base (titres archivés ou référencés,
 pochette locale) ; la page Deezer n'est demandée que pour **compléter** une entité du catalogue
-qu'on n'a pas encore (afficher ce qu'on peut télécharger), et ce qu'elle renvoie au-delà des cinq
-champs est ignoré. La discographie d'un artiste de la bibliothèque = ses albums en base, plus une
+qu'on n'a pas encore (afficher ce qu'on peut télécharger) ; on n'en garde que les faits du tableau
+en tête, jamais ses rangées de recommandations. La discographie d'un artiste de la bibliothèque = ses albums en base, plus une
 section « disponible sur Deezer » optionnelle.
 
 Dépend de : D14 (les ids de page).
@@ -386,6 +435,39 @@ Pour mémoire, ces parties appellent Deezer mais **pour récupérer des sons**, 
 - Toutes les règles de résilience du CLAUDE.md (disjoncteur, budgets, `_dz_api` / `_dz_live`) :
   elles concernent désormais moins de routes, pas moins de rigueur.
 
+## D19. MusicBrainz, l'« IMDb de la musique » : évaluation et usage
+
+C'est le complément pour ce que Deezer ne sait pas, surtout pour les **uploads**, qui n'ont que
+leurs tags, et le recoupement des faits Deezer quand on doute. Un module neuf (`supysonic/enrich/`,
+hors de `supysonic/deezer/` puisqu'il sert aussi aux uploads), en arrière-plan comme le reste : un
+titre est mis en file à l'archivage ou à l'upload, un seul worker suit le rythme imposé par chaque
+service, et un bouton + un CLI rattrapent la bibliothèque (reprise sur checkpoint, causes d'échec
+comptées). Rien n'attend ce module.
+
+Évaluation (conditions relevées sur leur documentation le 18/10/2026) :
+
+| Source | Ce qu'on en tire | Conditions | Fiabilité |
+|---|---|---|---|
+| **MusicBrainz** (`/ws/2/`) | Identifiant stable de l'enregistrement, de l'œuvre et de la sortie ; date de première sortie ; label ; crédits (compositeur, parolier, producteur…) ; ISRC | Pas de clé ; **1 requête/s par IP en moyenne** (au-delà, 503 pour toute l'IP) ; User-Agent obligatoire au format `NSupySonic/<version> ( contact )` ; données principales en **CC0** ; usage non commercial gratuit ; recherche par ISRC (`/ws/2/isrc/<isrc>`) | C'est bien l'équivalent d'IMDb : une base encyclopédique éditée par une communauté avec relecture, où chaque entité a un identifiant permanent. Couverture excellente sur la pop, le rock et les grands labels, plus inégale sur les scènes hard dance : à mesurer sur la bibliothèque avant d'en faire plus. |
+| **AcoustID** (`api.acoustid.org/v2/lookup`) | Identification **par l'audio lui-même** (empreinte Chromaprint calculée avec `fpcalc` sur le fichier) → identifiant MusicBrainz, ISRC | **Clé d'application** gratuite (à fournir par l'opérateur, jamais committée) ; **3 requêtes/s** maximum ; **usage non commercial uniquement** | La seule méthode qui ne dépend d'aucune métadonnée : le bon recours pour un upload mal tagué. |
+| **LRCLIB** | Paroles (D11) | Pas de clé, déjà utilisé | Base ouverte participative ; la recherche par durée évite les mauvaises versions. |
+| **Cover Art Archive** | Pochette pour un upload qui n'en a pas | Pas de limite de débit annoncée ; licence des images à vérifier | Exacte quand l'identifiant MusicBrainz l'est. |
+| Discogs | Label, numéro de catalogue, sorties vinyle et petits labels | Jeton pour le débit haut : 60 req/min authentifié, 25 sinon ; une partie seulement des données en CC0 | Très bonne sur l'électronique indépendante, rapprochement plus fragile (pas d'ISRC). **Choix par défaut** : pas dans la première version. |
+
+Rapprochement, du plus sûr au moins sûr : l'**ISRC** (de Deezer ou des tags) ; l'**empreinte
+AcoustID** si l'opérateur a une clé ; une **recherche** titre + artiste + durée (± 3 s), acceptée
+seulement si le titre réduit (`_core_title`) et l'artiste principal concordent exactement. Rien
+n'est écrit sans correspondance sûre. Chaque valeur garde sa source dans le sidecar ; un fait venu
+de Deezer ou des tags n'est jamais écrasé, MusicBrainz ne remplit que ce qui manque (exception
+possible : la date de première sortie, D12).
+
+À découper en PR : (a) le socle et MusicBrainz par ISRC, pour les uploads d'abord ; (b) l'empreinte
+AcoustID et la recherche ; (c) le rattrapage de la bibliothèque, avec la mesure de couverture par
+source.
+
+Fini quand : le job rapporte la part des titres complétés par source et par méthode, et un
+échantillon vérifié à la main ne contient pas de mauvaise correspondance.
+
 ---
 
 ## Ordre conseillé
@@ -393,12 +475,15 @@ Pour mémoire, ces parties appellent Deezer mais **pour récupérer des sons**, 
 1. **D1, D2, D3** : couper toutes les écritures vers Deezer. Indépendants les uns des autres,
    petits, et c'est la partie demandée explicitement.
 2. **D4, D5** puis **D16** : couper la synchronisation entrante.
-3. **D9, D10, D11, D12, D13** : remplacer chaque donnée pré-calculée par la nôtre (indépendants).
-4. **D8** : réduire ce qui est écrit sur disque et migrer l'existant (après 3).
+3. **D9, D11, D13** : notre gain, les paroles hors Deezer, le BPM gardé comme référence
+   (indépendants).
+4. **D8** avec **D10** et **D12** : ce qui est écrit sur disque, et la migration de l'existant.
 5. **D14** puis **D15** : l'identité unique, puis les pages.
 6. **D6** (en trois PR) et **D7** : remplacer les algorithmes.
-7. **D17** : le ménage final.
+7. **D19** : MusicBrainz, quand le reste tient debout (c'est un complément).
+8. **D17** : le ménage final.
 
 Décisions à confirmer par le propriétaire (un choix par défaut est indiqué dans chaque section) :
-numéro de piste / disque (tableau en tête), sort des playlists « Deezer · » existantes (D5), écran
-Explorer (D7), paroles Deezer déjà archivées (D11), année (D12).
+sort des playlists « Deezer · » existantes (D5), écran Explorer (D7), paroles Deezer en dernier
+recours et paroles déjà archivées (D11), date de première sortie MusicBrainz plutôt que celle de
+Deezer pour les compilations (D12), Discogs (D19).
