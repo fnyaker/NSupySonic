@@ -7186,16 +7186,32 @@ class GenreStudioTestCase(unittest.TestCase):
         import threading
         from unittest import mock
 
-        from supysonic.deezer import subgenre_tracks as sg
+        from supysonic.deezer import references as refs
         from supysonic.webui import genre as wg
 
-        with mock.patch.dict(sg.SUBGENRE_TRACKS, lists, clear=True):
+        sounds = [(g, a, t) for g, ps in lists.items() for a, t in ps]
+        with mock.patch.object(refs, "default_sounds", return_value=sounds):
             wg._sounds_job.update(running=True, stopped=False, retry_at=0.0)
             t = threading.Thread(target=wg._run_sounds, args=(self.app,))
             t.start()
             t.join(timeout=10)
             self.assertFalse(t.is_alive())
             return wg._sounds_json(), wg._sounds_signature()
+
+    def test_the_default_sounds_cover_every_major_genre_with_twenty(self):
+        """The run once read only the sub-genre lists, so the engine's own
+        families (Techno, Rock, Hip-hop…) got the two or three curated
+        examples. Frenchcore, Uptempo and the other scenes with no canon
+        written down stay short on purpose (references.py)."""
+        from supysonic.deezer import major_tracks, references as refs
+
+        counts = {}
+        for genre, _a, _t in refs.default_sounds():
+            counts[genre] = counts.get(genre, 0) + 1
+        short = {g: counts.get(g, 0) for g in major_tracks.MAJOR_TRACKS if counts.get(g, 0) < 20}
+        self.assertEqual(short, {})
+        keys = [(refs.fold(a), refs.fold(t)) for _g, a, t in refs.default_sounds()]
+        self.assertEqual(len(keys), len(set(keys)), "a recording is a default sound of one genre only")
 
     def test_a_default_sounds_run_counts_what_it_did_and_remembers_it(self):
         from supysonic.db import Meta, TrackTag

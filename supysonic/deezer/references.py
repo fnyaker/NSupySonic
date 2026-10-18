@@ -37,6 +37,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from .major_tracks import MAJOR_TRACKS
 from .subgenre_tracks import SUBGENRE_TRACKS
 
 #: Genre label (as the studio's vocabulary spells it) -> (artist, title) pairs.
@@ -213,7 +214,7 @@ SCENE_ARTISTS: dict[str, tuple[str, ...]] = {
 
 # The hand-written sub-genre lists go in after the curated ones, skipping any
 # pair the curated list already names (a "Piano" track is both, once).
-for _genre, _pairs in SUBGENRE_TRACKS.items():
+for _genre, _pairs in (*SUBGENRE_TRACKS.items(), *MAJOR_TRACKS.items()):
     _have = set(REFERENCES.get(_genre, ()))
     REFERENCES[_genre] = REFERENCES.get(_genre, ()) + tuple(p for p in _pairs if p not in _have)
 
@@ -304,3 +305,21 @@ def first_artist(ref_artist: str) -> str:
 
 def genres_with_references() -> list[str]:
     return sorted(set(REFERENCES) | set(SCENE_ARTISTS))
+
+
+def default_sounds() -> list[tuple[str, str, str]]:
+    """``[(genre, artist, title), ...]``: every recording that is a genre's
+    default sound, the sub-genres' hand-written lists first and the curated
+    ones after, so a record named under two genres is tagged with the more
+    specific one (a track wears one tag). Each pair appears once."""
+    seen: set[tuple[str, str]] = set()
+    out = []
+    for source in (SUBGENRE_TRACKS, REFERENCES):
+        for genre, pairs in source.items():
+            for artist, title in pairs:
+                key = (fold(artist), fold(title))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append((genre, artist, title))
+    return out
