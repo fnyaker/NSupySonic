@@ -9,6 +9,7 @@
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
   import { youtubeStatus, loadYoutubeStatus } from "../lib/youtube.js";
+  import { playlistLink, importRoute } from "../lib/linkimport.js";
 
   export let params = {};
 
@@ -118,7 +119,7 @@
 
   async function run(term) {
     const mine = ++seq;
-    if (!term) {
+    if (!term || playlistLink(term)) {
       results = EMPTY;
       loading = false;
       return;
@@ -149,6 +150,9 @@
   // most that still reads as a shortlist on a phone rather than a page you have
   // to scroll past to reach anything else — the rest is one tap away on the
   // Titres tab.
+  // A pasted playlist link is not a search: offer to import it instead.
+  $: shared = playlistLink(q);
+
   const TOP_TRACKS = 10;
   $: topTracks =
     tab === "all" ? (results.tracks || []).slice(0, TOP_TRACKS) : results.tracks || [];
@@ -182,7 +186,17 @@
   {/if}
 </div>
 
-{#if q.trim()}
+{#if shared}
+  <a class="shared fade-in" href={importRoute(shared.url)}>
+    <span class="s-icon"><Icon name="link" size={20} /></span>
+    <span class="s-text">
+      <strong>Importer cette playlist {shared.label}</strong>
+      <span class="muted">Retrouver ses titres pour l'écouter ici, et la garder si tu veux.</span>
+    </span>
+  </a>
+{/if}
+
+{#if q.trim() && !shared}
   <div class="tabs">
     <button class:active={tab === "all"} on:click={() => (tab = "all")}>Tout</button>
     <button class:active={tab === "tracks"} on:click={() => (tab = "tracks")}>Titres</button>
@@ -201,7 +215,7 @@
 {:else if !q.trim()}
   <p class="muted hint">Commencez à taper pour rechercher.</p>
 {:else if !hasResults}
-  {#if !(yt && ytAvailable)}
+  {#if !(yt && ytAvailable) && !shared}
     <p class="muted hint">Aucun résultat pour « {q} ».</p>
   {/if}
 {:else}
@@ -383,6 +397,39 @@
   }
   .hint.small {
     margin-top: 6px;
+  }
+  .shared {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    max-width: 560px;
+    margin: 16px 0 4px;
+    padding: 14px 18px;
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    color: var(--text);
+    text-decoration: none;
+  }
+  .shared:hover {
+    background: var(--bg-hover);
+  }
+  .s-icon {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+  }
+  .s-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+    font-size: 0.9rem;
   }
   .tabs {
     display: flex;

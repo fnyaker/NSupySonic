@@ -167,9 +167,14 @@
         <Icon name="refresh" size={17} /> {$syncing ? "Sync…" : "Synchroniser Deezer"}
       </button>
     {/if}
+    {#if CAN_BROWSE}
+      <a class="upload" href="#/import" title="Importer une playlist partagée (Deezer, Spotify, YouTube, Apple Music)">
+        <Icon name="link" size={17} /> <span class="full">Importer une playlist</span><span class="short">Playlist partagée</span>
+      </a>
+    {/if}
     {#if CAN_KEEP}
       <button class="upload" on:click={() => fileInput.click()} disabled={uploading}>
-        <Icon name="upload" size={17} /> {uploading ? "Import…" : "Importer des fichiers"}
+        <Icon name="upload" size={17} /> {#if uploading}Import…{:else}<span class="full">Importer des fichiers</span><span class="short">Fichiers</span>{/if}
       </button>
     {/if}
   </div>
@@ -296,7 +301,21 @@
     gap: 8px;
     flex-wrap: wrap;
   }
+  .upload .short {
+    display: none;
+  }
+  /* On a phone three pills of full labels stack into a column: the short ones
+     keep the import pair on one row. */
+  @media (max-width: 520px) {
+    .upload .full {
+      display: none;
+    }
+    .upload .short {
+      display: inline;
+    }
+  }
   .upload {
+    text-decoration: none;
     display: inline-flex;
     align-items: center;
     gap: 7px;
