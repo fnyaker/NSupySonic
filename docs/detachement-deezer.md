@@ -378,8 +378,8 @@ base qu'en repli (« Deezer disabled/unreachable »). `/api/artist/<id>/tracks`,
 
 À faire : une entité présente en base est servie depuis la base (titres archivés ou référencés,
 pochette locale) ; la page Deezer n'est demandée que pour **compléter** une entité du catalogue
-qu'on n'a pas encore (afficher ce qu'on peut télécharger), et ce qu'elle renvoie au-delà des cinq
-champs est ignoré. La discographie d'un artiste de la bibliothèque = ses albums en base, plus une
+qu'on n'a pas encore (afficher ce qu'on peut télécharger) ; on n'en garde que les faits du tableau
+en tête, jamais ses rangées de recommandations. La discographie d'un artiste de la bibliothèque = ses albums en base, plus une
 section « disponible sur Deezer » optionnelle.
 
 Dépend de : D14 (les ids de page).
