@@ -28,10 +28,10 @@
 >   Subsonic lui-même. Reste la recommandation de déployer derrière HTTPS.
 > - **NS-10** / **NS-35** — l'audit les classe déjà « non reproduit » et
 >   « risque contractuel, pas technique » ; rien à corriger côté code.
-> - **NS-19** (Android), **NS-21** (chaîne d'approvisionnement),
->   **NS-27** (journal d'audit) — trois chantiers à part entière (durcissement
->   de l'app native, politique de dépendances, nouvelle table + écran admin),
->   hors du périmètre de cette passe de correctifs.
+> - **NS-21** (chaîne d'approvisionnement), **NS-27** (journal d'audit) — deux
+>   chantiers à part entière (politique de dépendances, nouvelle table + écran
+>   admin), hors du périmètre de cette passe de correctifs. **NS-19** (Android)
+>   a été corrigé depuis, dans une passe dédiée à l'app native.
 >
 > **Migration de schéma.** `SCHEMA_VERSION` passe à `20260730` :
 > `track.owner_id` (propriétaire d'un upload, rétro-rempli depuis le chemin
@@ -136,7 +136,7 @@ Les preuves les plus marquantes de cette passe :
 | [NS-16](#ns-16) | `getLyrics` : XML non fiable en HTTP clair (bombe XML) | 🟡 Moyen | 🔎 Confirmé | Bascule sur LRCLIB (https + JSON) : plus de XML ni de HTTP clair à parser |
 | [NS-17](#ns-17) | Ids non validés dans les URL Deezer sortantes | 🟡 Moyen | ✅ Confirmé | `_valid_id` appliqué à artist/album/playlist/lyrics/gain/radio ; slug pour smarttracklist |
 | [NS-18](#ns-18) | SSRF via `stream_url` d'épisode (redirections suivies) | 🟡 Moyen | 🔎 Confirmé | Redirections suivies un saut à la fois, refus des IP privées/loopback/link-local |
-| [NS-19](#ns-19) | Android : cleartext + trust-all SSL + pont JS ouvert | 🟡 Moyen | 🔎 Confirmé | **Non corrigé** — `android/`, hors du périmètre serveur de cette passe |
+| [NS-19](#ns-19) | Android : cleartext + trust-all SSL + pont JS ouvert | 🟡 Moyen | 🔎 Confirmé | Épinglage TOFU au lieu du trust-all, `NSNative` limité au serveur, clair et cookies limités au serveur (redirections suivies à la main), mixed content refusé, sauvegarde désactivée |
 | [NS-20](#ns-20) | Fuite de l'ARL (conf en clair, env, `ps`) | 🟡 Moyen | 🔎 Confirmé | `umask 077`, conf rendue en `chmod 600`, mot de passe admin via `--password-stdin` |
 | [NS-21](#ns-21) | Supply chain : pas de lockfile, deps flottantes | 🟡 Moyen | 🔎 Confirmé | **Non corrigé** — lockfile npm / planchers de version : décision du mainteneur |
 | [NS-22](#ns-22) | CSP `https:` joker, pas de HSTS | 🟡 Moyen | ✅ Confirmé | CSP restreinte aux hôtes réellement utilisés, `object-src 'none'`, HSTS si TLS, Permissions-Policy |
@@ -545,6 +545,17 @@ cookie en clair → injection JS → `NSNative.shareFile(url arbitraire)` /
 `saveText(fichier arbitraire)`. Le trust-all est **pire qu'aucun TLS** (il affiche un
 cadenas). → Config réseau restreinte à l'hôte, épinglage TOFU au lieu du trust-all, shim
 restreint à l'origine, validation d'origine dans `shareFile`, `allowBackup="false"`.
+
+**Corrigé.** Décocher « Vérifier le certificat SSL » épingle désormais le certificat vu
+à la première connexion (empreinte SHA-256 montrée à l'écran de configuration ;
+la WebView épingle à son premier chargement sinon) : ensuite seul ce certificat, ou une
+chaîne que le système accepte, passe — et jamais pour un autre hôte. `NSNative` ne
+répond qu'à une page du serveur configuré (le shim n'était déjà injecté que là, et
+`shareFile` vérifiait déjà son URL). Le trafic en clair reste autorisé par le manifeste
+(l'hôte d'un serveur de LAN n'est pas connu à la compilation) mais est refusé en code
+vers tout autre hôte, côté page comme côté natif ; les requêtes natives suivent les
+redirections à la main pour que le cookie de session n'aille qu'au serveur. Mixed
+content refusé, sauvegarde et transfert d'appareil exclus.
 
 ### <a id="ns-20"></a>NS-20 — 🟡 🔎 Fuite de l'ARL et du mot de passe admin
 `entrypoint.sh` écrit `arl = …` en clair dans `/data/supysonic.conf` (umask 022, volume

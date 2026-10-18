@@ -14,7 +14,11 @@
     <string name="setup_host_helper">ex. musique.mondomaine.fr ou http://192.168.1.10</string>
     <string name="setup_port_hint">Port (optionnel)</string>
     <string name="setup_ssl_check">Vérifier le certificat SSL</string>
-    <string name="setup_ssl_helper">Décoche pour un certificat auto-signé.</string>
+    <string name="setup_ssl_helper">Décoche pour un certificat auto-signé : il est mémorisé à la première connexion, et seul celui-là sera accepté ensuite.</string>
+    <string name="setup_trust_title">Faire confiance à ce certificat ?</string>
+    <string name="setup_trust_message">%1$s présente un certificat que le système ne reconnaît pas. Son empreinte SHA-256 :\n\n%2$s\n\nSi elle correspond à celle de ton serveur, l\'application n\'acceptera plus que ce certificat-là pour lui.</string>
+    <string name="setup_trust_accept">Faire confiance</string>
+    <string name="setup_trust_cancel">Annuler</string>
     <string name="setup_connect">Se connecter</string>
     <string name="setup_checking">Vérification…</string>
     <string name="setup_host_required">Adresse requise</string>
@@ -40,6 +44,7 @@
     <string name="error_title">Connexion impossible</string>
     <string name="error_unreachable">Impossible de charger %1$s</string>
     <string name="error_ssl">Certificat SSL invalide. Décoche « Vérifier le certificat SSL » dans les paramètres si ton serveur utilise un certificat auto-signé.</string>
+    <string name="error_ssl_changed">Le certificat du serveur a changé depuis la première connexion. Si tu viens de le renouveler, rouvre les paramètres du serveur et reconnecte-toi pour faire confiance au nouveau. Sinon, quelqu\'un s\'interpose peut-être sur ce réseau.</string>
     <string name="error_retry">Réessayer</string>
     <string name="error_settings">Paramètres du serveur</string>
 
