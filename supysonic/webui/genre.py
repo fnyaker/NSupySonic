@@ -1508,7 +1508,8 @@ def genre_reference_import():
 
 
 # -- the default sounds ---------------------------------------------------------
-# deezer/subgenre_tracks.py's recordings are ADDED to the tags, once: each one
+# The default sounds (references.default_sounds: the sub-genres' lists, the major
+# genres' and the curated ones) are ADDED to the tags, once: each one
 # Deezer carries is brought in and tagged with its sub-genre, unless the track
 # already wears a tag. One tag per track, so a sound someone chose (or an earlier
 # default) is never overwritten. Nothing is downloaded here: a tagged row is
@@ -1525,9 +1526,10 @@ _sounds_job = {
 
 
 def _sounds_signature():
-    from ..deezer import subgenre_tracks as sg
+    from ..deezer import references as refs
 
-    return "%d:%d" % (len(sg.SUBGENRE_TRACKS), sum(len(v) for v in sg.SUBGENRE_TRACKS.values()))
+    sounds = refs.default_sounds()
+    return "%d:%d" % (len({g for g, _a, _t in sounds}), len(sounds))
 
 
 def _sounds_json():
@@ -1561,7 +1563,7 @@ def _tag_default_sound(dzapi, provider, artist, title, tag):
 
 def _run_sounds(app):
     from ..db import close_connection, open_connection
-    from ..deezer import subgenre_tracks as sg
+    from ..deezer import references as refs
     from ..deezer.workload import renice
     from . import _dz_api, _dz_live
 
@@ -1578,7 +1580,7 @@ def _run_sounds(app):
                     _sounds_job["retry_at"] = time.monotonic() + SOUNDS_RETRY_S
                 return
             tags = {t.name: t for t in GenreTag.select()}
-            pairs = [(g, a, t) for g, ps in sg.SUBGENRE_TRACKS.items() for a, t in ps]
+            pairs = refs.default_sounds()
             with _sounds_lock:
                 _sounds_job.update(total=len(pairs), done=0, tagged=0, kept=0, not_found=0, failed=0, stopped=False)
             fails = 0
