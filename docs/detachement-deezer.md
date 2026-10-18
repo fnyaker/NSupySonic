@@ -28,6 +28,50 @@ Ce document est un **inventaire**, pas une implémentation. Chaque section `D<n>
 indépendant, qui peut devenir sa propre tâche et sa propre PR. Les dépendances entre chantiers
 sont indiquées ; l'ordre conseillé est en fin de document.
 
+## La performance d'abord : règle transversale
+
+**Exigence du propriétaire (18/10/2026)** : se détacher de Deezer ne doit rien coûter en
+réactivité. **Chaque clic de l'utilisateur est la priorité maximale et son action doit être faite
+au plus vite.** Cette règle s'applique à tous les chantiers et elle passe avant les autres : un
+chantier qui rend une action plus lente n'est pas fini, même s'il fait ce qu'il doit.
+
+Ce que ça veut dire concrètement, pour chaque chantier :
+
+1. **Le clic d'abord, le reste après.** Une action de l'utilisateur (étoiler, créer ou éditer une
+   playlist, lancer un titre, ouvrir une page) fait son travail local et répond ; tout ce qui en
+   découle (archivage, enrichissement, re-mesure) part en arrière-plan **après** la réponse.
+   Retirer un appel à Deezer d'une route est l'occasion de la rendre plus rapide, pas seulement
+   d'y mettre autre chose à la place.
+2. **Aucun appel réseau tiers dans le fil d'une requête de l'utilisateur**, sauf quand l'action
+   en a besoin par nature : jouer un titre pas encore archivé, une recherche de catalogue. Ni
+   MusicBrainz, ni LRCLIB, ni AcoustID, ni Deezer pour une métadonnée.
+3. **L'arrière-plan cède toujours la place.** Tout nouveau travail de fond (l'enrichissement de
+   D19, les migrations de D8, la re-mesure du gain de D9, les voisins par embeddings de D6) passe
+   par les mécanismes qui existent déjà pour ça : la file à priorités (`workload.Priority`, en
+   `BULK`), `workload.renice`, `quiet_wait` tant qu'une action de l'utilisateur est en cours,
+   `X-NS-Background` côté client, et au plus un quart des fils du serveur. Un job de fond ne tient
+   jamais un fil de requête.
+4. **L'interface répond avant le serveur.** Un clic se voit à l'écran dans la même image
+   (mise à jour optimiste, comme `upsertPlaylistLocal` ou `resolvedUnavailable` aujourd'hui) ;
+   une erreur serveur la défait ensuite.
+5. **Mesuré, pas supposé.** Chaque chantier qui touche une route ou un écran relève ses chiffres
+   avant et après avec les outils existants — `tools/perf_api.py` (temps médian, nombre de requêtes
+   SQL et octets par route, sur une bibliothèque de 8 000 titres, Deezer coupé) et
+   `webapp/test/ui/run.mjs` (temps du fil principal dans Chromium) — et les écrit dans la PR. Un
+   test compte les requêtes SQL ou les appels réseau là où c'est possible (règle « compter, pas
+   chronométrer » des tests existants).
+
+Budgets communs, sauf mention contraire dans le chantier :
+- **un clic se voit à l'écran en moins de 100 ms** (une image d'interface, rien n'attend le
+  serveur) ;
+- **une route locale ne devient jamais plus lente** que sa mesure actuelle par `perf_api.py`, et
+  une route qui perd son appel à Deezer doit répondre au temps de sa version « Deezer coupé » ;
+- **un titre archivé démarre aussi vite qu'aujourd'hui**, et aucun travail de fond ne doit se voir
+  pendant qu'il démarre.
+
+Chaque chantier ci-dessous se termine par une ligne **Latence** qui dit ce que la règle veut dire
+pour lui.
+
 ## Ce que Deezer continue de faire
 
 Pour que la liste ci-dessous soit lisible, voici la frontière visée :
@@ -74,6 +118,8 @@ Fini quand : aucun appel `gw.create_playlist`, `add_songs_to_playlist`, `remove_
 `delete_playlist`, `edit_playlist` n'est atteignable depuis une route ; un test compte zéro appel
 au faux gateway pendant un cycle créer / éditer / réordonner / supprimer, en Subsonic comme en `/api`.
 
+**Latence** : Créer, renommer, réordonner ou supprimer une playlist ne fait plus aucun aller-retour vers Deezer : la route répond après la seule écriture en base (aujourd'hui elle attend `gw.create_playlist`). Mesurer `POST /api/playlists` et `POST /api/playlist/<id>/tracks` avant et après ; la playlist apparaît dans la barre latérale dans l'image du clic.
+
 ## D2. Arrêter de pousser les favoris vers Deezer
 
 État actuel :
@@ -97,6 +143,8 @@ au faux gateway pendant un cycle créer / éditer / réordonner / supprimer, en 
 Fini quand : étoiler / désétoiler n'importe quoi ne parle jamais à Deezer, et l'état est le même
 après redémarrage, Deezer coupé.
 
+**Latence** : Étoiler répond après une écriture en base, sans réseau ; l'archivage déclenché par le favori part après la réponse, en priorité `BULK`. Le cœur se remplit dans l'image du clic.
+
 ## D3. Arrêter les autres écritures vers le compte Deezer
 
 État actuel :
@@ -113,6 +161,8 @@ après redémarrage, Deezer coupé.
 
 Fini quand : `push.py` n'a plus d'appelant et peut être supprimé, avec `push_to_deezer`
 (voir D17).
+
+**Latence** : `/api/listen` et la sauvegarde de position des podcasts répondent sans réseau. Moins d'appels au total, donc moins de fils occupés pour les autres requêtes.
 
 ## D4. Synchronisation entrante : une importation ponctuelle, plus une source de vérité
 
@@ -138,6 +188,8 @@ Fini quand : `push.py` n'a plus d'appelant et peut être supprimé, avec `push_t
 Fini quand : retirer un favori ou une playlist sur Deezer ne change rien chez nous ; le
 planificateur ne lit plus rien du compte.
 
+**Latence** : `/me/favorites` et `/me/favorite-ids` ne lisent plus que la base : elles doivent tomber au temps mesuré aujourd'hui Deezer coupé (19 ms pour les ids sur 4 000 étoiles d'après le CLAUDE.md). L'import ponctuel est un job de fond qui ne tient aucun fil de requête.
+
 ## D5. Retirer les playlists algorithmiques importées (Flow, mixes, nouveautés)
 
 État actuel : `importer.sync_recommendations` matérialise chaque nuit en playlists locales
@@ -152,6 +204,8 @@ n'est perdu) plutôt que de les supprimer ; une migration retire le préfixe-con
 « Deezer · » du code qui le traite à part (`push.reconcile_playlist`, `_db_mix_for`, `home`).
 
 Fini quand : le planificateur n'appelle plus aucune de ces fonctions.
+
+**Latence** : Rien à l'écran ; la synchro nocturne devient plus courte.
 
 ## D6. Accueil et lecture continue sans les algorithmes Deezer
 
@@ -185,6 +239,8 @@ Fini quand : le planificateur n'appelle plus aucune de ces fonctions.
 Fini quand : aucune de ces routes n'appelle Deezer, et le lecteur continue une file en mode avion
 sur la bibliothèque archivée.
 
+**Latence** : C'est le chantier le plus exposé. Les voisins par embeddings sont **précalculés** en arrière-plan (index mis à jour quand un vecteur arrive), jamais calculés pendant la requête : `/api/radio/...` et l'accueil répondent depuis la base en un temps comparable aux autres listes (`perf_api.py`). La suite automatique de la file est prête **avant** la fin du titre en cours, comme aujourd'hui (`ensureUpcoming` avec trois titres d'avance).
+
 ## D7. Explorer
 
 État actuel : `/api/explore`, `/explore/genre/<id>`, `/explore/countries`, `routes/Explore.svelte` :
@@ -196,6 +252,8 @@ entièrement les classements et genres éditoriaux de l'API publique Deezer.
 2. Le réécrire sur la bibliothèque locale (par genre servi, par décennie, par artiste).
 
 Fini quand : l'écran n'existe plus, ou ne lit plus que la base.
+
+**Latence** : Si l'écran est réécrit sur la base, il suit les budgets des autres listes ; s'il est retiré, rien.
 
 ## D8. Ce qu'on écrit sur disque à l'archivage : les faits, pas les calculs ni les jetons
 
@@ -227,6 +285,8 @@ Dépend de : D9 (gain), D11 (paroles).
 Fini quand : une archive porte ses faits et rien de calculé par Deezer, et un upload tagué
 proprement passe exactement par le même code.
 
+**Latence** : La migration de l'existant tourne en `BULK`, `renice`, et se met en pause (`quiet_wait`) dès qu'une action de l'utilisateur est en cours ; un titre en cours de migration reste jouable. Le tag d'une archive est toujours écrit avant publication, jamais sous un fichier servi.
+
 ## D9. Normalisation du volume mesurée par nous, pour tout le monde
 
 État actuel : `Track.gain` vient du `GAIN` Deezer (import, `/api/gain/<id>`, `/api/gains` qui
@@ -247,6 +307,8 @@ prix (à mesurer : l'analyse tourne juste après l'archivage).
 
 Fini quand : aucun gain ne vient de Deezer, et un upload est normalisé comme une archive.
 
+**Latence** : `/api/gains` ne répond plus que depuis la base (une requête), donc aussi vite qu'aujourd'hui Deezer coupé. La mesure du gain se fait dans la passe d'analyse déjà existante, sans ffmpeg supplémentaire.
+
 ## D10. Crédits : ceux de Deezer restent, sans aller les chercher en direct
 
 État actuel : `supysonic/webui/credits.py` (`/api/track/<id>/credits`) lit `SNG_CONTRIBUTORS`,
@@ -261,6 +323,8 @@ Les crédits sont des faits : ils restent importés de Deezer. Ce qui change :
 - pour un titre pas encore archivé, l'appel à Deezer peut rester (c'est un fait, mis en cache).
 
 Petit chantier, à faire avec D8.
+
+**Latence** : Pour un titre archivé, `/api/track/<id>/credits` lit le sidecar et ne parle plus à personne : réponse en lecture de fichier.
 
 ## D11. Paroles : cherchées ailleurs que chez Deezer
 
@@ -293,6 +357,8 @@ Décisions du propriétaire possibles, avec leur choix par défaut :
 
 Fini quand : le module ne lit plus de paroles chez Deezer.
 
+**Latence** : Aucune requête LRCLIB dans le fil de `/api/lyrics` pour un titre archivé : les paroles sont cherchées à l'archivage, en arrière-plan, et la route lit le `.lrc`. Pour un titre pas encore archivé, une seule requête bornée (le délai par défaut) et « pas de paroles » plutôt qu'une attente.
+
 ## D12. Dates de sortie : celles de Deezer, complétées pour les uploads
 
 La date de sortie est un fait : elle reste importée de Deezer (`PHYSICAL_RELEASE_DATE` /
@@ -307,6 +373,8 @@ La date de sortie est un fait : elle reste importée de Deezer (`PHYSICAL_RELEAS
   sur une compilation ou une réédition, où la date Deezer est celle de la compilation.
 
 Aucun algorithme ne lit la date. Petit chantier.
+
+**Latence** : Lire ou trier par date est une colonne en base : aucun coût. La migration de schéma ne bloque pas le démarrage plus que les migrations actuelles.
 
 ## D13. Tempo et genre : nos algorithmes savent s'en passer
 
@@ -339,6 +407,8 @@ qui change :
 Fini quand : le BPM Deezer est disponible au studio, et l'éval prouve, chiffres à l'appui, que
 l'analyse est juste sans lui.
 
+**Latence** : Le BPM Deezer gardé sur disque supprime la requête de `tempo_hints` au premier passage pour les titres déjà vus : moins de travail au démarrage d'un titre, jamais plus.
+
 ## D14. Une seule identité : l'UUID de la ligne, pour l'API et la SPA
 
 C'est le chantier le plus large, et celui qui fait vraiment d'une archive « un fichier comme un
@@ -370,6 +440,8 @@ Fini quand : la SPA ne lit `deezer_id` que pour les résultats de recherche de c
 upload et une archive suivent exactement le même code de lecture, de pochette, de gain et de
 favori.
 
+**Latence** : C'est un chantier de structure ; il ne doit coûter **rien** à l'exécution : même nombre de requêtes SQL par liste (les tests de `test_webui_lists.py` le comptent), même taille de réponse à quelques octets près, et la migration des données du navigateur se fait une fois, en arrière-plan, sans bloquer le premier écran. Vérifier avec `webapp/test/ui/run.mjs` (ouvrir les favoris, taper, trier) qu'aucun chiffre ne remonte.
+
 ## D15. Pages album, artiste et playlist : la base d'abord
 
 État actuel : `/api/album/<id>` et `/api/artist/<id>` demandent d'abord **Deezer** et ne lisent la
@@ -387,6 +459,8 @@ Dépend de : D14 (les ids de page).
 Fini quand : avec Deezer coupé, toute page d'une entité de la bibliothèque est identique à ce
 qu'elle est Deezer allumé, hors section « disponible sur Deezer ».
 
+**Latence** : Une page album ou artiste de la bibliothèque s'affiche depuis la base, sans attendre Deezer : son temps devient celui de la version « Deezer coupé » d'aujourd'hui. La section « disponible sur Deezer » se charge après, sans repousser le reste de la page.
+
 ## D16. Le planificateur ne synchronise plus le compte
 
 État actuel : `supysonic/deezer/scheduler.py` lance chaque nuit `importer.sync` (playlists, favoris,
@@ -399,6 +473,8 @@ contenu du compte Deezer, seulement sur ce qui est en base et pas encore sur dis
 `sync_at`, `sync_interval` sont à renommer ou documenter pour ce qui reste.
 
 Dépend de : D4, D5.
+
+**Latence** : Le planificateur fait moins de travail ; ce qui reste suit la règle 3 (priorité `BULK`, pause pendant une action de l'utilisateur).
 
 ## D17. Ménage : configuration, code mort, documentation
 
@@ -419,6 +495,8 @@ Dépend de : D4, D5.
 - Écran Réglages → Compte Deezer : ne garder que l'ARL, l'état de connexion, la qualité et
   l'import ponctuel de D4.
 
+**Latence** : Moins de code chargé : vérifier que le bundle principal de la SPA ne grossit pas (`npm run build`), et qu'il diminue si des écrans sont retirés.
+
 ## D18. Ce qui reste volontairement dépendant de Deezer (à ne pas casser)
 
 Pour mémoire, ces parties appellent Deezer mais **pour récupérer des sons**, et restent :
@@ -434,6 +512,8 @@ Pour mémoire, ces parties appellent Deezer mais **pour récupérer des sons**, 
   archive et un upload.
 - Toutes les règles de résilience du CLAUDE.md (disjoncteur, budgets, `_dz_api` / `_dz_live`) :
   elles concernent désormais moins de routes, pas moins de rigueur.
+
+**Latence** : Inchangé : ces chemins sont déjà ceux qui servent la musique, et c'est eux que la règle 3 protège.
 
 ## D19. MusicBrainz, l'« IMDb de la musique » : évaluation et usage
 
@@ -468,9 +548,15 @@ source.
 Fini quand : le job rapporte la part des titres complétés par source et par méthode, et un
 échantillon vérifié à la main ne contient pas de mauvaise correspondance.
 
+**Latence** : L'enrichissement ne passe jamais devant un clic : un seul worker en `BULK`, `renice`, pause dès qu'un archivage de l'utilisateur ou une requête de premier plan est en cours, débit des services respecté (1 req/s pour MusicBrainz) **sans** jamais tenir un fil de requête pendant l'attente. Aucune route ne l'attend : une donnée pas encore enrichie s'affiche simplement vide, et apparaît à la visite suivante.
+
 ---
 
 ## Ordre conseillé
+
+La règle de performance vaut pour chaque étape ; les chantiers qui **retirent** un appel réseau
+d'une route (D1 à D4, D10, D15) sont aussi ceux qui rendent l'app plus rapide : ce sont les
+premiers gains à aller chercher.
 
 1. **D1, D2, D3** : couper toutes les écritures vers Deezer. Indépendants les uns des autres,
    petits, et c'est la partie demandée explicitement.
