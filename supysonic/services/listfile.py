@@ -25,7 +25,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from xml.sax.saxutils import escape as _xml_escape
+from html import escape as _html_escape
 
 FORMATS = {
     "csv": ("text/csv; charset=utf-8", "csv", "CSV (TuneMyMusic, Soundiiz…)"),
@@ -58,7 +58,8 @@ _XML_BAD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 
 def escape(text) -> str:
-    return _xml_escape(_XML_BAD.sub("", str(text or "")))
+    # &, < and > are all XML text needs (what xml.sax.saxutils.escape does).
+    return _html_escape(_XML_BAD.sub("", str(text or "")), quote=False)
 
 
 def _xspf(name: str, rows: list) -> str:

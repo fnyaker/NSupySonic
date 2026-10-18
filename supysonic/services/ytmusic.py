@@ -103,7 +103,8 @@ class Client:
                 raise ServiceAuthError(
                     "YouTube Music refuse cette session : reconnectez le compte."
                 ) from exc
-            raise ServiceError(f"YouTube Music injoignable : {exc}") from exc
+            logger.warning("YouTube Music account lookup failed: %s", exc)
+            raise ServiceError("YouTube Music injoignable.") from exc
         return str(info.get("accountName") or info.get("channelHandle") or "YouTube Music")[:128]
 
     def find(self, want: dict) -> str | None:
@@ -117,7 +118,8 @@ class Client:
         try:
             hits = youtube.search(q)
         except youtube.YoutubeError as exc:
-            raise ServiceError(f"Recherche YouTube impossible : {exc}") from exc
+            logger.warning("YouTube search failed: %s", exc)
+            raise ServiceError("Recherche YouTube impossible pour le moment.") from exc
         cands = [{**h, "id": h["video_id"]} for h in hits]
         found = pick(want, cands)
         return found["id"] if found else None
@@ -140,5 +142,6 @@ class Client:
                 raise ServiceAuthError(
                     "YouTube Music refuse cette session : reconnectez le compte."
                 ) from exc
-            raise ServiceError(f"YouTube Music a refusé : {exc}") from exc
+            logger.warning("YouTube Music refused the playlist: %s", exc)
+            raise ServiceError("YouTube Music a refusé de créer la playlist.") from exc
         return f"https://music.youtube.com/playlist?list={pid}"

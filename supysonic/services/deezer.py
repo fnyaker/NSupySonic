@@ -115,5 +115,6 @@ class Client:
         except Exception as exc:
             if _transport(exc):
                 raise ServiceError("Deezer est injoignable.") from exc
-            raise ServiceError(f"Deezer a refusé : {exc}") from exc
+            logger.warning("Deezer refused the playlist: %s", exc)
+            raise ServiceError("Deezer a refusé de créer la playlist.") from exc
         return f"https://www.deezer.com/playlist/{pid}"

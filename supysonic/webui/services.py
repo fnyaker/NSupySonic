@@ -52,6 +52,7 @@ from . import (
 logger = logging.getLogger(__name__)
 
 SPOTIFY_CLIENT_KEY = "sp.client_id"
+SPOTIFY_REDIRECT_KEY = "sp.redirect"
 _CLIENT_ID_RE = re.compile(r"\A[0-9a-fA-F]{32}\Z")
 KINDS = ("playlist", "favorites", "album")
 MAX_TRACKS = 10000
@@ -100,8 +101,21 @@ def _spotify_client_id() -> str | None:
     return value if _CLIENT_ID_RE.fullmatch(value) else None
 
 
-def _spotify_redirect() -> str:
-    return url_for("webapi.services_spotify_callback", _external=True)
+def _redirect_here() -> str:
+    # Only ever read from the ADMIN's request, when they save the app: that is
+    # the address they register with Spotify, and it is frozen there.
+    return url_for("webapi.services_spotify_callback", _external=True)  # nosemgrep: python.flask.security.audit.flask-url-for-external-true.flask-url-for-external-true
+
+
+def _spotify_redirect() -> str | None:
+    """The redirect URI the admin registered, as saved with the client id.
+
+    Never rebuilt from the request in flight: its Host header is the client's
+    to choose, and the same server is reached under several names (the LAN
+    address, the public https one) while Spotify accepts exactly one."""
+    row = Meta.get_or_none(Meta.key == SPOTIFY_REDIRECT_KEY)
+    value = (row.value if row else "") or ""
+    return value if value.startswith(("https://", "http://")) else None
 
 
 def _client(service, user_id):
@@ -152,7 +166,11 @@ def services_status():
             "linked": "spotify" in links,
             "account": links["spotify"].account if "spotify" in links else None,
             **(
-                {"client_id": client_id or "", "redirect_uri": _spotify_redirect()}
+                {
+                    "client_id": client_id or "",
+                    "redirect_uri": _spotify_redirect() or _redirect_here(),
+                    "redirect_here": _redirect_here(),
+                }
                 if admin
                 else {}
             ),
@@ -191,10 +209,14 @@ def services_spotify_app():
     value = str((request.get_json(silent=True) or {}).get("client_id") or "").strip()
     if value and not _CLIENT_ID_RE.fullmatch(value):
         return jsonify({"error": "Un Client ID Spotify fait 32 caractères hexadécimaux."}), 400
-    Meta.delete().where(Meta.key == SPOTIFY_CLIENT_KEY).execute()
+    Meta.delete().where(Meta.key.in_([SPOTIFY_CLIENT_KEY, SPOTIFY_REDIRECT_KEY])).execute()
+    redirect_uri = _redirect_here()
+    if len(redirect_uri) > 256:
+        return jsonify({"error": "L'adresse de ce serveur est trop longue pour Spotify."}), 400
     if value:
         Meta.create(key=SPOTIFY_CLIENT_KEY, value=value)
-    return jsonify({"ok": True, "client_id": value, "redirect_uri": _spotify_redirect()})
+        Meta.create(key=SPOTIFY_REDIRECT_KEY, value=redirect_uri)
+    return jsonify({"ok": True, "client_id": value, "redirect_uri": redirect_uri})
 
 
 # An authorisation in flight, by its state: kept HERE rather than in the
@@ -218,11 +240,11 @@ def _take_pending(state: str):
 @login_required
 def services_spotify_authorize():
     client_id = _spotify_client_id()
-    if not client_id:
+    redirect_uri = _spotify_redirect()
+    if not client_id or not redirect_uri:
         return jsonify({"error": "Spotify n'est pas configuré sur ce serveur."}), 409
     verifier, challenge = spotify.pkce_pair()
     state = secrets.token_urlsafe(24)
-    redirect_uri = _spotify_redirect()
     with _pending_lock:
         if len(_pending) >= PENDING_MAX:
             for key in sorted(_pending, key=lambda k: _pending[k]["at"])[: PENDING_MAX // 4]:

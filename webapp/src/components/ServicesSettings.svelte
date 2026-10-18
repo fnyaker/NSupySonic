@@ -31,6 +31,9 @@
 
   $: list = ($services?.services || []).filter((s) => s.id !== "apple");
   $: spotify = list.find((s) => s.id === "spotify");
+  // The redirect URI is frozen when the app is saved; opened under another
+  // address (LAN vs public), saving again moves it here.
+  $: moved = !!(spotify?.client_id && spotify.redirect_here && spotify.redirect_here !== spotify.redirect_uri);
   $: if (spotify && !clientIdLoaded && spotify.client_id !== undefined) {
     clientId = spotify.client_id || "";
     clientIdLoaded = true;
@@ -65,6 +68,14 @@
       toasts.push(e?.message || "Échec");
     }
     savingId = false;
+  }
+
+  function hostOf(url) {
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
   }
 
   function copy(text) {
@@ -134,12 +145,15 @@
       <code>{spotify.redirect_uri}</code>
       <button class="icon-btn" on:click={() => copy(spotify.redirect_uri)} aria-label="Copier l'URI" title="Copier"><Icon name="copy" size={16} /></button>
     </div>
+    {#if moved}
+      <p class="warn"><Icon name="alert" size={14} /><span>Vous êtes sur <b>{hostOf(spotify.redirect_here)}</b>, pas sur l'adresse enregistrée. Pour relier depuis celle-ci, ajoutez-la chez Spotify puis enregistrez à nouveau.</span></p>
+    {/if}
     {#if spotify.redirect_uri && spotify.redirect_uri.startsWith("http://") && !/^http:\/\/127\./.test(spotify.redirect_uri)}
       <p class="warn"><Icon name="alert" size={14} /> Cette adresse est en http : Spotify la refusera. Ouvrez l'app par son adresse https pour relier un compte.</p>
     {/if}
     <div class="cid">
       <input type="text" bind:value={clientId} placeholder="Client ID (32 caractères)" spellcheck="false" autocomplete="off" maxlength="32" aria-label="Client ID Spotify" />
-      <button class="pill" on:click={saveClientId} disabled={savingId || clientId.trim() === (spotify.client_id || "")}>Enregistrer</button>
+      <button class="pill" on:click={saveClientId} disabled={savingId || (clientId.trim() === (spotify.client_id || "") && !moved)}>Enregistrer</button>
     </div>
   {/if}
 </section>
@@ -265,6 +279,7 @@
     overflow-wrap: anywhere;
   }
   .warn {
+    overflow-wrap: anywhere;
     display: flex;
     gap: 6px;
     align-items: flex-start;

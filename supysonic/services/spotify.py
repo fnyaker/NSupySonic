@@ -77,7 +77,8 @@ def _token_request(session, data: dict) -> dict:
     try:
         r = session.post(ACCOUNTS + "/api/token", data=data, timeout=TIMEOUT)
     except requests.RequestException as exc:
-        raise ServiceError(f"Spotify injoignable : {exc}") from exc
+        logger.warning("Spotify token request failed: %s", exc)
+        raise ServiceError("Spotify injoignable.") from exc
     if r.status_code == 400:
         # invalid_grant: the code was used, or the refresh token was revoked.
         raise ServiceAuthError("Spotify a refusé l'autorisation : reconnectez le compte.")
@@ -177,7 +178,8 @@ class Client:
                     method, API + path, headers=headers, timeout=TIMEOUT, **kw
                 )
             except requests.RequestException as exc:
-                raise ServiceError(f"Spotify injoignable : {exc}") from exc
+                logger.warning("Spotify %s %s failed: %s", method, path, exc)
+                raise ServiceError("Spotify injoignable.") from exc
             if r.status_code == 401 and not refreshed:
                 refreshed = True
                 self._refresh()

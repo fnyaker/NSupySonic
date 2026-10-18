@@ -98,7 +98,7 @@ class FakeSpotify:
             if self.fail_search_after is not None and self.searches > self.fail_search_after:
                 import requests
 
-                raise requests.ConnectionError("down")
+                raise requests.ConnectionError("down: proxy.internal:3128")
             return FakeResponse(200, {"tracks": {"items": self._search(params["q"])}})
         if path == "/me/playlists" and method == "POST":
             pid = "PL%d" % (len(self.playlists) + 1)
@@ -271,6 +271,30 @@ class ServicesTestCase(unittest.TestCase):
         self.assertNotIn("client_id", theirs["spotify"])
         self.assertNotIn("deezer", theirs, "the server's Deezer account is the admin's")
 
+    def test_the_redirect_uri_is_the_one_saved_never_the_request_host(self):
+        def under(name, password, base):
+            c = self.app.test_client()
+            c.post("/api/login", json={"username": name, "password": password}, base_url=base)
+            return lambda method, path, **kw: c.open(path, method=method, base_url=base, **kw)
+
+        admin = under("alice", "Alic3", "https://music.example.org")
+        r = admin("PUT", "/api/services/spotify/app", json={"client_id": CLIENT_ID})
+        self.assertEqual(r.get_json()["redirect_uri"], "https://music.example.org/api/services/spotify/callback")
+        # Anybody asking under another Host gets the saved address, not theirs.
+        url = under("bob", "B0bbb", "https://evil.example")("GET", "/api/services/spotify/authorize").get_json()["url"]
+        self.assertEqual(
+            parse_qs(urlparse(url).query)["redirect_uri"],
+            ["https://music.example.org/api/services/spotify/callback"],
+        )
+        # The admin on the LAN address is told it differs, and saving again moves it.
+        lan = under("alice", "Alic3", "http://192.168.1.5:5722")
+        rows = {s["id"]: s for s in lan("GET", "/api/services").get_json()["services"]}
+        self.assertEqual(rows["spotify"]["redirect_uri"], "https://music.example.org/api/services/spotify/callback")
+        self.assertEqual(rows["spotify"]["redirect_here"], "http://192.168.1.5:5722/api/services/spotify/callback")
+        lan("PUT", "/api/services/spotify/app", json={"client_id": CLIENT_ID})
+        rows = {s["id"]: s for s in lan("GET", "/api/services").get_json()["services"]}
+        self.assertEqual(rows["spotify"]["redirect_uri"], rows["spotify"]["redirect_here"])
+
     def test_spotify_link_round_trip_stores_an_encrypted_credential(self):
         self._configure()
         url = self.alice.get("/api/services/spotify/authorize").get_json()["url"]
@@ -369,6 +393,7 @@ class ServicesTestCase(unittest.TestCase):
         self.fake.fail_search_after = 1
         job = self._run(self.alice, "spotify")
         self.assertIn("injoignable", job["error"])
+        self.assertNotIn("proxy.internal", job["error"], "the transport's own words stay in the log")
         self.assertLess(job["done"], 4, "the rest is not filed as 'not found'")
         self.assertEqual(self.fake.playlists, {})
 

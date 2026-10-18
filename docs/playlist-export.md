@@ -30,6 +30,12 @@ Ce que chaque service permet en octobre 2026, et ce que NSupySonic en fait
   chiffrée AES-GCM avec la clé du serveur comme `User.password_clear`. Aucune de ces
   routes n'est prêtée à une télécommande (`remote.POLICY`: `NEVER`), sauf la liste en
   fichier (`read`, c'est la playlist elle-même).
+- **Adresse de retour figée** : l'URI de redirection est enregistrée avec le Client ID,
+  depuis la page de l'admin, et jamais reconstruite à partir de l'en-tête `Host` d'une
+  requête (que le client choisit). Ouvert sous une autre adresse (le réseau local au
+  lieu du https public), Réglages le signale ; enregistrer à nouveau la déplace.
+- **Messages d'erreur** : jamais le texte brut d'une exception (adresses, proxy) ;
+  il va dans le journal, l'utilisateur lit une phrase.
 - **Retour de Spotify** : l'état PKCE est gardé côté serveur, pas dans le cookie : sur
   Android la page de consentement s'ouvre dans le navigateur système, qui n'a pas la
   session de l'app. Le retour y affiche simplement « Compte Spotify relié ».
