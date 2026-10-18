@@ -5,8 +5,20 @@ fichiers FLAC**. Un titre archivé depuis Deezer doit être, pour le reste de l'
 fichier comme un autre, comme si l'utilisateur l'avait uploadé** : l'audio, la pochette, le titre,
 l'album, le nom (et l'id) de l'artiste. Rien d'autre ne vient de Deezer : ni ses algorithmes
 (Flow, mixes, radios, recommandations, classements), ni ses données pré-calculées (gain, BPM,
-genre, crédits, paroles, ISRC, label…), ni la synchronisation de nos playlists et favoris vers
+genre, crédits, paroles, label… : celles qu'on veut garder viennent d'ailleurs, voir D19), ni la synchronisation de nos playlists et favoris vers
 le compte Deezer.
+
+**Précision du propriétaire (18/10/2026)** : les informations utiles au-delà de ces cinq champs —
+**la date de sortie et les paroles** en premier lieu — doivent quand même être importées, mais
+**depuis des sources fiables autres que Deezer**, et **aucun de nos algorithmes ne doit en
+dépendre**. D'où deux règles qui s'appliquent à tous les chantiers ci-dessous :
+
+1. **L'enrichissement est une couche à part** (D19) : il arrive après l'archivage, en arrière-plan,
+   il peut échouer ou ne rien trouver, et rien d'autre ne l'attend.
+2. **Nos algorithmes ne lisent que ce que nous mesurons ou ce que l'utilisateur a choisi** : la
+   normalisation, le tempo, le genre, les recommandations fonctionnent à l'identique sur un fichier
+   sans aucune métadonnée enrichie. Les données enrichies servent à l'affichage, au tri et à la
+   recherche.
 
 Ce document est un **inventaire**, pas une implémentation. Chaque section `D<n>` est un chantier
 indépendant, qui peut devenir sa propre tâche et sa propre PR. Les dépendances entre chantiers
@@ -22,6 +34,7 @@ Pour que la liste ci-dessous soit lisible, voici la frontière visée :
 | La **recherche de catalogue** (`/api/search`, côté Deezer) et la lecture d'une page album / artiste / playlist **pour trouver** des sons à récupérer | Il faut bien savoir quoi télécharger. Ces pages servent à choisir ; elles n'alimentent plus la bibliothèque au-delà des cinq champs. |
 | La pochette d'album (téléchargée une fois, stockée en `cover.jpg`) | Explicitement gardée. |
 | Le titre, l'album, le nom et l'id de l'artiste (et les artistes crédités en featuring, qui sont des noms d'artistes) | Explicitement gardés. |
+| L'**ISRC** (code international d'un enregistrement), lu une fois à l'archivage | Ce n'est pas une donnée Deezer mais l'identifiant de l'industrie, et c'est la clé la plus sûre pour retrouver l'enregistrement dans MusicBrainz (D19). Gardé dans le sidecar, jamais lu par un algorithme. |
 | Le numéro de piste et de disque | **Choix par défaut** : gardés, car c'est ce qu'un fichier uploadé porte dans ses tags et l'ordre d'un album en dépend. À retirer si le propriétaire en décide autrement. |
 | `Track.deezer_id` et les ids déterministes (`ids.py`) | Ils ne sont plus une identité exposée (voir D14), seulement la « référence de source » qui permet de re-télécharger un fichier supprimé par le nettoyage. |
 | Les podcasts (shows / épisodes) | Hors périmètre de la demande ; seule la **réécriture vers Deezer** est coupée (D3). |
@@ -192,21 +205,23 @@ Fini quand : l'écran n'existe plus, ou ne lit plus que la base.
 - `library.refresh_track_metadata` « améliore » la ligne depuis `song.getData` (gain, année…).
 
 À faire :
-- Tags : titre, artiste(s), album, artiste de l'album, piste / disque (voir le choix par défaut en
-  tête), pochette. Plus d'ISRC, de date Deezer, de gain Deezer.
-- Sidecar : réduit aux ids de source (`deezer_id`, `artist_deezer_id`, `album_deezer_id`) et aux
-  cinq champs ; plus de bloc `gw`.
+- Tags à l'archivage : titre, artiste(s), album, artiste de l'album, piste / disque (voir le choix
+  par défaut en tête), pochette, ISRC. Plus de date Deezer, de gain Deezer.
+- Sidecar : réduit aux ids de source (`deezer_id`, `artist_deezer_id`, `album_deezer_id`), à
+  l'ISRC et aux cinq champs ; plus de bloc `gw`. L'enrichissement (D19) y ajoute ensuite une
+  section `enrich` à lui (identifiants MusicBrainz, date de sortie, label, crédits, avec la source
+  et la date de chaque valeur) et réécrit les tags correspondants dans le fichier.
 - `refresh_track_metadata` ne garde que ces champs.
 - Migration de l'existant : un job (bouton + CLI, reprise sur checkpoint comme les autres
   backfills) qui réécrit les sidecars et retire les tags superflus des archives déjà présentes,
   sans retélécharger l'audio. Le tag doit être réécrit hors du fichier publié puis remplacé
   (même règle que `archive._tag_archive`).
 
-Dépend de : D9 (gain), D10 (crédits), D11 (paroles), D12 (année) pour savoir ce qui remplace chaque
-champ retiré.
+Dépend de : D9 (gain), D10 (crédits), D11 (paroles), D12 (date), D19 (enrichissement) pour savoir
+ce qui remplace chaque champ retiré.
 
 Fini quand : une archive neuve et une archive migrée portent exactement les mêmes champs qu'un
-upload tagué proprement.
+upload tagué proprement, et l'enrichissement de D19 s'applique aux deux de la même façon.
 
 ## D9. Normalisation du volume mesurée par nous, pour tout le monde
 
@@ -235,36 +250,55 @@ Fini quand : aucun gain ne vient de Deezer, et un upload est normalisé comme un
 `NowPlayingMore.svelte` affiche le panneau.
 
 À faire : garder les artistes crédités (`TrackArtist`, ce sont des noms d'artistes) ; le reste
-(auteur, compositeur, producteur, label) vient des **tags du fichier** quand il y en a (cas d'un
-upload), jamais de Deezer. Retirer l'appel réseau et l'écriture dans le sidecar. Le panneau masque
-ce qui manque.
+(auteur, compositeur, producteur, label, copyright) vient, par ordre de préférence, des **tags du
+fichier** (cas d'un upload tagué), puis de **MusicBrainz** via l'enrichissement de D19 (relations
+`composer`, `lyricist`, `producer`… de l'enregistrement et de l'œuvre, label de la sortie). Plus
+jamais de Deezer : retirer l'appel réseau. Le panneau masque ce qui manque.
+
+Dépend de : D19 pour la partie MusicBrainz (la route peut être coupée de Deezer avant).
 
 Fini quand : la route ne touche plus le provider.
 
-## D11. Paroles : LRCLIB seulement
+## D11. Paroles : toujours importées, depuis LRCLIB
 
 État actuel : `supysonic/deezer/lyrics.py` cherche d'abord les paroles **de Deezer**
 (`provider.get_lyrics`), puis LRCLIB ; `/api/lyrics/<id>` interroge Deezer en direct pour un titre
 pas encore archivé ; les paroles sont embarquées dans les tags (`embed_lyrics`).
 
-À faire : LRCLIB (titre, artiste, album, durée : exactement les champs qu'on garde) comme seule
-source, pour les archives comme pour les uploads (qui n'en ont pas aujourd'hui). Le `.lrc` déjà
-archivé reste. Le CLI `deezer lyrics` devient `supysonic-cli lyrics`.
+À faire : les paroles restent importées (demande explicite), mais depuis **LRCLIB**, déjà utilisé
+en second choix (`lyrics.fetch_lrclib`) : une base ouverte et sans clé, cherchée par titre,
+artiste, album et durée — exactement les champs qu'on garde, ce qui la rend utilisable pour les
+uploads aussi (qui n'ont pas de paroles aujourd'hui). La synchronisation à la ligne reste préférée
+au texte brut. Le `.lrc` déjà archivé reste. Le CLI `deezer lyrics` devient `supysonic-cli lyrics`.
+
+Rien d'autre ne dépend des paroles : la ligne de paroles du lecteur s'affiche quand il y en a, et
+aucun algorithme ne les lit.
+
+Décision du propriétaire possible : garder Deezer en **dernier recours** quand LRCLIB n'a rien ?
+**Choix par défaut** : non, pour respecter le détachement ; à rouvrir si la couverture mesurée
+de LRCLIB sur la bibliothèque est trop faible (le job de D19 compte les titres sans paroles).
 
 Décision du propriétaire possible : retirer aussi les paroles déjà archivées venant de Deezer ?
 **Choix par défaut** : non, un `.lrc` est un fichier à nous, on le garde.
 
 Fini quand : le module ne référence plus le provider.
 
-## D12. Année et dates de sortie
+## D12. Dates de sortie : toujours importées, depuis MusicBrainz
 
 État actuel : `Track.year` vient de `PHYSICAL_RELEASE_DATE` / `DIGITAL_RELEASE_DATE` Deezer
 (`normalize_track`), et la date est écrite dans les tags.
 
-À faire : décision du propriétaire, l'année n'étant pas dans la liste des champs gardés.
-**Choix par défaut** : ne plus l'importer pour les nouvelles archives, laisser la colonne vide ;
-les tris par année ne portent alors que sur les uploads qui la taguent. Le nettoyage de l'existant
-est fait par le job de D8.
+À faire : la date reste importée (demande explicite), mais par l'enrichissement de D19 :
+- la date de la **première sortie** de l'enregistrement (`first-release-date` de MusicBrainz), qui
+  est celle qu'on veut pour un titre réédité ou compilé ; la date de la sortie précise (l'album
+  joué) en second, pour la page album ;
+- la date d'un upload vient d'abord de ses tags ;
+- colonne `Track.year` gardée, et la date complète (AAAA-MM-JJ, parfois seulement AAAA) stockée
+  à part pour l'affichage (migration de schéma).
+
+Les données existantes venant de Deezer : **choix par défaut**, gardées jusqu'à ce que
+l'enrichissement trouve mieux, et marquées comme venant de Deezer dans le sidecar pour que le job
+les remplace. Aucun algorithme ne lit la date.
 
 ## D13. Tempo et genre : uniquement mesurés ou choisis par nous
 
@@ -386,6 +420,49 @@ Pour mémoire, ces parties appellent Deezer mais **pour récupérer des sons**, 
 - Toutes les règles de résilience du CLAUDE.md (disjoncteur, budgets, `_dz_api` / `_dz_live`) :
   elles concernent désormais moins de routes, pas moins de rigueur.
 
+## D19. Enrichissement des métadonnées depuis des sources ouvertes
+
+C'est la réponse à « importer quand même les infos pertinentes, depuis quelque chose de fiable ».
+Un module neuf (`supysonic/enrich/`, hors de `supysonic/deezer/` puisqu'il sert aussi aux
+uploads), event-driven comme le reste : un titre est mis en file à l'archivage ou à l'upload, un
+seul worker traite la file au rythme imposé par chaque service, et un bouton + un CLI rattrapent
+la bibliothèque existante (reprise sur checkpoint, causes d'échec comptées, comme les autres
+backfills).
+
+Sources retenues (conditions relevées sur leur documentation le 18/10/2026) :
+
+| Source | Ce qu'on en tire | Conditions | Fiabilité |
+|---|---|---|---|
+| **MusicBrainz** (`/ws/2/`) | Identifiant de l'enregistrement, date de première sortie, date et label de la sortie, crédits (compositeur, parolier, producteur…), ISRC | Pas de clé ; **1 requête/s par IP en moyenne** (au-delà, 503 pour toute l'IP) ; User-Agent obligatoire au format `NSupySonic/<version> ( contact )` ; données principales en **CC0** ; usage non commercial gratuit | La référence ouverte, éditée par une communauté avec relecture. Couverture excellente sur la pop, le rock et les grands labels, plus inégale sur les scènes hard dance : à mesurer sur la bibliothèque. |
+| **AcoustID** (`api.acoustid.org/v2/lookup`) | Identification **par l'audio lui-même** (empreinte Chromaprint calculée avec `fpcalc` sur le FLAC) → identifiant MusicBrainz de l'enregistrement, ISRC | **Clé d'application** gratuite (à fournir par l'opérateur, comme l'ARL, jamais committée) ; **3 requêtes/s** maximum ; **usage non commercial uniquement** | La seule méthode qui ne dépend d'aucune métadonnée : elle reconnaît le fichier, ce qui en fait le meilleur recours pour les uploads mal tagués et pour vérifier une correspondance douteuse. |
+| **LRCLIB** | Paroles synchronisées ou brutes (D11) | Pas de clé, déjà utilisé dans `lyrics.py` | Base ouverte participative ; la recherche par durée évite la plupart des mauvaises versions. |
+| **Cover Art Archive** | Pochette en haute définition quand on n'en a pas (upload sans image) | Pas de limite de débit annoncée ; licence des images à vérifier avant de s'en servir | Liée à MusicBrainz, donc exacte quand l'identifiant l'est. Optionnel : la pochette Deezer reste la source par défaut des archives. |
+| Discogs | Label, numéro de catalogue, dates pour les sorties vinyle et les petits labels | Jeton obligatoire pour avoir le débit haut : 60 req/min authentifié, 25 sinon ; une partie des données seulement en CC0 | Très bonne sur l'électronique indépendante, mais rapprochement plus fragile (pas d'ISRC). **Choix par défaut** : pas dans la première version, à ajouter si MusicBrainz couvre mal la bibliothèque. |
+
+Comment on retrouve l'enregistrement, du plus sûr au moins sûr :
+1. **ISRC** gardé à l'archivage (ou lu dans les tags d'un upload) → `GET /ws/2/isrc/<isrc>` ; un
+   ISRC peut pointer plusieurs enregistrements, on garde celui dont la durée et l'artiste
+   collent.
+2. **Empreinte AcoustID**, quand il n'y a pas d'ISRC ou que l'ISRC est ambigu, si l'opérateur a
+   fourni une clé.
+3. **Recherche** par titre + artiste + durée (± 3 s), acceptée seulement si le titre réduit
+   (`_core_title` existe déjà pour ça) et l'artiste principal concordent exactement.
+
+Rien n'est écrit sans correspondance sûre : mieux vaut un champ vide qu'une date fausse. Chaque
+valeur garde sa source et sa date dans le sidecar, une valeur venant des tags d'un upload n'est
+jamais écrasée, et une correspondance se ré-essaie après un délai (une entrée MusicBrainz peut
+être créée plus tard). Ni l'archivage, ni la lecture, ni aucun algorithme n'attendent ce module, et
+il obéit aux mêmes règles de résilience que les appels Deezer (délai par défaut, disjoncteur par
+hôte, un échec réseau n'est jamais un verdict sur le titre).
+
+À découper en PR : (a) le socle (file, worker, sidecar `enrich`, MusicBrainz par ISRC) ; (b) la
+recherche par titre et l'empreinte AcoustID ; (c) les dates (D12) et les crédits (D10) branchés
+dessus ; (d) le rattrapage de la bibliothèque et l'écran de suivi dans Réglages.
+
+Fini quand : sur la bibliothèque réelle, le job rapporte la part des titres enrichis par source et
+par méthode de rapprochement, et une vérification à la main d'un échantillon ne trouve pas de
+mauvaise correspondance.
+
 ---
 
 ## Ordre conseillé
@@ -393,12 +470,15 @@ Pour mémoire, ces parties appellent Deezer mais **pour récupérer des sons**, 
 1. **D1, D2, D3** : couper toutes les écritures vers Deezer. Indépendants les uns des autres,
    petits, et c'est la partie demandée explicitement.
 2. **D4, D5** puis **D16** : couper la synchronisation entrante.
-3. **D9, D10, D11, D12, D13** : remplacer chaque donnée pré-calculée par la nôtre (indépendants).
-4. **D8** : réduire ce qui est écrit sur disque et migrer l'existant (après 3).
+3. **D9, D11, D13** : remplacer chaque donnée pré-calculée par la nôtre (indépendants), et
+   **D19** en parallèle : l'enrichissement depuis MusicBrainz, AcoustID et LRCLIB.
+4. **D10, D12** sur D19, puis **D8** : réduire ce qui est écrit sur disque et migrer l'existant.
 5. **D14** puis **D15** : l'identité unique, puis les pages.
 6. **D6** (en trois PR) et **D7** : remplacer les algorithmes.
 7. **D17** : le ménage final.
 
 Décisions à confirmer par le propriétaire (un choix par défaut est indiqué dans chaque section) :
 numéro de piste / disque (tableau en tête), sort des playlists « Deezer · » existantes (D5), écran
-Explorer (D7), paroles Deezer déjà archivées (D11), année (D12).
+Explorer (D7), paroles Deezer déjà archivées et Deezer en dernier recours pour les paroles (D11),
+dates Deezer existantes (D12), Discogs (D19). La date de sortie et les paroles, elles, sont
+importées : c'est tranché.
