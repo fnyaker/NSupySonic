@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261012"
+SCHEMA_VERSION = "20261018"
 
 
 def now():
@@ -1112,6 +1112,27 @@ class RemoteLink(_Model):
         table_name = "remote_link"
 
 
+class ServiceLink(_Model):
+    """A user's own account on another streaming service, for exporting
+    playlists to it (supysonic/services, supysonic/webui/services.py).
+
+    ``data`` is the credential (OAuth tokens, or the browser headers YouTube
+    Music takes), ENCRYPTED with the server secret like ``User.password_clear``:
+    a copy of the table is a copy of nobody's account. ``account`` is only the
+    name the service gave the account, to show which one is linked.
+    """
+
+    user = ForeignKeyField(User, backref="+", on_delete="CASCADE")
+    service = CharField(16)
+    account = CharField(128, null=True)
+    data = TextField()
+    updated = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "service_link"
+        primary_key = CompositeKey("user", "service")
+
+
 def get_resource_text(respath):
     return importlib.resources.files(__package__).joinpath(respath).read_text("utf-8")
 
@@ -1257,6 +1278,7 @@ def _migration_order():
         PodcastProgress,
         PodcastMarker,
         RemoteLink,  # after User: it references it
+        ServiceLink,  # after User: it references it
     ]
 
 

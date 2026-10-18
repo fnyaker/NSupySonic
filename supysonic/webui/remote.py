@@ -133,6 +133,15 @@ POLICY = {
     "party_mine": NEVER,
     "party_end": NEVER,
     "party_publish": NEVER,
+    # the owner's accounts on other services: linking one, or writing into it
+    "services_status": NEVER,
+    "services_spotify_app": NEVER,
+    "services_spotify_authorize": NEVER,
+    "services_spotify_callback": NEVER,
+    "services_youtube_connect": NEVER,
+    "services_disconnect": NEVER,
+    "services_export": NEVER,
+    "services_export_status": NEVER,
     # the player's own reports: the controller plays nothing
     "report_listen": NEVER,
     "track_construction": NEVER,
@@ -214,6 +223,8 @@ POLICY = {
     "automatch_run": "admin",
     "automatch_cancel": "admin",
     "export_zip": "full",
+    # the list of a playlist as a file: the same data the playlist page reads
+    "services_list_file": "read",
     "share_file": "full",
     "share_clip": "full",
     "stream": "full",

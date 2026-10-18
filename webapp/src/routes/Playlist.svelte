@@ -289,7 +289,7 @@
         <button class="icon-btn" on:click={downloadAll} disabled={dlBusy} aria-label="Télécharger la playlist" title="Télécharger sur l'appareil (hors-ligne)"><Icon name="download" size={22} /></button>
       {/if}
       {#if CAN_KEEP}
-        <button class="icon-btn" on:click={() => openExport("playlist", id, data.playlist.title)} aria-label="Exporter en ZIP" title="Exporter en ZIP (clé USB, autre lecteur…)"><Icon name="archive" size={22} /></button>
+        <button class="icon-btn" on:click={() => openExport("playlist", id, data.playlist.title)} aria-label="Exporter" title="Exporter : vers Spotify, YouTube Music…, en ZIP ou en liste"><Icon name="archive" size={22} /></button>
       {/if}
       {#if $isAdmin && CAN_KEEP && data.tracks.length}
         <button
