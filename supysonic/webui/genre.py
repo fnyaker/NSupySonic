@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random as _random
 import threading
 import time
@@ -1119,6 +1120,53 @@ def genre_labelled():
         row["tag"] = _tag_json(tt.tag)
         out.append(row)
     return jsonify({"labelled": out})
+
+
+#: The unlabelled pool the studio's self-training reads (lib/genre/core.js,
+#: `pseudo`): the most a request may ask for, and how far the scan may look.
+POOL_MAX = 2000
+POOL_SCAN_MAX = 12000
+
+
+@webapi.route("/genre/pool")
+@login_required
+@admin_required
+def genre_pool():
+    """Untagged tracks that HAVE a vector, most played first: what the studio's
+    self-training learns from where its head is sure (the vectors themselves
+    come through /genre/embeddings, which serves only the current widths).
+
+    Whether a track has a vector is a file on disk, so the scan is bounded in
+    rows and in time like the candidates' — a library still being measured
+    answers with what it has."""
+    from ..deezer import embedding as emb
+
+    try:
+        limit = max(1, min(POOL_MAX, int(request.args.get("limit", 600))))
+    except (TypeError, ValueError):
+        limit = 600
+    labelled = {tt.track_id for tt in TrackTag.select(TrackTag.track)}
+    out = []
+    scanned = 0
+    deadline = time.monotonic() + CANDIDATE_BUDGET
+    query = (
+        Track.select(Track.id, Track.deezer_id, Track.path)
+        .where(Track.last_modification > 0)
+        .order_by(Track.play_count.desc(), Track.created.desc())
+        .limit(POOL_SCAN_MAX)
+    )
+    for track in query:
+        scanned += 1
+        if track.id in labelled:
+            continue
+        path = emb.sidecar_path(track)
+        if path and os.path.exists(path):
+            out.append(str(track.deezer_id or track.id))
+            if len(out) >= limit:
+                break
+        if time.monotonic() > deadline:
+            break
+    return jsonify({"ids": out, "scanned": scanned})
 
 
 # -- a whole album, playlist or artist at once --------------------------------------

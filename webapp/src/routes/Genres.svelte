@@ -169,6 +169,27 @@
       /* not remembered, still applied */
     }
   }
+  // Self-training: the untagged tracks the head is sure of join a second fit,
+  // each fold labelling them with its own head; the second head ships only on
+  // a held-out gain (webapp/trainer `pseudo`). Measured on overlapping
+  // synthetic genres: four tags a genre, 0.537 → 0.625 on tracks neither head
+  // saw; eight and more, within a point either way — so it is gated, not
+  // assumed.
+  const POOL_MAX = 600;
+  const PSEUDO_THRESHOLD = 0.9;
+  let useSelfTrain = true;
+  try {
+    useSelfTrain = localStorage.getItem("genre.selftrain") !== "0";
+  } catch {
+    /* default */
+  }
+  $: {
+    try {
+      localStorage.setItem("genre.selftrain", useSelfTrain ? "1" : "0");
+    } catch {
+      /* not remembered, still applied */
+    }
+  }
   // Measured on synthetic genres that differ only in tempo and piep: 0.3 lets
   // them be told apart (recall 1.0 on all four, three seeds) while genres the
   // embedding separates stay at 1.0; 0.1 learns them only partly, 1.0 starts
@@ -545,6 +566,25 @@
         vectors.set(k, decodeEmbedding(v));
       for (const [k, v] of Object.entries(part.extras || {})) extras.set(k, v);
     }
+    // The pool for self-training: untagged tracks with a vector.
+    const poolV = [];
+    const poolRaws = [];
+    if (useSelfTrain) {
+      try {
+        const poolIds = (await api.genrePool(POOL_MAX)).ids || [];
+        for (let i = 0; i < poolIds.length; i += BATCH) {
+          progressStage = "titres non étiquetés";
+          progress = 0.2 * (i / Math.max(1, poolIds.length));
+          const part = await api.genreEmbeddings(poolIds.slice(i, i + BATCH));
+          for (const [k, v] of Object.entries(part.embeddings || {})) {
+            poolV.push(decodeEmbedding(v));
+            poolRaws.push(rawExtras((part.extras || {})[k]));
+          }
+        }
+      } catch {
+        // Best effort: without a pool the head is the one the labels make.
+      }
+    }
     const withVec = keep.filter((r) => vectors.has(String(r.deezer_id || r.id)));
     if (!withVec.length)
       throw new Error("aucun vecteur disponible — lancez « Calculer les empreintes »");
@@ -584,7 +624,7 @@
       groups[i] = a ? artistIds.get(a) : -1;
     });
     return {
-      rowsV, raws, y, groups, n: usable.length, d, older, labels: names,
+      rowsV, raws, y, groups, n: usable.length, d, older, labels: names, poolV, poolRaws,
       measured: raws.filter((r) => r.slice(1).some(Number.isFinite)).length,
       skipped: keep.length - withVec.length,
       prep,
@@ -599,15 +639,27 @@
   // The matrix a trainer gets, built fresh per call (the worker takes the
   // buffers): the first `width` numbers of each embedding (a v3 vector's first
   // 2560 ARE its v2 one), then the extras block when there is a scaler.
-  function pack(data, scaler, width = data.d) {
+  // `withPool` appends the untagged rows wide enough for `width`, as class -1.
+  function pack(data, scaler, width = data.d, withPool = false) {
     const k = scaler ? EXTRAS.length + 1 : 0;
     const dim = width + k;
-    const X = new Float32Array(data.n * dim);
+    const pool = withPool ? data.poolV.map((v, j) => j).filter((j) => data.poolV[j].length >= width) : [];
+    const n = data.n + pool.length;
+    const X = new Float32Array(n * dim);
+    const y = new Int32Array(n).fill(-1);
+    const groups = new Int32Array(n).fill(-1);
     for (let i = 0; i < data.n; i++) {
       X.set(data.rowsV[i].subarray(0, width), i * dim);
       if (scaler) X.set(extrasBlock(data.raws[i], scaler, EXTRA_SCALE), i * dim + width);
     }
-    return { X, y: data.y.slice(), groups: data.groups.slice(), n: data.n, d: dim, labels: data.labels };
+    y.set(data.y);
+    groups.set(data.groups);
+    pool.forEach((j, p) => {
+      const i = data.n + p;
+      X.set(data.poolV[j].subarray(0, width), i * dim);
+      if (scaler) X.set(extrasBlock(data.poolRaws[j], scaler, EXTRA_SCALE), i * dim + width);
+    });
+    return { X, y, groups, n, d: dim, labels: data.labels };
   }
 
   async function runTraining() {
@@ -675,6 +727,8 @@
       }
       progressStage = mode === "linear" || mode === "auto" ? "entraînement" : "entraînement approfondi";
       let trained = quick;
+      let trainedMode = "linear";
+      let trainedOpts = base;
       let modeNote = "";
       const C = data.labels.length;
       if (mode === "auto") {
@@ -692,12 +746,16 @@
           );
           if (deepHead.metrics.balanced >= quick.metrics.balanced + AUTO_DEEP_MIN_GAIN) {
             trained = deepHead;
+            trainedMode = "deep";
+            trainedOpts = { ...TRAIN_OPTS.deep, ...base };
             modeNote = `réseau gardé : ${pct(deepHead.metrics.balanced)} % contre ${pct(quick.metrics.balanced)} % pour la tête linéaire`;
           } else {
             modeNote = `tête linéaire gardée : le réseau ne faisait pas mieux (${pct(deepHead.metrics.balanced)} %)`;
           }
         }
       } else if (mode !== "linear") {
+        trainedMode = "deep";
+        trainedOpts = { ...(TRAIN_OPTS[mode] || {}), ...base };
         trained = await train(
           pack(data, scaler, width),
           "deep",
@@ -705,8 +763,30 @@
             progressStage = stage === "done" ? "terminé" : progressStage;
             progress = 0.5 + 0.5 * (pct || 0);
           },
-          { ...(TRAIN_OPTS[mode] || {}), ...base }
+          trainedOpts
         );
+      }
+      // Self-training on top of whatever won: the same run with the pool. Its
+      // first head IS the one above, bit for bit (same seed, same folds, the
+      // pool's fits come after), so nothing is lost when the second one does
+      // not earn its place.
+      const poolRows = useSelfTrain ? data.poolV.filter((v) => v.length >= width).length : 0;
+      if (poolRows) {
+        progressStage = "titres non étiquetés";
+        const without = trained.metrics.balanced;
+        try {
+          const self = await train(
+            pack(data, scaler, width, true),
+            trainedMode,
+            (stage, p) => (progress = 0.5 + 0.5 * (p || 0)),
+            { ...trainedOpts, pseudo: PSEUDO_THRESHOLD }
+          );
+          const ps = self.metrics.pseudo || { pool: poolRows, balanced: null, rows: 0 };
+          if (ps.rows > 0) trained = self;
+          trained.metrics.pseudo = { ...ps, without };
+        } catch {
+          // The head trained on the labels stands.
+        }
       }
       if (construction) trained.metrics.construction = construction;
       if (loud) trained.metrics.loud = loud;
@@ -2159,6 +2239,18 @@
             </span>
           </span>
         </label>
+        <label class="option" class:on={useSelfTrain}>
+          <input type="checkbox" bind:checked={useSelfTrain} />
+          <span class="option-text">
+            <strong>Apprendre aussi des titres non étiquetés</strong>
+            <span class="muted">
+              Les titres de la bibliothèque dont le modèle est sûr servent d'exemples
+              supplémentaires, avec moins de poids que vos étiquettes. Le résultat n'est
+              gardé que s'il fait mieux sur des titres qu'il n'a jamais vus — l'entraînement
+              le vérifie. Utile surtout quand un genre n'a encore que quelques titres.
+            </span>
+          </span>
+        </label>
         </details>
         <!-- Outside the label: a button inside one would be a second control it
              labels, and a click on it would tick the box. -->
@@ -2288,6 +2380,16 @@
                     <span class="v">{l.used ? "utilisée" : "écartée"}</span>
                     <span class="muted small">tête rapide {pct(l.with)} % avec, {pct(l.without)} % sans</span>
                   {/if}
+                </div>
+              {/if}
+              {#if head.metrics.pseudo}
+                {@const ps = head.metrics.pseudo}
+                <div class="score">
+                  <span class="k">Titres non étiquetés</span>
+                  <span class="v">{ps.rows > 0 ? "utilisés" : "écartés"}</span>
+                  <span class="muted small">
+                    {ps.rows > 0 ? `${ps.rows} appris parmi ${ps.pool}` : `${ps.pool} lus`}{#if ps.balanced != null}{" · "}{pct(ps.balanced)} % avec, {pct(ps.without)} % sans{/if}
+                  </span>
                 </div>
               {/if}
               {#if head.metrics.construction}
@@ -3372,11 +3474,14 @@
   .results {
     margin-top: 18px;
     display: grid;
+    /* An auto track grows to its widest child's intrinsic width: on a phone
+       the tile grid below pushed the verdict past the screen's edge. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 18px;
   }
   .scores {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
     gap: 10px;
   }
   .score {

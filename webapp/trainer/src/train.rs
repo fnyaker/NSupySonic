@@ -28,6 +28,15 @@ const BAG_MIN_EXAMPLES: usize = 12;
 /// by dropping them: each parameter's gradient also carries its L2 term, around
 /// 1e-5, so a 1e-20 contribution was already below f32's resolution of it.
 const TINY: f32 = 1e-20;
+/// Self-training (`Opts::pseudo`): the most a class takes from the unlabelled
+/// pool, as a multiple of its own labelled examples in the fit. More, and the
+/// head ends up learning its own opinions rather than the labels.
+const PSEUDO_RATIO: f64 = 3.0;
+/// What one pseudo-labelled row weighs against a row somebody tagged.
+const PSEUDO_WEIGHT: f32 = 0.5;
+/// The held-out balanced accuracy the self-trained head must gain to ship
+/// instead of the head trained on the labels alone.
+const PSEUDO_GAIN: f64 = 0.01;
 
 #[inline]
 fn flush(g: f32) -> f32 {
@@ -60,14 +69,20 @@ pub struct Opts {
     pub seed: u32,
     /// Hold out whole groups (artists) rather than rows.
     pub grouped: bool,
+    /// Self-training: 0 off; otherwise the probability a fold's head must give
+    /// an UNLABELLED row (class -1) before that row joins the fold's second fit
+    /// with the head's answer as its label. Each fold labels the pool with its
+    /// own head, so its held-out rows never had a say in the labels it learns
+    /// from, and the second fit ships only when it scores better held out.
+    pub pseudo: f32,
 }
 
 impl Opts {
     pub fn linear() -> Opts {
-        Opts { kind: 0, epochs: 60, lr: 0.08, l2: 1e-4, batch: 32, folds: 5, proj: 256, bag: 3, hidden: 0, hidden2: 0, noise: 0.0, seed: 1, grouped: false }
+        Opts { kind: 0, epochs: 60, lr: 0.08, l2: 1e-4, batch: 32, folds: 5, proj: 256, bag: 3, hidden: 0, hidden2: 0, noise: 0.0, seed: 1, grouped: false, pseudo: 0.0 }
     }
     pub fn deep() -> Opts {
-        Opts { kind: 1, epochs: 120, lr: 0.02, l2: 3e-4, batch: 32, folds: 3, proj: 0, bag: 1, hidden: 256, hidden2: 0, noise: 0.0, seed: 1, grouped: false }
+        Opts { kind: 1, epochs: 120, lr: 0.02, l2: 3e-4, batch: 32, folds: 3, proj: 0, bag: 1, hidden: 256, hidden2: 0, noise: 0.0, seed: 1, grouped: false, pseudo: 0.0 }
     }
 }
 
@@ -78,11 +93,13 @@ pub struct Data {
     pub x: Vec<f32>,
     pub y: Vec<i32>,
     pub groups: Vec<i32>,
+    /// Each row's weight in the loss (1 for a labelled row).
+    pub rw: Vec<f32>,
 }
 
 impl Data {
     pub fn new(n: usize, d: usize, c: usize) -> Data {
-        Data { n, d, c, x: vec![0.0; n * d], y: vec![0; n], groups: vec![-1; n] }
+        Data { n, d, c, x: vec![0.0; n * d], y: vec![0; n], groups: vec![-1; n], rw: vec![1.0; n] }
     }
 }
 
@@ -126,6 +143,11 @@ pub struct Outcome {
     /// labels the model disagrees with on data it did not train on.
     pub held: Vec<f32>,
     pub held_mask: Vec<u8>,
+    /// The self-trained head's held-out balanced accuracy, -1 when it was not
+    /// trained (no pool, or self-training off).
+    pub pseudo_balanced: f64,
+    /// How many pool rows the SHIPPED head learnt from (0: the labels alone won).
+    pub pseudo_rows: usize,
 }
 
 // --- the space a run trains in -------------------------------------------------
@@ -344,7 +366,7 @@ impl LinFit {
                 let lg = &mut self.lg[k * c..(k + 1) * c];
                 softmax(lg, &mut self.p);
                 let yi = data.y[i as usize] as usize;
-                let wt = self.cw[yi];
+                let wt = self.cw[yi] * data.rw[i as usize];
                 wsum += wt;
                 for cl in 0..c {
                     lg[cl] = flush((wt as f64 * (self.p[cl] - if cl == yi { 1.0 } else { 0.0 })) as f32);
@@ -572,7 +594,7 @@ impl MlpFit {
                 for (k, &i) in rows.iter().enumerate() {
                     softmax(&acts[last][k * c..(k + 1) * c], p);
                     let yi = data.y[i as usize] as usize;
-                    let wt = cw[yi];
+                    let wt = cw[yi] * data.rw[i as usize];
                     wsum += wt;
                     for cl in 0..c {
                         delta[last][k * c + cl] = flush((wt as f64 * (p[cl] - if cl == yi { 1.0 } else { 0.0 })) as f32);
@@ -598,19 +620,43 @@ impl MlpFit {
 
 enum Target {
     /// Held-out: the logits of these rows, averaged over `members` fits.
-    Fold { test: Vec<u32>, members: usize },
-    /// A member of the shipped head.
-    Final { members: usize },
+    /// `student` is the self-trained second fit of fold `fold`.
+    Fold { test: Vec<u32>, members: usize, fold: usize, student: bool },
+    /// A member of the shipped head (or of its self-trained alternative).
+    Final { members: usize, student: bool },
 }
 
 struct Task {
     rows: Vec<u32>,
     target: Target,
+    /// Pool rows' labels for this fit, written into `Data::y` when it starts.
+    labels: Vec<(u32, i32)>,
 }
 
 enum Fit {
     Lin(LinFit),
     Mlp(MlpFit),
+}
+
+/// One head's verdicts and weights, accumulated over its fits.
+struct Heads {
+    held: Vec<f32>,
+    held_mask: Vec<bool>,
+    final_w: Vec<f32>,
+    final_b: Vec<f32>,
+    final_net: Option<Net>,
+}
+
+impl Heads {
+    fn new(n: usize, c: usize, lin_dim: usize) -> Heads {
+        Heads {
+            held: vec![0.0; n * c],
+            held_mask: vec![false; n],
+            final_w: vec![0.0; c * lin_dim],
+            final_b: vec![0.0; c],
+            final_net: None,
+        }
+    }
 }
 
 struct Run {
@@ -619,14 +665,21 @@ struct Run {
     cur: Option<(Task, Fit, usize)>,
     planned: usize,
     done: usize,
-    held: Vec<f32>,
-    held_mask: Vec<bool>,
+    /// The head trained on the labels alone.
+    teacher: Heads,
+    /// The self-trained one (empty unless self-training runs).
+    student: Heads,
     /// Each fold fit's verdicts on its own training rows (`c × c`).
     fit_conf: Vec<i32>,
-    final_w: Vec<f32>,
-    final_b: Vec<f32>,
-    final_net: Option<Net>,
     final_members: usize,
+    /// Self-training: whether it runs, the pool's logits under each fold's
+    /// teacher (and the final one), and how many teacher fits are still out.
+    pseudo: bool,
+    pool_logits: Vec<Vec<f32>>,
+    pool_left: Vec<usize>,
+    final_pool: Vec<f32>,
+    final_left: usize,
+    picked_final: usize,
 }
 
 pub struct Job {
@@ -638,10 +691,54 @@ pub struct Job {
     examples: Vec<usize>,
     widths: Vec<usize>,
     cw_all: Vec<f32>,
+    /// The labelled rows, and the unlabelled pool (class -1).
+    real: Vec<u32>,
+    pool: Vec<u32>,
     run: Option<Run>,
     first: Option<Outcome>,
     retry_possible: bool,
     pub outcome: Option<Outcome>,
+}
+
+/// The pool rows a head is sure enough about, most confident first, at most
+/// `cap[k]` per class: `(row, class)`.
+fn pick_pool(logits: &[f32], pool: &[u32], c: usize, threshold: f32, cap: &[usize]) -> Vec<(u32, i32)> {
+    let mut p = vec![0f64; c];
+    let mut sure: Vec<(f64, u32, usize)> = Vec::new();
+    for (j, &i) in pool.iter().enumerate() {
+        softmax(&logits[j * c..(j + 1) * c], &mut p);
+        let mut k = 0;
+        for q in 1..c {
+            if p[q] > p[k] {
+                k = q;
+            }
+        }
+        if p[k] >= threshold as f64 {
+            sure.push((p[k], i, k));
+        }
+    }
+    sure.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+    let mut taken = vec![0usize; c];
+    let mut out = Vec::new();
+    for (_, i, k) in sure {
+        if taken[k] < cap[k] {
+            taken[k] += 1;
+            out.push((i, k as i32));
+        }
+    }
+    out
+}
+
+/// How many pool rows each class may take next to `rows` (labelled rows).
+fn pool_cap(y: &[i32], rows: &[u32], c: usize) -> Vec<usize> {
+    let mut counts = vec![0usize; c];
+    for &i in rows {
+        let k = y[i as usize];
+        if k >= 0 {
+            counts[k as usize] += 1;
+        }
+    }
+    counts.iter().map(|&n| (n as f64 * PSEUDO_RATIO).floor() as usize).collect()
 }
 
 impl Job {
@@ -655,6 +752,8 @@ impl Job {
             examples: Vec::new(),
             widths: Vec::new(),
             cw_all: Vec::new(),
+            real: Vec::new(),
+            pool: Vec::new(),
             run: None,
             first: None,
             retry_possible: false,
@@ -681,31 +780,49 @@ impl Job {
         if c < 2 {
             return Err(StartError::TooFewClasses);
         }
-        if d == 0 || self.data.x.len() != n * d || self.data.y.iter().any(|&v| v < 0 || v as usize >= c) {
+        // Class -1 is an unlabelled row: the self-training pool, and nothing at
+        // all when self-training is off.
+        if d == 0 || self.data.x.len() != n * d || self.data.y.iter().any(|&v| v < -1 || v as i64 >= c as i64) {
             return Err(StartError::BadData);
         }
         if self.data.x.iter().any(|v| !v.is_finite()) {
             return Err(StartError::BadData);
         }
-        if self.opt.kind == 0 && n < c * 2 {
+        self.real = (0..n as u32).filter(|&i| self.data.y[i as usize] >= 0).collect();
+        self.pool = if self.opt.pseudo > 0.0 {
+            (0..n as u32).filter(|&i| self.data.y[i as usize] < 0).collect()
+        } else {
+            Vec::new()
+        };
+        for &i in &self.pool {
+            self.data.rw[i as usize] = PSEUDO_WEIGHT;
+        }
+        let nr = self.real.len();
+        if self.opt.kind == 0 && nr < c * 2 {
             return Err(StartError::TooFewLinear);
         }
-        if self.opt.kind != 0 && n < c * 3 {
+        if self.opt.kind != 0 && nr < c * 3 {
             return Err(StartError::TooFewDeep);
         }
         self.examples = vec![0; c];
-        for &k in &self.data.y {
-            self.examples[k as usize] += 1;
+        for &i in &self.real {
+            self.examples[self.data.y[i as usize] as usize] += 1;
         }
-        let (assign, folds) = if self.opt.grouped {
-            cv::grouped(&self.data.y, &self.data.groups, c, self.opt.folds, &mut self.rng)
+        // The folds are dealt over the LABELLED rows only: a pool row is never
+        // held out, since there is no answer to hold it against.
+        let y: Vec<i32> = self.real.iter().map(|&i| self.data.y[i as usize]).collect();
+        let g: Vec<i32> = self.real.iter().map(|&i| self.data.groups[i as usize]).collect();
+        let (sub, folds) = if self.opt.grouped {
+            cv::grouped(&y, &g, c, self.opt.folds, &mut self.rng)
         } else {
-            cv::stratified(&self.data.y, c, self.opt.folds, &mut self.rng)
+            cv::stratified(&y, c, self.opt.folds, &mut self.rng)
         };
-        self.assign = assign;
+        self.assign = vec![-1; n];
+        for (k, &i) in self.real.iter().enumerate() {
+            self.assign[i as usize] = sub[k];
+        }
         self.folds = folds;
-        let all: Vec<u32> = (0..n as u32).collect();
-        self.cw_all = class_weights(&self.data.y, &all, c);
+        self.cw_all = class_weights(&self.data.y, &self.real, c);
         let proj = self.opt.proj;
         self.retry_possible = self.opt.kind == 0 && proj > 0 && (d as f64) > proj as f64 * 1.5;
         self.begin_run(proj);
@@ -723,43 +840,58 @@ impl Job {
             vec![dim, self.opt.hidden.max(1), c]
         };
         let mut tasks = VecDeque::new();
+        let mut pool_left = vec![0usize; self.folds];
         for f in 0..self.folds {
             let mut train = Vec::new();
             let mut test = Vec::new();
-            for i in 0..n {
-                if self.assign[i] == f as i32 {
-                    test.push(i as u32);
+            for &i in &self.real {
+                if self.assign[i as usize] == f as i32 {
+                    test.push(i);
                 } else {
-                    train.push(i as u32);
+                    train.push(i);
                 }
             }
             if train.is_empty() || test.is_empty() {
                 continue;
             }
             let members = self.bag_count(train.len());
+            pool_left[f] = members;
             for _ in 0..members {
-                tasks.push_back(Task { rows: train.clone(), target: Target::Fold { test: test.clone(), members } });
+                tasks.push_back(Task {
+                    rows: train.clone(),
+                    target: Target::Fold { test: test.clone(), members, fold: f, student: false },
+                    labels: Vec::new(),
+                });
             }
         }
-        let members = self.bag_count(n);
-        let all: Vec<u32> = (0..n as u32).collect();
+        let members = self.bag_count(self.real.len());
         for _ in 0..members {
-            tasks.push_back(Task { rows: all.clone(), target: Target::Final { members } });
+            tasks.push_back(Task {
+                rows: self.real.clone(),
+                target: Target::Final { members, student: false },
+                labels: Vec::new(),
+            });
         }
-        let planned = tasks.len() * self.opt.epochs.max(1);
+        let pseudo = self.opt.pseudo > 0.0 && !self.pool.is_empty();
+        let lin_dim = if self.opt.kind == 0 { dim } else { 0 };
+        let planned = tasks.len() * self.opt.epochs.max(1) * if pseudo { 2 } else { 1 };
+        let pool_n = self.pool.len();
         self.run = Some(Run {
             space,
             tasks,
             cur: None,
             planned,
             done: 0,
-            held: vec![0.0; n * c],
-            held_mask: vec![false; n],
+            teacher: Heads::new(n, c, lin_dim),
+            student: Heads::new(if pseudo { n } else { 0 }, c, if pseudo { lin_dim } else { 0 }),
             fit_conf: vec![0; c * c],
-            final_w: if self.opt.kind == 0 { vec![0.0; c * dim] } else { Vec::new() },
-            final_b: vec![0.0; c],
-            final_net: None,
             final_members: members,
+            pseudo,
+            pool_logits: if pseudo { vec![vec![0.0; pool_n * c]; self.folds] } else { Vec::new() },
+            pool_left,
+            final_pool: if pseudo { vec![0.0; pool_n * c] } else { Vec::new() },
+            final_left: members,
+            picked_final: 0,
         });
     }
 
@@ -769,7 +901,7 @@ impl Job {
             return 1.0;
         }
         let Some(run) = &self.run else { return 0.0 };
-        let frac = run.done as f64 / run.planned.max(1) as f64;
+        let frac = (run.done as f64 / run.planned.max(1) as f64).min(1.0);
         if !self.retry_possible {
             frac.min(0.999)
         } else if self.first.is_none() {
@@ -806,6 +938,10 @@ impl Job {
         if run.cur.is_none() {
             match run.tasks.pop_front() {
                 Some(task) => {
+                    // A self-trained fit's pool rows carry ITS head's labels.
+                    for &(i, k) in &task.labels {
+                        self.data.y[i as usize] = k;
+                    }
                     let fit = if self.opt.kind == 0 {
                         Fit::Lin(LinFit::new(run.space.dim, self.data.c, &task.rows, &self.data.y, self.opt.batch))
                     } else {
@@ -829,16 +965,17 @@ impl Job {
         run.done += 1;
         if *ep >= self.opt.epochs.max(1) {
             let (task, fit, _) = run.cur.take().unwrap();
-            Self::close_fit(run, &self.data, task, fit);
+            let ctx = PoolCtx { pool: &self.pool, threshold: self.opt.pseudo, epochs: self.opt.epochs.max(1), real: &self.real };
+            Self::close_fit(run, &self.data, task, fit, &ctx);
         }
         true
     }
 
-    fn close_fit(run: &mut Run, data: &Data, task: Task, fit: Fit) {
+    fn close_fit(run: &mut Run, data: &Data, task: Task, fit: Fit, ctx: &PoolCtx) {
         let c = data.c;
         let dim = run.space.dim;
         match task.target {
-            Target::Fold { test, members } => {
+            Target::Fold { test, members, fold, student } => {
                 // The held-out verdict is the AVERAGE of the fold's members, the
                 // same object as the head that ships (itself an average). The
                 // JavaScript summed them here while shipping the average, so the
@@ -846,31 +983,45 @@ impl Job {
                 // shipped head came out that much too diffident — its good calls
                 // then fell under the server's confidence gate.
                 let inv = 1.0 / members as f32;
-                match fit {
+                let heads = if student { &mut run.student } else { &mut run.teacher };
+                let teach = run.pseudo && !student;
+                let mut logits = vec![0f32; c];
+                match &fit {
                     Fit::Lin(f) => {
-                        let mut logits = vec![0f32; c];
                         for &i in &test {
                             let i = i as usize;
                             forward(&f.w, &f.b, run.space.row(data, i), &mut logits, c, dim);
-                            axpy(&mut run.held[i * c..(i + 1) * c], inv, &logits);
-                            run.held_mask[i] = true;
+                            axpy(&mut heads.held[i * c..(i + 1) * c], inv, &logits);
+                            heads.held_mask[i] = true;
                         }
-                        for &i in &task.rows {
-                            let i = i as usize;
-                            forward(&f.w, &f.b, run.space.row(data, i), &mut logits, c, dim);
-                            run.fit_conf[data.y[i] as usize * c + argmax(&logits)] += 1;
-                        }
-                    }
-                    Fit::Mlp(mut m) => {
-                        let batch = m.net.batch;
-                        for chunk in test.chunks(batch) {
-                            m.net.forward(chunk, data, &run.space, false);
-                            for (k, &i) in chunk.iter().enumerate() {
+                        if !student {
+                            for &i in &task.rows {
                                 let i = i as usize;
-                                axpy(&mut run.held[i * c..(i + 1) * c], inv, m.net.logits(k));
-                                run.held_mask[i] = true;
+                                forward(&f.w, &f.b, run.space.row(data, i), &mut logits, c, dim);
+                                run.fit_conf[data.y[i] as usize * c + argmax(&logits)] += 1;
                             }
                         }
+                        if teach {
+                            let pl = &mut run.pool_logits[fold];
+                            for (j, &i) in ctx.pool.iter().enumerate() {
+                                forward(&f.w, &f.b, run.space.row(data, i as usize), &mut logits, c, dim);
+                                axpy(&mut pl[j * c..(j + 1) * c], inv, &logits);
+                            }
+                        }
+                    }
+                    Fit::Mlp(_) => {}
+                }
+                if let Fit::Mlp(mut m) = fit {
+                    let batch = m.net.batch;
+                    for chunk in test.chunks(batch) {
+                        m.net.forward(chunk, data, &run.space, false);
+                        for (k, &i) in chunk.iter().enumerate() {
+                            let i = i as usize;
+                            axpy(&mut heads.held[i * c..(i + 1) * c], inv, m.net.logits(k));
+                            heads.held_mask[i] = true;
+                        }
+                    }
+                    if !student {
                         for chunk in task.rows.chunks(batch) {
                             m.net.forward(chunk, data, &run.space, false);
                             for (k, &i) in chunk.iter().enumerate() {
@@ -879,31 +1030,113 @@ impl Job {
                             }
                         }
                     }
+                    if teach {
+                        let pl = &mut run.pool_logits[fold];
+                        let mut j = 0;
+                        for chunk in ctx.pool.chunks(batch) {
+                            m.net.forward(chunk, data, &run.space, false);
+                            for k in 0..chunk.len() {
+                                axpy(&mut pl[j * c..(j + 1) * c], inv, m.net.logits(k));
+                                j += 1;
+                            }
+                        }
+                    }
+                }
+                if teach {
+                    run.pool_left[fold] -= 1;
+                    if run.pool_left[fold] == 0 {
+                        let cap = pool_cap(&data.y, &task.rows, c);
+                        let labels = pick_pool(&run.pool_logits[fold], ctx.pool, c, ctx.threshold, &cap);
+                        if labels.is_empty() {
+                            // Nothing the fold's head is sure of: its second fit
+                            // would be its first, so its verdicts are copied.
+                            for &i in &test {
+                                let i = i as usize;
+                                run.student.held[i * c..(i + 1) * c].copy_from_slice(&run.teacher.held[i * c..(i + 1) * c]);
+                                run.student.held_mask[i] = true;
+                            }
+                            run.done += members * ctx.epochs;
+                        } else {
+                            let mut rows = task.rows.clone();
+                            rows.extend(labels.iter().map(|&(i, _)| i));
+                            for _ in 0..members {
+                                run.tasks.push_back(Task {
+                                    rows: rows.clone(),
+                                    target: Target::Fold { test: test.clone(), members, fold, student: true },
+                                    labels: labels.clone(),
+                                });
+                            }
+                        }
+                    }
                 }
             }
-            Target::Final { members } => match fit {
-                Fit::Lin(f) => {
-                    let inv = 1.0 / members as f32;
-                    axpy(&mut run.final_w, inv, &f.w);
-                    axpy(&mut run.final_b, inv, &f.b);
+            Target::Final { members, student } => {
+                let heads = if student { &mut run.student } else { &mut run.teacher };
+                match fit {
+                    Fit::Lin(f) => {
+                        let inv = 1.0 / members as f32;
+                        axpy(&mut heads.final_w, inv, &f.w);
+                        axpy(&mut heads.final_b, inv, &f.b);
+                    }
+                    Fit::Mlp(mut m) => {
+                        if run.pseudo && !student {
+                            let batch = m.net.batch;
+                            let mut j = 0;
+                            for chunk in ctx.pool.chunks(batch) {
+                                m.net.forward(chunk, data, &run.space, false);
+                                for k in 0..chunk.len() {
+                                    run.final_pool[j * c..(j + 1) * c].copy_from_slice(m.net.logits(k));
+                                    j += 1;
+                                }
+                            }
+                        }
+                        heads.final_net = Some(m.net);
+                    }
                 }
-                Fit::Mlp(m) => run.final_net = Some(m.net),
-            },
+                if run.pseudo && !student {
+                    run.final_left -= 1;
+                    if run.final_left == 0 {
+                        if !run.teacher.final_w.is_empty() {
+                            let mut logits = vec![0f32; c];
+                            for (j, &i) in ctx.pool.iter().enumerate() {
+                                forward(&run.teacher.final_w, &run.teacher.final_b, run.space.row(data, i as usize), &mut logits, c, dim);
+                                run.final_pool[j * c..(j + 1) * c].copy_from_slice(&logits);
+                            }
+                        }
+                        let cap = pool_cap(&data.y, ctx.real, c);
+                        let labels = pick_pool(&run.final_pool, ctx.pool, c, ctx.threshold, &cap);
+                        run.picked_final = labels.len();
+                        if labels.is_empty() {
+                            run.done += members * ctx.epochs;
+                        } else {
+                            let mut rows = ctx.real.to_vec();
+                            rows.extend(labels.iter().map(|&(i, _)| i));
+                            for _ in 0..members {
+                                run.tasks.push_back(Task {
+                                    rows: rows.clone(),
+                                    target: Target::Final { members, student: true },
+                                    labels: labels.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    fn end_run(&mut self) {
-        let run = self.run.take().expect("a run to end");
-        let (n, d, c) = (self.data.n, self.data.d, self.data.c);
-        let dim = run.space.dim;
+    /// The confusion matrix, the scores and the temperature of one head's
+    /// held-out verdicts.
+    fn judge(&self, heads: &Heads) -> (Vec<i32>, f64, f64, f64, usize) {
+        let (n, c) = (self.data.n, self.data.c);
         let mut confusion = vec![0i32; c * c];
         let mut held = Vec::new();
         let mut held_y = Vec::new();
         for i in 0..n {
-            if !run.held_mask[i] {
+            if !heads.held_mask[i] || self.assign[i] < 0 {
                 continue;
             }
-            let lg = &run.held[i * c..(i + 1) * c];
+            let lg = &heads.held[i * c..(i + 1) * c];
             let mut got = 0;
             for k in 1..c {
                 if lg[k] > lg[got] {
@@ -916,20 +1149,25 @@ impl Job {
             held_y.push(yi as i32);
         }
         let (accuracy, balanced) = cv::scores(&confusion, &self.examples, c);
-        let (_, fit_balanced) = cv::scores(&run.fit_conf, &self.examples, c);
         let temperature = cv::temperature(&held, &held_y, c);
-        let layers = if self.opt.kind == 0 {
-            let w = match &run.space.p {
-                Some(p) => unproject(&run.final_w, p, c, dim, d),
-                None => run.final_w,
+        (confusion, accuracy, balanced, temperature, held_y.len())
+    }
+
+    fn layers_of(&self, space: &Space, heads: Heads) -> Vec<Layer> {
+        let (d, c) = (self.data.d, self.data.c);
+        let dim = space.dim;
+        if self.opt.kind == 0 {
+            let w = match &space.p {
+                Some(p) => unproject(&heads.final_w, p, c, dim, d),
+                None => heads.final_w,
             };
-            vec![Layer { rows: c, cols: d, w, b: run.final_b }]
+            vec![Layer { rows: c, cols: d, w, b: heads.final_b }]
         } else {
-            let net = run.final_net.expect("the final fit");
+            let net = heads.final_net.expect("the final fit");
             net.layers
                 .into_iter()
                 .enumerate()
-                .map(|(l, layer)| match (&run.space.p, l) {
+                .map(|(l, layer)| match (&space.p, l) {
                     // The first layer is linear in its input, so a projection
                     // folds straight back into it: what ships is a plain MLP
                     // over the original embedding.
@@ -937,27 +1175,76 @@ impl Job {
                     _ => Layer { rows: layer.out, cols: layer.inp, w: layer.w, b: layer.b },
                 })
                 .collect()
+        }
+    }
+
+    fn end_run(&mut self) {
+        let run = self.run.take().expect("a run to end");
+        let c = self.data.c;
+        let (confusion, accuracy, balanced, temperature, evaluated) = self.judge(&run.teacher);
+        let (_, fit_balanced) = cv::scores(&run.fit_conf, &self.examples, c);
+        let Run { space, teacher, student, final_members, pseudo, picked_final, .. } = run;
+        let mut pseudo_balanced = -1.0;
+        let mut outcome = None;
+        if pseudo {
+            let (s_conf, s_acc, s_bal, s_temp, s_eval) = self.judge(&student);
+            pseudo_balanced = s_bal;
+            let student_final = student.final_net.is_some() || picked_final > 0;
+            if student_final && picked_final > 0 && s_bal >= balanced + PSEUDO_GAIN {
+                let held_mask = student.held_mask.iter().map(|&m| m as u8).collect();
+                let held = student.held.clone();
+                outcome = Some(Outcome {
+                    kind: 0,
+                    layers: self.layers_of(&space, student),
+                    confusion: s_conf,
+                    folds: self.folds,
+                    projected: 0,
+                    bagged: 0,
+                    accuracy: s_acc,
+                    balanced: s_bal,
+                    temperature: s_temp,
+                    retried: false,
+                    evaluated: s_eval,
+                    fit_balanced,
+                    held,
+                    held_mask,
+                    pseudo_balanced,
+                    pseudo_rows: picked_final,
+                });
+            }
+        }
+        let mut outcome = match outcome {
+            Some(o) => o,
+            None => {
+                let held_mask = teacher.held_mask.iter().map(|&m| m as u8).collect();
+                let held = teacher.held.clone();
+                Outcome {
+                    kind: 0,
+                    layers: self.layers_of(&space, teacher),
+                    confusion,
+                    folds: self.folds,
+                    projected: 0,
+                    bagged: 0,
+                    accuracy,
+                    balanced,
+                    temperature,
+                    retried: false,
+                    evaluated,
+                    fit_balanced,
+                    held,
+                    held_mask,
+                    pseudo_balanced,
+                    pseudo_rows: 0,
+                }
+            }
         };
-        let outcome = Outcome {
-            kind: if self.opt.kind == 0 { 0 } else if self.opt.hidden2 > 0 { 2 } else { 1 },
-            layers,
-            confusion,
-            folds: self.folds,
-            projected: if run.space.p.is_some() { dim } else { 0 },
-            bagged: if run.final_members > 1 { run.final_members } else { 0 },
-            accuracy,
-            balanced,
-            temperature,
-            retried: false,
-            evaluated: held_y.len(),
-            fit_balanced,
-            held_mask: run.held_mask.iter().map(|&m| m as u8).collect(),
-            held: run.held,
-        };
+        outcome.kind = if self.opt.kind == 0 { 0 } else if self.opt.hidden2 > 0 { 2 } else { 1 };
+        outcome.projected = if space.p.is_some() { space.dim } else { 0 };
+        outcome.bagged = if final_members > 1 { final_members } else { 0 };
         // Projection costs a few percent of distance, which is nothing on
         // clustered data and everything on classes barely apart: a weak score
         // is retried at full width and the better model ships.
-        if self.opt.kind == 0 && self.first.is_none() && self.retry_possible && balanced < RETRY_BELOW {
+        if self.opt.kind == 0 && self.first.is_none() && self.retry_possible && outcome.balanced < RETRY_BELOW {
             self.first = Some(outcome);
             self.begin_run(0);
             return;
@@ -971,4 +1258,12 @@ impl Job {
             None => outcome,
         });
     }
+}
+
+/// What a closing fit needs from the job to label the pool.
+struct PoolCtx<'a> {
+    pool: &'a [u32],
+    threshold: f32,
+    epochs: usize,
+    real: &'a [u32],
 }

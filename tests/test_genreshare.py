@@ -39,6 +39,7 @@ class GenreShareTestCase(unittest.TestCase):
     _login = _borrow("_login")
     _track = _borrow("_track")
     _tag = _borrow("_tag")
+    _store_embedding = _borrow("_store_embedding")
 
     def _label(self, track, tag):
         r = self.client.post("/api/genre/label", json={"track": str(track.deezer_id), "tag": tag["id"]})
@@ -173,6 +174,25 @@ class GenreShareTestCase(unittest.TestCase):
         z = GenreTag.get(GenreTag.name == "Zaag")
         self.assertEqual((z.color, z.archetype), (None, None))
         self.assertEqual(TrackTag.select().count(), 0)
+
+    def test_the_self_training_pool_is_untagged_tracks_with_a_vector(self):
+        """/genre/pool (supysonic/webui/genre.py): what the studio's
+        self-training learns from. A tagged track is an example already, and a
+        track without a vector has nothing to learn from."""
+        self._login()
+        zaag = self._tag("Zaag")
+        tagged, free, bare = self._track("3001"), self._track("3002"), self._track("3003")
+        stored = self._track("3004", archived=False)
+        for t in (tagged, free, stored):
+            self._store_embedding(t, [0.1] * V2)
+        self._label(tagged, zaag)
+        r = self.client.get("/api/genre/pool")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.json["ids"], ["3002"])
+        self.assertNotIn(str(bare.deezer_id), r.json["ids"])
+        self.assertEqual(self.client.get("/api/genre/pool?limit=x").status_code, 200)
+        self._login("bob", "B0bbb")
+        self.assertEqual(self.client.get("/api/genre/pool").status_code, 403)
 
 
 if __name__ == "__main__":

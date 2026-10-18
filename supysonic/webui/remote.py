@@ -244,6 +244,7 @@ POLICY = {
     "genre_share_export": "admin",
     "genre_share_preview": "admin",
     "genre_share_import": "admin",
+    "genre_pool": "admin",
     "genre_extractor_upload": "admin",
     "genre_extractor_delete": "admin",
     "genre_extractor_test": "admin",
