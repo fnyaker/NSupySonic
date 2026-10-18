@@ -16,6 +16,10 @@ dans une WebView plein écran et lui donne ce qui manque au navigateur :
 - **Écran de configuration au premier lancement** : adresse du serveur, port
   optionnel, case « Vérifier le certificat SSL » (à décocher pour un certificat
   auto-signé), et raccourci pour désactiver l'optimisation batterie.
+  Décochée, la case ne veut pas dire « tout accepter » : le certificat présenté
+  à la première connexion est affiché (empreinte SHA-256) puis **épinglé**, et
+  seul celui-là est accepté ensuite. Un certificat renouvelé se fait accepter
+  en revalidant l'écran de configuration.
   L'écran se rouvre via l'appui long sur l'icône de l'app (« Serveur ») ou
   depuis l'écran d'erreur de connexion.
 

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -18,7 +19,16 @@
         android:theme="@style/Theme.NSupySonic"
         android:usesCleartextTraffic="true"
         android:supportsRtl="true"
-        android:allowBackup="true">
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        tools:targetApi="31">
+        <!-- usesCleartextTraffic: a home server may be http://192.168.1.10 and
+             this file cannot know which host it is, so http stays allowed at
+             the platform level and is narrowed in code to the configured
+             server only (MainActivity.shouldInterceptRequest for the page,
+             Net for the native fetches). allowBackup / dataExtractionRules:
+             the session cookie and the pinned certificate never leave the
+             device. -->
 
         <activity
             android:name=".SetupActivity"

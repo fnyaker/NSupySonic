@@ -180,6 +180,20 @@ commands back via `window.__nsNativeCmd()`. No webapp-side code is involved, so 
 against any deployed SPA version. Build: `gradle -p android assembleRelease` (JDK 17, SDK 34 —
 CI does this; no wrapper is committed).
 
+**Trust boundaries** (audit NS-19). "Verify SSL" unticked is **trust on first use**, never
+trust-all (`Ssl.kt`): the setup screen learns the certificate with a handshake it refuses (nothing is
+sent), shows its SHA-256 and pins it (`Prefs.pinFor`, per origin); the WebView pins on its first
+`onReceivedSslError` if setup could not; afterwards a chain the system accepts OR that exact leaf
+passes, a different one is "le certificat a changé", and re-saving the settings re-pins. Another
+host is never relaxed. `Prefs.originOf` is the ONE definition of "our server" (scheme, host, port)
+for the navigation guard, the shim, the bridge, the pin and the native fetches. `NSNative` answers
+only while the top frame is the server's (`onServerPage`, raised by `loadServer` before the page
+exists — the shim calls it at document start, before `onPageStarted` arrives). The manifest must
+allow cleartext (a LAN server's host is unknown at build time), so http is narrowed in code to the
+configured server: `shouldInterceptRequest` for the page, `Net.get` for native fetches — which also
+follows redirects by hand so the session cookie only ever goes to the server. Mixed content is
+never allowed; backup and device transfer exclude everything (`data_extraction_rules.xml`).
+
 **Surviving a long background stay.** Everything the app *is* — the audio, the queue, the UI —
 lives in the WebView's renderer process, which Android may kill whenever nobody is looking at it;
 the app process itself is only safe while the foreground service is up (it isn't, once playback

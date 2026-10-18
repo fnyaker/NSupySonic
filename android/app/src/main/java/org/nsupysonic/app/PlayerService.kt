@@ -25,8 +25,6 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.media.session.MediaButtonReceiver
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.Executors
 
 /**
@@ -354,8 +352,9 @@ class PlayerService : Service() {
         artUrl = url
         artBitmap = null
         if (url.isEmpty()) return
-        val verify = Prefs(this).verifySsl
-        // Same-origin /api/cover needs the WebView's session cookie.
+        val prefs = Prefs(this)
+        // Same-origin /api/cover needs the WebView's session cookie (Net only
+        // ever sends it to the configured server).
         val cookies = try {
             CookieManager.getInstance().getCookie(url)
         } catch (_: Exception) {
@@ -366,14 +365,12 @@ class PlayerService : Service() {
             for (attempt in 0 until 3) {
                 if (url != artUrl) return@execute // superseded by a newer track
                 bmp = try {
-                    val conn = URL(url).openConnection() as HttpURLConnection
-                    Ssl.apply(conn, verify)
-                    conn.connectTimeout = 8000
-                    conn.readTimeout = 8000
-                    conn.instanceFollowRedirects = true
-                    if (!cookies.isNullOrEmpty()) conn.setRequestProperty("Cookie", cookies)
-                    if (conn.responseCode !in 200..299) null
-                    else conn.inputStream.use { decodeBounded(readCapped(it)) }
+                    val conn = Net.get(prefs, url, cookies, 8000, 8000)
+                    try {
+                        conn.inputStream.use { decodeBounded(readCapped(it)) }
+                    } finally {
+                        conn.disconnect()
+                    }
                 } catch (_: Exception) {
                     null
                 }
