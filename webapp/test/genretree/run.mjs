@@ -15,7 +15,7 @@ const browser = await chromium.launch();
 
 async function open(viewport, mobile) {
   const ctx = await browser.newContext({ viewport, deviceScaleFactor: 2, isMobile: !!mobile, hasTouch: !!mobile });
-  await ctx.route(/dzcdn\.net|api\.deezer\.com/, (r) => r.abort());
+  await ctx.route((u) => ["dzcdn.net", "api.deezer.com"].some((h) => u.hostname === h || u.hostname.endsWith("." + h)), (r) => r.abort());
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("pageerror:", e.message));
   await login(page, base);
