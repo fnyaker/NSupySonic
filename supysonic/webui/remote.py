@@ -154,6 +154,8 @@ POLICY = {
     "youtube_status": "read",
     "artist": "read",
     "artist_tracks": "read",
+    "artist_on_deezer": "read",
+    "album_on_deezer": "read",
     "album": "read",
     "playlist": "read",
     "discography": "read",
@@ -495,7 +497,7 @@ def clean_track(t):
     """A track as the queue carries it, or None when it cannot be played."""
     if not isinstance(t, dict):
         return None
-    tid = t.get("deezer_id")
+    tid = t.get("deezer_id") or t.get("id")
     if isinstance(tid, int) and not isinstance(tid, bool):
         tid = str(tid)
     if not isinstance(tid, str) or not _ENTITY_ID_RE.match(tid):

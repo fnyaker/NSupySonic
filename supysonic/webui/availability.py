@@ -80,6 +80,9 @@ def _resolve_local(track_id):
     """A Track row from a universal id (numeric Deezer id or a local UUID)."""
     from ..deezer import archive
 
+    from .refs import canonical
+
+    track_id = canonical(track_id)
     if _valid_id(track_id):
         return archive.find_local_track(track_id)
     try:
@@ -107,6 +110,9 @@ def probe_track(track_id):
     Cheap by design: a recorded verdict answers immediately, and only a stale (or
     absent) one costs a Deezer round-trip.
     """
+    from .refs import canonical
+
+    track_id = canonical(track_id)
     track = _resolve_local(track_id)
     if track is not None and not _may_access_track(track):
         return jsonify({"error": "not found"}), 404
