@@ -32,6 +32,7 @@
 // files are asked about exactly like Deezer tracks: by their row's UUID.
 
 import { api } from "./api.js";
+import { migrateKey } from "./trackkey.js";
 
 const KEY = "audio.analysis";
 const MAX = 500; // a few tens of KB; the LRU drops the oldest half
@@ -79,9 +80,11 @@ function load() {
       const framed = raw.v && typeof raw.v === "object";
       const verdicts = framed ? raw.v : raw;
       const times = (framed && raw.t) || {};
-      for (const [id, v] of Object.entries(verdicts)) {
+      for (const [raw, v] of Object.entries(verdicts)) {
+        // Kept under a Deezer id by an older build: the same track's UUID now.
+        const id = migrateKey(raw);
         mem.set(id, v);
-        stamps.set(id, +times[id] || 0);
+        stamps.set(id, +times[raw] || 0);
       }
       if (framed && Number.isFinite(raw.g)) generation = raw.g;
     }
@@ -123,7 +126,7 @@ function schedule() {
 
 /** The verdict for a track, or null when we do not have one. */
 export function knownAnalysis(id) {
-  return (id && mem.get(String(id))) || null;
+  return (id && mem.get(migrateKey(id))) || null;
 }
 
 /**
@@ -186,14 +189,13 @@ function store(id, verdict) {
 
 const provisional = (v) => !!(v && v.provisional);
 
-// A track the server can answer for: Deezer's numeric id, or the UUID that IS
-// the row's id for everything else — an upload, a scanned library file, a
-// YouTube fallback. Those used to be filtered out here (and refused by the
-// server), so an uploaded file never had a genre, tagged or not.
+// A track the server can answer for, named by its UUID — the row's id, for
+// every kind of track (a Deezer one, an upload, a scanned library file, a
+// YouTube fallback). A Deezer id is turned into the UUID its row has.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function verdictId(raw) {
-  const id = raw == null ? "" : String(raw);
-  return /^\d+$/.test(id) || UUID_RE.test(id) ? id : null;
+  const id = raw == null ? "" : migrateKey(raw);
+  return UUID_RE.test(id) ? id : null;
 }
 
 /** Come back for these in a moment; the server has them on its queue. */

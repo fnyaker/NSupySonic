@@ -14,6 +14,7 @@ import { resolveCover } from "../format.js";
 import { dominantColor } from "../color.js";
 import { api } from "../api.js";
 import { createPublisher } from "./bridge.js";
+import { trackRef } from "../trackkey.js";
 
 let pub = null;
 let unsub = null;
@@ -37,7 +38,7 @@ function sendMeta() {
     return;
   }
   const cover = resolveCover(get(offlineCovers), t.album?.cover) ||
-    (t.deezer_id ? api.coverUrl(t.deezer_id) : "");
+    (trackRef(t) ? api.coverUrl(trackRef(t)) : "");
   pub.meta({
     title: t.title || "",
     artist: t.artist?.name || "",

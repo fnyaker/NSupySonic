@@ -1,4 +1,5 @@
 <script>
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { push } from "svelte-spa-router";
   import { slide } from "svelte/transition";
   import {
@@ -16,7 +17,7 @@
 
   let tab = "queue"; // queue | lyrics
 
-  $: fav = $current && $favorites.has(String($current.deezer_id));
+  $: fav = $current && $favorites.has(trackKey($current));
   $: queue = $player.queue;
   $: idx = $player.index;
 
@@ -33,7 +34,7 @@
 
   {#if $current}
     <div class="art">
-      <Cover src={$current.album?.cover} alt={$current.title} kind={$current.podcast ? "podcast" : "album"} fallbackId={$current.deezer_id} eager />
+      <Cover src={$current.album?.cover} alt={$current.title} kind={$current.podcast ? "podcast" : "album"} fallbackId={trackRef($current)} eager />
     </div>
     <div class="meta">
       <div class="info">

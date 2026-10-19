@@ -22,6 +22,7 @@ import { blobDecodes } from "./imagebytes.js";
 import { logInfo } from "./log.js";
 import { primeGain } from "./gaincache.js";
 import { primeAnalyses } from "./analysis.js";
+import { migrateKey, trackKey, trackRef } from "./trackkey.js";
 
 const DB_NAME = "nsupy-playcache";
 const DB_VERSION = 1;
@@ -64,6 +65,9 @@ function reqp(request) {
 const ownedCovers = new Set();
 // Track ids whose prefetch is in flight, to dedupe concurrent triggers.
 const inFlight = new Set();
+// Entries written before the app keyed on UUIDs sit under their Deezer id until
+// `migrateStoredKeys` renames them; the index answers to the UUID meanwhile.
+const storedAs = new Map(); // key (uuid) -> the id on disk, while it differs
 
 // Load the index at startup: total size, cached-id set, and merge cover object
 // URLs into the shared map (without clobbering permanent-download covers).
@@ -75,7 +79,9 @@ export async function initPlayCache() {
     let size = 0;
     const ids = new Set();
     for (const a of audio) {
-      ids.add(a.id);
+      const key = migrateKey(a.id);
+      if (key !== a.id) storedAs.set(key, a.id);
+      ids.add(key);
       size += a.size || 0;
     }
     const add = {};
@@ -95,6 +101,11 @@ export async function initPlayCache() {
   }
 }
 
+// What the prefetcher may fetch: a Deezer track of the library. An upload is
+// already on the server's disk, a podcast episode or a YouTube hit is fetched
+// when it is played.
+const streamable = (track) => !!track && !track.local && !track.podcast && track.source !== "youtube";
+
 export function isCached(id) {
   return get(cachedIds).has(String(id));
 }
@@ -104,7 +115,7 @@ export function isCached(id) {
 // user changed quality since the prefetch — stream fresh instead of silently
 // playing the old bitrate); offline, any cached bitrate still beats silence.
 export async function getCachedAudioURL(id, quality = null) {
-  id = String(id);
+  id = storedAs.get(String(id)) ?? String(id);
   try {
     const db = await openDB();
     const rec = await reqp(tx(db, "audio", "readonly").objectStore("audio").get(id));
@@ -133,8 +144,8 @@ async function touchAudio(id) {
 // Prefetch a track's audio (+ cover) into the cache. Skips a track that's
 // downloaded, already cached, or in flight. Best-effort and quiet.
 export async function prefetchTrack(track, quality) {
-  const id = track && track.deezer_id ? String(track.deezer_id) : null;
-  if (!id || !/^\d+$/.test(id)) return; // Deezer ids only (local files are on disk)
+  const id = trackKey(track);
+  if (!id || !streamable(track)) return; // library tracks only (local files are on disk)
   if (isDownloaded(id) || isCached(id) || inFlight.has(id)) return;
   inFlight.add(id);
   try {
@@ -145,7 +156,7 @@ export async function prefetchTrack(track, quality) {
     // priority instead of holding a thread for the minute that takes). A
     // refusal is not an error here — it means "not cached yet", and the next
     // track change asks again.
-    const res = await fetch(api.streamUrl(id, quality), {
+    const res = await fetch(api.streamUrl(trackRef(track), quality), {
       credentials: "include",
       headers: { "X-NS-Background": "1" },
     });
@@ -154,7 +165,7 @@ export async function prefetchTrack(track, quality) {
     const blob = await res.blob();
     if (!blob || !blob.size) return;
     await putAudio(id, blob, quality, type);
-    await cacheCover(track.album && track.album.cover, id);
+    await cacheCover(track.album && track.album.cover, trackRef(track));
     // The gain belongs with the audio: a track whose bytes are on the device
     // must never have to ask the network how loud it is when it starts.
     primeGain(track).catch(() => {});
@@ -194,8 +205,8 @@ export async function prefetchUpcoming(tracks, quality, stillWanted = () => true
   let spent = 0;
   for (const track of tracks) {
     if (mine !== batchSeq || !get(online)) return;
-    const id = track && track.deezer_id ? String(track.deezer_id) : null;
-    if (!id || !/^\d+$/.test(id)) continue;
+    const id = trackKey(track);
+    if (!id || !streamable(track)) continue;
     if (isDownloaded(id) || isCached(id)) continue;
     if (!stillWanted(track)) return;
     const before = get(playCacheSize);
@@ -216,14 +227,14 @@ async function putAudio(id, blob, quality, type) {
 
 // Cache a cover (from the same-origin archived-cover route), unless a permanent
 // download already provides it. Keyed by the remote URL the UI renders.
-async function cacheCover(coverUrl, deezerId, background = true) {
+async function cacheCover(coverUrl, ref, background = true) {
   if (!coverUrl) return;
   const key = coverKey(coverUrl);
   if (get(offlineCovers)[key]) return;
   try {
     // The art of the track PLAYING is on screen and in the notification, so it
     // is foreground. The art of a track being prefetched is not.
-    const res = await fetch(api.coverUrl(deezerId), {
+    const res = await fetch(api.coverUrl(ref), {
       credentials: "include",
       headers: background ? { "X-NS-Background": "1" } : {},
     });
@@ -248,7 +259,7 @@ async function cacheCover(coverUrl, deezerId, background = true) {
 // server-archived) pochette in airplane mode, for everything you have listened
 // to, not only for what the prefetcher happened to pull ahead.
 export async function cacheCoverFor(track) {
-  const id = track && track.deezer_id ? String(track.deezer_id) : null;
+  const id = trackRef(track);
   const url = track && track.album && track.album.cover;
   if (!id || !url) return;
   if (get(offlineCovers)[coverKey(url)]) return; // already have this art
@@ -374,9 +385,11 @@ async function evictEntry(e) {
     const t = tx(db, "audio", "readwrite");
     t.objectStore("audio").delete(e.key);
     await done(t);
+    const key = migrateKey(e.key); // an entry not yet renamed is indexed by its UUID
+    storedAs.delete(key);
     cachedIds.update((s) => {
       const n = new Set(s);
-      n.delete(e.key);
+      n.delete(key);
       return n;
     });
   } else {
@@ -432,4 +445,24 @@ export async function clearPlayCache() {
   } catch {
     return false;
   }
+}
+
+// Rename, once, the audio written under a Deezer id (see `storedAs`). Quiet
+// background work: until it is done the index already finds those entries.
+export async function migrateStoredKeys() {
+  if (!storedAs.size) return 0;
+  const db = await openDB();
+  let moved = 0;
+  for (const [key, old] of [...storedAs]) {
+    const t = tx(db, "audio", "readwrite");
+    const store = t.objectStore("audio");
+    const [rec, have] = await Promise.all([reqp(store.get(old)), reqp(store.get(key))]);
+    if (rec && !have) store.put({ ...rec, id: key });
+    store.delete(old);
+    await done(t);
+    storedAs.delete(key);
+    moved++;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  return moved;
 }

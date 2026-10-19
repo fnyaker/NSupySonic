@@ -1,4 +1,5 @@
 <script>
+  import { trackRef } from "../lib/trackkey.js";
   import { onMount, onDestroy } from "svelte";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, LEVEL_INFO } from "../lib/remote/mode.js";
   import { leaveRemote } from "../lib/remote/controller.js";
@@ -538,7 +539,7 @@
       <div class="list">
         {#each items as m (m.id)}
           <div class="row">
-            <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} kind="track" fallbackId={m.track?.deezer_id} /></div>
+            <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} kind="track" fallbackId={trackRef(m.track)} /></div>
             <div class="meta">
               <div class="t">{m.track?.title}</div>
               <div class="a muted">{artistLine(m.track)}</div>

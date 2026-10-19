@@ -1,4 +1,5 @@
 <script>
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { api } from "../lib/api.js";
   import { toasts } from "../lib/stores.js";
   import { duration as fmtDuration, artistLine } from "../lib/format.js";
@@ -47,7 +48,7 @@
   }
 
   function add(track) {
-    const id = String(track.deezer_id);
+    const id = trackKey(track);
     if (added.has(id)) return;
     added = new Set(added).add(id);
     onadd?.(track);
@@ -55,7 +56,7 @@
   }
 
   function isIn(track) {
-    const id = String(track.deezer_id);
+    const id = trackKey(track);
     return added.has(id) || existingIds.has(id);
   }
 
@@ -89,9 +90,9 @@
         <p class="muted hint">Tapez pour rechercher dans Deezer et votre bibliothèque locale.</p>
       {/if}
 
-      {#each results as t (t.deezer_id)}
+      {#each results as t (trackKey(t))}
         <div class="res">
-          <div class="thumb"><Cover src={t.album?.cover} alt={t.title} size={42} kind="track" fallbackId={t.deezer_id} /></div>
+          <div class="thumb"><Cover src={t.album?.cover} alt={t.title} size={42} kind="track" fallbackId={trackRef(t)} /></div>
           <div class="meta">
             <div class="t">
               {#if t.source === "youtube"}<span class="local" title="Source YouTube (pas sur Deezer)"><Icon name="youtube" size={12} /></span>{:else if t.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}

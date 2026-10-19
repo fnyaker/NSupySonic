@@ -15,6 +15,7 @@ import {
   normalization,
 } from "./stores.js";
 import { invalidatePlaylists, loadFavorites } from "./actions.js";
+import { trackKey, trackRef } from "./trackkey.js";
 
 // -- preview -----------------------------------------------------------------
 // Same pipeline as the player: the /api/stream URL at the quality you listen
@@ -22,7 +23,7 @@ import { invalidatePlaylists, loadFavorites } from "./actions.js";
 // will get. Deliberately its OWN element — auditioning a replacement must not
 // hijack (or be hijacked by) whatever is playing.
 
-/** The deezer_id being auditioned, or null. */
+/** The trackKey being auditioned, or null. */
 export const previewing = writable(null);
 let previewEl = null;
 
@@ -41,13 +42,13 @@ export function stopPreview() {
 }
 
 export function togglePreview(track) {
-  if (get(previewing) === track.deezer_id) {
+  if (get(previewing) === trackKey(track)) {
     stopPreview();
     return;
   }
   stopPreview();
   const el = new Audio();
-  el.src = api.streamUrl(track.deezer_id, get(quality));
+  el.src = api.streamUrl(trackRef(track), get(quality));
   el.preload = "auto";
   // Match the player's static normalization so a candidate doesn't merely
   // sound louder than the rest of your library and win on that.
@@ -63,7 +64,7 @@ export function togglePreview(track) {
   el.addEventListener("error", fail);
   el.play().catch(fail);
   previewEl = el;
-  previewing.set(track.deezer_id);
+  previewing.set(trackKey(track));
 }
 
 // -- committing --------------------------------------------------------------
@@ -72,10 +73,10 @@ export function togglePreview(track) {
 export async function applyReplacement(target, candidate) {
   stopPreview();
   try {
-    const r = await api.replaceTrack(target.deezer_id, candidate.deezer_id);
+    const r = await api.replaceTrack(trackRef(target), trackRef(candidate));
     // The dead track is gone from your library, so drop its badge; the
     // stand-in is playable, so make sure it doesn't inherit one.
-    clearUnavailable(target.deezer_id);
+    clearUnavailable(trackKey(target));
     invalidatePlaylists();
     loadFavorites(true);
     toasts.push(

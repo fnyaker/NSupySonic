@@ -8,6 +8,7 @@ import { api } from "./api.js";
 import { playable } from "./ladder.js";
 import { activeSource, getContext, isWired, lookaheadSeconds } from "./audio/graph.js";
 import { outputLag, trimSeconds } from "./audio/latency.js";
+import { trackKey } from "./trackkey.js";
 
 // { synced: [{ time, text }], text } | null  (null = none / not loaded yet)
 export const trackLyrics = writable(null);
@@ -16,7 +17,7 @@ export const trackLyrics = writable(null);
 // song's words over the new one is worse than showing none.
 let showingFor = null;
 current.subscribe(($c) => {
-  const id = $c?.deezer_id || null;
+  const id = trackKey($c);
   if (id === showingFor) return;
   showingFor = id;
   trackLyrics.set(null);

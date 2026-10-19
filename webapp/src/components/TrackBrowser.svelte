@@ -1,4 +1,5 @@
 <script>
+  import { trackRef } from "../lib/trackkey.js";
   import TrackList from "./TrackList.svelte";
   import Icon from "./Icon.svelte";
   import { api } from "../lib/api.js";
@@ -30,7 +31,7 @@
     // Server-side pre-archive is for Deezer tracks (numeric ids). Local/uploaded
     // files (UUID ids) are already on the server's disk, so filter them out —
     // sending them made the server queue nothing and report "0 titres".
-    const ids = tracks.map((t) => t.deezer_id).filter((x) => /^\d+$/.test(String(x)));
+    const ids = tracks.filter((t) => !t.local && !t.podcast && t.source !== "youtube").map(trackRef);
     if (!ids.length) {
       toasts.push("Rien à archiver (fichiers déjà locaux)");
       return;

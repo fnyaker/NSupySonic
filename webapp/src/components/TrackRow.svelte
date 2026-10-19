@@ -1,4 +1,5 @@
 <script>
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { push } from "svelte-spa-router";
   import {
     player,
@@ -23,16 +24,16 @@
   export let showAlbum = true;
   export let showCover = true; // album thumbnail per row (off on album pages)
 
-  $: isCurrent = $currentId === track.deezer_id;
+  $: isCurrent = $currentId === trackKey(track);
   $: isPlaying = isCurrent && $playing;
-  $: fav = $favorites.has(String(track.deezer_id));
-  $: downloaded = $downloads.has(String(track.deezer_id));
+  $: fav = $favorites.has(trackKey(track));
+  $: downloaded = $downloads.has(trackKey(track));
   // Flagged by the API when the list was fetched, or discovered mid-session by
   // the player's probe. A track you have downloaded plays from the device, so it
   // is never "unavailable" to YOU whatever Deezer decided.
   $: unavailable =
     !downloaded &&
-    (track.unavailable === true || $unavailableIds.has(String(track.deezer_id)));
+    (track.unavailable === true || $unavailableIds.has(trackKey(track)));
 
   function play() {
     if (isCurrent) player.toggle();
@@ -212,7 +213,7 @@
 
     <div class="titles">
       {#if showCover}
-        <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} kind="track" fallbackId={track.deezer_id} /></div>
+        <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} kind="track" fallbackId={trackRef(track)} /></div>
       {/if}
       <div class="meta">
         <div class="t" class:gone={unavailable}>

@@ -2687,6 +2687,7 @@ def _episode(e, channel=None):
         else _image("talk", e.image_md5 or channel.cover_art_md5)
     )
     return {
+        "id": str(e.id),
         "deezer_id": str(e.id),
         "podcast": True,
         "title": e.title,

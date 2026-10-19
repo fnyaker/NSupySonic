@@ -4,6 +4,7 @@
   // (/api/share/waveform); the cut itself is done server-side by ffmpeg, so
   // what leaves the device is a small, ready-to-send audio file. Sharing uses
   // the Web Share API (with files) when available, else a plain download.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { onDestroy, tick } from "svelte";
   import { get } from "svelte/store";
   import {
@@ -28,7 +29,8 @@
   const MIN_WINDOW = 3; // seconds visible at maximum zoom
 
   let track = null;
-  let id = null;
+  let id = null; // the track's key
+  let ref = null; // what requests name it by
   let peaks = null;
   let duration = 0;
   let loadingWave = false;
@@ -50,14 +52,15 @@
   // -- open / close -----------------------------------------------------------
 
   $: open = !!$shareSheet;
-  $: if ($shareSheet && $shareSheet.track.deezer_id !== id) init($shareSheet.track);
+  $: if ($shareSheet && trackKey($shareSheet.track) !== id) init($shareSheet.track);
   $: if (!$shareSheet && id) teardown();
 
   let initSeq = 0;
   async function init(t) {
     const mine = ++initSeq;
     track = t;
-    id = t.deezer_id;
+    id = trackKey(t);
+    ref = trackRef(t);
     peaks = null;
     waveError = false;
     loadingWave = true;
@@ -92,7 +95,7 @@
     defaultSelection();
     if (t.podcast) loadEpisodeMarkers(id);
     try {
-      const r = await api.waveform(id);
+      const r = await api.waveform(ref);
       if (mine !== initSeq) return;
       peaks = r.peaks || null;
       if (r.duration) duration = r.duration;
@@ -121,6 +124,7 @@
     }
     track = null;
     id = null;
+    ref = null;
     peaks = null;
   }
 
@@ -130,7 +134,7 @@
   // playing (the most likely "share this bit"), else the first 30 s.
   function defaultSelection() {
     const cur = get(current);
-    const at = cur && cur.deezer_id === id ? get(player).currentTime : 0;
+    const at = cur && trackKey(cur) === id ? get(player).currentTime : 0;
     const len = Math.min(30, duration || 30);
     selStart = Math.max(0, Math.min(at - len / 2, (duration || len) - len));
     selEnd = selStart + len;
@@ -161,7 +165,7 @@
     // can be routed through the shared Web Audio graph — the pre-listen then gets
     // the exact standard pipeline (per-track normalization, EQ, bass, safety
     // limiter), while volume/mute stay on the element itself, like the player.
-    preview.src = api.streamUrl(id);
+    preview.src = api.streamUrl(ref);
     preview.volume = get(player).muted ? 0 : get(player).volume;
     preview.addEventListener("timeupdate", onPreviewTime);
     preview.addEventListener("ended", stopPreview);
@@ -185,11 +189,11 @@
   // playback too.
   async function ensurePreviewGain(t) {
     if (!t || get(normalization) === "off" || typeof t.gain === "number") return;
-    const cached = knownGain(t.deezer_id);
+    const cached = knownGain(trackKey(t));
     if (cached !== undefined) {
       if (typeof cached === "number") {
         t.gain = cached;
-        if (t.deezer_id === id) setPreviewGain(cached, false);
+        if (trackKey(t) === id) setPreviewGain(cached, false);
       }
       return;
     }
@@ -197,7 +201,7 @@
     const g = gainFor(t);
     // Apply only if this is still the track the sheet is showing. Ramp
     // (snap=false) — a preview may already be audible when this lands.
-    if (typeof g === "number" && t.deezer_id === id) setPreviewGain(g, false);
+    if (typeof g === "number" && trackKey(t) === id) setPreviewGain(g, false);
   }
   function onPreviewTime() {
     if (!preview) return;
@@ -382,7 +386,7 @@
     const waveH = H - rulerH;
     const mid = waveH / 2;
 
-    const isCur = get(current)?.deezer_id === id;
+    const isCur = trackKey(get(current)) === id;
     const playT = previewPlaying || previewTime > 0 ? previewTime : isCur ? get(player).currentTime : null;
 
     // bars
@@ -709,8 +713,8 @@
   $: clipLen = Math.max(0, selEnd - selStart);
   $: shareUrl =
     mode === "clip"
-      ? api.shareClipUrl(id, selStart, selEnd, clipFmt)
-      : api.shareFileUrl(id, fullFmt === "orig" ? null : fullFmt);
+      ? api.shareClipUrl(ref, selStart, selEnd, clipFmt)
+      : api.shareFileUrl(ref, fullFmt === "orig" ? null : fullFmt);
 
   function fallbackName() {
     const artist = artistLine(track);
@@ -813,7 +817,7 @@
     <div class="sheet" role="dialog" aria-label="Partager" tabindex="-1" on:click|stopPropagation>
       <header>
         <div class="who">
-          <Cover src={track.album?.cover} alt={track.title} size={46} kind="track" fallbackId={track.deezer_id} />
+          <Cover src={track.album?.cover} alt={track.title} size={46} kind="track" fallbackId={trackRef(track)} />
           <div class="txt">
             <span class="t">{track.title}</span>
             <span class="a muted">{artistLine(track)}</span>

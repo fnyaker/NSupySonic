@@ -74,6 +74,7 @@
     watchAudio,
     whenReady,
   } from "../lib/ladder.js";
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import {
     getEpisodeProgress,
     saveEpisodeProgress,
@@ -89,7 +90,7 @@
   // hand playback over with no reload pause. `audio` is whichever is playing.
   let audio = null;
   let els = [];
-  let curId = null; // deezer_id currently loaded on `audio`
+  let curId = null; // trackKey currently loaded on `audio`
   let curQ = null; // quality currently loaded on `audio`
   let curSeq = -1; // player.seq the active element was (re)started for
   let switching = false;
@@ -515,7 +516,7 @@
     // load() defers fetching and loadedmetadata below would never fire.
     el.preload = "auto";
     el.src =
-      curIsBlob && curBlobUrl ? curBlobUrl : api.streamUrl(cur.deezer_id, curQ);
+      curIsBlob && curBlobUrl ? curBlobUrl : api.streamUrl(trackRef(cur), curQ);
     el.load();
     const cleanup = () => {
       clearTimeout(recoverDeadline);
@@ -642,7 +643,7 @@
       const listened = Math.max(0, Math.round(played / 1000));
       const s = get(player);
       api.reportListen({
-        deezer_id: listenId,
+        id: listenId,
         listened,
         next_id: nextId,
         context: s.context || null,
@@ -705,7 +706,7 @@
     if (!cur || typeof gainFor(cur) === "number") return;
     await primeGains([cur]);
     const g = gainFor(cur);
-    if (typeof g === "number" && get(current)?.deezer_id === cur.deezer_id)
+    if (typeof g === "number" && trackKey(get(current)) === trackKey(cur))
       setTrackGain(g, false);
   }
 
@@ -718,7 +719,7 @@
   async function ensureGain(track) {
     if (get(normalization) === "off" || !track) return;
     if (typeof track.gain === "number") return;
-    const cached = knownGain(track.deezer_id);
+    const cached = knownGain(trackKey(track));
     if (typeof cached === "number") {
       track.gain = cached;
       return;
@@ -734,7 +735,7 @@
     // setTrackGain at the handover picks up the value we just cached, so a gain
     // that arrives while the next track is still loading still lands exactly
     // when that track starts.
-    if (loadingTrack || get(current)?.deezer_id !== track.deezer_id) return;
+    if (loadingTrack || trackKey(get(current)) !== trackKey(track)) return;
     if ((audio?.currentTime || 0) > GAIN_LATE_GRACE) return;
     setTrackGain(g, false); // already audible: ramp, don't click
   }
@@ -752,7 +753,7 @@
       audio.duration && isFinite(audio.duration) ? audio.duration : cur.duration || 0;
     // `force` also pushes straight to the server (pause / page-hide are often
     // the last code to run before the tab is frozen).
-    saveEpisodeProgress(cur.deezer_id, audio.currentTime, d, force);
+    saveEpisodeProgress(trackKey(cur), audio.currentTime, d, force);
   }
 
   // Seek requests from other views (e.g. the immersive player). Routed through
@@ -768,7 +769,7 @@
   // the current one when the player navigated to it deliberately even though it
   // carries the same deezer id (a duplicate in the queue, a "restart" prev).
   $: if (audio && $current) {
-    if ($current.deezer_id !== curId) loadTrack($current);
+    if (trackKey($current) !== curId) loadTrack($current);
     else if ($player.seq !== curSeq) restartCurrent();
   }
   // The queue emptied (last track removed): stop and release the element so it
@@ -832,7 +833,7 @@
   $: if (
     audio &&
     $current &&
-    $current.deezer_id === curId &&
+    trackKey($current) === curId &&
     $quality !== curQ &&
     !switching &&
     !xfade && // mid-crossfade both elements are in use; apply it on the next load
@@ -842,11 +843,12 @@
 
   // Prefer an on-device download (instant, plays in airplane mode) over the
   // network. Returns { url, blob } — blob true means a revocable object URL.
-  async function resolveSource(deezerId, q) {
+  async function resolveSource(track, q) {
+    const key = trackKey(track);
     // 1) A permanent download (fixed quality, plays in airplane mode).
-    if (isDownloaded(deezerId)) {
+    if (isDownloaded(key)) {
       try {
-        const u = await getObjectURL(deezerId);
+        const u = await getObjectURL(key);
         if (u) return { url: u, blob: true };
       } catch {
         /* fall back to the cache / network */
@@ -855,16 +857,16 @@
     // 2) The playback cache (prefetched next track) — check before the network
     //    so a drop right at the track change doesn't stall playback. The cached
     //    bitrate must match the asked quality while online (else stream fresh).
-    if (isCached(deezerId)) {
+    if (isCached(key)) {
       try {
-        const u = await getCachedAudioURL(deezerId, q);
+        const u = await getCachedAudioURL(key, q);
         if (u) return { url: u, blob: true };
       } catch {
         /* fall back to the network */
       }
     }
     // 3) Stream from the server.
-    return { url: api.streamUrl(deezerId, q), blob: false };
+    return { url: api.streamUrl(trackRef(track), q), blob: false };
   }
 
   function setBlobUrl(url) {
@@ -906,7 +908,7 @@
     // given a new source anyway, and the skip ramp below owns it from here.
     cancelCrossfade(false);
     trimmedId = null;
-    logInfo("load", `${track.podcast ? "episode" : "track"} ${track.deezer_id} "${track.title}"`
+    logInfo("load", `${track.podcast ? "episode" : "track"} ${trackKey(track)} "${track.title}"`
       + (firstLoad ? " (first load after restore)" : ""), null, { important: firstLoad });
     // Where to (re)start this track:
     //  - a podcast episode always resumes from its own saved position, whenever
@@ -914,7 +916,7 @@
     //  - otherwise, only the very first (session-restored) load resumes.
     let resumeAt = 0;
     if (track.podcast) {
-      const p = getEpisodeProgress(track.deezer_id);
+      const p = getEpisodeProgress(trackKey(track));
       // A finished episode restarts from the top instead of the credits.
       if (p && !p.done && p.t > 1) resumeAt = p.t;
     } else if (firstLoad && $player.currentTime > 1) {
@@ -927,10 +929,10 @@
       const e = edgesFor(track);
       if (e && e.start > 0.25) resumeAt = e.start;
     }
-    curId = track.deezer_id;
+    curId = trackKey(track);
     // From here, everything that is not the audio itself waits its turn behind
     // it (see lib/ladder.js).
-    beginTrack(track.deezer_id);
+    beginTrack(trackKey(track));
     curQ = get(quality);
     curSeq = get(player).seq;
     lastKnownTime = resumeAt;
@@ -979,7 +981,7 @@
     // meant to be immediate; the overlap is for the end of a track.
     const soften =
       !firstLoad && get(crossfadeEnabled) && get(crossfadeOnSkip) && get(player).playing;
-    const srcPromise = resolveSource(track.deezer_id, curQ);
+    const srcPromise = resolveSource(track, curQ);
     if (soften) {
       fadeElement(audio, 0, SKIP_FADE);
       // On the fade's own clock, never a bare timer: in the background a
@@ -988,7 +990,7 @@
     }
     const src = await srcPromise;
     // A newer load may have superseded us while reading the blob from IndexedDB.
-    if (curId !== track.deezer_id) {
+    if (curId !== trackKey(track)) {
       if (src.blob) {
         try {
           URL.revokeObjectURL(src.url);
@@ -1016,7 +1018,7 @@
     // fetch until the user actually presses play (play() triggers the load).
     audio.preload = firstLoad && !get(player).playing ? "none" : "auto";
     if (detachLadder) detachLadder();
-    detachLadder = watchAudio(audio, track.deezer_id);
+    detachLadder = watchAudio(audio, trackKey(track));
     audio.src = src.url;
     audio.load();
     // The element is silent from here until it buffers, so the fade gain can be
@@ -1040,7 +1042,7 @@
     // reactive below), so the snapped value is already the correct one, with no
     // unity-then-correct jump. No-op unless normalization is on.
     setTrackGain(gainFor(track));
-    if (src.blob) touch(track.deezer_id); // bump LRU recency
+    if (src.blob) touch(trackKey(track)); // bump LRU recency
 
     if (resumeAt > 0) seekOnceLoaded(resumeAt);
     if ($player.playing) startPlayback("load");
@@ -1067,9 +1069,9 @@
     });
     // The animation asks for the tempo and the genre; a second late is fine,
     // silence is not.
-    whenReady(TIER.VERDICT, () => primeAnalyses([String(track.deezer_id)]));
+    whenReady(TIER.VERDICT, () => primeAnalyses([trackKey(track)]));
     whenReady(TIER.EXTRA, () => {
-      flushListen(track.deezer_id);
+      flushListen(trackRef(track));
       // Measure this track and the next one. The next one is the point: a
       // crossfade needs its bounds before it starts, and the server only
       // measures what is already archived — so a track is trimmed from the play
@@ -1133,16 +1135,16 @@
     probedId = id;
     let verdict;
     try {
-      verdict = await api.probeTrack(track.deezer_id);
+      verdict = await api.probeTrack(trackRef(track));
     } catch {
       return; // couldn't ask — recovery carries on as before
     }
     if (!verdict || verdict.available) return;
     if (curId !== id) return; // we already moved on
-    logInfo("audio", `probe: ${track.deezer_id} is unavailable — skipping`, null, {
+    logInfo("audio", `probe: ${trackKey(track)} is unavailable — skipping`, null, {
       important: true,
     });
-    markUnavailable(track.deezer_id);
+    markUnavailable(trackKey(track));
     failCurrentTrack("Titre indisponible — vous pouvez le remplacer");
   }
 
@@ -1245,7 +1247,7 @@
     const el = chase.el;
     el.pause(); // don't audibly replay from 0 while buffering toward the target
     el.preload = "auto";
-    el.src = api.streamUrl(cur.deezer_id, curQ);
+    el.src = api.streamUrl(trackRef(cur), curQ);
     el.load();
   }
 
@@ -1296,7 +1298,7 @@
     incoming.volume = audio.volume;
     incoming.muted = audio.muted;
     incoming.preload = "auto"; // may carry preload=none from a paused restore
-    incoming.src = api.streamUrl(cur.deezer_id, newQ);
+    incoming.src = api.streamUrl(trackRef(cur), newQ);
     incoming.load();
 
     let done = false;
@@ -1346,7 +1348,7 @@
       done = true;
       cleanup();
       // Bail if the track changed underneath us while preloading.
-      if (get(current)?.deezer_id !== cur.deezer_id) {
+      if (trackKey(get(current)) !== trackKey(cur)) {
         switching = false;
         return;
       }
@@ -1451,7 +1453,7 @@
 
   function currentSourceUrl(cur) {
     if (curIsBlob && curBlobUrl) return curBlobUrl;
-    return cur ? api.streamUrl(cur.deezer_id, curQ) : null;
+    return cur ? api.streamUrl(trackRef(cur), curQ) : null;
   }
 
   function renewElements(reason) {
@@ -1531,14 +1533,14 @@
       disposeEl(incoming);
       switching = false;
       renewWanted = true; // the next track change, or a quiet moment, does it
-      if (why !== "cancelled") renewDeferredFor = cur.deezer_id;
+      if (why !== "cancelled") renewDeferredFor = trackKey(cur);
       logInfo("audio", `hand-over off Web Audio postponed (${why})`, null, { important: true });
     };
     const onErr = () => abandon("the fresh element failed to load");
     renewCleanup = () => abandon("cancelled");
     function swap() {
       if (done) return;
-      if (audio !== old || get(current)?.deezer_id !== cur.deezer_id) {
+      if (audio !== old || trackKey(get(current)) !== trackKey(cur)) {
         abandon("the track changed");
         return;
       }
@@ -1565,7 +1567,7 @@
       setTrackGain(gainFor(cur));
       if (detachLadder) {
         detachLadder();
-        detachLadder = watchAudio(incoming, cur.deezer_id);
+        detachLadder = watchAudio(incoming, trackKey(cur));
       }
       lastAdvance = Date.now();
       if (get(player).playing) startPlayback("renew");
@@ -1895,7 +1897,7 @@
   // something to blend into whatever follows it.
   function edgesFor(track) {
     if (!track || track.podcast || !get(trimSilence)) return null;
-    const e = knownEdges(track.deezer_id, get(trimThresholdDb));
+    const e = knownEdges(trackKey(track), get(trimThresholdDb));
     if (!e) return null;
     // A trim is for the EDGES: the beat of silence a master carries at each
     // end. Bounds that would cut more than EDGE_MAX off either end, or that
@@ -1918,9 +1920,9 @@
   function primeEdgesAround(track) {
     if (!get(trimSilence)) return;
     const db = get(trimThresholdDb);
-    if (track && !track.podcast) primeEdges(track.deezer_id, db);
+    if (track && !track.podcast) primeEdges(trackKey(track), db);
     const n = peekNext(get(player));
-    if (n && !n.podcast) primeEdges(n.deezer_id, db);
+    if (n && !n.podcast) primeEdges(trackKey(n), db);
   }
 
   // Where the CURRENT track's audio stops, in element time.
@@ -2033,7 +2035,7 @@
     };
     xfade = mine;
 
-    const src = await resolveSource(track.deezer_id, mine.q);
+    const src = await resolveSource(track, mine.q);
     if (xfade !== mine) {
       // Cancelled while we were reading the blob out of IndexedDB.
       if (src.blob) {
@@ -2148,8 +2150,8 @@
     // (A skip has moved the queue already: what must still hold is that the
     // track it asked for is the one that is current.)
     const stale = x.skip
-      ? get(current)?.deezer_id !== x.track.deezer_id
-      : peekNext(get(player))?.deezer_id !== x.track.deezer_id || sleepStopsAtTrackEnd();
+      ? trackKey(get(current)) !== trackKey(x.track)
+      : trackKey(peekNext(get(player))) !== trackKey(x.track) || sleepStopsAtTrackEnd();
     if (stale) {
       cancelCrossfade();
       return;
@@ -2195,7 +2197,7 @@
   function adoptIncoming(x) {
     const el = x.el;
     audio = el;
-    curId = x.track.deezer_id;
+    curId = trackKey(x.track);
     curQ = x.q;
     curIsBlob = x.isBlob;
     // The outgoing element is still playing its blob, so its URL must outlive
@@ -2222,7 +2224,7 @@
     // reloading it from the top.
     curSeq = get(player).seq;
     const landed = get(current);
-    if (landed?.deezer_id !== x.track.deezer_id) {
+    if (trackKey(landed) !== trackKey(x.track)) {
       // The queue changed between the check in beginCrossfade and here. Let the
       // normal path load whatever is actually current — a hard cut, but right.
       cancelCrossfade();
@@ -2234,7 +2236,7 @@
     setTrackGain(gainFor(x.track));
     player.setProgress(el.currentTime, x.track.duration || 0);
     setPlaybackStatus("idle");
-    if (x.isBlob) touch(x.track.deezer_id);
+    if (x.isBlob) touch(trackKey(x.track));
     pushRecent(x.track);
     updateMediaSession(x.track, { art: false });
     trimmedId = null;
@@ -2245,19 +2247,19 @@
     // PREVIOUS track's signal, which has already fired.
     if (detachLadder) detachLadder();
     detachLadder = null;
-    beginTrack(x.track.deezer_id);
+    beginTrack(trackKey(x.track));
     whenReady(TIER.ART, async () => {
       await cacheCoverFor(x.track).catch(() => {});
       updateMediaSession(x.track);
     });
-    whenReady(TIER.VERDICT, () => primeAnalyses([String(x.track.deezer_id)]));
+    whenReady(TIER.VERDICT, () => primeAnalyses([trackKey(x.track)]));
     whenReady(TIER.EXTRA, () => {
-      flushListen(x.track.deezer_id);
+      flushListen(trackRef(x.track));
       primeEdgesAround(x.track);
     });
     // Registered first, released now: past the ladder's gate they would each
     // start immediately instead of taking their turn.
-    audioReady(x.track.deezer_id);
+    audioReady(trackKey(x.track));
   }
 
   // The ramp has reached zero: stop the outgoing element and release it.
@@ -2351,7 +2353,7 @@
     // Finished a podcast episode: flag it done (shows as "Terminé", no resume
     // into the credits). (repeat "one" restarts it, so leave it alone.)
     if (cur && cur.podcast && s.repeat !== "one")
-      markEpisodeFinished(cur.deezer_id, cur.duration || 0);
+      markEpisodeFinished(trackKey(cur), cur.duration || 0);
     // A sleep timer set to "end of the track" ends here: the next track is lined
     // up, paused, and the play time is reported like any other stop.
     if (finishSleepAtTrackEnd()) {
@@ -2379,8 +2381,8 @@
     }
     if (s.autoplay && cur) {
       try {
-        const r = await api.trackRadio(cur.deezer_id);
-        const more = (r.tracks || []).filter((t) => t.deezer_id !== cur.deezer_id);
+        const r = await api.trackRadio(trackRef(cur));
+        const more = (r.tracks || []).filter((t) => trackKey(t) !== trackKey(cur));
         if (more.length) {
           player.autoExtend(more);
           return;
@@ -2422,7 +2424,7 @@
     const isFlow = !!(s.context && s.context.kind === "flow");
     const seed = isFlow ? null : s.queue[s.queue.length - 1] || s.queue[s.index];
     if (!isFlow && !seed) return;
-    const seedId = isFlow ? null : seed.id || seed.deezer_id;
+    const seedId = isFlow ? null : trackRef(seed);
     const key = `${isFlow ? "flow" : seedId}|${s.queue.length}`;
     if (key === exhausted) return;
     if (Date.now() - lastExtendAt < MIN_EXTEND_GAP) return;
@@ -2470,20 +2472,21 @@
   // (and rescheduled us).
   function stillNext(id) {
     const s = get(player);
-    return s.index >= 0 && s.queue[s.index + 1]?.deezer_id === id;
+    return s.index >= 0 && trackKey(s.queue[s.index + 1]) === id;
   }
   // Is `track` still inside the window we're supposed to be buffering?
   function stillUpcoming(track) {
     const s = get(player);
     if (s.index < 0) return false;
     const upcoming = s.queue.slice(s.index + 1, s.index + 1 + prefetchAhead());
-    return upcoming.some((t) => t && t.deezer_id === track.deezer_id);
+    return upcoming.some((t) => t && trackKey(t) === trackKey(track));
   }
   $: {
     const ahead = $prefetchCount; // re-arm when the setting changes
     const nextTrack =
       $player.index >= 0 ? $player.queue[$player.index + 1] : null;
-    const nextId = nextTrack?.deezer_id;
+    const nextId = trackKey(nextTrack);
+    const nextRef = trackRef(nextTrack);
     // Raising the buffer depth mid-play should take effect now, not at the next
     // track change — so a changed setting re-arms even on the same "next".
     if (ahead !== lastAhead) {
@@ -2499,7 +2502,7 @@
         if (stillNext(nextId) && get(online))
           // Prefetch priority: this one track is about to be needed, so it goes
           // ahead of whatever bulk archiving is running, and behind nothing.
-          api.download([nextId], "prefetch").catch(() => {});
+          api.download([nextRef], "prefetch").catch(() => {});
       }, ARCHIVE_DELAY);
       clearTimeout(prefetchTimer);
       const runPrefetch = () => {
@@ -2539,11 +2542,11 @@
     const cover = track.album?.cover;
     const offline = resolveCover(get(offlineCovers), cover);
     if (offline && offline !== cover) return offline; // already a local blob
-    const key = coverKey(cover) || "id:" + track.deezer_id;
+    const key = coverKey(cover) || "id:" + trackKey(track);
     if (artCache.key === key && artCache.url) return artCache.url;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await fetch(api.coverUrl(track.deezer_id), {
+        const res = await fetch(api.coverUrl(trackRef(track)), {
           credentials: "include",
         });
         // The server's answer that there is no art at all: asking again in
@@ -2583,7 +2586,7 @@
         };
         add(art);
         try {
-          add(new URL(api.coverUrl(track.deezer_id), window.location.href).href);
+          add(new URL(api.coverUrl(trackRef(track)), window.location.href).href);
         } catch {
           /* ignore */
         }

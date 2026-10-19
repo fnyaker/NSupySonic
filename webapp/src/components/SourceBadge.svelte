@@ -2,6 +2,7 @@
   // What a YouTube track REALLY plays at, next to the quality chip, when the
   // chip asks for more than YouTube has (FLAC, Opus 320…). The chip stays the
   // setting; this says the truth about the one track that cannot honour it.
+  import { trackKey } from "../lib/trackkey.js";
   import { current, player, quality } from "../lib/stores.js";
   import { isYoutube, realBitrate, realBitrateBadge } from "../lib/youtube.js";
 
@@ -10,7 +11,7 @@
   let real = 0;
   // Keyed on the id as a STRING: `current` is handed over again on every
   // progress tick, and a statement reading the object would ask on each one.
-  $: id = $current && isYoutube($current) ? String($current.deezer_id) : null;
+  $: id = $current && isYoutube($current) ? trackKey($current) : null;
   // Asked once the audio is running: the first play is what archives the
   // file, so before that there is nothing to measure.
   $: playing = !!id && $player.currentTime > 0.5;

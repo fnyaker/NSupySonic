@@ -11,6 +11,7 @@
   //
   // Training runs in a Web Worker (lib/genre/trainer.js) because it is seconds
   // of solid arithmetic, and a frozen tab is not a progress bar.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { onMount, onDestroy } from "svelte";
   import { pop, push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
@@ -382,7 +383,7 @@
     if (prev) bumpCount(prev.name, -1, false);
     lastAction = { track, tag, prev, at };
     try {
-      if (!prev || prev.id !== tag.id) await api.genreLabel(track.deezer_id || track.id, tag.id);
+      if (!prev || prev.id !== tag.id) await api.genreLabel(trackRef(track), tag.id);
     } catch (e) {
       toasts.push(e?.message || "étiquetage impossible", "error");
       lastAction = null;
@@ -412,7 +413,7 @@
     bumpCount(a.tag.name, -1, !a.prev);
     if (a.prev) bumpCount(a.prev.name, 1, false);
     try {
-      await api.genreLabel(a.track.deezer_id || a.track.id, a.prev ? a.prev.id : null);
+      await api.genreLabel(trackRef(a.track), a.prev ? a.prev.id : null);
       toasts.push(`Annulé : « ${a.track.title} »`);
     } catch (e) {
       toasts.push(e?.message || "annulation impossible", "error");
@@ -457,7 +458,7 @@
   // Any track the studio shows: the candidate being tagged, or a genre's
   // reference (which has no local id yet — its Deezer id is its key).
   function previewTrack(t) {
-    const key = t.id || t.deezer_id;
+    const key = trackKey(t);
     if (previewing && previewId === key) {
       stopPreview();
       return;
@@ -467,7 +468,7 @@
     previewId = key;
     previewTime = 0;
     previewDuration = 0;
-    audio.src = api.streamUrl(t.deezer_id || t.id, $downloadQuality);
+    audio.src = api.streamUrl(trackRef(t), $downloadQuality);
     // A third of the way in: past the intro, into whatever the track actually
     // is. A genre judged from the first eight bars is a genre judged wrong. The
     // stream may not be seekable yet (the server archives while it streams), so
@@ -555,7 +556,7 @@
     // vector is missing is simply left out rather than making the whole run wait.
     // Each comes with what the head can read next to it: the served tempo and
     // the construction summary (lib/genre/construction.js).
-    const ids = keep.map((r) => r.deezer_id || r.id);
+    const ids = keep.map((r) => trackRef(r));
     const vectors = new Map();
     const extras = new Map();
     const BATCH = 200;
@@ -586,7 +587,7 @@
         // Best effort: without a pool the head is the one the labels make.
       }
     }
-    const withVec = keep.filter((r) => vectors.has(String(r.deezer_id || r.id)));
+    const withVec = keep.filter((r) => vectors.has(trackRef(r)));
     if (!withVec.length)
       throw new Error("aucun vecteur disponible — lancez « Calculer les empreintes »");
     // What would bias the head or its score is taken out BEFORE it trains
@@ -595,7 +596,7 @@
     const probe = withVec.map((r) => ({
       label: r.tag.name,
       artist: r.artist_id || null,
-      key: vectorKey(vectors.get(String(r.deezer_id || r.id))),
+      key: vectorKey(vectors.get(trackRef(r))),
     }));
     const prep = prepare(probe);
     const usable = prep.keep.map((i) => withVec[i]);
@@ -607,7 +608,7 @@
     // v3 vectors carry the loud half of the track after the v2 ones (which they
     // begin with, value for value). One matrix has one width: the loud block is
     // a candidate only when EVERY row has it; otherwise all train on the v2 part.
-    const older = usable.filter((r) => vectors.get(String(r.deezer_id || r.id)).length < V3_DIM).length;
+    const older = usable.filter((r) => vectors.get(trackRef(r)).length < V3_DIM).length;
     const d = older ? V2_DIM : V3_DIM;
     const y = new Int32Array(usable.length);
     // Each row's artist as a small integer, for the artist folds.
@@ -616,7 +617,7 @@
     const rowsV = [];
     const raws = [];
     usable.forEach((r, i) => {
-      const key = String(r.deezer_id || r.id);
+      const key = trackRef(r);
       rowsV.push(vectors.get(key));
       raws.push(rawExtras(extras.get(key)));
       y[i] = names.indexOf(r.tag.name);
@@ -1593,9 +1594,9 @@
                         <button
                           class="ref-play"
                           on:click={() => previewTrack(ref.match)}
-                          aria-label={previewing && previewId === ref.match.deezer_id ? "Pause" : "Écouter"}
+                          aria-label={previewing && previewId === trackKey(ref.match) ? "Pause" : "Écouter"}
                         >
-                          <Icon name={previewing && previewId === ref.match.deezer_id ? "pause" : "play"} size={14} />
+                          <Icon name={previewing && previewId === trackKey(ref.match) ? "pause" : "play"} size={14} />
                         </button>
                       {:else}
                         <span class="ref-play off"><Icon name="close" size={12} /></span>
@@ -1757,7 +1758,7 @@
                 src={current.cover}
                 alt={current.title}
                 kind="track"
-                fallbackId={current.deezer_id || current.id}
+                fallbackId={trackRef(current)}
                 size={120}
                 eager
               />
