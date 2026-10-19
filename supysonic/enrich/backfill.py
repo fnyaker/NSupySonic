@@ -6,6 +6,7 @@
 """The library-wide catch-up: every archived track not yet tried (or whose try
 is old enough to be worth another), through the same decision as the queue."""
 
+import logging
 import threading
 
 from peewee import fn
@@ -13,6 +14,8 @@ from peewee import fn
 from ..db import Track, TrackEnrichment
 from ..libjob import LibraryJob, resume_if_interrupted as _resume
 from . import queue as _queue
+
+logger = logging.getLogger(__name__)
 
 CURSOR_KEY = "enrich_cursor"
 
@@ -45,7 +48,7 @@ def run(app, job):
             try:
                 close_connection()
             except Exception:
-                pass
+                logger.debug("enrich: closing the connection failed", exc_info=True)
 
 
 def resume_if_interrupted(app):

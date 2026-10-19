@@ -12,7 +12,7 @@ never committed). Without either, ``available`` is False and nothing is tried.
 import json
 import logging
 import shutil
-import subprocess
+import subprocess  # nosec B404 - fpcalc, a fixed binary, argument list, no shell
 
 from . import musicbrainz as mb
 
@@ -34,7 +34,7 @@ def fingerprint(path):
     if not exe:
         return None
     try:
-        out = subprocess.run(
+        out = subprocess.run(  # nosec B603 - exe is shutil.which('fpcalc'); the path follows '--'
             [exe, "-json", "-length", str(FP_SECONDS), "--", path],
             capture_output=True, timeout=60, check=False,
         )
