@@ -169,6 +169,12 @@
     } catch {
       /* ignore */
     }
+    try {
+      mig = await api.archiveMigrateStatus();
+      if (mig?.running) pollMigrate();
+    } catch {
+      /* ignore */
+    }
   });
 
   async function refreshDeezerStatus(force = false) {
@@ -281,6 +287,43 @@
       /* the job keeps running server-side regardless */
     } finally {
       jobPolling = false;
+    }
+  }
+
+  // -- migrating the files already on disk (admin) ---------------------------
+  // The archive's format changed (no Deezer loudness in the tags, a facts block
+  // in the sidecar). The server rewrites the old files in the background, once.
+  let mig = null;
+  let migPolling = false;
+
+  async function startMigrate() {
+    try {
+      mig = await api.archiveMigrate();
+      toasts.push("Mise à niveau lancée — elle continue même si vous fermez l'app");
+      pollMigrate();
+    } catch (e) {
+      toasts.push(e?.message || "Impossible de lancer la mise à niveau", "error");
+    }
+  }
+
+  async function pollMigrate() {
+    if (migPolling) return;
+    migPolling = true;
+    try {
+      for (;;) {
+        mig = await api.archiveMigrateStatus();
+        if (!mig.running) break;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      toasts.push(
+        mig.failed
+          ? `Mise à niveau terminée : ${mig.done} fichier(s), ${mig.failed} échec(s)`
+          : `Mise à niveau terminée : ${mig.done} fichier(s) vérifié(s)`
+      );
+    } catch {
+      /* the job keeps running server-side regardless */
+    } finally {
+      migPolling = false;
     }
   }
 
@@ -697,6 +740,36 @@
         Dernier passage&nbsp;: {job.archived} archivé(s){job.unavailable
           ? `, ${job.unavailable} indisponible(s)`
           : ""}{job.failed ? `, ${job.failed} échec(s)` : ""}.
+      </p>
+    {/if}
+  {/if}
+
+  <h3>Mise à niveau des fichiers</h3>
+  <p class="muted hint">
+    Réécrit les titres archivés avant le détachement de Deezer&nbsp;: plus de
+    volume Deezer dans les étiquettes, la date de sortie la plus ancienne, les
+    faits dans le fichier compagnon. Sans risque&nbsp;: un titre en cours de
+    lecture n'est jamais touché à moitié, et relancer ne change plus rien.
+  </p>
+  {#if mig?.running}
+    <div class="gauge">
+      <div class="bar"><span class="indeterminate"></span></div>
+      <div class="gauge-txt">
+        <span>Mise à niveau en cours… {mig.done} fichier(s)</span>
+        <span class="muted">
+          {mig.counts?.tags || 0} étiquette(s) · {mig.counts?.bpm || 0} tempo(s) appris
+        </span>
+      </div>
+    </div>
+  {:else}
+    <div class="arch-btns">
+      <button class="ghost" on:click={startMigrate}>
+        <Icon name="refresh" size={16} /> Mettre à niveau les fichiers
+      </button>
+    </div>
+    {#if mig && (mig.done || mig.failed)}
+      <p class="muted hint">
+        Dernier passage&nbsp;: {mig.done} fichier(s){mig.failed ? `, ${mig.failed} échec(s)` : ""}.
       </p>
     {/if}
   {/if}
@@ -1702,6 +1775,25 @@
   }
   .bar span.warn {
     background: var(--accent-2);
+  }
+  .bar span.indeterminate {
+    width: 35%;
+    animation: bar-slide 1.4s ease-in-out infinite;
+  }
+  @keyframes bar-slide {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(300%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar span.indeterminate {
+      animation: none;
+      width: 100%;
+      opacity: 0.5;
+    }
   }
   .gauge-txt {
     display: flex;

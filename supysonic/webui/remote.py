@@ -239,6 +239,8 @@ POLICY = {
     "set_settings": "admin",
     "analysis_backfill_start": "admin",
     "analysis_backfill_status": "admin",
+    "archive_migrate_start": "admin",
+    "archive_migrate_status": "admin",
     "genre_relabel": "admin",
     "genre_sounds": "admin",
     "genre_share_export": "admin",

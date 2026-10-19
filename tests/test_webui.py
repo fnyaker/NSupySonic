@@ -656,8 +656,16 @@ class WebUITestCase(unittest.TestCase):
             os.makedirs(os.path.dirname(t.path), exist_ok=True)
             with open(t.path, "wb") as fh:
                 fh.write(b"\x00")
-        first = self.client.get("/api/track/555/credits").get_json()
+        # Not on disk yet: Deezer is asked (once), as before.
+        os.remove(t.path)
+        self.client.get("/api/track/555/credits")
         self.assertEqual(gw.credit_calls, ["555"])
+        # Archived with its payload: from then on the file alone answers.
+        with self.app.app_context():
+            with open(t.path, "wb") as fh:
+                fh.write(b"\x00")
+            library.save_track_metadata(t, gw.get_track("555"))
+        first = self.client.get("/api/track/555/credits").get_json()
         self.assertTrue(any(c["role"] == "composer" for c in first["credits"]))
         # Forget everything in memory and let Deezer fail: the file answers.
         with credits._lock:
@@ -4193,14 +4201,14 @@ class TrackAnalysisTestCase(unittest.TestCase):
         got = self.client.post("/api/analyses", json={"ids": [uid]}).get_json()
         self.assertEqual(got["analyses"], {})
 
-    def test_a_deezer_archives_genre_tag_is_not_served(self):
-        """Deezer's archives are tagged with its broad album genre ("Dance"):
-        that must not outrank the measurement."""
+    def test_a_genre_written_into_an_archive_is_served(self):
+        """An archive is no longer tagged with Deezer's broad album genre
+        ("Dance"), so a genre in a Deezer row's tags is somebody's own."""
         from supysonic.deezer import analysis as ana
 
         t = self._deezer_track()
         t.genre = "Dance"
-        self.assertIsNone(ana.file_genre(t))
+        self.assertIsNotNone(ana.file_genre(t))  # served, not refused as Deezer's
 
     def test_someone_elses_upload_is_not_answered(self):
         from supysonic.db import User
@@ -4372,10 +4380,19 @@ class TrackAnalysisTestCase(unittest.TestCase):
             def get_track(self, sid):
                 return {"bpm": self.bpm}
 
+        def forget():  # the answer is kept in the row: start each ask afresh
+            t.deezer_bpm = None
+            ana._hints.clear()
+
         self.assertEqual(ana._deezer_bpm(Prov(174), t), 174.0)
+        self.assertEqual(t.deezer_bpm, 174.0)
         # Deezer reports 0 for tracks it has no figure for; that is not a tempo.
+        forget()
         self.assertIsNone(ana._deezer_bpm(Prov(0), t))
+        self.assertEqual(t.deezer_bpm, 0.0)  # asked, and has none
+        forget()
         self.assertIsNone(ana._deezer_bpm(Prov(9999), t))
+        forget()
         self.assertIsNone(ana._deezer_bpm(None, t))
 
     def test_deezer_bpm_survives_an_outage(self):

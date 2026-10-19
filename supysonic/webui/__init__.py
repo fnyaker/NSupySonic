@@ -3561,6 +3561,11 @@ def delete_local(track_id):
         os.remove(path)
     except OSError:
         logger.info("Upload file already gone: %s", path)
+    # The facts sidecar written beside it at import goes with it.
+    try:
+        os.remove(os.path.splitext(path)[0] + ".json")
+    except OSError:
+        pass
     return jsonify({"ok": True})
 
 
@@ -4261,6 +4266,7 @@ from . import genre  # noqa: E402,F401  isort:skip
 from . import genreshare  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip
 from . import credits  # noqa: E402,F401  isort:skip
+from . import diskmigrate  # noqa: E402,F401  isort:skip
 from . import party  # noqa: E402,F401  isort:skip
 from . import remote  # noqa: E402,F401  isort:skip
 from . import youtube  # noqa: E402,F401  isort:skip

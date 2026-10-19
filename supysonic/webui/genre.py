@@ -536,6 +536,10 @@ def _track_json(t, prediction=None):
         "album": t.album.name if t.album else "",
         "duration": t.duration,
         "play_count": t.play_count,
+        # Deezer's published tempo, kept in the row (0 = Deezer has none): the
+        # studio shows it, and reading it costs no query of its own.
+        "deezer_bpm": getattr(t, "deezer_bpm", None) or None,
+        "bpm_source": "deezer" if getattr(t, "deezer_bpm", None) else None,
     }
     if prediction:
         out["predicted"] = prediction[0]
