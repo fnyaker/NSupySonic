@@ -31,7 +31,7 @@
     data = null;
     try {
       // Cached copy first, fresh one right after — no skeleton on a revisit.
-      await api.swr("/smarttracklist/" + mixId, (r) => {
+      await api.swr("/home/mix/" + encodeURIComponent(mixId), (r) => {
         if (mine !== loadSeq) return;
         data = r;
         loading = false;

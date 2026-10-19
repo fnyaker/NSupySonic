@@ -243,6 +243,7 @@ export const api = {
   // discovery
   home: () => req("/home"),
   smartTracklist: (id) => req("/smarttracklist/" + id),
+  homeMix: (id) => req("/home/mix/" + encodeURIComponent(id)),
   flow: () => req("/flow"),
   flowClusters: () => req("/flow/clusters"),
   recommendations: () => req("/recommendations"),
@@ -364,6 +365,10 @@ export const api = {
   genreEmbed: (force = false) =>
     req("/genre/embed" + (force ? "?force=1" : ""), { method: "POST" }),
   genreEmbedStatus: () => req("/genre/embed"),
+  // The tracks that sound alike (what the radio, the flow and the home read).
+  similarRebuild: (force = false) =>
+    req("/similar/rebuild" + (force ? "?force=1" : ""), { method: "POST" }),
+  similarStatus: () => req("/similar/rebuild"),
 
   // radios
   trackRadio: (id) => req("/radio/track/" + id),

@@ -489,11 +489,12 @@ class WebUITestCase(unittest.TestCase):
 
     def test_home(self):
         self._login()
+        # The home is the library's own answer (tests/test_detach_f.py has the
+        # rows); an empty library gives empty shelves, not an error.
         data = self.client.get("/api/home").get_json()
-        self.assertTrue(data["mixes"])
-        mix = data["mixes"][0]
-        self.assertEqual(mix["title"], "Nouveautés")
-        self.assertTrue(mix["subtitle"].startswith("Avec"))
+        self.assertEqual(
+            sorted(data), ["forgotten", "mixes", "popular", "recent"]
+        )
 
     def test_smarttracklist(self):
         self._login()
@@ -542,14 +543,13 @@ class WebUITestCase(unittest.TestCase):
 
     def test_flow(self):
         self._login()
-        data = self.client.get("/api/flow").get_json()
-        self.assertEqual(data["tracks"][0]["title"], "Flow1")
+        # From the library now (tests/test_detach_f.py): nothing archived, nothing to play.
+        self.assertEqual(self.client.get("/api/flow").get_json(), {"tracks": []})
 
     def test_track_radio(self):
         self._login()
         data = self.client.get("/api/radio/track/3135556").get_json()
-        self.assertTrue(data["tracks"])
-        self.assertEqual(data["tracks"][1]["title"], "Mix")
+        self.assertEqual(data, {"tracks": []})  # unknown to the library
 
     def test_flow_deezer_error_no_500(self):
         # A Deezer outage on Flow must degrade to an empty list, not a 500 —
@@ -3604,7 +3604,10 @@ class WebUIGuestTestCase(unittest.TestCase):
 
     def test_no_personalized_discovery(self):
         self._login()
-        self.assertEqual(self.client.get("/api/home").get_json(), {"mixes": []})
+        self.assertEqual(
+            self.client.get("/api/home").get_json(),
+            {"mixes": [], "recent": [], "popular": [], "forgotten": []},
+        )
         self.assertEqual(self.client.get("/api/flow").get_json(), {"tracks": []})
         self.assertEqual(
             self.client.get("/api/recommendations").get_json(),
