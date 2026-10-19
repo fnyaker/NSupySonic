@@ -176,11 +176,16 @@ class DeezerGuardTestCase(_AppCase):
         self.assertEqual(sorted(offending), [])
 
     def test_the_one_off_import_is_the_only_reader_of_the_account(self):
-        self.client.post("/api/deezer/import-account", json={})
-        for _ in range(100):  # a worker thread: wait on its end, not on a delay
-            if not self.client.get("/api/deezer/import-account").get_json().get("running"):
-                break
-            time.sleep(0.05)
+        from supysonic import webui
+
+        webui._import_job.clear()  # another test's worker may have left it running
+        webui._import_job.update(running=False)
+        rv = self.client.post("/api/deezer/import-account", json={})
+        self.assertTrue(rv.get_json()["ok"])
+        deadline = time.monotonic() + 30  # a worker thread: wait for its end
+        while webui._import_job.get("running") and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(webui._import_job.get("running"))
         heard = {c for _w, c in self.calls}
         self.assertLessEqual(heard, IMPORT_READS)
         self.assertIn("gw.get_user_playlists", heard)
