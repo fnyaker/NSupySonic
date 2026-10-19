@@ -16,6 +16,7 @@
   import GradientHeader from "../components/GradientHeader.svelte";
   import TrackBrowser from "../components/TrackBrowser.svelte";
   import Icon from "../components/Icon.svelte";
+  import VirtualList from "../components/VirtualList.svelte";
 
   export let params = {};
 
@@ -87,7 +88,9 @@
     try {
       const r = await api.importStatus(mine);
       if (!alive || mine !== jobId) return;
-      job = r;
+      // A save's polls carry no item list (it does not change while saving):
+      // keep the one on screen rather than re-render it every poll.
+      job = r.items || !job ? r : { ...r, items: job.items };
       if (RUNNING.has(r.state)) schedule(POLL_MS);
       else if (r.state === "saved") onSaved(r);
     } catch (e) {
@@ -283,9 +286,9 @@
     {#if unsure.length}
       <h2 class="sec">À vérifier <span class="count">{unsure.length}</span></h2>
       <p class="muted small">Retrouvés à peu près : même artiste, titre très proche.</p>
-      <ul class="lines">
-        {#each unsure as it}
-          <li>
+      <div class="lines">
+        <VirtualList items={unsure} estimateHeight={64} key={(it, i) => i} let:item={it}>
+          <div class="li">
             <span class="l-main">
               <span class="l-title">{it.line.title}</span>
               <span class="muted l-sub">{artists(it.line)}</span>
@@ -295,17 +298,17 @@
               <span class="l-title">{it.track.title}</span>
               <span class="muted l-sub">{it.track.display_artist || it.track.artist?.name || ""} · {VIA[it.via]}</span>
             </span>
-          </li>
-        {/each}
-      </ul>
+          </div>
+        </VirtualList>
+      </div>
     {/if}
 
     {#if missing.length}
       <h2 class="sec">Introuvables <span class="count">{missing.length}</span></h2>
       <p class="muted small">Aucune version sûre de ces titres. Touche-en un pour le chercher toi-même.</p>
-      <ul class="lines">
-        {#each missing as it}
-          <li>
+      <div class="lines">
+        <VirtualList items={missing} estimateHeight={52} key={(it, i) => i} let:item={it}>
+          <div class="li">
             <button class="l-btn" on:click={() => searchFor(it.line)}>
               <span class="l-main">
                 <span class="l-title">{it.line.title}</span>
@@ -314,9 +317,9 @@
               {#if it.line.duration}<span class="muted dur">{fmtDuration(it.line.duration)}</span>{/if}
               <Icon name="search" size={16} />
             </button>
-          </li>
-        {/each}
-      </ul>
+          </div>
+        </VirtualList>
+      </div>
     {/if}
   </div>
 {/if}
@@ -559,21 +562,19 @@
     color: var(--text-dim);
   }
   .lines {
-    list-style: none;
-    padding: 0;
     margin: 10px 0 0;
   }
-  .lines li {
+  .lines .li {
     display: flex;
     align-items: center;
     gap: 12px;
     padding: 10px 12px;
     border-radius: 10px;
   }
-  .lines li:hover {
+  .lines .li:hover {
     background: var(--bg-hover);
   }
-  .lines li:has(.l-btn) {
+  .lines .li:has(.l-btn) {
     padding: 0;
   }
   .l-btn {

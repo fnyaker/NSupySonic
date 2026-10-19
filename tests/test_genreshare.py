@@ -135,6 +135,56 @@ class GenreShareTestCase(unittest.TestCase):
         # The genre itself arrives: tagging can start on it here.
         self.assertTrue(GenreTag.select().where(GenreTag.name == "Zaag").exists())
 
+    def test_a_head_s_metrics_are_bounded(self):
+        self._login()
+        r = self.client.put("/api/genre/model", json={
+            "labels": ["A", "B"], "weights": _encode([0.0] * (2 * V2 + 2)), "dim": V2, "kind": "linear",
+            "metrics": {"junk": "x" * (3 * 1024 * 1024)},
+        })
+        self.assertEqual(r.status_code, 413, r.data)
+        self.assertFalse(GenreModel.select().exists())
+
+    def test_a_genre_is_matched_without_case(self):
+        """"zaag" in a file is this server's "Zaag": a second tag split one class
+        in two (and MySQL's case-blind index refused it, a 500)."""
+        self._login()
+        self._tag("Zaag")
+        a = self._track("3001")
+        f = {"format": "nsupysonic-genre", "version": 1, "tags": [{"genre": "zaag", "deezer_id": "3001"}]}
+        p = self.client.post("/api/genre/share/preview", json=f).json
+        self.assertEqual(p["new_genres"], [])
+        job = self.client.post("/api/genre/share/import", json={"file": f, "tags": True}).json["job"]
+        self.assertEqual(job["tagged"], 1)
+        self.assertEqual([g.name for g in GenreTag.select()], ["Zaag"])
+        self.assertEqual(TrackTag.get(TrackTag.track == a).tag.name, "Zaag")
+
+    def test_the_preview_costs_the_same_whatever_the_file(self):
+        """Uploads and YouTube lines were one statement each (a LOWER() scan
+        for an upload); the preview reads them in batches."""
+        from .test_deezer import count_statements
+
+        self._login()
+        up = self._track("3101")
+        up.deezer_id = None
+        up.title = "Mon Upload"
+        up.save()
+        artist = up.artist.name
+
+        def file(n):
+            tags = [{"genre": "Zaag", "title": f"upload {i}", "artist": "x"} for i in range(n)]
+            tags += [{"genre": "Zaag", "youtube_id": "AAAAAAAAA%02d" % i} for i in range(n)]
+            tags.append({"genre": "Zaag", "title": "mon upload", "artist": artist.upper()})
+            return {"format": "nsupysonic-genre", "version": 1, "tags": tags}
+
+        counts = []
+        for n in (5, 50):
+            with count_statements() as c:
+                p = self.client.post("/api/genre/share/preview", json=file(n))
+            self.assertEqual(p.status_code, 200, p.data)
+            self.assertEqual(p.json["tags"]["local"], 1)  # the upload, found by its title and artist
+            counts.append(sum(c.values()))
+        self.assertEqual(counts[0], counts[1], counts)
+
     def test_an_unreadable_head_never_replaces_the_working_one(self):
         self._login()
         self._put_head(["A", "B"])

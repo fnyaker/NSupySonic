@@ -430,10 +430,11 @@ def read_youtube(link: dict) -> dict:
     except yt.YoutubeHeld as exc:
         raise LinkError("YouTube refuse les demandes pour l'instant, réessaie plus tard") from exc
     except Exception as exc:
-        yt._hold_for(exc)
         text = str(exc).lower()
         if "404" in text or "not found" in text or "does not exist" in text or "private" in text:
+            # YouTube ANSWERED: nothing wrong with YouTube, so nobody is held off.
             raise LinkError("Playlist introuvable sur YouTube (supprimée ou privée ?)") from exc
+        yt._hold_for(exc)
         raise LinkError(f"YouTube n'a pas répondu ({type(exc).__name__})") from exc
     return parse_youtube(raw)
 

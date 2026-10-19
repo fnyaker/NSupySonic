@@ -292,6 +292,26 @@ class ReadersTestCase(unittest.TestCase):
         self.assertEqual(got["tracks"][1]["yt"]["video_id"], "BBBBBBBBBBB")
         self.assertEqual(got["cover"], "https://lh3.googleusercontent.com/x=w544-h544")
 
+    def test_a_playlist_youtube_says_is_gone_holds_nobody_off(self):
+        """YouTube answering "no such playlist" says nothing about YouTube: it
+        used to hold every YouTube search and first play off for a minute."""
+        from unittest import mock
+
+        from supysonic.deezer import youtube as yt
+
+        yt.reset()
+        self.addCleanup(yt.reset)
+        client = mock.Mock()
+        client.get_playlist.side_effect = Exception("The playlist does not exist.")
+        with mock.patch.object(yt, "installed", return_value=True), mock.patch.object(yt, "_client", return_value=client):
+            with self.assertRaises(linkimport.LinkError):
+                linkimport.read_youtube({"id": "PLxxxxxxxxxxxxxxxx"})
+            self.assertFalse(yt.held()[0])
+            client.get_playlist.side_effect = Exception("HTTP Error 429: Too Many Requests")
+            with self.assertRaises(linkimport.LinkError):
+                linkimport.read_youtube({"id": "PLxxxxxxxxxxxxxxxx"})
+            self.assertTrue(yt.held()[0])
+
     def test_video_titles(self):
         self.assertEqual(
             linkimport.clean_video_title("Daft Punk - One More Time (Official Video) [HD]", ["Daft Punk"]),
@@ -349,6 +369,11 @@ class ImportApi:
             return dz(6, "Alors On Danse", "Stromae", 207)
         if isrc == "BEUM71300002":
             return dz(5, "Papaoutai", "Stromae", 232)
+        if isrc == "BEUM79999999":
+            # What deezerpy raises for an ISRC Deezer does not know (error 800).
+            from deezerpy.errors import DataException
+
+            raise DataException("no data")
         return {"error": {}}
 
     def get_playlist(self, pid):
@@ -493,6 +518,24 @@ class ImportRouteTestCase(unittest.TestCase):
         self.pages["pl.u-8aAVZAgCo1Y3D"] = page
         job = self.status(self.start("https://music.apple.com/fr/playlist/chill-fr/pl.u-8aAVZAgCo1Y3D"))
         self.assertEqual(job["items"][0]["track"]["deezer_id"], "1")  # not Papaoutai
+
+    def test_an_isrc_deezer_does_not_know_still_leaves_the_search(self):
+        self.login()
+        page = apple_page().replace('"albumName": "Cheese",', '"albumName": "Cheese", "isrc": "BEUM79999999",')
+        self.pages["pl.u-8aAVZAgCo1Y3D"] = page
+        job = self.status(self.start("https://music.apple.com/fr/playlist/chill-fr/pl.u-8aAVZAgCo1Y3D"))
+        self.assertEqual(job["items"][0]["track"]["deezer_id"], "1")
+        self.assertTrue(self.api.queries)
+
+    def test_a_save_in_progress_does_not_resend_the_list(self):
+        from supysonic.webui import playlist_import as pi
+
+        job = {k: None for k in ("id", "source", "source_label", "kind", "url", "name", "cover",
+                                 "total", "truncated", "done", "matched", "error", "playlist_id")}
+        job.update(items=[{"line": {}, "track": None}] * 3, counts={})
+        for state, has in (("matching", False), ("done", True), ("saving", False), ("saved", True)):
+            job["state"] = state
+            self.assertEqual("items" in pi._snapshot(job), has, state)
 
     def test_a_deezer_link_is_its_own_match(self):
         self.login()

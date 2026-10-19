@@ -47,7 +47,8 @@
 
   async function runYoutube() {
     const term = q.trim();
-    if (!yt || !ytAvailable || !term || term === ytFor) return;
+    // A pasted playlist link is an import, not something to search YouTube for.
+    if (!yt || !ytAvailable || !term || term === ytFor || playlistLink(term)) return;
     const mine = ++ytSeq;
     ytLoading = true;
     ytError = "";
@@ -232,7 +233,7 @@
   {/if}
 {/if}
 
-{#if !loading && q.trim() && yt && ytAvailable && (tab === "all" || tab === "tracks")}
+{#if !loading && q.trim() && !shared && yt && ytAvailable && (tab === "all" || tab === "tracks")}
   <h2 class="ythead"><Icon name="youtube" size={20} /> Sur YouTube</h2>
   {#if ytTracks.length && !ytStale && !ytLoading}
     <p class="ytnote muted">Archivé à la première écoute, en Opus ~130 kbit/s (le mieux que YouTube propose).</p>

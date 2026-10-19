@@ -39,6 +39,7 @@ const base_job = {
 };
 let polls = 0;
 let saved = false;
+let savingPolls = 0;
 const asked = [];
 
 const browser = await chromium.launch({ args: ["--autoplay-policy=no-user-gesture-required"] });
@@ -64,6 +65,11 @@ await ctx.route(/\/api\/import\/playlist/, (r) => {
     return json(r, { ok: true });
   }
   polls++;
+  // A save in progress is polled without its list (it does not change then).
+  if (saved && savingPolls < 2) {
+    savingPolls++;
+    return json(r, { ...base_job, state: "saving", done: items.length, matched: 31, counts: { local: 4, deezer: 26, youtube: 1 } });
+  }
   if (saved) return json(r, { ...base_job, state: "saved", playlist_id: "11111111-2222-3333-4444-555555555555", items, done: items.length, matched: 31, counts: { local: 4, deezer: 26, youtube: 1 } });
   if (polls === 1) return json(r, { ...base_job, state: "reading", name: null, total: 0, done: 0, matched: 0, counts: {} });
   if (polls <= 3) return json(r, { ...base_job, state: "matching", done: 12, matched: 11, counts: { deezer: 11 } });
@@ -111,9 +117,16 @@ function window_w() {
 }
 if (process.env.SHOTS) await page.screenshot({ path: join(process.env.SHOTS, PHONE ? "import-done-phone.png" : "import-done-desktop.png"), fullPage: true });
 
-// The unmatched lines lead to a search for them.
+// The unmatched lines lead to a search for them. The lists are windowed: a row
+// exists once its section is on screen.
+await page.locator("h2.sec", { hasText: "À vérifier" }).scrollIntoViewIfNeeded();
+await page.waitForTimeout(300);
+check(await page.locator(".lines .li:not(:has(.l-btn))").count() === 1, "the line to check is listed");
+await page.locator("h2.sec", { hasText: "Introuvables" }).scrollIntoViewIfNeeded();
+await page.waitForTimeout(300);
 await page.locator(".lines .l-btn").first().scrollIntoViewIfNeeded();
 const missH = await page.locator(".lines .l-btn").first().evaluate((e) => e.getBoundingClientRect().height);
+check(await page.locator(".lines .l-btn").count() === 2, "both unmatched lines are listed");
 check(missH >= 44, "an unmatched line is a thumb-sized target", `${missH}px`);
 
 await page.locator("h2.sec", { hasText: "Introuvables" }).scrollIntoViewIfNeeded();
@@ -130,6 +143,8 @@ await page.locator(".actions .ghost", { hasText: "Enregistrer" }).click();
 await page.locator("form.keep input").fill("Mes hits");
 await page.locator("form.keep button[type=submit]").click();
 await page.waitForSelector(".actions .ghost:has-text('Ouvrir la playlist')", { timeout: 8000 });
+check(savingPolls === 2, "the save was polled while it ran", savingPolls);
+check(await page.locator(".row.track").count() > 0, "and the list stayed on screen through it");
 check(saved && saved.title === "Mes hits", "it is saved under the name typed", JSON.stringify(saved));
 check(await page.locator(".kind", { hasText: "Playlist enregistrée" }).count() === 1, "and says so");
 

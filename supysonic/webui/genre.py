@@ -69,6 +69,7 @@ _PRED_CACHE_MAX = 30000
 # two-layer MLP (2x512) is ~2.5 MB. Eight megabytes is far past anything
 # legitimate and stops a bad request from being a memory problem.
 MODEL_MAX_BYTES = 8 * 1024 * 1024
+METRICS_MAX_BYTES = 2 * 1024 * 1024  # a 226-genre confusion matrix is ~0.3 MB
 ARCHETYPES = ("sustain", "voice", "groove", "hard", "rock")
 
 # -- the extractor's self-test job -------------------------------------------
@@ -1889,13 +1890,19 @@ def store_head(data):
     if kind in ("mlp", "mlp2") and not (1 <= hidden <= 2048):
         return {"error": "bad hidden size"}, 400
 
+    # Bounded like the weights: a shared model file is someone else's text, and
+    # the request limit alone is the upload limit (a gigabyte by default).
+    metrics = json.dumps(data.get("metrics") or {})
+    if len(metrics) > METRICS_MAX_BYTES:
+        return {"error": "metrics too large"}, 413
+
     row = GenreModel.create(
         version=(GenreModel.select().count() + 1),
         kind=kind,
         hidden=hidden,
         labels=json.dumps([str(x)[:48] for x in labels]),
         weights=weights,
-        metrics=json.dumps(data.get("metrics") or {}),
+        metrics=metrics,
         dim=dim,
         active=True,
     )

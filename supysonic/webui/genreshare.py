@@ -258,7 +258,11 @@ def _find(entry, deezer_rows=None):
             return deezer_rows.get(entry["deezer_id"])
         return Track.get_or_none(Track.id == dz_ids.track_uuid(entry["deezer_id"]))
     if entry["youtube_id"]:
+        if deezer_rows is not None:
+            return deezer_rows.get(("yt", entry["youtube_id"]))
         return Track.get_or_none(Track.youtube_id == entry["youtube_id"])
+    if deezer_rows is not None:
+        return deezer_rows.get(("up", entry["title"].lower(), entry["artist"].lower()))
     # An upload exists only on the server it was uploaded to: the best this one
     # can do is the same artist and the same title among its own files.
     return (
@@ -274,7 +278,9 @@ def _find(entry, deezer_rows=None):
 
 
 def _deezer_rows(entries):
-    """Every entry's Deezer row the library already has, in chunked lookups."""
+    """Every entry's row the library already has, in a few chunked lookups
+    rather than one statement per entry: keyed by Deezer id, ``("yt", id)`` and
+    ``("up", title, artist)`` (lowercased) — what ``_find`` reads."""
     from ..deezer import ids as dz_ids
 
     want = {dz_ids.track_uuid(e["deezer_id"]): e["deezer_id"] for e in entries if e["deezer_id"]}
@@ -283,6 +289,29 @@ def _deezer_rows(entries):
     for i in range(0, len(keys), _IN_CHUNK):
         for t in Track.select().where(Track.id.in_(keys[i : i + _IN_CHUNK])):
             found[want[t.id]] = t
+    yt = list({e["youtube_id"] for e in entries if not e["deezer_id"] and e["youtube_id"]})
+    for i in range(0, len(yt), _IN_CHUNK):
+        for t in Track.select().where(Track.youtube_id.in_(yt[i : i + _IN_CHUNK])):
+            found.setdefault(("yt", t.youtube_id), t)
+    up = {
+        (e["title"].lower(), e["artist"].lower())
+        for e in entries
+        if not e["deezer_id"] and not e["youtube_id"]
+    }
+    if up:
+        # The uploads' own (title, artist) pairs, read once: a LOWER() match per
+        # entry was a table scan per line of the file.
+        titles = list({t for t, _a in up})
+        for i in range(0, len(titles), _IN_CHUNK):
+            q = (
+                Track.select(Track, Artist)
+                .join(Artist, on=(Track.artist == Artist.id))
+                .where(Track.deezer_id.is_null(), fn.LOWER(Track.title).in_(titles[i : i + _IN_CHUNK]))
+            )
+            for t in q:
+                k = (t.title.lower(), t.artist.name.lower())
+                if k in up:
+                    found.setdefault(("up",) + k, t)
     return found
 
 
@@ -310,12 +339,12 @@ def genre_share_preview():
     for i in range(0, len(ids), _IN_CHUNK):
         for tt in TrackTag.select(TrackTag, GenreTag).join(GenreTag).where(TrackTag.track.in_(ids[i : i + _IN_CHUNK])):
             # Same genre: nothing to do. Another one: this server's choice stands.
-            counts["already" if tt.tag.name == wanted[tt.track_id] else "kept"] += 1
-    have = {g.name for g in GenreTag.select(GenreTag.name)}
+            counts["already" if tt.tag.name.lower() == wanted[tt.track_id].lower() else "kept"] += 1
+    have = {g.name.lower() for g in GenreTag.select(GenreTag.name)}
     return jsonify({
         "tags": counts,
         "genres": len(f["genres"]),
-        "new_genres": [g["name"] for g in f["genres"] if g["name"] not in have],
+        "new_genres": [g["name"] for g in f["genres"] if g["name"].lower() not in have],
         "head": _head_summary(f["head"], f["embedding"]),
     })
 
@@ -337,11 +366,16 @@ def _job_json():
 def _ensure_genres(genres):
     """The file's genres as this server's tags (made where missing), by name.
     An existing tag keeps its own colour and look: the file only fills gaps."""
-    have = {g.name: g for g in GenreTag.select()}
+    # Matched without case: "hardstyle" in a file IS this server's "Hardstyle"
+    # (a second tag would split one class in two, and MySQL's index refuses it).
+    have = {g.name.lower(): g for g in GenreTag.select()}
+    out = {}
     for g in genres:
-        if g["name"] not in have:
-            have[g["name"]] = GenreTag.create(name=g["name"], color=g["color"], archetype=g["archetype"])
-    return have
+        key = g["name"].lower()
+        if key not in have:
+            have[key] = GenreTag.create(name=g["name"], color=g["color"], archetype=g["archetype"])
+        out[g["name"]] = have[key]
+    return out
 
 
 def _run_import(app, entries, genres, inline=False):

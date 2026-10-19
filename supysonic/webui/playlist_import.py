@@ -114,7 +114,9 @@ def _snapshot(job) -> dict:
                 "total", "truncated", "done", "matched", "error", "playlist_id",
             )
         }
-        if job["state"] in ("done", "saving", "saved"):
+        # Not while saving either: the list does not change then, and a save of a
+        # long import polled every 0.7 s re-sent and re-rendered it each time.
+        if job["state"] in ("done", "saved"):
             out["items"] = list(job["items"])
         out["counts"] = dict(job["counts"])
     return out
@@ -206,14 +208,23 @@ class _Matcher:
             return None
         from deezerpy.errors import is_transport_failure
 
-        try:
-            if line.get("isrc"):
+        if line.get("isrc"):
+            # Its own try: Deezer not knowing an ISRC is an error answer (800),
+            # and it must leave the title search to be tried, not skip it.
+            try:
                 raw = self.api.get_track_by_ISRC(line["isrc"])
-                cand = _track_api(raw) if isinstance(raw, dict) else None
-                # An ISRC names one recording; the title is only checked loosely
-                # (a store may spell it its own way).
-                if cand and cand["deezer_id"] not in self.dead and closeness(_line_track(line), cand) >= 0.6:
-                    return cand, True
+            except Exception as exc:
+                if is_transport_failure(exc):
+                    self.deezer_down = True
+                    logger.info("Import: Deezer unreachable for %r", line["title"], exc_info=True)
+                    return None
+                raw = None
+            cand = _track_api(raw) if isinstance(raw, dict) else None
+            # An ISRC names one recording; the title is only checked loosely
+            # (a store may spell it its own way).
+            if cand and cand["deezer_id"] not in self.dead and closeness(_line_track(line), cand) >= 0.6:
+                return cand, True
+        try:
             seen, found = set(), None
             for query in (_query(line), _core_title(line["title"])):
                 if not query or query in seen:
