@@ -146,6 +146,18 @@ def create_application(config=None):
     # Initialize the optional Deezer proxy (lazy login on first use)
     setup_deezer(app)
 
+    # The providers registry (multi-provider plan). app.deezer stays what it
+    # is; the built-in adapters join the registry with lot B. Third parties
+    # arrive through the supysonic.providers entry points.
+    from .providers import Registry
+
+    app.providers = Registry()
+    if app.testing:
+        from .providers.fake import FakeProvider
+
+        app.providers.register(FakeProvider())
+    app.providers.load_entry_points()
+
     # MusicBrainz enrichment: the options for the worker (it has no app
     # context), and a catch-up run an interrupted restart left unfinished.
     from .enrich import backfill as _enrich_backfill

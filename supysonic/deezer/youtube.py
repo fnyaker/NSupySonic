@@ -52,6 +52,7 @@ from collections import OrderedDict
 
 from peewee import IntegrityError
 
+from .. import sources
 from ..db import Album, Artist, Folder, Track, db
 from . import ids, library
 
@@ -399,7 +400,7 @@ def upsert_track(hit: dict, archive_dir: str) -> Track:
     path = os.path.join(folder.path, fname)
     try:
         with db.atomic():
-            return Track.create(
+            track = Track.create(
                 id=tid,
                 deezer_id=None,
                 youtube_id=hit["video_id"],
@@ -419,6 +420,8 @@ def upsert_track(hit: dict, archive_dir: str) -> Track:
                 root_folder=root,
                 folder=folder,
             )
+            sources.attach_new(track, "youtube", hit["video_id"])
+            return track
     except IntegrityError:
         row = Track.get_or_none(Track.id == tid)
         if row is None:

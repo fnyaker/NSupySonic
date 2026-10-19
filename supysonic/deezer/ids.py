@@ -87,3 +87,35 @@ def youtube_album_uuid(key) -> uuid.UUID:
 
 def youtube_artist_uuid(key) -> uuid.UUID:
     return uuid.uuid5(NS_YOUTUBE_ARTIST, str(key))
+
+
+# Any other provider: one namespace derived from the provider id, the kind and
+# the ref, so the UUID of a record never seen is known before it has a row.
+NS_PROVIDER = uuid.uuid5(NS_DEEZER, "provider")
+
+_DEEZER_KINDS = {
+    "track": track_uuid,
+    "album": album_uuid,
+    "artist": artist_uuid,
+    "playlist": playlist_uuid,
+    "show": show_uuid,
+}
+_YOUTUBE_KINDS = {
+    "track": youtube_track_uuid,
+    "album": youtube_album_uuid,
+    "artist": youtube_artist_uuid,
+}
+
+
+def entity_uuid(provider, kind, ref) -> uuid.UUID:
+    """The UUID the row for ``provider``'s ``ref`` has (or will have). Deezer and
+    YouTube give EXACTLY what their own functions above give — every id a client
+    holds depends on it; anything else is derived from its provider id."""
+    make = None
+    if provider == "deezer":
+        make = _DEEZER_KINDS.get(kind)
+    elif provider == "youtube":
+        make = _YOUTUBE_KINDS.get(kind)
+    if make is not None:
+        return make(ref)
+    return uuid.uuid5(NS_PROVIDER, f"{provider}:{kind}:{ref}")

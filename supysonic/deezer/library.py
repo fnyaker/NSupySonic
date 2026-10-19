@@ -32,6 +32,7 @@ from ..db import (
     PodcastChannel,
     PodcastEpisode,
 )
+from .. import sources
 from . import ids
 from .provider import EXT_FOR_FORMAT, NOMINAL_BITRATE
 
@@ -600,6 +601,7 @@ def upsert_artist(art_id, name: str, cache=None) -> Artist:
             lambda: Artist.create(id=aid, name=name or "[unknown]", deezer_id=key),
             lambda: Artist.get_or_none(Artist.id == aid),
         )
+        sources.attach_entity("artist", "deezer", key, aid)
     if cache is not None:
         cache.artists[key] = artist
     return artist
@@ -640,6 +642,7 @@ def upsert_album(
             ),
             lambda: Album.get_or_none(Album.id == aid),
         )
+        sources.attach_entity("album", "deezer", key, aid)
     if cache is not None:
         cache.albums[key] = album
     return album
@@ -763,6 +766,7 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
                 # next free one.
         if track is None:
             raise last_exc
+        sources.attach_new(track, "deezer", f["sng_id"])
         _sync_credits(track, f["credits"], artist, cache=cache)
         return track
 
@@ -927,6 +931,7 @@ def upsert_channel(user, show: dict, url=None) -> PodcastChannel:
             ),
             lambda: PodcastChannel.get_or_none(PodcastChannel.id == cid),
         )
+        sources.attach_entity("show", "deezer", show["show_id"], cid)
     return channel
 
 
