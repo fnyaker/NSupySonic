@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS album (
     name VARCHAR(256) NOT NULL COLLATE NOCASE,
     artist_id CHAR(36) NOT NULL REFERENCES artist,
     deezer_id VARCHAR(32),
-    cover_md5 VARCHAR(64)
+    cover_md5 VARCHAR(64),
+    release_date VARCHAR(10)
 );
 CREATE INDEX IF NOT EXISTS index_album_artist_id_fk ON album(artist_id);
 
@@ -38,6 +39,8 @@ CREATE TABLE IF NOT EXISTS track (
     has_art BOOLEAN NOT NULL DEFAULT false,
     deezer_id VARCHAR(32),
     youtube_id VARCHAR(16),
+    release_date VARCHAR(10),
+    deezer_bpm REAL,
     album_id CHAR(36) NOT NULL REFERENCES album,
     artist_id CHAR(36) NOT NULL REFERENCES artist,
     bitrate INTEGER NOT NULL,
@@ -308,4 +311,32 @@ CREATE TABLE IF NOT EXISTS service_link (
     data TEXT NOT NULL,
     updated DATETIME NOT NULL,
     PRIMARY KEY (user_id, service)
+);
+
+CREATE TABLE IF NOT EXISTS starred_playlist (
+    user_id CHAR(36) NOT NULL REFERENCES user,
+    starred_id CHAR(36) NOT NULL REFERENCES playlist,
+    date DATETIME NOT NULL,
+    PRIMARY KEY (user_id, starred_id)
+);
+CREATE INDEX IF NOT EXISTS index_starred_playlist_user_id_fk ON starred_playlist(user_id);
+CREATE INDEX IF NOT EXISTS index_starred_playlist_starred_id_fk ON starred_playlist(starred_id);
+
+CREATE TABLE IF NOT EXISTS track_neighbor (
+    track_id CHAR(36) NOT NULL REFERENCES track ON DELETE CASCADE,
+    neighbor_id CHAR(36) NOT NULL REFERENCES track ON DELETE CASCADE,
+    score REAL NOT NULL,
+    rank INTEGER NOT NULL,
+    PRIMARY KEY (track_id, neighbor_id)
+);
+CREATE INDEX IF NOT EXISTS index_track_neighbor_track_id_rank ON track_neighbor(track_id, rank);
+CREATE INDEX IF NOT EXISTS index_track_neighbor_neighbor_id_fk ON track_neighbor(neighbor_id);
+
+CREATE TABLE IF NOT EXISTS track_enrichment (
+    track_id CHAR(36) NOT NULL PRIMARY KEY REFERENCES track ON DELETE CASCADE,
+    status VARCHAR(16) NOT NULL,
+    method VARCHAR(16) NOT NULL,
+    mbid VARCHAR(36),
+    tried DATETIME NOT NULL,
+    error VARCHAR(255)
 );

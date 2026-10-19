@@ -19,6 +19,7 @@
 // never queued across an outage — a pause pressed a minute ago is not what
 // anyone wants when the link comes back — so a tap while offline says so.
 
+import { trackKey } from "../trackkey.js";
 import { writable, get } from "svelte/store";
 import { player, current, seekTo, setPlaybackStatus, toasts } from "../stores.js";
 import { beginTrack, audioReady } from "../ladder.js";
@@ -237,7 +238,7 @@ function watchTrack() {
   if (!atLeast("read")) return;
   let id = null;
   current.subscribe((t) => {
-    const next = t && t.deezer_id != null ? String(t.deezer_id) : null;
+    const next = trackKey(t);
     if (next === id) return;
     id = next;
     beginTrack(next);
@@ -331,7 +332,7 @@ function applyState(st, ack) {
   player.update((s) => {
     const was = s.queue[s.index];
     const now = q[st.index];
-    const changed = (was && was.deezer_id) !== (now && now.deezer_id);
+    const changed = trackKey(was) !== trackKey(now);
     return {
       ...s,
       queue: q,

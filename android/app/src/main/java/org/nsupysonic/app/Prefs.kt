@@ -1,6 +1,7 @@
 package org.nsupysonic.app
 
 import android.content.Context
+import android.net.Uri
 
 /** Server settings entered on first launch (host/port/SSL verification). */
 class Prefs(context: Context) {
@@ -32,6 +33,35 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putBoolean("batteryOffered", v).apply()
 
     /**
+     * The server certificate trusted on first use, as Ssl.fingerprint spells it
+     * — only consulted when [verifySsl] is off, and only for the origin it was
+     * pinned on: pointing the app at another server starts from no pin.
+     */
+    fun pinFor(origin: String?): String? {
+        if (origin == null) return null
+        if (sp.getString("pinOrigin", null) != origin) return null
+        return sp.getString("pinCert", null)
+    }
+
+    fun setPin(origin: String, fingerprint: String) =
+        sp.edit().putString("pinOrigin", origin).putString("pinCert", fingerprint).apply()
+
+    fun clearPin() = sp.edit().remove("pinOrigin").remove("pinCert").apply()
+
+    /** The configured server's origin (see [originOf]). */
+    fun serverOrigin(): String? = originOf(baseUrl())
+
+    /** Whether [url] is on the configured server: scheme, host AND port. */
+    fun isServerUrl(url: String?): Boolean {
+        val mine = serverOrigin() ?: return false
+        return originOf(url) == mine
+    }
+
+    /** The pin that applies to [url]: the server's, never another host's. */
+    fun pinForUrl(url: String?): String? =
+        if (isServerUrl(url)) pinFor(serverOrigin()) else null
+
+    /**
      * Normalized origin: scheme defaults to https, the optional port field is
      * inserted into the AUTHORITY (host) only when the host doesn't already
      * carry one — never after a path (the old code produced ".../musique:5722"
@@ -60,5 +90,30 @@ class Prefs(context: Context) {
         }
 
         fun appUrlFor(host: String, port: String): String = buildBaseUrl(host, port) + "/app/"
+
+        /**
+         * "scheme://host:port" with the port always spelled out (":443" and ""
+         * compare equal) and scheme/host lowercased, or null for anything that
+         * is not http(s) with a host. ONE definition of "same server", shared by
+         * the navigation guard, the shim, the JS bridge, the certificate pin
+         * and the native fetches, so they cannot drift apart.
+         */
+        fun originOf(url: String?): String? {
+            if (url.isNullOrEmpty()) return null
+            val u = try {
+                Uri.parse(url)
+            } catch (_: Exception) {
+                return null
+            }
+            val scheme = u.scheme?.lowercase() ?: return null
+            val defaultPort = when (scheme) {
+                "https" -> 443
+                "http" -> 80
+                else -> return null
+            }
+            val host = u.host?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+            val port = if (u.port > 0) u.port else defaultPort
+            return "$scheme://$host:$port"
+        }
     }
 }

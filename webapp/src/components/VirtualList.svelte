@@ -13,6 +13,7 @@
   //   </VirtualList>
   // The slot's root element is measured for row height, so every row must be
   // the same height (they are — fixed-height queue rows).
+  import { trackKey } from "../lib/trackkey.js";
   import { onMount, tick } from "svelte";
 
   export let items = [];
@@ -20,7 +21,7 @@
   export let buffer = 8; // extra rows above/below the viewport (smooth fast scroll)
   // Key each row by identity + absolute position so duplicates in the queue
   // don't collide. Overridable if a caller has a better key.
-  export let key = (item, index) => (item?.deezer_id ?? "") + ":" + index;
+  export let key = (item, index) => (trackKey(item) ?? "") + ":" + index;
 
   let listEl;
   let winEl;

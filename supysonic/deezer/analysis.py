@@ -1109,20 +1109,62 @@ def published_bpm(provider, deezer_id):
     return (bpm if MIN_BPM <= bpm <= MAX_BPM else None), True
 
 
-def _deezer_bpm(provider, track):
-    """Deezer's figure for an archived track, or None.
+def remember_published(deezer_id, bpm, track=None):
+    """Keep what Deezer answered about a track's tempo: in the row, for good.
 
-    The first play usually looked it up already (see ``tempo_hints``), so the
-    cached answer is taken before Deezer is asked a second time.
+    ``Track.deezer_bpm`` is the durable copy (0 = "Deezer was asked and has no
+    figure", NULL = never asked), and an archived track also carries it in its
+    sidecar's ``facts``, so it is the last time anyone asks. Never raises: this
+    is a by-product of an analysis or a hint, not a condition for either.
+    """
+    value = float(bpm) if bpm else 0.0
+    try:
+        if track is None:
+            track = Track.get_or_none(Track.deezer_id == str(deezer_id))
+        if track is None:
+            return
+        if track.deezer_bpm is None:
+            Track.update(deezer_bpm=value).where(
+                Track.id == track.id, Track.deezer_bpm.is_null(True)
+            ).execute()
+            track.deezer_bpm = value
+        if value and track.path and os.path.isfile(track.path):
+            from . import library
+
+            library.update_track_facts(track, {"deezer_bpm": value}, "deezer")
+    except Exception:
+        logger.debug("analysis: could not keep Deezer's tempo", exc_info=True)
+
+
+def deezer_bpm_for(provider, track):
+    """``(bpm or None, answered)``: Deezer's published tempo for a track.
+
+    The row is read FIRST: once Deezer has answered, nobody asks again, and the
+    answer outlives the process. Then the hint cache; only then Deezer itself.
     """
     if track is None or not track.deezer_id:
-        return None
+        return None, True
+    if track.deezer_bpm is not None:
+        return (track.deezer_bpm or None), True
     key = str(track.deezer_id)
     with _hint_lock:
         hit = _hints.get(key)
     if hit is not None and hit[2] and hit[0] > time.monotonic():
-        return hit[1]
-    return published_bpm(provider, key)[0]
+        remember_published(key, hit[1], track)
+        return hit[1], True
+    bpm, answered = published_bpm(provider, key)
+    if answered:
+        remember_published(key, bpm, track)
+    return bpm, answered
+
+
+def _deezer_bpm(provider, track):
+    """Deezer's figure for an archived track, or None.
+
+    The row's own copy comes first (see ``deezer_bpm_for``), then the answer the
+    first play's hint already fetched, and only then Deezer.
+    """
+    return deezer_bpm_for(provider, track)[0]
 
 
 # --- the published tempo, before there is a file -------------------------------
@@ -1171,8 +1213,25 @@ def tempo_hints(ids, provider):
         return known, waiting
     t = time.monotonic()
     global _hint_worker
+    ids = [str(i) for i in ids]
+    # What Deezer already told us is in the rows: no hint is fetched twice, ever.
+    stored = {}
+    if ids:
+        try:
+            stored = {
+                str(r.deezer_id): r.deezer_bpm
+                for r in Track.select(Track.deezer_id, Track.deezer_bpm).where(
+                    Track.deezer_id.in_(ids), Track.deezer_bpm.is_null(False)
+                )
+            }
+        except Exception:
+            logger.debug("analysis: could not read the stored tempos", exc_info=True)
     with _hint_lock:
         for ident in ids:
+            if ident in stored:
+                if stored[ident]:
+                    known[ident] = stored[ident]
+                continue
             key = str(ident)
             hit = _hints.get(key)
             if hit is not None and hit[0] > t:
@@ -1211,6 +1270,8 @@ def _drain_hints(provider):
             bpm, answered = published_bpm(provider, key)
         except Exception:
             bpm, answered = None, False
+        if answered:
+            remember_published(key, bpm)
         with _hint_lock:
             _hint_queued.discard(key)
             _hints[key] = (
@@ -1408,7 +1469,7 @@ def audit_published_tempo(provider, limit=200, progress=None):
         if not track.path or not os.path.isfile(track.path):
             continue
         stats["scanned"] += 1
-        bpm, answered = published_bpm(provider, track.deezer_id)
+        bpm, answered = deezer_bpm_for(provider, track)
         if not answered:
             stats["error"] = "Deezer could not be reached; the audit stopped early"
             stats["scanned"] -= 1
@@ -1583,11 +1644,74 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
             track.path, exc, exc_info=True,
         )
         return None, f"database: {exc}"
+    apply_measured_gain(track, feats.get("lufs"))
     logger.info(
         "analysed %s: %s bpm (%s), %s (%.2f) in %.1fs",
         track.path, bpm, bpm_source, style, style_conf, payload["took"],
     )
     return row, None
+
+
+#: ``Track.gain`` is what the player reads as the track's loudness (it applies
+#: ``-(gain + 18.4)``). Measured integrated loudness maps onto it as
+#: ``gain = lufs + offset``. Theoretical value: Deezer's reference is 18.4 and
+#: the measure targets -18 LUFS, hence -0.4 dB. ``tools/gain_calibrate.py`` gives
+#: the median on a real library.
+GAIN_FROM_LUFS_OFFSET = -0.4
+
+
+def gain_from_lufs(lufs):
+    """The ``Track.gain`` value for a measured integrated loudness, or None."""
+    try:
+        v = float(lufs)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float("inf"), float("-inf")) or not -70.0 < v < 5.0:
+        return None  # ebur128 reads -inf on silence: no loudness, no gain
+    return round(v + GAIN_FROM_LUFS_OFFSET, 2)
+
+
+def apply_measured_gain(track, lufs):
+    """Store the measured gain on the row (an archive or an upload alike)."""
+    gain = gain_from_lufs(lufs)
+    if gain is None:
+        return False
+    try:
+        Track.update(gain=gain).where(Track.id == track.id).execute()
+    except Exception:
+        logger.debug("analysis: could not store the gain", exc_info=True)
+        return False
+    track.gain = gain
+    return True
+
+
+def regain_from_analyses(page_size=500):
+    """The gain of every analysed track, from the stored measure: no ffmpeg.
+
+    A quick pass over ``TrackAnalysis.data`` (the ``lufs`` it carries); returns
+    how many rows changed.
+    """
+    changed = 0
+    after = None
+    while True:
+        q = TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.data)
+        if after is not None:
+            q = q.where(TrackAnalysis.track > after)
+        rows = list(q.order_by(TrackAnalysis.track).limit(page_size))
+        if not rows:
+            return changed
+        after = rows[-1].track_id
+        for r in rows:
+            try:
+                lufs = (json.loads(r.data or "{}") or {}).get("lufs")
+            except ValueError:
+                continue
+            gain = gain_from_lufs(lufs)
+            if gain is None:
+                continue
+            changed += Track.update(gain=gain).where(
+                Track.id == r.track_id, (Track.gain.is_null()) | (Track.gain != gain)
+            ).execute()
 
 
 _FAMILY_ARCH = {fid: arch for fid, _label, arch, _fn in FAMILIES}
@@ -1845,19 +1969,19 @@ def _fold_genre(name):
 
 
 def file_genre(track):
-    """``(label, archetype)`` from the genre written in a LOCAL file's own tags,
-    or None.
+    """``(label, archetype)`` from the genre written in a file's own tags, or None.
 
     A file somebody uploaded carries the genre its owner gave it, and that is a
     person's answer, not a guess — it used to be read into ``Track.genre`` and
-    then ignored by everything that serves a genre. Only for local files: a
-    Deezer track's archive is tagged with Deezer's broad album genre ("Dance"),
-    which must not outrank a trained head. The first of several ("A; B", "A/B")
+    then ignored by everything that serves a genre. It applies to every file
+    whose ``Track.genre`` comes from tags somebody wrote: an archive is no longer
+    tagged with Deezer's broad album genre ("Dance"), so a Deezer row carries one
+    only if its owner gave it. The first of several ("A; B", "A/B")
     is taken, and it is matched against the studio's tags and the engine's
     vocabulary (case, accents and punctuation folded) so it comes back under
     the name the player knows; a genre nobody knows is served under its own.
     """
-    if track is None or getattr(track, "deezer_id", None) is not None:
+    if track is None:
         return None
     raw = getattr(track, "genre", None)
     if not raw:
@@ -2268,6 +2392,11 @@ def backfill(provider=None, force=False, limit=None, progress=None, on_stats=Non
     workers = auto_workers(workers)
     if workers > 1:
         provider = None
+    try:
+        # Rows measured before the gain came from the measure: no ffmpeg needed.
+        regain_from_analyses()
+    except Exception:
+        logger.warning("analysis: regain pass failed", exc_info=True)
 
     stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None,
              "workers": workers, "failures": [], "failure_reasons": {}}
@@ -2375,6 +2504,11 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None,
                 )
             else:
                 stats["done"] += 1
+                # The vector is new: its neighbours are computed behind
+                # everything else, never in the way of the next extraction.
+                from .. import similar
+
+                similar.queue_track(track.id)
                 if stats["done"] % 20 == 0:
                     say(f"  {stats['done']} embedded...")
             report(stats)

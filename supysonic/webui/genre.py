@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random as _random
 import threading
 import time
@@ -68,6 +69,7 @@ _PRED_CACHE_MAX = 30000
 # two-layer MLP (2x512) is ~2.5 MB. Eight megabytes is far past anything
 # legitimate and stops a bad request from being a memory problem.
 MODEL_MAX_BYTES = 8 * 1024 * 1024
+METRICS_MAX_BYTES = 2 * 1024 * 1024  # a 226-genre confusion matrix is ~0.3 MB
 ARCHETYPES = ("sustain", "voice", "groove", "hard", "rock")
 
 # -- the extractor's self-test job -------------------------------------------
@@ -534,6 +536,10 @@ def _track_json(t, prediction=None):
         "album": t.album.name if t.album else "",
         "duration": t.duration,
         "play_count": t.play_count,
+        # Deezer's published tempo, kept in the row (0 = Deezer has none): the
+        # studio shows it, and reading it costs no query of its own.
+        "deezer_bpm": getattr(t, "deezer_bpm", None) or None,
+        "bpm_source": "deezer" if getattr(t, "deezer_bpm", None) else None,
     }
     if prediction:
         out["predicted"] = prediction[0]
@@ -1121,6 +1127,53 @@ def genre_labelled():
     return jsonify({"labelled": out})
 
 
+#: The unlabelled pool the studio's self-training reads (lib/genre/core.js,
+#: `pseudo`): the most a request may ask for, and how far the scan may look.
+POOL_MAX = 2000
+POOL_SCAN_MAX = 12000
+
+
+@webapi.route("/genre/pool")
+@login_required
+@admin_required
+def genre_pool():
+    """Untagged tracks that HAVE a vector, most played first: what the studio's
+    self-training learns from where its head is sure (the vectors themselves
+    come through /genre/embeddings, which serves only the current widths).
+
+    Whether a track has a vector is a file on disk, so the scan is bounded in
+    rows and in time like the candidates' — a library still being measured
+    answers with what it has."""
+    from ..deezer import embedding as emb
+
+    try:
+        limit = max(1, min(POOL_MAX, int(request.args.get("limit", 600))))
+    except (TypeError, ValueError):
+        limit = 600
+    labelled = {tt.track_id for tt in TrackTag.select(TrackTag.track)}
+    out = []
+    scanned = 0
+    deadline = time.monotonic() + CANDIDATE_BUDGET
+    query = (
+        Track.select(Track.id, Track.deezer_id, Track.path)
+        .where(Track.last_modification > 0)
+        .order_by(Track.play_count.desc(), Track.created.desc())
+        .limit(POOL_SCAN_MAX)
+    )
+    for track in query:
+        scanned += 1
+        if track.id in labelled:
+            continue
+        path = emb.sidecar_path(track)
+        if path and os.path.exists(path):
+            out.append(str(track.deezer_id or track.id))
+            if len(out) >= limit:
+                break
+        if time.monotonic() > deadline:
+            break
+    return jsonify({"ids": out, "scanned": scanned})
+
+
 # -- a whole album, playlist or artist at once --------------------------------------
 #
 # Tagging one track at a time is right for the tracks that need a decision and
@@ -1508,7 +1561,8 @@ def genre_reference_import():
 
 
 # -- the default sounds ---------------------------------------------------------
-# deezer/subgenre_tracks.py's recordings are ADDED to the tags, once: each one
+# The default sounds (references.default_sounds: the sub-genres' lists, the major
+# genres' and the curated ones) are ADDED to the tags, once: each one
 # Deezer carries is brought in and tagged with its sub-genre, unless the track
 # already wears a tag. One tag per track, so a sound someone chose (or an earlier
 # default) is never overwritten. Nothing is downloaded here: a tagged row is
@@ -1525,9 +1579,10 @@ _sounds_job = {
 
 
 def _sounds_signature():
-    from ..deezer import subgenre_tracks as sg
+    from ..deezer import references as refs
 
-    return "%d:%d" % (len(sg.SUBGENRE_TRACKS), sum(len(v) for v in sg.SUBGENRE_TRACKS.values()))
+    sounds = refs.default_sounds()
+    return "%d:%d" % (len({g for g, _a, _t in sounds}), len(sounds))
 
 
 def _sounds_json():
@@ -1561,7 +1616,7 @@ def _tag_default_sound(dzapi, provider, artist, title, tag):
 
 def _run_sounds(app):
     from ..db import close_connection, open_connection
-    from ..deezer import subgenre_tracks as sg
+    from ..deezer import references as refs
     from ..deezer.workload import renice
     from . import _dz_api, _dz_live
 
@@ -1578,7 +1633,7 @@ def _run_sounds(app):
                     _sounds_job["retry_at"] = time.monotonic() + SOUNDS_RETRY_S
                 return
             tags = {t.name: t for t in GenreTag.select()}
-            pairs = [(g, a, t) for g, ps in sg.SUBGENRE_TRACKS.items() for a, t in ps]
+            pairs = refs.default_sounds()
             with _sounds_lock:
                 _sounds_job.update(total=len(pairs), done=0, tagged=0, kept=0, not_found=0, failed=0, stopped=False)
             fails = 0
@@ -1806,25 +1861,44 @@ def genre_model():
         start_relabel(current_app._get_current_object())
         return jsonify({"deleted": True, "relabel": _relabel_json()})
 
-    data = request.get_json(silent=True) or {}
+    result, status = store_head(request.get_json(silent=True) or {})
+    if status != 200:
+        return jsonify(result), status
+    # The new head reaches the whole library from what is already measured.
+    start_relabel(current_app._get_current_object())
+    return jsonify({**result, "relabel": _relabel_json()})
+
+
+def store_head(data):
+    """Store a head as the active one, or refuse it: ``(json, status)``. Shared
+    by the studio's PUT and a shared model file's import (genreshare.py). The
+    caller starts the relabel."""
+    from ..deezer import genre as gen
+
     labels = data.get("labels")
     weights = data.get("weights")
     dim = int(data.get("dim") or 0)
     if not isinstance(labels, list) or len(labels) < 2:
-        return jsonify({"error": "at least two labels are needed"}), 400
+        return {"error": "at least two labels are needed"}, 400
     if not isinstance(weights, str) or not weights:
-        return jsonify({"error": "weights required"}), 400
+        return {"error": "weights required"}, 400
     if len(weights) > MODEL_MAX_BYTES:
-        return jsonify({"error": "weights too large"}), 413
+        return {"error": "weights too large"}, 413
     if dim <= 0 or dim > 8192:
-        return jsonify({"error": "bad dim"}), 400
+        return {"error": "bad dim"}, 400
 
     kind = str(data.get("kind") or "linear").lower()
     if kind not in ("linear", "mlp", "mlp2"):
-        return jsonify({"error": "unknown kind"}), 400
+        return {"error": "unknown kind"}, 400
     hidden = int(data.get("hidden") or 0)
     if kind in ("mlp", "mlp2") and not (1 <= hidden <= 2048):
-        return jsonify({"error": "bad hidden size"}), 400
+        return {"error": "bad hidden size"}, 400
+
+    # Bounded like the weights: a shared model file is someone else's text, and
+    # the request limit alone is the upload limit (a gigabyte by default).
+    metrics = json.dumps(data.get("metrics") or {})
+    if len(metrics) > METRICS_MAX_BYTES:
+        return {"error": "metrics too large"}, 413
 
     row = GenreModel.create(
         version=(GenreModel.select().count() + 1),
@@ -1832,7 +1906,7 @@ def genre_model():
         hidden=hidden,
         labels=json.dumps([str(x)[:48] for x in labels]),
         weights=weights,
-        metrics=json.dumps(data.get("metrics") or {}),
+        metrics=metrics,
         dim=dim,
         active=True,
     )
@@ -1852,9 +1926,7 @@ def genre_model():
     if problem:
         row.delete_instance()
         gen.invalidate()
-        return jsonify({"error": problem}), 400
+        return {"error": problem}, 400
     GenreModel.update(active=False).where(GenreModel.id != row.id).execute()
     gen.invalidate()
-    # The new head reaches the whole library from what is already measured.
-    start_relabel(current_app._get_current_object())
-    return jsonify({"stored": True, "version": row.version, "relabel": _relabel_json()})
+    return {"stored": True, "version": row.version}, 200

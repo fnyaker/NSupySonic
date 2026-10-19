@@ -1,4 +1,5 @@
 <script>
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { onDestroy } from "svelte";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { push } from "svelte-spa-router";
@@ -6,6 +7,7 @@
   import { player, isAdmin, toasts, lastPlaylist, openExport, openGenreBulk } from "../lib/stores.js";
   import {
     toggleEntityFavorite,
+    entityMeta,
     invalidatePlaylists,
     upsertPlaylistLocal,
     removePlaylistLocal,
@@ -59,7 +61,7 @@
   $: editable = !!data?.playlist?.editable && $isAdmin && CAN_KEEP;
   // A sort/search can't coexist with the drag-reorder edit mode.
   $: if (!manualView && editing) editing = false;
-  $: existingIds = new Set((data?.tracks || []).map((t) => String(t.deezer_id)));
+  $: existingIds = new Set((data?.tracks || []).map((t) => trackKey(t)));
 
   // Sequence guard: a delayed earlier response must not overwrite the page
   // after a quick navigation to another playlist.
@@ -117,7 +119,7 @@
 
   async function toggleFav() {
     const next = !fav;
-    if (await toggleEntityFavorite("playlist", id, next)) fav = next;
+    if (await toggleEntityFavorite("playlist", id, next, entityMeta("playlist", data?.playlist || {}))) fav = next;
   }
 
   // -- editing -------------------------------------------------------------
@@ -179,7 +181,7 @@
     data = data;
     // Capture the playlist id with the order: a quick navigation to another
     // playlist swaps `id` before the debounce fires.
-    pendingOrder = { plId: id, order: newTracks.map((t) => String(t.deezer_id)) };
+    pendingOrder = { plId: id, order: newTracks.map((t) => trackRef(t)) };
     clearTimeout(orderTimer);
     orderTimer = setTimeout(queueOrder, 400);
   }
@@ -227,7 +229,7 @@
     data = data;
     enqueue(async () => {
       try {
-        await api.addToPlaylist(plId, [String(track.deezer_id)]);
+        await api.addToPlaylist(plId, [trackRef(track)]);
         invalidatePlaylists();
       } catch {
         toasts.push(`Échec de l'ajout de « ${track.title} »`, "error");
@@ -312,7 +314,7 @@
         >
           {editing ? "Terminé" : "Modifier"}
         </button>
-      {:else if $isAdmin && CAN_KEEP}
+      {:else if CAN_KEEP}
         <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
       {/if}
     </div>

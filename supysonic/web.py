@@ -77,6 +77,16 @@ def setup_deezer(app):
             _wa.reanalyse_if_stale(app)
             _wg.resume_if_interrupted(app)
             _wg.relabel_if_stale(app)
+
+            from . import libjob, similar
+
+            libjob.resume_if_interrupted(
+                app, {similar.CURSOR_KEY: lambda: similar.rebuild_job()}
+            )
+
+            from .deezer import diskmigrate as _dm
+
+            _dm.resume_if_interrupted(app)
     return app.deezer
 
 
@@ -135,6 +145,15 @@ def create_application(config=None):
 
     # Initialize the optional Deezer proxy (lazy login on first use)
     setup_deezer(app)
+
+    # MusicBrainz enrichment: the options for the worker (it has no app
+    # context), and a catch-up run an interrupted restart left unfinished.
+    from .enrich import backfill as _enrich_backfill
+    from .enrich import queue as _enrich_queue
+
+    _enrich_queue.configure(app.config.get("ENRICH"))
+    if not app.testing:
+        _enrich_backfill.resume_if_interrupted(app)
 
     # Test for the cache directory
     cache_path = app.config["WEBAPP"]["cache_dir"]

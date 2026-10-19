@@ -1,6 +1,7 @@
 // Higher-level actions wiring the API to the stores (favorites, radio, toasts).
 // Kept separate from api.js to avoid an import cycle (api.js imports stores).
 
+import { migrateKey, trackKey, trackRef } from "./trackkey.js";
 import { get } from "svelte/store";
 
 import { REMOTE, CAN_KEEP } from "./remote/mode.js";
@@ -210,7 +211,8 @@ export async function loadFavorites(force = false) {
   if (favoritesLoaded && !force) return;
   try {
     const r = await api.favoriteIds();
-    favorites.set(new Set((r.ids || []).map(String)));
+    // The server may still name a track by its Deezer id: a key is a key.
+    favorites.set(new Set((r.ids || []).map(migrateKey)));
     favoritesLoaded = true;
   } catch {
     /* ignore */
@@ -218,7 +220,7 @@ export async function loadFavorites(force = false) {
 }
 
 export function isFavorite(id) {
-  return get(favorites).has(String(id));
+  return get(favorites).has(migrateKey(id));
 }
 
 // Full favorite tracks, cached. First call fetches; later calls return the
@@ -274,14 +276,14 @@ export async function toggleFavorite(track) {
     toasts.push("Ce lien est en lecture seule", "info");
     return;
   }
-  const id = String(track.deezer_id);
+  const id = trackKey(track);
   const on = !get(favorites).has(id);
   // optimistic
   if (on) favorites.add(id);
   else favorites.remove(id);
   updateFavTracksCache(track, on);
   try {
-    await api.favorite(id, on);
+    await api.favorite(trackRef(track), on);
     toasts.push(on ? "Ajouté aux favoris" : "Retiré des favoris");
   } catch {
     // rollback
@@ -297,23 +299,23 @@ export async function toggleFavorite(track) {
 function updateFavTracksCache(track, on) {
   const list = get(favTracks);
   if (list === null) return; // not loaded yet — nothing to keep in sync
-  const id = String(track.deezer_id);
+  const id = trackKey(track);
   if (on) {
-    if (!list.some((t) => String(t.deezer_id) === id)) {
+    if (!list.some((t) => trackKey(t) === id)) {
       favTracks.set([{ ...track, added: Math.floor(Date.now() / 1000) }, ...list]);
     }
   } else {
-    favTracks.set(list.filter((t) => String(t.deezer_id) !== id));
+    favTracks.set(list.filter((t) => trackKey(t) !== id));
   }
 }
 
-export async function toggleEntityFavorite(kind, id, on) {
+export async function toggleEntityFavorite(kind, id, on, meta = {}) {
   if (!CAN_KEEP) {
     toasts.push("Ce lien est en lecture seule", "info");
     return false;
   }
   try {
-    await api.favoriteEntity(kind, id, on);
+    await api.favoriteEntity(kind, id, on, meta);
     toasts.push(on ? "Ajouté à vos favoris" : "Retiré de vos favoris");
     return true;
   } catch {
@@ -340,9 +342,10 @@ export async function subscribeToPodcast(showDeezerId) {
 
 export async function startTrackRadio(track) {
   try {
-    const r = await api.trackRadio(track.deezer_id);
+    const key = trackRef(track);
+    const r = await api.trackRadio(key);
     if (r.tracks && r.tracks.length) {
-      player.playQueue(r.tracks, 0, { kind: "radio", id: track.deezer_id });
+      player.playQueue(r.tracks, 0, { kind: "radio", id: key });
       toasts.push("Radio lancée");
     }
   } catch {
@@ -375,7 +378,7 @@ export function addTrackToPlaylist(playlistId, trackId, playlistTitle) {
 
 export async function downloadTrackTo(track, quality = null) {
   const q = quality || get(downloadQuality);
-  if (isDownloaded(track.deezer_id)) return;
+  if (isDownloaded(trackKey(track))) return;
   toasts.push(`Téléchargement de « ${track.title} »…`);
   const ok = await downloadTrack(track, q);
   toasts.push(
@@ -385,7 +388,7 @@ export async function downloadTrackTo(track, quality = null) {
 }
 
 export async function undownloadTrack(track) {
-  await removeTrack(track.deezer_id);
+  await removeTrack(trackKey(track));
   toasts.push("Téléchargement retiré");
 }
 
@@ -399,7 +402,7 @@ const DL_CONCURRENCY = 4;
 export async function downloadTracks(tracks, quality = null) {
   const q = quality || get(downloadQuality);
   const list = (tracks || []).filter(
-    (t) => t && t.deezer_id && !isDownloaded(t.deezer_id)
+    (t) => t && trackKey(t) && !isDownloaded(trackKey(t))
   );
   if (!list.length) {
     toasts.push("Déjà disponible hors-ligne");
@@ -444,7 +447,7 @@ export async function playEntity(kind, id, context = null) {
     let tracks = [];
     if (kind === "album") tracks = (await api.album(id)).tracks;
     else if (kind === "playlist") tracks = (await api.playlist(id)).tracks;
-    else if (kind === "mix") tracks = (await api.smartTracklist(id)).tracks;
+    else if (kind === "mix") tracks = (await api.homeMix(id)).tracks;
     else if (kind === "artist") tracks = (await api.artistRadio(id)).tracks;
     if (tracks && tracks.length) {
       player.playQueue(tracks, 0, context || { kind, id });
@@ -454,6 +457,18 @@ export async function playEntity(kind, id, context = null) {
   } catch {
     toasts.push("Lecture impossible", "error");
   }
+}
+
+// What the server needs to name an entity it has never imported.
+export function entityMeta(kind, item) {
+  if (kind === "album")
+    return {
+      title: item.title || item.name,
+      artist: item.artist?.name,
+      artist_id: item.artist?.deezer_id,
+    };
+  if (kind === "artist") return { title: item.name || item.title };
+  return { title: item.title || item.name };
 }
 
 // Context menu for an album/artist/playlist/mix card.
@@ -470,23 +485,21 @@ export function buildEntityMenu(kind, item, nav) {
       icon: "download",
       action: () => downloadEntity(kind, routeId),
     });
-  // Favoriting an album/artist/playlist writes to the shared Deezer account, so
-  // it's admin-only (guests don't mutate the owner's account) — and on a remote
-  // control, only a link that may change what is kept.
-  if (get(isAdmin) && CAN_KEEP) {
-    // Only Deezer-backed entities can be favorited on the account (a user's own
-    // playlist has no Deezer favorite to add).
+  // A favourite is local to the user's own account; on a remote control, only a
+  // link that may change what is kept can make one.
+  if (CAN_KEEP) {
+    const meta = entityMeta(kind, item);
     if ((kind === "album" || kind === "playlist") && item.deezer_id)
       items.push({
         label: "Ajouter aux favoris",
         icon: "heart",
-        action: () => toggleEntityFavorite(kind, item.deezer_id, true),
+        action: () => toggleEntityFavorite(kind, item.deezer_id, true, meta),
       });
-    if (kind === "artist")
+    if (kind === "artist" && item.deezer_id)
       items.push({
         label: "Suivre",
         icon: "heart",
-        action: () => toggleEntityFavorite("artist", item.deezer_id, true),
+        action: () => toggleEntityFavorite("artist", item.deezer_id, true, meta),
       });
   }
   return items;
@@ -498,14 +511,14 @@ export function buildEntityMenu(kind, item, nav) {
 // endpoints that reject a UUID (400) or 404. Give episodes their own minimal,
 // working menu instead.
 function buildEpisodeMenu(ep, nav) {
-  const dl = isDownloaded(ep.deezer_id);
+  const dl = isDownloaded(trackKey(ep));
   const items = [
     { label: "Lire ensuite", icon: "next", action: () => player.playNext([ep]) },
     { label: "Ajouter à la file", icon: "queue", action: () => player.addToQueue([ep]) },
   ];
   // Playing this very episode: offer a one-tap marker at the current position.
   const s = get(player);
-  if (s.queue[s.index]?.deezer_id === ep.deezer_id) {
+  if (trackKey(s.queue[s.index]) === trackKey(ep)) {
     items.push({
       label: "Marquer cette position",
       icon: "bookmarkPlus",
@@ -535,7 +548,7 @@ function buildEpisodeMenu(ep, nav) {
 // Build the context-menu item list for a track. `nav` is svelte-spa-router push.
 export function buildTrackMenu(track, nav) {
   if (track.podcast) return buildEpisodeMenu(track, nav);
-  const fav = get(favorites).has(String(track.deezer_id));
+  const fav = get(favorites).has(trackKey(track));
   // The owner's identity, narrowed on a remote control to what its link lends.
   const admin = get(isAdmin) && CAN_KEEP;
   const items = [
@@ -543,15 +556,15 @@ export function buildTrackMenu(track, nav) {
     { label: "Ajouter à la file", icon: "queue", action: () => player.addToQueue([track]) },
   ];
   // Adding to a playlist edits the owner's Deezer playlists — admin-only.
-  // `track.deezer_id` is the universal track id — a numeric Deezer id, or the
-  // row UUID for local files — so this works for local tracks too.
+  // `trackRef` names the track the way the server resolves it: the row UUID, or
+  // the Deezer id of a catalogue result the playlist will make a row for.
   if (admin) {
     const last = get(lastPlaylist);
     if (last && last.id)
       items.push({
         label: `Ajouter à « ${last.title} »`,
         icon: "plus",
-        action: () => addTrackToPlaylist(last.id, track.deezer_id, last.title),
+        action: () => addTrackToPlaylist(last.id, trackRef(track), last.title),
       });
     // Opens the searchable playlist picker (scrolling a giant submenu to find
     // the right playlist was the old, painful way).
@@ -582,7 +595,7 @@ export function buildTrackMenu(track, nav) {
   // Offline download — device-local, so available to everyone. A plain
   // "Télécharger" at the default quality, plus a submenu to pick another. Not on
   // a remote control: this device is not the one playing.
-  const dl = !REMOTE && isDownloaded(track.deezer_id);
+  const dl = !REMOTE && isDownloaded(trackKey(track));
   if (!REMOTE) items.push(
     "divider",
     dl

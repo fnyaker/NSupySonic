@@ -29,6 +29,7 @@ import android.webkit.SslErrorHandler
 import android.webkit.URLUtil
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -44,9 +45,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import java.io.ByteArrayInputStream
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.Executors
 
 /**
@@ -100,6 +100,11 @@ class MainActivity : AppCompatActivity() {
     // Which output the music goes to, pushed to the page as it changes (the
     // page plays direct on Bluetooth — see AudioRoute).
     private var audioRoute: AudioRoute? = null
+    // Whether the top-level page is the configured server's. addJavascriptInterface
+    // puts NSNative on EVERY page the WebView loads, so each bridge method checks
+    // this first: a foreign page that got in somehow (a redirect, a link the
+    // guard missed) finds a bridge that answers nothing and does nothing.
+    @Volatile private var onServerPage = false
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -168,7 +173,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        webView.loadUrl(prefs.appUrl())
+        loadServer(webView, prefs.appUrl())
     }
 
     /**
@@ -184,12 +189,13 @@ class MainActivity : AppCompatActivity() {
             databaseEnabled = true
             // Auto-advance to the next track must not require a tap.
             mediaPlaybackRequiresUserGesture = false
-            // Only relax mixed content for the self-signed / http home-server case
-            // (SSL verification turned off). With verification ON, keep the safer
-            // compatibility mode instead of blanket-allowing http on an https page.
-            mixedContentMode =
-                if (prefs.verifySsl) WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                else WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            // Mixed content only exists on an https page, and an https server
+            // never needs an http sub-resource: everything it serves is its
+            // own, and the CSP's outside hosts (Deezer's CDN) are https. An
+            // http server's page is http, where this does not apply at all.
+            // So never — it was ALWAYS_ALLOW with verification off, which let
+            // anyone on the network rewrite whatever loaded over http.
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             userAgentString = "$userAgentString NSupySonicApp/1.0"
         }
         wv.addJavascriptInterface(Bridge(), "NSNative")
@@ -201,7 +207,9 @@ class MainActivity : AppCompatActivity() {
         // request off to the system DownloadManager instead, carrying the
         // session cookie so the auth-protected /api/share/* URLs still work.
         wv.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-            startDownload(url, userAgent, contentDisposition, mimeType)
+            // Only the server's own files: the download carries its cookie.
+            if (isServerUrl(url)) startDownload(url, userAgent, contentDisposition, mimeType)
+            else Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show()
         }
 
         // Install the mediaSession-capturing shim before any page script runs,
@@ -210,7 +218,7 @@ class MainActivity : AppCompatActivity() {
         // frame the WebView happened to load. The onPageStarted fallback below
         // covers WebViews without the feature, and any origin rule the API
         // rejects (the shim is idempotent, double injection is harmless).
-        val origin = serverOrigin()
+        val origin = shimOriginRule()
         if (origin != null &&
             WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         ) {
@@ -225,18 +233,41 @@ class MainActivity : AppCompatActivity() {
             override fun onPageStarted(
                 view: WebView?, url: String?, favicon: android.graphics.Bitmap?
             ) {
-                if (isServerUrl(url)) view?.evaluateJavascript(shimJs, null)
+                val ours = isServerUrl(url)
+                onServerPage = ours
+                if (ours) view?.evaluateJavascript(shimJs, null)
             }
 
             override fun onReceivedSslError(
                 view: WebView?, handler: SslErrorHandler?, error: SslError?
             ) {
-                // Opt-in only: the user unticked "verify SSL" for a self-signed cert.
-                if (!prefs.verifySsl) handler?.proceed()
-                else {
-                    handler?.cancel()
-                    showError(getString(R.string.error_ssl))
+                when (sslVerdict(error)) {
+                    SslVerdict.PROCEED -> handler?.proceed()
+                    SslVerdict.REFUSE -> handler?.cancel()
+                    SslVerdict.INVALID -> {
+                        handler?.cancel()
+                        showError(getString(R.string.error_ssl))
+                    }
+                    SslVerdict.CHANGED -> {
+                        handler?.cancel()
+                        showError(getString(R.string.error_ssl_changed))
+                    }
                 }
+            }
+
+            // Cleartext only to the configured server (see Net): the manifest
+            // must allow http for a LAN server it cannot name in advance, so
+            // the narrowing is done here, for every request the page makes.
+            override fun shouldInterceptRequest(
+                view: WebView?, request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val url = request?.url ?: return null
+                if (!url.scheme.equals("http", ignoreCase = true)) return null
+                if (isServerUri(url)) return null
+                return WebResourceResponse(
+                    "text/plain", "utf-8", 403, "Cleartext refused", emptyMap(),
+                    ByteArrayInputStream(ByteArray(0))
+                )
             }
 
             override fun onReceivedError(
@@ -254,7 +285,10 @@ class MainActivity : AppCompatActivity() {
                 // system. Compares scheme/host/port (a bare startsWith let
                 // "https://host.evil.com" or "https://host:57223" masquerade as
                 // the configured "https://host[:5722]").
-                if (isServerUri(url)) return false
+                if (isServerUri(url)) {
+                    if (request?.isForMainFrame == true) onServerPage = true
+                    return false
+                }
                 return try {
                     startActivity(Intent(Intent.ACTION_VIEW, url))
                     true
@@ -270,7 +304,9 @@ class MainActivity : AppCompatActivity() {
             // Every navigation the page makes, hash routes included: the screen
             // a rebuilt WebView should come back to.
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
-                if (isServerUrl(url)) lastAppUrl = url
+                val ours = isServerUrl(url)
+                onServerPage = ours
+                if (ours) lastAppUrl = url
             }
 
             override fun onRenderProcessGone(
@@ -331,13 +367,14 @@ class MainActivity : AppCompatActivity() {
         root.addView(wv, 0)
         webView = wv
         webViewDead = false
+        onServerPage = false
         pendingRebuild = false
         pingToken++ // a liveness ping still in flight is about a WebView that's gone
         mainFrameFailed = false
         errorView.visibility = View.GONE
         configureWebView(wv)
         val back = lastAppUrl?.takeIf { isServerUrl(it) } ?: prefs.appUrl()
-        wv.loadUrl(back)
+        loadServer(wv, back)
         offerBatteryExemptionOnce()
     }
 
@@ -435,10 +472,16 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (!prefs.configured) return
-        if (::webView.isInitialized && !webViewDead && !isServerUrl(webView.url)) {
+        // The server settings may have just re-pinned a certificate: forget
+        // what the WebView decided under the old one, and retry a load that
+        // the old pin refused.
+        if (::webView.isInitialized && !webViewDead) webView.clearSslPreferences()
+        if (::webView.isInitialized && !webViewDead &&
+            (mainFrameFailed || !isServerUrl(webView.url))
+        ) {
             mainFrameFailed = false
             errorView.visibility = View.GONE
-            webView.loadUrl(prefs.appUrl())
+            loadServer(webView, prefs.appUrl())
         }
     }
 
@@ -493,41 +536,59 @@ class MainActivity : AppCompatActivity() {
         if (webViewDead || !::webView.isInitialized) return
         mainFrameFailed = false
         errorView.visibility = View.GONE
-        webView.loadUrl(prefs.appUrl())
+        loadServer(webView, prefs.appUrl())
+    }
+
+    /**
+     * Load one of the server's pages. The bridge flag is raised HERE, before
+     * the page exists, because the shim talks to NSNative at document start —
+     * typically before onPageStarted has reached this thread — and a flag
+     * raised there would refuse the page its own first calls (appVersion).
+     * The navigation guard keeps the top frame on the server from then on;
+     * onPageStarted / doUpdateVisitedHistory lower it if anything else shows.
+     */
+    private fun loadServer(wv: WebView, url: String) {
+        onServerPage = isServerUrl(url)
+        wv.loadUrl(url)
     }
 
     // -- origin checks ---------------------------------------------------------
     // One place decides what "our server" means, so the navigation guard, the
     // shim injection and the JS bridge can't drift apart.
 
-    /** The default port a scheme implies, so ":443" and "" compare equal. */
-    private fun effectivePort(u: Uri): Int =
-        if (u.port > 0) u.port
-        else when (u.scheme?.lowercase()) {
-            "https" -> 443
-            "http" -> 80
-            else -> -1
-        }
+    // Prefs.originOf is the definition (scheme, host and port — a bare
+    // startsWith let "https://host.evil.com" pass for "https://host").
+    private fun isServerUri(u: Uri): Boolean = prefs.isServerUrl(u.toString())
 
-    private fun isServerUri(u: Uri): Boolean {
-        val base = Uri.parse(prefs.baseUrl())
-        if (base.host.isNullOrEmpty()) return false
-        return u.scheme.equals(base.scheme, ignoreCase = true) &&
-            u.host.equals(base.host, ignoreCase = true) &&
-            effectivePort(u) == effectivePort(base)
+    private fun isServerUrl(url: String?): Boolean = prefs.isServerUrl(url)
+
+    private enum class SslVerdict { PROCEED, REFUSE, INVALID, CHANGED }
+
+    /**
+     * What to do with a certificate the system refused. With verification on:
+     * nothing gets through. Off: trust on first use — the configured server's
+     * first certificate is pinned (unless the setup screen already pinned
+     * one), then only that exact certificate passes. Any OTHER host is never
+     * relaxed: the setting is about the user's own server, not the internet.
+     */
+    private fun sslVerdict(error: SslError?): SslVerdict {
+        if (prefs.verifySsl) return SslVerdict.INVALID
+        if (!isServerUrl(error?.url)) return SslVerdict.REFUSE
+        val origin = prefs.serverOrigin() ?: return SslVerdict.REFUSE
+        val seen = Ssl.fingerprint(error?.certificate) ?: return SslVerdict.INVALID
+        val pinned = prefs.pinFor(origin)
+        return when {
+            pinned == null -> {
+                prefs.setPin(origin, seen)
+                SslVerdict.PROCEED
+            }
+            pinned == seen -> SslVerdict.PROCEED
+            else -> SslVerdict.CHANGED
+        }
     }
 
-    private fun isServerUrl(url: String?): Boolean {
-        if (url.isNullOrEmpty()) return false
-        return try {
-            isServerUri(Uri.parse(url))
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    /** "scheme://host[:port]" of the configured server, for origin rules. */
-    private fun serverOrigin(): String? {
+    /** "scheme://host[:port]" of the configured server, for the shim's origin rule. */
+    private fun shimOriginRule(): String? {
         val u = Uri.parse(prefs.baseUrl())
         val scheme = u.scheme ?: return null
         val host = u.host ?: return null
@@ -635,7 +696,6 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
             return
         }
-        val verify = prefs.verifySsl
         val cookie = try {
             CookieManager.getInstance().getCookie(rawUrl)
         } catch (_: Exception) {
@@ -643,26 +703,29 @@ class MainActivity : AppCompatActivity() {
         }
         shareExecutor.execute {
             try {
-                val conn = URL(rawUrl).openConnection() as HttpURLConnection
-                Ssl.apply(conn, verify)
-                conn.connectTimeout = 15000
-                conn.readTimeout = 60000
-                conn.instanceFollowRedirects = true
-                if (!cookie.isNullOrEmpty()) conn.setRequestProperty("Cookie", cookie)
-                if (conn.responseCode !in 200..299)
-                    throw java.io.IOException("HTTP ${conn.responseCode}")
+                // Net follows redirects by hand and sends the cookie to the
+                // server only: a redirect elsewhere no longer carries it along.
+                val conn = Net.get(prefs, rawUrl, cookie, 15000, 60000)
                 val mimeType =
                     conn.contentType?.substringBefore(";")?.trim().takeUnless { it.isNullOrEmpty() }
                         ?: "application/octet-stream"
+                // The name comes from a response header: keep it a plain file
+                // name inside the share directory, whatever it says.
                 val fileName =
                     URLUtil.guessFileName(rawUrl, conn.getHeaderField("Content-Disposition"), mimeType)
+                        .replace(Regex("[^A-Za-z0-9._ -]"), "_").trimStart('.').take(120)
+                        .ifEmpty { "nsupysonic" }
 
                 // One slot: a fresh share replaces whatever was queued before —
                 // nothing here needs to outlive the single chooser it feeds.
                 val dir = File(cacheDir, "shared").apply { mkdirs() }
                 dir.listFiles()?.forEach { it.delete() }
                 val outFile = File(dir, fileName)
-                conn.inputStream.use { input -> outFile.outputStream().use { input.copyTo(it) } }
+                try {
+                    conn.inputStream.use { input -> outFile.outputStream().use { input.copyTo(it) } }
+                } finally {
+                    conn.disconnect()
+                }
 
                 val uri = FileProvider.getUriForFile(
                     this@MainActivity, "$packageName.fileprovider", outFile
@@ -771,6 +834,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class Bridge {
+        /** Only the configured server's page may use the bridge (see onServerPage). */
+        private fun allowed(): Boolean = onServerPage
+
         /**
          * This app's versionName, read by the web player (lib/appversion.js) at
          * startup: it compares it against the version the server publishes and,
@@ -780,7 +846,7 @@ class MainActivity : AppCompatActivity() {
          */
         @JavascriptInterface
         fun appVersion(): String =
-            try {
+            if (!allowed()) "" else try {
                 packageManager.getPackageInfo(packageName, 0).versionName ?: ""
             } catch (_: Exception) {
                 ""
@@ -793,7 +859,7 @@ class MainActivity : AppCompatActivity() {
          */
         @JavascriptInterface
         fun audioRoute(): String =
-            try {
+            if (!allowed()) "{\"kind\":\"unknown\",\"name\":\"\"}" else try {
                 this@MainActivity.audioRoute?.current() ?: "{\"kind\":\"unknown\",\"name\":\"\"}"
             } catch (_: Exception) {
                 "{\"kind\":\"unknown\",\"name\":\"\"}"
@@ -801,12 +867,14 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun publish(json: String) {
+            if (!allowed()) return
             val state = PlayerService.State.fromJson(json) ?: return
             runOnUiThread { handleState(state) }
         }
 
         @JavascriptInterface
         fun openServerSettings() {
+            if (!allowed()) return
             runOnUiThread { openSettings() }
         }
 
@@ -822,6 +890,7 @@ class MainActivity : AppCompatActivity() {
          */
         @JavascriptInterface
         fun deezerLogin() {
+            if (!allowed()) return
             runOnUiThread {
                 try {
                     deezerLoginPending = true
@@ -842,7 +911,8 @@ class MainActivity : AppCompatActivity() {
         // WebView. `url` is the absolute /api/share/(file|clip)/... URL.
         @JavascriptInterface
         fun shareFile(url: String) {
-            startShare(url)
+            if (!allowed()) return
+            runOnUiThread { startShare(url) }
         }
 
         /**
@@ -856,6 +926,7 @@ class MainActivity : AppCompatActivity() {
          */
         @JavascriptInterface
         fun saveText(name: String, text: String) {
+            if (!allowed()) return
             // Bounded: the diagnostic log is a few hundred KB at most, and this
             // writes to the shared Downloads folder.
             if (text.length > MAX_SAVE_TEXT) {

@@ -17,11 +17,6 @@
   <a use:link href="/search" class={active("/search")}>
     <Icon name="search" size={22} /><span class="l">Rechercher</span>
   </a>
-  {#if $isAdmin}
-    <a use:link href="/explore" class={active("/explore")}>
-      <Icon name="compass" size={22} /><span class="l">Explorer</span>
-    </a>
-  {/if}
   <a use:link href="/library" class={active("/library")}>
     <Icon name="library" size={22} /><span class="l">Biblio</span>
   </a>

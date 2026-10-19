@@ -11,11 +11,12 @@ of ``song.getData``, next to the ISRC, the release date, the label and the
 copyright. Where the answer comes from, best first:
 
 1. the ``<track>.json`` sidecar of an archived track, which is the app's own
-   copy of it and needs no Deezer at all;
-2. Deezer, asked once and kept a day — and, when the track is archived, written
-   into the sidecar, so it is the last time anyone asks: an archived track
-   carries its whole identity on disk;
-3. the database, which knows the performers and nothing else — so the panel
+   copy of it and needs no Deezer at all — and ONLY that: a track on disk is
+   never the reason for a call to Deezer, whatever its sidecar lacks;
+2. the tags of an uploaded file (composer, lyricist, producer, label…), read
+   from the file;
+3. Deezer, asked once and kept a day, for a track that is not on disk;
+4. the database, which knows the performers and nothing else — so the panel
    still says who is on the record while Deezer is out.
 
 A failure to reach Deezer is never an answer about the track: the credits it
@@ -25,6 +26,7 @@ could not read are simply missing from the reply.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 
@@ -143,7 +145,9 @@ def build(gw: dict | None, performers: list[dict]) -> dict:
             }
         )
 
-    date = _text(gw.get("PHYSICAL_RELEASE_DATE") or gw.get("DIGITAL_RELEASE_DATE"))
+    date = library.release_date_of(gw) or _text(
+        gw.get("PHYSICAL_RELEASE_DATE") or gw.get("DIGITAL_RELEASE_DATE")
+    )
     info = {
         "isrc": _text(gw.get("ISRC")),
         "released": date if date and date != "0000-00-00" else "",
@@ -152,6 +156,44 @@ def build(gw: dict | None, performers: list[dict]) -> dict:
         "album": _text(gw.get("ALB_TITLE")),
     }
     return {"credits": credits, "info": {k: v for k, v in info.items() if v}}
+
+
+#: The people the tags of an uploaded file can name, and the role each is under.
+_FILE_ROLES = (("composer", "composer"), ("lyricist", "lyricist"), ("producer", "producer"))
+
+
+def _split_people(raw) -> list[str]:
+    """Names out of a tag value: ``"A; B"`` is two people, ``"Last, First"`` one."""
+    return [n for n in (p.strip() for p in str(raw or "").replace("\x00", ";").split(";")) if n]
+
+
+def from_file_tags(path: str) -> dict:
+    """A gateway-shaped payload built from the tags of a file on disk.
+
+    An upload has no Deezer to ask: the composer, lyricist, producer and label
+    its owner wrote into the file are the whole story, and the credits panel
+    reads the same shape as for a Deezer track.
+    """
+    from ..filetags import read_file_facts
+
+    facts = read_file_facts(path)
+    contributors = {
+        role: _split_people(facts[key]) for key, role in _FILE_ROLES if facts.get(key)
+    }
+    gw = {}
+    if contributors:
+        gw["SNG_CONTRIBUTORS"] = contributors
+    if facts.get("isrc"):
+        gw["ISRC"] = facts["isrc"]
+    if facts.get("date"):
+        gw["PHYSICAL_RELEASE_DATE"] = facts["date"]
+    if facts.get("label"):
+        gw["LABEL_NAME"] = facts["label"]
+    return gw
+
+
+def _archived(track) -> bool:
+    return bool(track is not None and track.path and os.path.isfile(track.path))
 
 
 def _performers(track, meta) -> list[dict]:
@@ -213,6 +255,9 @@ def _live(tid: str) -> dict | None:
 @login_required
 def track_credits(track_id):
     """Everyone credited on a track, and its release details."""
+    from .refs import canonical
+
+    track_id = canonical(track_id)
     numeric = _valid_id(track_id)
     track = _resolve_local(track_id)
     if track is not None and not _may_access_track(track):
@@ -224,16 +269,17 @@ def track_credits(track_id):
     gw = (meta or {}).get("gw") if meta else None
     have = isinstance(gw, dict) and "SNG_CONTRIBUTORS" in gw
 
-    # An upload has nothing but its tags: no Deezer to ask, nothing to add.
-    if numeric and not have:
+    if track is not None and track.deezer_id is None and _archived(track):
+        # An upload (or a YouTube archive) has nothing but its tags: no Deezer
+        # to ask, and what the file says is read from the file.
+        if track.youtube_id is None:
+            gw = {**from_file_tags(track.path), **(gw or {})}
+    elif numeric and not have and not _archived(track):
+        # Only a track that is not on disk is worth a question to Deezer. An
+        # archive answers from its sidecar alone, whatever that holds: asking
+        # Deezer about a file we own is a network call for nothing.
         live = _live(track_id)
         if live is not None:
             gw = {**(gw or {}), **live}
-            # Archived: keep it, and it is never asked again.
-            if track is not None and track.path and "SNG_CONTRIBUTORS" in live:
-                try:
-                    library.save_track_metadata(track, live)
-                except Exception:
-                    logger.debug("credits: could not update the sidecar of %s", track_id, exc_info=True)
 
     return jsonify(build(gw, _performers(track, meta)))

@@ -29,6 +29,7 @@ from datetime import datetime
 import mediafile
 
 from ..db import Album, Artist, Track, User
+from ..filetags import read_file_facts
 from . import ids, library
 
 logger = logging.getLogger(__name__)
@@ -110,13 +111,17 @@ def import_local_file(path: str, root, owner=None) -> Track | None:
     folder = library.get_album_folder(root, albumartist, album_name)
     mtime = int(os.path.getmtime(path))
 
-    return Track.create(
+    # What the file says about itself (mutagen, never raises): its release date
+    # goes in the row, and every fact it carries in the sidecar below.
+    facts = read_file_facts(path)
+    track = Track.create(
         id=ids.local_track_uuid(path),
         deezer_id=None,  # the "local" marker
         disc=tag.disc or 1,
         number=tag.track or 1,
         title=(tag.title or os.path.splitext(basename)[0])[:255],
         year=tag.year,
+        release_date=(facts.get("date") or None),
         genre=tag.genre,
         duration=int(tag.length or 0),
         has_art=bool(tag.images),
@@ -130,6 +135,15 @@ def import_local_file(path: str, root, owner=None) -> Track | None:
         created=datetime.fromtimestamp(mtime),
         owner=owner,
     )
+    if facts:
+        # Same shape as an archive's: ``facts.<key> = {value, source}``, from
+        # ``tags``, the source nobody outranks. Best-effort, like every sidecar.
+        carried = {("release_date" if k == "date" else k): v for k, v in facts.items()}
+        try:
+            library.update_track_facts(track, carried, "tags")
+        except Exception:
+            logger.debug("Could not write the facts of %s", path, exc_info=True)
+    return track
 
 
 def scan_local(archive_dir: str) -> dict:

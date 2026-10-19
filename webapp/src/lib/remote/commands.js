@@ -8,6 +8,7 @@
 //
 // Pure, on purpose — test/remote.test.mjs drives both halves on plain objects.
 
+import { migrateKey, trackKey } from "../trackkey.js";
 import { settingLevel } from "./settings.js";
 
 // Each command and the lowest level that may send it — the server's table
@@ -47,7 +48,7 @@ export const MAX_QUEUE = 5000;
 
 // A track id that can stand in a URL path segment: the server drops any other.
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-export const playableId = (t) => !!t && ID_RE.test(String(t.deezer_id ?? ""));
+export const playableId = (t) => !!t && ID_RE.test(trackKey(t) ?? "");
 
 const pick = (o, keys) => {
   if (!o || typeof o !== "object") return undefined;
@@ -64,7 +65,6 @@ const pick = (o, keys) => {
 export function slimTrack(t) {
   if (!t || typeof t !== "object") return null;
   const out = pick(t, [
-    "deezer_id",
     "title",
     "duration",
     "explicit",
@@ -78,7 +78,11 @@ export function slimTrack(t) {
     "cover",
     "display_artist",
   ]);
-  out.deezer_id = String(t.deezer_id);
+  // The row's UUID names the track; a catalogue result with no row yet keeps
+  // the Deezer id it was listed under, the only form the server can still
+  // make a row from.
+  out.id = trackKey(t);
+  if (!t.id && t.deezer_id != null) out.deezer_id = String(t.deezer_id);
   if (t.artist) out.artist = pick(t.artist, ["deezer_id", "name"]);
   if (Array.isArray(t.artists))
     out.artists = t.artists.slice(0, 12).map((a) => pick(a, ["deezer_id", "name", "role"]));
@@ -128,12 +132,12 @@ export function commandFor(method, args, state) {
     case "removeAt": {
       const t = queue[a];
       if (!t || !playableId(t)) return null;
-      return { op: method === "jump" ? "jump" : "remove", args: { i: a, id: String(t.deezer_id) } };
+      return { op: method === "jump" ? "jump" : "remove", args: { i: a, id: trackKey(t) } };
     }
     case "move": {
       const t = queue[a];
       if (!t || !playableId(t) || !Number.isInteger(b) || b < 0) return null;
-      return { op: "move", args: { i: a, id: String(t.deezer_id), to: b } };
+      return { op: "move", args: { i: a, id: trackKey(t), to: b } };
     }
     case "clearUpcoming":
       return { op: "clear", args: {} };
@@ -183,10 +187,11 @@ export function commandFor(method, args, state) {
  */
 export function resolveIndex(queue, i, id) {
   if (!Array.isArray(queue)) return -1;
-  if (queue[i] && String(queue[i].deezer_id) === id) return i;
+  id = migrateKey(id);
+  if (queue[i] && trackKey(queue[i]) === id) return i;
   let best = -1;
   for (let k = 0; k < queue.length; k++) {
-    if (String(queue[k]?.deezer_id) !== id) continue;
+    if (trackKey(queue[k]) !== id) continue;
     if (best < 0 || Math.abs(k - i) < Math.abs(best - i)) best = k;
   }
   return best;

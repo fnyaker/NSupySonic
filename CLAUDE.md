@@ -119,6 +119,7 @@ cd webapp && node test/repeat/run.mjs               # repeat one / all on a 4 s 
                                                      # every pass reaches its end, none jumps back from the middle, no dead air
 cd webapp && node test/skip/run.mjs                 # a crossfaded skip in a HIDDEN page whose timers are throttled (the phone behind a car
                                                      # radio): the next track must be heard at once, graph and direct paths
+cd webapp && node test/import/run.mjs [--phone]       # a shared playlist link: pasted into the search, read, played, kept
 cd webapp && node test/fullscreen/run.mjs           # the desktop full-screen player from 700x900 to 1920x1080: every control on screen,
                                                      # inside its column and the element a click at its centre lands on
                                                      # (the four browser tests above start tools/perf_api.py --serve; PYTHON=<venv python>, SHOTS=<dir> keeps pictures)
@@ -180,6 +181,20 @@ commands back via `window.__nsNativeCmd()`. No webapp-side code is involved, so 
 against any deployed SPA version. Build: `gradle -p android assembleRelease` (JDK 17, SDK 34 —
 CI does this; no wrapper is committed).
 
+**Trust boundaries** (audit NS-19). "Verify SSL" unticked is **trust on first use**, never
+trust-all (`Ssl.kt`): the setup screen learns the certificate with a handshake it refuses (nothing is
+sent), shows its SHA-256 and pins it (`Prefs.pinFor`, per origin); the WebView pins on its first
+`onReceivedSslError` if setup could not; afterwards a chain the system accepts OR that exact leaf
+passes, a different one is "le certificat a changé", and re-saving the settings re-pins. Another
+host is never relaxed. `Prefs.originOf` is the ONE definition of "our server" (scheme, host, port)
+for the navigation guard, the shim, the bridge, the pin and the native fetches. `NSNative` answers
+only while the top frame is the server's (`onServerPage`, raised by `loadServer` before the page
+exists — the shim calls it at document start, before `onPageStarted` arrives). The manifest must
+allow cleartext (a LAN server's host is unknown at build time), so http is narrowed in code to the
+configured server: `shouldInterceptRequest` for the page, `Net.get` for native fetches — which also
+follows redirects by hand so the session cookie only ever goes to the server. Mixed content is
+never allowed; backup and device transfer exclude everything (`data_extraction_rules.xml`).
+
 **Surviving a long background stay.** Everything the app *is* — the audio, the queue, the UI —
 lives in the WebView's renderer process, which Android may kill whenever nobody is looking at it;
 the app process itself is only safe while the foreground service is up (it isn't, once playback
@@ -227,22 +242,27 @@ inside any WebView — email + password is the supported route. SPA side: `lib/n
 
 ## Architecture
 
-Three Deezer code layers, from low to high:
+**The frontier (detachment, lots A-I).** Deezer is a supplier of SOUND and of catalogue FACTS, nothing
+else. An archived track is a file like an upload: identity (UUID of the row), cover, tempo, genre,
+gain, lyrics, neighbours, radio and home are all this server's own, from the database and the disk.
+Nothing the user does writes to the Deezer account (no star, playlist, listen or position is
+mirrored; there is no option for it), and nothing reads the account except the ONE-OFF import in
+Réglages → Compte Deezer (`importer.import_account`: playlists and favourites, added, never removed).
+`tests/test_detach_guard.py` enforces it: a spy client, every `/api` route visited, and an `ALLOWED`
+list of the calls that fetch sound or catalogue facts — adding a Deezer call means adding it there.
+What stays on Deezer on purpose is listed in `docs/detachement-deezer.md` (D18).
 
-1. **`deezerpy/`** — the vendored Deezer client (based on RemixDev's deezer-py). Three transports
+Three code layers, from low to high:
+
+1. **`deezerpy/`** — the vendored Deezer client (based on RemixDev's deezer-py). Two transports
    with deliberate reliability roles (learned the hard way; do not "simplify" back to one):
-   - `api.py` — **public `api.deezer.com`**. Used for **search**, **recommendations** (editorial
-     releases + chart artists/playlists), and **artist pages/radio**. Stable, typed, returns image URLs.
-   - `gw.py` — **private gateway `gw-light.php`**. Used for album/playlist/mix pages, lyrics, Flow
-     (`radio.getUserRadio`), track radio, favorites & playlist writes, and stream tokens.
-   - `graphql.py` — **`pipe.deezer.com`** (`Deezer.gql`). Auths with a JWT minted from the ARL.
-     Currently only powers **customizable Flow clusters** (`FlowConfig`/`UpdateFlowConfig`).
+   - `api.py` — **public `api.deezer.com`**. Used for **search**, the **catalogue charts**
+     (Explore) and **artist pages**. Stable, typed, returns image URLs.
+   - `gw.py` — **private gateway `gw-light.php`**. Used for album/playlist/show pages, the track
+     records, track and artist radio seeds, the one-off account import and stream tokens.
    - **Gotcha — full tracklists:** album/playlist *page* calls only return the first ~10–40 tracks.
      Always fetch the full list via `get_album_tracks` (`song.getListByAlbum` nb:-1) /
      `get_playlist_tracks` (`playlist.getSongs` nb:-1).
-   - **Gotcha — JWT minting:** `POST https://auth.deezer.com/login/arl?...` (POST, not GET) with the
-     session cookies returns JSON `{"jwt": ...}`. An expired/invalid JWT comes back as a GraphQL
-     error on HTTP 200 (`Jwt*Error`), so the client re-mints + retries once on any `Jwt*` error.
 
 2. **`supysonic/deezer/`** — the proxy logic:
    - `provider.py` — ARL login + stream decryption; the single object the rest of the app talks to.
@@ -250,14 +270,10 @@ Three Deezer code layers, from low to high:
      `archive_dir`) and import helpers.
    - `library.py` — DB upsert + deterministic archive paths. `ids.py` — deterministic `uuid5` IDs
      from Deezer IDs (plus nullable `deezer_id` columns on Track/Album/Artist/Playlist).
-   - `importer.py` — Deezer → Subsonic sync (writes straight to DB). Besides the smart tracklists it imports
-     **"Nouveautés pour toi" en vrac** (`sync_new_albums`, `[deezer] import_new_albums`, on): the CMS
-     module page `channels/module/<uuid>` (`gw.get_module_page`, id captured from a HAR, the home page
-     searched should it move) lists the new-releases mix then ~100 new albums; each album's FULL
-     tracklist goes, in Deezer's order, into one local playlist "Deezer · Nouveautés en vrac". A run
-     that reads no album keeps last week's. `push.py` — Subsonic → Deezer
-     mirror (star/unstar, playlist CRUD), hooked from `api/playlists.py` & `api/annotation.py`,
-     guarded by `push_to_deezer`, fail-soft.
+   - `importer.py` — the one-off account import (`import_account`) and the scheduled refresh of
+     subscribed podcasts (`sync`); writes straight to the DB and never to Deezer. The playlists the
+     old nightly sync wrote ("Deezer · Flow", smart tracklists, "Nouveautés en vrac") are ordinary
+     playlists now: kept, never refreshed or purged.
    - `lyrics.py` — archive synced lyrics as a `.lrc` sidecar next to each archived audio file
      (+ embedded plain text in the tags), sourced best-first from **Deezer's own** lyrics then the
      public **LRCLIB** API (https://lrclib.net); synced wins over plain. `ensure_lyrics` is called on
@@ -379,8 +395,7 @@ no Blowfish — `provider.download_episode_to` just follows redirects), archived
 The local channel rows are the source of truth for subscriptions; `importer.sync_podcasts` refreshes them.
 Per-user playback state is server-side: `PodcastProgress` (auto-saved position, `finished` flag) and
 `PodcastMarker` (manual bookmarks) via `/api/podcast/progress` + marker CRUD; the SPA merges them with
-its localStorage copy newest-wins (`webapp/src/lib/podcastProgress.js`), and the admin's positions are
-mirrored to Deezer (`episode.bookmarkSet`) fail-soft.
+its localStorage copy newest-wins (`webapp/src/lib/podcastProgress.js`); nothing is sent to Deezer.
 
 **Unavailable tracks** (`supysonic/webui/availability.py`): Deezer drops tracks from its catalogue,
 and `Track.unavailable` (a timestamp, so a verdict expires and is re-tested) records the ones we
@@ -436,12 +451,25 @@ by default, asked on Enter or when ticked — never per keystroke) and the repla
   is asked. The admin switch (Réglages → *Source de secours : YouTube*, `Meta yt.enabled`) turns
   it off for everyone; what is archived keeps playing. `tests/test_youtube.py` counts the requests.
 
+**Importing a shared playlist** (`supysonic/linkimport.py` reads the link, `webui/playlist_import.py`
+matches and keeps it, `routes/Import.svelte`; reached from a link pasted into the search box and from
+the library). Deezer, Spotify (its public embed page), YouTube (`ytmusicapi`) and Apple Music (the
+share page's own JSON): no account, no token. **The pasted text is only ever parsed** — every request
+goes to a fixed host with a validated id, and a short link's redirect is followed by hand, each hop
+required to stay on the same service. Each line is matched library first (on disk: free, and it
+never vanishes), then Deezer (the ISRC when given, else a search), then YouTube (a YouTube link's own
+video, or one search) — by the replacement sheet's own `match_score`, or `closeness` ≥ `PLAUSIBLE`
+with the artist credited (`sure: false`, listed under "À vérifier"); anything less stays unmatched,
+since a wrong song is worse than a hole. A worker job (4 searches in flight), polled; the result is
+TEMPORARY (process memory, 3 h) and plays as it is. *Enregistrer* (admin) makes a LOCAL playlist —
+not created on the Deezer account — and queues its tracks for archiving.
+
 **Unavailable means BOTH sources are gone** — not "Deezer dropped it". `DELETE /api/track/<id>` is
 the third answer next to replace-and-upload, and `availability.verify_gone` re-checks *at the moment
 of deletion*: a file on disk → refuse (and clear the verdict); Deezer still resolves → refuse; an
 inconclusive network answer → refuse. Only `TrackUnavailable` with no file, or a local upload whose
 file is gone, authorises it. Scoped like a replacement (own playlists/favourites; an admin also drops
-the row, `recursive=True`) and mirrored to Deezer for the admin, fail-soft.
+the row, `recursive=True`); nothing is mirrored to Deezer.
 
 **The "Indisponibles" list is built for clearing out** (`components/UnavailableList.svelte`,
 `lib/replace.js`). Tick several (shift-click for a range) and `POST /api/tracks/delete` (≤ 200 ids)
@@ -602,6 +630,14 @@ server's own work). Four rules came out of it, each with its number:
   gzip copy of every text and wasm file that compresses (`vite.config.js#precompress`) and `spa.py`
   serves the smallest one the client accepts (`Vary: Accept-Encoding`, the type still the file's):
   main bundle **460 → 132 kB**, the analyser **219 → 71 kB**, the app core **63 → 19 kB**.
+
+**Gain and lyrics no longer come from Deezer.** `Track.gain` is the measured loudness
+(`analysis.apply_measured_gain`, `gain = lufs + GAIN_FROM_LUFS_OFFSET`; `/api/gain`, `/api/gains` read the
+database only and take UUIDs or Deezer ids; `regain_from_analyses` re-derives it from stored analyses without
+ffmpeg at the start of a backfill). Lyrics are LRCLIB only (`lyrics.ensure_lyrics`, hits more than 3 s off the
+track's duration refused, synced replaces plain, `facts.lyrics_tried` in the sidecar stops repeat searches;
+the route searches after answering). Shared building blocks: `library.update_track_facts` (sidecar `facts`),
+`supysonic/libjob.py` (resumable library job), `supysonic/filetags.py` (facts read from file tags).
 
 **Local play counts.** `/api/listen` writes `Track.play_count` / `last_play` (≥20 s counts, a skip
 doesn't). Before that only Subsonic's `scrobble` did, so a library played entirely through the web
@@ -836,6 +872,10 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
     tracked tempo moves it up (dnb at 87/174, double-kick metal); at half it is Deezer's hardcore
     listing and ignored, unless alternate beats are unequal in the bass (< 0.3: a one-drop tracked
     at double time) — then it halves; any other disagreement follows the tracker's confidence.
+  **Without any Deezer figure** (`python tools/tempo_eval.py --no-deezer DIR`, 26 arranged records
+  with a beat): the tracker alone is exact on 23, its three misses octaves (dnb 87/174, metal 90/180,
+  reggae 152/76); with a perfect Deezer witness 25 (only reggae stays). The server does not need Deezer's
+  BPM for hard dance, where Deezer publishes none anyway.
   Without numpy the envelope estimator below still answers. A version bump re-measures the library
   on boot (`webui/analysis.reanalyse_if_stale`) instead of waiting for the button.
 - The fallback envelope estimator measures a low-passed envelope — ffmpeg decimates to 1 kHz u8 and
@@ -1146,6 +1186,26 @@ genres". The heuristic above knows the styles it was written with; this teaches 
 - **The CSP had to be widened by exactly one token.** `script-src 'self' 'wasm-unsafe-eval'` permits
   WebAssembly compilation and nothing else — not `eval()`, not `new Function`, not inline script.
   Without it `WebAssembly.instantiate` is refused outright and deep training cannot run at all.
+- **A model travels as ONE FILE** (`supysonic/webui/genreshare.py`, the *Partager le modèle* card on the
+  Modèle tab): `/genre/share/export` writes the genres, every label (genre + Deezer id, YouTube id, or
+  artist and title for an upload) and the active head; `/genre/share/preview` then `/genre/share/import`
+  read one back. The two halves serve different cases: the head serves at once but only where the
+  vectors live in the same space (same extractor, a width this server reads — refused at the preview,
+  and `genre.store_head` still stores, re-reads and refuses before the working head is retired); the
+  labels outlive any extractor and ADD to the receiver's tags — a track already tagged here keeps its
+  tag, a track missing here is made from Deezer's record (no download), Deezer unreachable is
+  "non récupéré", never a verdict. Everything in the file is someone else's text: bounded, typed,
+  colours and archetypes validated, ids checked. `tests/test_genreshare.py`.
+- **The untagged library teaches too, but only where it EARNS it** (self-training: `tr_pseudo` in
+  `webapp/trainer`, `/genre/pool`, the *Apprendre aussi des titres non étiquetés* box, on by default).
+  The studio fetches up to 600 untagged tracks that have a vector (most played first) and appends them
+  as class −1. Per fold, the fold's OWN head labels them (never a head that saw the fold's test rows),
+  and a second head trains on the fold plus the pool rows it is ≥ 0.9 sure of — at most 3× a genre's
+  own examples, each weighing half a tag. That second head ships only if its held-out balanced
+  accuracy beats the first by a point; otherwise the first ships, bit for bit (its tasks run before
+  any pool fit, same seed, same folds). Untagged rows change nothing when it is off (pinned in Rust
+  and in `genre.test.mjs`). Measured on overlapping synthetic genres, scored on rows neither head saw:
+  four tags a genre 0.537 → 0.625; eight and more, within a point — hence the gate.
 - **One tag per track, admin-only, one model.** A track labelled both frenchcore and uptempo teaches
   the head that the two describe the same sound; a track that genuinely sits between them is better
   left out. And two users disagreeing about what hardtekk is would train the single shared model
@@ -2622,8 +2682,8 @@ Three rules hold it together, and each was bought:
 Renders and analyses are memoised per options object, which is what keeps the suite at ~30 s.
 
 All proxy/web tests run offline with mocks: `tests/test_deezer.py` (mock provider),
-`tests/test_webui.py` (`MockGW` + `MockApi` cover every `/api` route), `tests/test_graphql.py`
-(fake session routing auth-vs-pipe POSTs by host), `tests/test_deezer_resilience.py` (a fake HTTP
+`tests/test_webui.py` (`MockGW` + `MockApi` cover every `/api` route), `tests/test_detach_guard.py`
+(the spy client: what the app may ask Deezer), `tests/test_deezer_resilience.py` (a fake HTTP
 adapter that times out / answers garbage, pinning the rules above: the breaker opens and stops
 costing sockets, retries stay inside their budget, and no transport failure ever condemns a track or
 a show). Note that its circuit breaker is a process-wide singleton — reset it in `setUp` when a test

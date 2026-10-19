@@ -479,6 +479,28 @@ def deezer_import(config, ref):
         raise ClickException(str(e)) from e
 
 
+@deezer.command("import-account")
+@click.pass_obj
+def deezer_import_account(config):
+    """One-off import of your Deezer playlists and favorites (never removes anything)."""
+
+    provider = _require_provider(config)
+    sync_user = config.DEEZER.get("sync_user")
+    if not sync_user:
+        raise ClickException("Set 'sync_user' in the [deezer] config to a supysonic username.")
+
+    from .deezer.importer import DeezerImporter
+
+    try:
+        importer = DeezerImporter(provider, sync_user, progress=click.echo)
+    except User.DoesNotExist as e:
+        raise ClickException(f"sync_user '{sync_user}' does not exist.") from e
+    out = importer.import_account()
+    click.echo(f"Playlists: {out['playlists']}, favorites: {out['favorites']}")
+    for f in out["failed"]:
+        click.echo(f"  ! {f}", err=True)
+
+
 @deezer.command("sync")
 @click.pass_obj
 def deezer_sync(config):
@@ -519,35 +541,96 @@ def deezer_sync(config):
         click.echo(f"Recommendations: {out['recommendations']}")
 
 
-@deezer.command("lyrics")
-@click.option("--overwrite", is_flag=True, help="Re-fetch even tracks that already have a .lrc sidecar.")
-@click.option("--limit", type=int, default=None, help="Stop after N processed tracks.")
-@click.pass_obj
-def deezer_lyrics(config, overwrite, limit):
-    """Fetch and archive synced lyrics for every archived track that lacks them.
-
-    Writes a '.lrc' sidecar next to each archived audio file (sourced from Deezer
-    or the public LRCLIB API, synced when available) and embeds the plain text in
-    the file's tags. Tracks whose audio isn't archived yet are skipped.
-    """
-    from .deezer import get_provider
+def _lyrics_command(config, overwrite, limit):
     from .deezer.lyrics import backfill_archived_lyrics
 
-    # A provider is optional: LRCLIB works without Deezer, so local tracks (and
-    # any Deezer track already archived) can still get lyrics when the proxy is
-    # off — but with it we also get Deezer's own, richer synced lyrics.
-    provider = get_provider(config)
-    if provider is None:
-        click.echo("Deezer proxy disabled; using LRCLIB only.")
-
-    click.echo("Archiving lyrics for archived tracks...")
+    click.echo("Archiving lyrics for archived tracks (LRCLIB)...")
     stats = backfill_archived_lyrics(
-        provider, overwrite=overwrite, limit=limit, progress=click.echo
+        None, overwrite=overwrite, limit=limit, progress=click.echo
     )
     click.echo(
         "Done. synced={synced} plain={plain} none={missing} "
         "(scanned {scanned}, {skipped} already had a sidecar).".format(**stats)
     )
+
+
+@cli.command("lyrics")
+@click.option("--overwrite", is_flag=True, help="Re-fetch even tracks that already have a .lrc sidecar.")
+@click.option("--limit", type=int, default=None, help="Stop after N processed tracks.")
+@click.pass_obj
+def lyrics_cmd(config, overwrite, limit):
+    """Fetch and archive synced lyrics for every archived track that lacks them.
+
+    Writes a '.lrc' sidecar next to each archived audio file (from the public
+    LRCLIB API) and embeds the plain text in the file's tags. Tracks whose
+    audio isn't archived yet are skipped.
+    """
+    _lyrics_command(config, overwrite, limit)
+
+
+@deezer.command("lyrics")
+@click.option("--overwrite", is_flag=True, help="Re-fetch even tracks that already have a .lrc sidecar.")
+@click.option("--limit", type=int, default=None, help="Stop after N processed tracks.")
+@click.pass_obj
+def deezer_lyrics(config, overwrite, limit):
+    """Alias of `supysonic-cli lyrics`."""
+    _lyrics_command(config, overwrite, limit)
+
+
+@cli.command("enrich")
+@click.option("--force", is_flag=True, help="Ask again even for tracks already tried.")
+@click.option("--limit", type=int, default=None, help="Stop after N processed tracks.")
+@click.pass_obj
+def enrich_cmd(config, force, limit):
+    """Complete the facts of archived tracks from MusicBrainz.
+
+    Tries the ISRC, then AcoustID (needs 'fpcalc' and [enrich] acoustid_key),
+    then a strict title/artist/length search, at the services' own pace (one
+    request a second for MusicBrainz). Safe to interrupt and to run again.
+    """
+    from .enrich import backfill, queue as enrich_queue
+
+    enrich_queue.configure(getattr(config, "ENRICH", None))
+    job = backfill.make_job(force)
+    click.echo("Enriching archived tracks (MusicBrainz)...")
+    job.run(limit=limit)
+    snap = job.snapshot()
+    cov = backfill.coverage()
+    click.echo(
+        "Done. processed={done} failed={failed}. Library: {tried} tried, "
+        "{untried} not yet, found by method {found}, outcomes {status}.".format(
+            done=snap["done"], failed=snap["failed"], **cov
+        )
+    )
+    if snap.get("failure_reasons"):
+        for reason, n in sorted(snap["failure_reasons"].items(), key=lambda kv: -kv[1]):
+            click.echo(f"  {n} x {reason}")
+
+
+@deezer.command("migrate-disk")
+@click.option("--force", is_flag=True, help="Start over instead of resuming an interrupted run.")
+@click.option("--no-bpm", is_flag=True, help="Do not ask Deezer for the tempo of the tracks missing it.")
+@click.pass_obj
+def deezer_migrate_disk(config, force, no_bpm):
+    """Bring the archives already on disk to the current format.
+
+    Rewrites each archive's sidecar (no Deezer gain or rank, a facts block) and
+    its tags (no Deezer ReplayGain, the oldest release date), outside the
+    published file, and learns Deezer's published tempo where it is missing.
+    Safe to run again and to interrupt: a second run changes nothing.
+    """
+    from .deezer import diskmigrate, get_provider
+
+    provider = None if no_bpm else get_provider(config)
+    job = diskmigrate.make_job(provider, force)
+    click.echo("Migrating archived tracks...")
+    stats = job.run()
+    c = diskmigrate._counts
+    click.echo(
+        "Done. migrated={done} failed={failed} (sidecars {sidecar}, tags {tags}, "
+        "tempos {bpm}).".format(**stats, **{k: c.get(k, 0) for k in ("sidecar", "tags", "bpm")})
+    )
+    _echo_failures(stats)
 
 
 def _echo_failures(stats):

@@ -80,6 +80,9 @@ def _resolve_local(track_id):
     """A Track row from a universal id (numeric Deezer id or a local UUID)."""
     from ..deezer import archive
 
+    from .refs import canonical
+
+    track_id = canonical(track_id)
     if _valid_id(track_id):
         return archive.find_local_track(track_id)
     try:
@@ -107,6 +110,9 @@ def probe_track(track_id):
     Cheap by design: a recorded verdict answers immediately, and only a stale (or
     absent) one costs a Deezer round-trip.
     """
+    from .refs import canonical
+
+    track_id = canonical(track_id)
     track = _resolve_local(track_id)
     if track is not None and not _may_access_track(track):
         return jsonify({"error": "not found"}), 404
@@ -479,9 +485,7 @@ def replacement_candidates(track_id):
 
 # -- replacement ------------------------------------------------------------
 # Swapping a track everywhere it appears touches playlists (position by
-# position) and favorites, and — for the admin's Deezer-backed playlists — has
-# to be mirrored to Deezer as well. The Deezer half is slow and flaky, so the
-# whole thing runs in a worker thread and the UI polls the job.
+# position) and favorites. It runs in a worker thread and the UI polls the job.
 
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
@@ -623,13 +627,12 @@ def replace_everywhere(app, source, target, user_id, admin):
             star.delete_instance()
             favorites += 1
 
-    _mirror_to_deezer(app, source, target, touched, admin)
     _retire_replaced(source)
     return len(touched), favorites
 
 
 def _run_replace(app, job_id, source_id, target_id, user_id, admin):
-    """Worker: rewrite playlists and favorites, then mirror to Deezer."""
+    """Worker: rewrite playlists and favorites."""
     from ..db import close_connection, open_connection
 
     playlists = favorites = 0
@@ -744,13 +747,11 @@ def delete_track(track_id):
 
 
 def _remove_everywhere(app, track, user_id, admin):
-    """Unpick ``track`` from the caller's lists, drop the row (admin), mirror.
+    """Unpick ``track`` from the caller's lists, drop the row (admin).
 
     Returns ``(playlists, favorites)`` touched. Shared by the single and the
     bulk deletion: the scope rules are the same for one track or two hundred.
     """
-    deezer_id = track.deezer_id
-
     rows = (
         PlaylistTrack.select(PlaylistTrack, Playlist)
         .join(Playlist, on=(PlaylistTrack.playlist == Playlist.id))
@@ -759,13 +760,6 @@ def _remove_everywhere(app, track, user_id, admin):
     if not admin:
         rows = rows.where(Playlist.user == user_id)
     touched = {row.playlist_id for row in rows}
-    # Collected BEFORE the row goes: once the track is deleted the
-    # PlaylistTrack links are gone and there is nothing left to mirror.
-    mirrored = [
-        pl.deezer_id
-        for pl in Playlist.select().where(Playlist.id.in_(list(touched)))
-        if pl.deezer_id
-    ] if touched else []
 
     with db.atomic():
         for pid in touched:
@@ -792,7 +786,6 @@ def _remove_everywhere(app, track, user_id, admin):
             # remaining starred/playlist links go with it.
             track.delete_instance(recursive=True)
 
-    _purge_on_deezer(app, deezer_id, mirrored, admin)
     return len(touched), favorites
 
 
@@ -947,33 +940,6 @@ def _run_delete_many(app, job_id, todo, user_id, admin):
             pass
 
 
-def _purge_on_deezer(app, deezer_id, playlist_deezer_ids, admin):
-    """Carry the removal over to the Deezer account too (best effort).
-
-    Only the admin owns that account, and a Deezer failure must never undo the
-    local removal that already succeeded.
-    """
-    if not admin or not deezer_id:
-        return
-    if not app.config["DEEZER"].get("push_to_deezer"):
-        return
-    provider = getattr(app, "deezer", None)
-    if provider is None:
-        return
-    for dz_playlist in playlist_deezer_ids:
-        try:
-            provider.remove_songs_from_playlist(dz_playlist, [deezer_id])
-        except Exception:
-            logger.info(
-                "Deezer removal from playlist %s failed", dz_playlist, exc_info=True
-            )
-    try:
-        provider.dz.gw.remove_song_from_favorites(deezer_id)
-        provider.invalidate_favorites_cache()
-    except Exception:
-        logger.info("Deezer unstar of %s failed", deezer_id, exc_info=True)
-
-
 def _retire_replaced(source) -> bool:
     """Drop a dead track once nothing points at it any more.
 
@@ -1007,28 +973,3 @@ def _retire_replaced(source) -> bool:
         return False
     logger.info("Retired replaced track %s (nothing referenced it)", source.deezer_id)
     return True
-
-
-def _mirror_to_deezer(app, source, target, playlist_ids, admin):
-    """Best effort: carry the swap over to the Deezer account too.
-
-    Only the admin owns that account, only real Deezer playlists can be mirrored,
-    and a Deezer failure must never undo the local swap that already succeeded.
-    """
-    if not admin or not app.config["DEEZER"].get("push_to_deezer"):
-        return
-    provider = getattr(app, "deezer", None)
-    if provider is None or not target.deezer_id or not source.deezer_id:
-        return
-    for pid in playlist_ids:
-        pl = Playlist.get_or_none(Playlist.id == pid)
-        if pl is None or not pl.deezer_id:
-            continue
-        try:
-            provider.remove_songs_from_playlist(pl.deezer_id, [source.deezer_id])
-            provider.add_songs_to_playlist(pl.deezer_id, [target.deezer_id])
-        except Exception:
-            logger.info(
-                "Deezer mirror of the replacement failed for playlist %s", pid,
-                exc_info=True,
-            )

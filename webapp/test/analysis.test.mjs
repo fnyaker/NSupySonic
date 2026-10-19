@@ -48,7 +48,10 @@ globalThis.fetch = async (_url, opts) => {
 };
 
 mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_780_000_000_000 });
-const { knownAnalysis, onAnalysis, primeAnalyses } = await import("../src/lib/analysis.js");
+// The device and the server speak in track UUIDs; a Deezer id is turned into the
+// UUID its row has (lib/trackkey.js), here as in the app.
+const { migrateKey } = await import("../src/lib/trackkey.js");
+const { knownAnalysis, onAnalysis, primeAnalyses, verdictId } = await import("../src/lib/analysis.js");
 
 const heard = [];
 onAnalysis((id, v) => heard.push([id, v.bpm, !!v.provisional]));
@@ -68,7 +71,7 @@ const published = (bpm) => ({ bpm, bpmConfidence: 0.8, bpmSource: "deezer", styl
 const measured = (bpm, style) => ({ bpm, bpmConfidence: 0.8, bpmSource: "deezer+octave", style, styleLabel: style });
 
 test("a first play gets the published tempo, then the measured verdict replaces it", async () => {
-  const id = "3001";
+  const id = migrateKey("3001");
   // Ask 0: nothing yet, the lookup is running. Asks 1-2: the published figure
   // (Deezer lists this frenchcore track at half, as it often does), and the
   // server does NOT list the id as pending — it cannot see the archive
@@ -103,7 +106,7 @@ test("a first play gets the published tempo, then the measured verdict replaces 
 });
 
 test("a provisional verdict that is never replaced is kept, and re-asked at most every ten minutes", async () => {
-  const id = "3002";
+  const id = migrateKey("3002");
   script.set(id, () => ({ verdict: published(140) }));
   heard.length = 0;
   primeAnalyses([id]);
@@ -130,11 +133,11 @@ test("a provisional verdict that is never replaced is kept, and re-asked at most
   assert.equal(asked.get(id), polls + 1);
   // It is persisted too, so the next session starts on it before any request.
   await advance(6000);
-  assert.ok(String(disk.get("audio.analysis")).includes('"3002"'));
+  assert.ok(String(disk.get("audio.analysis")).includes(`"${id}"`));
 });
 
 test("a track with no published tempo and nothing to measure is asked about once", async () => {
-  const id = "3003";
+  const id = migrateKey("3003");
   script.set(id, () => ({}));
   primeAnalyses([id]);
   await settle();
@@ -148,7 +151,7 @@ test("a track with no published tempo and nothing to measure is asked about once
 test("a kept verdict is asked again after a day, and not before", async () => {
   // A verdict kept on the device used to be kept for good: a genre head
   // re-applied to the library on the server never reached it.
-  const id = "3101";
+  const id = migrateKey("3101");
   script.set(id, () => ({ verdict: measured(174, "dnb") }));
   asked.delete(id);
   primeAnalyses([id]);
@@ -170,8 +173,8 @@ test("a kept verdict is asked again after a day, and not before", async () => {
 test("a new verdict generation drops every verdict kept on the device", async () => {
   // The server re-decided the library under a new genre head: whatever this
   // device kept was decided under the old one.
-  const a = "3201";
-  const b = "3202";
+  const a = migrateKey("3201");
+  const b = migrateKey("3202");
   script.set(a, () => ({ verdict: measured(150, "hardstyle") }));
   script.set(b, () => ({ verdict: measured(200, "frenchcore") }));
   primeAnalyses([a]);
@@ -193,7 +196,7 @@ test("a tag set elsewhere reaches a device whose queue is all cached", async () 
   // so the generation a label moves on the server never reached it. Now a
   // track change past REVALIDATE_MS asks for the generation alone (no id
   // counted) and re-asks the tracks only when it moved.
-  const id = "3901";
+  const id = migrateKey("3901");
   let style = "techno";
   script.set(id, () => ({ verdict: measured(130, style) }));
   asked.delete(id);
@@ -213,4 +216,13 @@ test("a tag set elsewhere reaches a device whose queue is all cached", async () 
   await settle();
   assert.equal(asked.get(id), 2);
   assert.equal(knownAnalysis(id).style, "schranz");
+});
+
+test("a verdict is asked for by the track's UUID, whichever id the caller holds", () => {
+  const u = migrateKey("3135556");
+  assert.equal(u, "07e9d96b-af2c-5213-96bf-e9d8ea203276");
+  assert.equal(verdictId("3135556"), u);
+  assert.equal(verdictId(u), u);
+  assert.equal(verdictId("not an id"), null);
+  assert.equal(verdictId(null), null);
 });

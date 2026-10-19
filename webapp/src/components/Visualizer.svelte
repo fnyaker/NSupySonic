@@ -22,6 +22,7 @@
   // busy would mean a missed flash. Painting happens on rAF, capped by the
   // user's setting. A scene therefore never misses an event and never paints
   // more often than the screen (or the user) wants.
+  import { trackRef } from "../lib/trackkey.js";
   import { onMount, onDestroy } from "svelte";
   import { get } from "svelte/store";
   import { current, offlineCovers } from "../lib/stores.js";
@@ -458,7 +459,7 @@
   async function loadCover(t) {
     const url =
       resolveCover(get(offlineCovers), t.album?.cover) ||
-      (t.deezer_id ? api.coverUrl(t.deezer_id) : "");
+      (trackRef(t) ? api.coverUrl(trackRef(t)) : "");
     if (!url) return;
     useCover(loResCover(url, 256) || url);
     try {

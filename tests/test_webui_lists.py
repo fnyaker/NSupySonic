@@ -178,11 +178,15 @@ class ListsTestCase(unittest.TestCase):
         self.assertEqual([a["name"] for a in by_id["1"]["artists"]], ["Édith", "Bob & Co"])
         self.assertEqual(by_id["1"]["display_artist"], "Édith feat. Bob & Co")
         self.assertEqual(by_id["1"]["gain"], -7.5)
-        self.assertIsNone(by_id["2"]["album"]["cover"])
+        # Every row's cover is its album's local route, md5 or not.
+        self.assertEqual(by_id["2"]["album"]["cover"], "/api/cover/" + str(self.tracks[1].album_id))
+        self.assertEqual(by_id["2"]["id"], str(self.tracks[1].id))
+        self.assertIn("release_date", by_id["2"])
         self.assertTrue(by_id["3"]["unavailable"])
         local = by_id[str(self.tracks[3].id)]
         self.assertTrue(local["local"])
-        self.assertEqual(local["album"]["cover"], "/api/localcover/" + str(self.tracks[3].id))
+        self.assertEqual(local["id"], str(self.tracks[3].id))
+        self.assertEqual(local["album"]["cover"], "/api/cover/" + str(self.tracks[3].album_id))
         self.assertEqual(local["artist"]["deezer_id"], str(self.tracks[3].artist.id))
         self.assertEqual(by_id["5"]["artists"][0]["deezer_id"], str(self.tracks[4].artist.id))
 
@@ -220,9 +224,9 @@ class ListsTestCase(unittest.TestCase):
             pls = self.client.get("/api/me/playlists").get_json()["playlists"]
         by_name = {p["title"]: p for p in pls}
         self.assertEqual(by_name["Big"]["nb_tracks"], 10)
-        self.assertEqual(by_name["Big"]["cover"], "https://e-cdns-images.dzcdn.net/images/cover/aa11/500x500-000000-80-0-0.jpg")
-        # A local first track: its own cover route.
-        self.assertEqual(by_name["Local first"]["cover"], "/api/localcover/" + str(self.tracks[3].id))
+        self.assertEqual(by_name["Big"]["cover"], "/api/cover/" + str(self.tracks[0].album_id))
+        # A local first track: its album's cover route, like any other.
+        self.assertEqual(by_name["Local first"]["cover"], "/api/cover/" + str(self.tracks[3].album_id))
         self.assertEqual(by_name["Empty"], {
             "id": str(self.empty.id), "deezer_id": None, "title": "Empty", "cover": None,
             "nb_tracks": 0, "editable": True,
@@ -289,8 +293,9 @@ class ListsTestCase(unittest.TestCase):
         self.assertEqual(cards["Album Un"]["nb_tracks"], 2)
         self.assertIsNone(cards["Album Un"]["year"])
         # Seven albums, and the grid costs the same as it would for one: the
-        # count per album is gone (it was 2 statements each).
-        self.assertLessEqual(counts["SELECT"], 8, counts)
+        # count per album is gone (it was 2 statements each). Two more than it
+        # was: the similar artists, read from the stored neighbours.
+        self.assertLessEqual(counts["SELECT"], 10, counts)
         with count_statements() as counts:
             disco = self.client.get("/api/artist/11/discography").get_json()["discography"]
         self.assertEqual(len(disco["album"]), 7)

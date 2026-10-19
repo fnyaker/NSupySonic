@@ -28,7 +28,11 @@ const { MIRRORED, settingLevel } = await import("../src/lib/remote/settings.js")
 const S = await import("../src/lib/stores.js");
 const { claimToken, LEVELS } = await import("../src/lib/remote/mode.js");
 
+// A row of the library, as the API sends it: the UUID is the identity, the Deezer
+// id rides along. (A catalogue result has no `id` yet: see trackkey.js.)
+const { migrateKey } = await import("../src/lib/trackkey.js");
 const track = (id, extra = {}) => ({
+  id: migrateKey(String(id)),
   deezer_id: String(id),
   title: `T${id}`,
   duration: 200,
@@ -73,7 +77,7 @@ function tap(method, args) {
 }
 
 const view = (s) => ({
-  ids: s.queue.map((t) => t.deezer_id),
+  ids: s.queue.map((t) => t.id),
   index: s.index,
   playing: s.playing,
   volume: s.volume,
@@ -129,7 +133,7 @@ test("a row is named by index AND id, so a queue that moved meanwhile is not a w
   // at the top since.
   fresh(B, [track(0), ...Q], 2);
   C.runCommand({ op: "jump", args: { i: 3, id: "4" } }, env(B));
-  assert.equal(get(B.player).queue[get(B.player).index].deezer_id, "4");
+  assert.equal(get(B.player).queue[get(B.player).index].id, migrateKey("4"));
   // Gone from the queue: nothing happens rather than the wrong thing.
   fresh(B);
   assert.equal(C.runCommand({ op: "jump", args: { i: 1, id: "77" } }, env(B)), null);
@@ -142,19 +146,19 @@ test("a row is named by index AND id, so a queue that moved meanwhile is not a w
 test("a list command starts on the tapped track even when rows before it cannot play", () => {
   const list = [track(1), { title: "no id" }, track(2), { deezer_id: "../x" }, track(3)];
   const cmd = C.commandFor("playQueue", [list, 4, null], get(A.player));
-  assert.deepEqual(cmd.args.tracks.map((t) => t.deezer_id), ["1", "2", "3"]);
+  assert.deepEqual(cmd.args.tracks.map((t) => t.id), ["1", "2", "3"].map(migrateKey));
   assert.equal(cmd.args.start, 2);
   fresh(B);
   C.runCommand(cmd, env(B));
   const s = get(B.player);
-  assert.equal(s.queue[s.index].deezer_id, "3");
+  assert.equal(s.queue[s.index].id, migrateKey("3"));
 });
 
 test("a queue longer than the server takes is cut to a window around the tapped track", () => {
   const big = Array.from({ length: 12000 }, (_, i) => track(i + 1));
   const { tracks, start } = C.packTracks(big, 9000);
   assert.equal(tracks.length, C.MAX_QUEUE);
-  assert.equal(tracks[start].deezer_id, "9001");
+  assert.equal(tracks[start].id, migrateKey("9001"));
 });
 
 test("what crosses is what is drawn, not the whole record", () => {

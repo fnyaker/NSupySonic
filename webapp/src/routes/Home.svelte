@@ -1,18 +1,24 @@
 <script>
   import { onMount } from "svelte";
-  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
-  import { player, recent, isAdmin } from "../lib/stores.js";
+  import { player, recent } from "../lib/stores.js";
   import Card from "../components/Card.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
-  import FlowTuner from "../components/FlowTuner.svelte";
 
+  // The home is the library's own answer (/api/home): no call to Deezer, so
+  // it opens as fast as the disk and reads the same offline.
   let mixes = [];
-  let reco = { albums: [], artists: [], playlists: [] };
+  let shelves = { recent: [], popular: [], forgotten: [] };
   let flowLoading = false;
   let loading = true;
-  let tuner = false;
+
+  // An album card opens /album/<id>; until the album screen reads a row's own
+  // id, a Deezer album is addressed by its Deezer id and only one without
+  // keeps the UUID.
+  const cards = (list) =>
+    (list || []).map((a) => (a.deezer_id ? { ...a, id: undefined } : a));
+  const cardKey = (a) => a.id || a.deezer_id;
 
   $: greeting = (() => {
     const h = new Date().getHours();
@@ -36,28 +42,24 @@
     return out;
   })();
 
-  onMount(async () => {
-    // Personalized Deezer discovery is the account owner's; guests just browse.
-    if (!$isAdmin) {
-      loading = false;
-      return;
-    }
-    // Stale-while-revalidate: the home shelves paint from the last-seen copy
-    // right away and quietly correct themselves — both of these calls go out to
-    // Deezer server-side, so waiting on them is seconds of empty page.
-    const [h, r] = await Promise.allSettled([
-      api.swr("/home", (d) => {
-        mixes = d.mixes || [];
-        loading = false;
-      }),
-      api.swr("/recommendations", (d) => {
-        reco = d;
-        loading = false;
-      }),
-    ]);
-    if (h.status === "fulfilled") mixes = h.value.mixes || [];
-    if (r.status === "fulfilled") reco = r.value;
+  function take(d) {
+    mixes = d.mixes || [];
+    shelves = {
+      recent: cards(d.recent),
+      popular: cards(d.popular),
+      forgotten: cards(d.forgotten),
+    };
     loading = false;
+  }
+
+  onMount(async () => {
+    // Stale-while-revalidate: the shelves paint from the last-seen copy right
+    // away and quietly correct themselves.
+    try {
+      take(await api.swr("/home", take));
+    } catch {
+      loading = false;
+    }
   });
 
   async function playFlow() {
@@ -77,26 +79,15 @@
   <div>
     <h1>{greeting}</h1>
     <p class="muted">
-      {$isAdmin ? "Vos mixes, vos nouveautés et vos recommandations." : "Cherchez un artiste, un album ou un titre pour commencer."}
+      Vos mixes, vos nouveautés et ce que vous aimez réécouter, depuis votre bibliothèque.
     </p>
   </div>
-  {#if $isAdmin}
-    <div class="flow-actions">
-      <button class="pill" on:click={playFlow} disabled={flowLoading}>
-        <Icon name="play" size={18} /> Lancer mon Flow
-      </button>
-      {#if CAN_KEEP}
-        <button class="pill ghost" on:click={() => (tuner = true)}>
-          <Icon name="sliders" size={16} /> Personnaliser
-        </button>
-      {/if}
-    </div>
-  {/if}
+  <div class="flow-actions">
+    <button class="pill" on:click={playFlow} disabled={flowLoading}>
+      <Icon name="play" size={18} /> Lancer mon Flow
+    </button>
+  </div>
 </div>
-
-{#if tuner && $isAdmin && CAN_KEEP}
-  <FlowTuner onClose={() => (tuner = false)} />
-{/if}
 
 {#if loading}
   <Skeleton kind="shelf" />
@@ -109,10 +100,10 @@
     </div>
   {/if}
 
-  {#if reco.playlists?.length}
-    <h2>Playlists pour vous</h2>
+  {#if shelves.recent.length}
+    <h2>Ajoutés récemment</h2>
     <div class="shelf">
-      {#each reco.playlists as p (p.deezer_id)}<Card item={p} kind="playlist" />{/each}
+      {#each shelves.recent as a (cardKey(a))}<Card item={a} kind="album" />{/each}
     </div>
   {/if}
 
@@ -123,24 +114,24 @@
     </div>
   {/if}
 
-  {#if reco.albums?.length}
-    <h2>Albums pour vous</h2>
+  {#if shelves.popular.length}
+    <h2>Vos plus écoutés</h2>
     <div class="shelf">
-      {#each reco.albums as a (a.deezer_id)}<Card item={a} kind="album" />{/each}
+      {#each shelves.popular as a (cardKey(a))}<Card item={a} kind="album" />{/each}
     </div>
   {/if}
 
-  {#if reco.artists?.length}
-    <h2>Artistes à découvrir</h2>
+  {#if shelves.forgotten.length}
+    <h2>À réécouter</h2>
     <div class="shelf">
-      {#each reco.artists as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}
+      {#each shelves.forgotten as a (cardKey(a))}<Card item={a} kind="album" />{/each}
     </div>
   {/if}
 
-  {#if !$isAdmin && !recentAlbums.length}
+  {#if !mixes.length && !shelves.recent.length && !recentAlbums.length}
     <p class="muted guest-hint">
-      Utilisez la recherche pour trouver de la musique, puis lancez la lecture.
-      Vos favoris et fichiers importés sont dans « Ma bibliothèque ».
+      Votre bibliothèque est vide pour l'instant : utilisez la recherche pour trouver de la
+      musique, puis lancez la lecture. Elle s'ajoutera ici au fil de vos écoutes.
     </p>
   {/if}
 {/if}

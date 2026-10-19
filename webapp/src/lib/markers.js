@@ -3,6 +3,7 @@
 // keyed by episode id keeps the views reactive; every mutation is optimistic
 // against it and reconciled with the server response.
 
+import { trackKey } from "./trackkey.js";
 import { get, writable } from "svelte/store";
 import { api } from "./api.js";
 import { toasts } from "./stores.js";
@@ -42,9 +43,9 @@ export async function loadEpisodeMarkers(episodeId) {
 }
 
 // Drop a marker at `position` (seconds) in an episode. The episode is a
-// track-shaped object whose deezer_id is the episode UUID.
+// track-shaped object whose key is the episode UUID.
 export async function addMarkerAt(episode, position, label = null) {
-  const eid = String(episode.deezer_id);
+  const eid = trackKey(episode);
   position = Math.max(0, Math.floor(position));
   try {
     const r = await api.addMarker(eid, position, label);

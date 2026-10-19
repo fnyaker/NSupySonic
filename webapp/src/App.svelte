@@ -8,6 +8,7 @@
   import { loadOfflineIndex, loadCoverCache } from "./lib/offline.js";
   import { initPlayCache } from "./lib/playcache.js";
   import { initGainCache } from "./lib/gaincache.js";
+  import { migrateKeysOnce } from "./lib/keymigrate.js";
   import { initQueueFilter } from "./lib/playfilter.js";
   import { loadFavorites } from "./lib/actions.js";
   import { initPodcastProgress } from "./lib/podcastProgress.js";
@@ -84,10 +85,10 @@
     "/library": Library,
     "/podcasts": Podcasts,
     "/podcast/:id": Show,
-    "/explore": wrap({ asyncComponent: () => import("./routes/Explore.svelte") }),
-    "/explore/:genre": wrap({ asyncComponent: () => import("./routes/Explore.svelte") }),
     "/settings": wrap({ asyncComponent: () => import("./routes/Settings.svelte") }),
     "/genres": wrap({ asyncComponent: () => import("./routes/Genres.svelte") }),
+    "/import": wrap({ asyncComponent: () => import("./routes/Import.svelte") }),
+    "/import/:url": wrap({ asyncComponent: () => import("./routes/Import.svelte") }),
   };
 
   // The projector renders outside the router (it is a screen, not a route), so
@@ -171,6 +172,13 @@
     // "nothing downloaded" and filters every track out. Fast: IDB metadata only.
     await Promise.all([loadOfflineIndex(), initPlayCache(), initGainCache()]);
     loadCoverCache();
+    // The records an older build keyed on Deezer ids are renamed once, behind the
+    // first screen (lib/keymigrate.js); the indexes above already find them.
+    if (!isDisplay) {
+      const later = () => migrateKeysOnce();
+      if ("requestIdleCallback" in window) requestIdleCallback(later, { timeout: 8000 });
+      else setTimeout(later, 3000);
+    }
 
     // Airplane-mode launch: if we're offline but have a remembered session, boot
     // straight into the (downloaded) library instead of stalling on the login

@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import json
 import logging
-import re
 import socket
 import threading
 import time
@@ -422,11 +420,6 @@ class DeezerProvider:
         # "re-logged in at boot" and suppressed the very first retry for the
         # machine's first minute of uptime.
         self._last_relogin = float("-inf")
-        # (checksum, tracks) cache for the favorites list — see
-        # get_my_favorite_tracks. The expensive part is fetching full metadata
-        # for every favorite; Deezer hands back a cheap checksum of the set, so
-        # we only refetch when it actually changed.
-        self._fav_cache: tuple[str | None, list] | None = None
         # Why the last login attempt failed: ("arl", msg) — Deezer rejected the
         # credential, the admin must paste a new one — or ("network", msg), which
         # says nothing about the ARL. None once a login has succeeded. Read by
@@ -663,7 +656,6 @@ class DeezerProvider:
         with self._login_lock:
             self.arl = arl
             self._drop_session()
-            self._fav_cache = None
             self._login_error = None
             self._last_check = 0.0
             self._last_relogin = float("-inf")
@@ -744,68 +736,6 @@ class DeezerProvider:
     def get_playlist_tracks(self, playlist_id) -> list[dict]:
         return self.dz.gw.get_playlist_tracks(playlist_id)
 
-    def get_smart_tracklist(self, smarttracklist_id) -> dict:
-        return self.dz.gw.get_smart_tracklist(smarttracklist_id)
-
-    # "Nouveautés pour toi" (web app: Accueil → Nouveautés → Tout voir): a CMS
-    # module page, the new-releases mix first, then every new album "en vrac".
-    # Its id is the editorial module's, captured from the web app; should it
-    # ever move, the home page is searched for a module that looks like it.
-    NEW_RELEASES_MODULE = "33d3a14c-5716-4343-87e1-4ec3ac4fd49b"
-    _MODULE_RE = re.compile(r"channels/module/([0-9a-f-]{36})")
-
-    def get_new_release_albums(self, limit=100) -> list[dict]:
-        """The albums of "Nouveautés pour toi", in Deezer's order:
-        ``[{"id", "title", "artist", "date"}]`` (at most ``limit``)."""
-        albums = self._module_albums(self.NEW_RELEASES_MODULE, limit)
-        if albums:
-            return albums
-        for module_id in self._new_release_modules():
-            if module_id == self.NEW_RELEASES_MODULE:
-                continue
-            albums = self._module_albums(module_id, limit)
-            if albums:
-                return albums
-        return []
-
-    def _module_albums(self, module_id, limit):
-        page = self.dz.gw.get_module_page(module_id) or {}
-        out, seen = [], set()
-        for section in page.get("sections") or []:
-            for item in section.get("items") or []:
-                if (item.get("type") or "") != "album":
-                    continue
-                data = item.get("data") or {}
-                aid = str(data.get("ALB_ID") or item.get("id") or "")
-                if not aid.isdigit() or aid in seen or data.get("AVAILABLE") is False:
-                    continue
-                seen.add(aid)
-                out.append({
-                    "id": aid,
-                    "title": data.get("ALB_TITLE") or item.get("title") or "",
-                    "artist": data.get("ART_NAME") or item.get("description") or "",
-                    "date": data.get("DIGITAL_RELEASE_DATE") or data.get("ORIGINAL_RELEASE_DATE") or "",
-                })
-                if len(out) >= limit:
-                    return out
-        return out
-
-    def _new_release_modules(self):
-        """Module ids the home page links to that read like new releases."""
-        try:
-            home = self.dz.gw.get_page("home") or {}
-        except Exception:
-            return []
-        found = []
-        for section in home.get("sections") or []:
-            blob = json.dumps(section, ensure_ascii=False)
-            if not re.search(r"nouveaut|new[_ -]?releases?", blob, re.I):
-                continue
-            for module_id in self._MODULE_RE.findall(blob):
-                if module_id not in found:
-                    found.append(module_id)
-        return found
-
     def get_album_page(self, alb_id) -> dict:
         return self.dz.gw.get_album_page(alb_id)
 
@@ -826,11 +756,6 @@ class DeezerProvider:
         return self.dz.gw.get_track_lyrics(sng_id)
 
     # -- Flow / radio / mixes --------------------------------------------
-
-    def get_flow(self, config_id=None) -> dict:
-        """The account's Flow. ``config_id`` picks a specific flow
-        configuration (e.g. ``motivation``); omitted = the default Flow."""
-        return self.dz.gw.get_user_radio(self.user_id, config_id=config_id)
 
     def get_track_mix(self, sng_id) -> dict:
         return self.dz.gw.get_track_mix(sng_id)
@@ -868,16 +793,6 @@ class DeezerProvider:
         """Search podcasts via the public API (typed, returns image URLs)."""
         res = self.dz.api.search_podcast(query, limit=limit)
         return (res or {}).get("data", []) or []
-
-    def get_user_shows(self) -> list[dict]:
-        """The user's favorite podcasts (shows) from their Deezer profile."""
-        return self.dz.gw.get_user_shows(self.user_id)
-
-    def add_favorite_show(self, show_id):
-        return self.dz.gw.add_show_to_favorites(show_id)
-
-    def remove_favorite_show(self, show_id):
-        return self.dz.gw.remove_show_from_favorites(show_id)
 
     def resolve_episode(self, episode) -> str:
         """Return a playable URL for a podcast episode.
@@ -1006,23 +921,6 @@ class DeezerProvider:
                 pass
             raise
 
-    def set_episode_position(self, episode_id, offset, duration, is_heard=False) -> bool:
-        """Best-effort push of an episode playback position to Deezer."""
-        try:
-            self.dz.gw.set_episode_bookmark(episode_id, offset, duration, is_heard)
-            return True
-        except Exception:
-            logger.debug("episode.bookmarkSet failed for %s", episode_id, exc_info=True)
-            return False
-
-    # -- customizable Flow (GraphQL pipe.deezer.com) ---------------------
-
-    def flow_clusters(self) -> list:
-        return self.dz.gql.get_flow_clusters()
-
-    def set_flow_clusters(self, clusters) -> dict:
-        return self.dz.gql.update_flow_clusters(clusters)
-
     # -- channels (genre/mood landing pages, gateway page.get) -----------
 
     def get_channels(self) -> dict:
@@ -1030,90 +928,6 @@ class DeezerProvider:
 
     def get_channel(self, name) -> dict:
         return self.dz.gw.get_channel(name)
-
-    # -- library reads ----------------------------------------------------
-
-    def get_user_playlists(self, limit=200) -> list[dict]:
-        return self.dz.gw.get_user_playlists(self.user_id, limit=limit)
-
-    def get_my_favorite_tracks(self, limit=10000) -> list[dict]:
-        # Cheap call: ids + a checksum of the favorites set. If the checksum is
-        # unchanged we serve the cached tracks instead of re-fetching metadata
-        # for thousands of songs (the slow part).
-        ids_raw = self.dz.gw.get_user_favorite_ids(limit=limit)
-        checksum = ids_raw.get("checksum") if isinstance(ids_raw, dict) else None
-        if checksum and self._fav_cache and self._fav_cache[0] == checksum:
-            return self._fav_cache[1]
-        tracks = self.dz.gw.get_my_favorite_tracks(limit=limit)
-        self._fav_cache = (checksum, tracks)
-        return tracks
-
-    def invalidate_favorites_cache(self):
-        """Drop the cached favorites (after a star/unstar from the web UI)."""
-        self._fav_cache = None
-
-    def get_user_albums(self, limit=200) -> list[dict]:
-        return self.dz.gw.get_user_albums(self.user_id, limit=limit)
-
-    def get_user_artists(self, limit=200) -> list[dict]:
-        return self.dz.gw.get_user_artists(self.user_id, limit=limit)
-
-    def report_listen(self, deezer_id, listened=0, next_id=None, context=None,
-                      is_shuffle=False) -> bool:
-        """Best-effort play report to Deezer (feeds recommendations/Flow)."""
-        try:
-            self.dz.gw.log_listen(
-                deezer_id,
-                listened=listened,
-                next_id=next_id,
-                context=context,
-                is_shuffle=is_shuffle,
-            )
-            return True
-        except Exception:
-            logger.debug("log.listen failed for %s", deezer_id, exc_info=True)
-            return False
-
-    # -- library writes ---------------------------------------------------
-
-    def add_favorite_track(self, sng_id):
-        return self.dz.gw.add_song_to_favorites(sng_id)
-
-    def remove_favorite_track(self, sng_id):
-        return self.dz.gw.remove_song_from_favorites(sng_id)
-
-    def add_favorite_album(self, alb_id):
-        return self.dz.gw.add_album_to_favorites(alb_id)
-
-    def remove_favorite_album(self, alb_id):
-        return self.dz.gw.remove_album_from_favorites(alb_id)
-
-    def add_favorite_artist(self, art_id):
-        return self.dz.gw.add_artist_to_favorites(art_id)
-
-    def remove_favorite_artist(self, art_id):
-        return self.dz.gw.remove_artist_from_favorites(art_id)
-
-    def add_favorite_playlist(self, playlist_id):
-        return self.dz.gw.add_playlist_to_favorites(playlist_id)
-
-    def remove_favorite_playlist(self, playlist_id):
-        return self.dz.gw.remove_playlist_from_favorites(playlist_id)
-
-    def create_playlist(self, title, description=None, songs=None):
-        return self.dz.gw.create_playlist(title, description=description, songs=songs or [])
-
-    def edit_playlist(self, playlist_id, title=None, description=None):
-        return self.dz.gw.edit_playlist(playlist_id, title, description=description)
-
-    def add_songs_to_playlist(self, playlist_id, songs):
-        return self.dz.gw.add_songs_to_playlist(playlist_id, songs)
-
-    def remove_songs_from_playlist(self, playlist_id, songs):
-        return self.dz.gw.remove_songs_from_playlist(playlist_id, songs)
-
-    def delete_playlist(self, playlist_id):
-        return self.dz.gw.delete_playlist(playlist_id)
 
     # -- resolve a playable, possibly-degraded stream URL ----------------
 

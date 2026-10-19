@@ -14,6 +14,7 @@ import { blobDecodes } from "./imagebytes.js";
 import { logInfo } from "./log.js";
 import { online } from "./net.js";
 import { primeGain } from "./gaincache.js";
+import { migrateKey, trackKey, trackRef } from "./trackkey.js";
 import {
   downloads,
   downloadsSize,
@@ -42,6 +43,13 @@ function openDB() {
   return dbPromise;
 }
 
+// Downloads made before the app keyed on UUIDs sit in IndexedDB under their
+// Deezer id. The index below answers to the UUID from the first moment (so an
+// offline launch finds its music) and remembers where such a record really is
+// until `migrateStoredKeys` has renamed it, which it does in the background.
+const storedAs = new Map(); // key (uuid) -> the id on disk, while it differs
+const diskId = (id) => storedAs.get(String(id)) ?? String(id);
+
 function tx(db, stores, mode) {
   return db.transaction(stores, mode);
 }
@@ -62,7 +70,8 @@ function reqp(request) {
 // A compact, offline-displayable copy of the track metadata.
 function slimTrack(t) {
   return {
-    deezer_id: String(t.deezer_id),
+    id: trackKey(t),
+    deezer_id: t.deezer_id ? String(t.deezer_id) : null,
     title: t.title,
     duration: t.duration || 0,
     explicit: !!t.explicit,
@@ -91,7 +100,9 @@ export async function loadOfflineIndex() {
     const ids = new Set();
     let size = 0;
     for (const m of metas) {
-      ids.add(m.id);
+      const key = migrateKey(m.id);
+      if (key !== m.id) storedAs.set(key, m.id);
+      ids.add(key);
       size += m.size || 0;
     }
     downloads.set(ids);
@@ -144,7 +155,7 @@ export async function loadCoverCache() {
 // to still be there in airplane mode a month later. (This used to return as
 // soon as ANY copy was on screen, so a track downloaded after being played
 // never stored its art at all.)
-async function cacheCover(coverUrl, deezerId, background = false) {
+async function cacheCover(coverUrl, ref, background = false) {
   if (!coverUrl) return false;
   const key = coverKey(coverUrl);
   // Publish only when nothing shows this art yet: swapping a live object URL
@@ -162,7 +173,7 @@ async function cacheCover(coverUrl, deezerId, background = false) {
       publish(existing.blob);
       return true;
     }
-    const res = await fetch(api.coverUrl(deezerId), {
+    const res = await fetch(api.coverUrl(ref), {
       credentials: "include",
       headers: background ? { "X-NS-Background": "1" } : {},
     });
@@ -219,7 +230,7 @@ export async function repairMissingCovers(have) {
   const todo = new Map(); // key -> [cover url, id]; one fetch per distinct art
   for (const m of metas) {
     const url = m && m.track && m.track.album && m.track.album.cover;
-    const id = m && ((m.track && m.track.deezer_id) || m.id);
+    const id = m && ((m.track && (m.track.id || m.track.deezer_id)) || m.id);
     if (!url || !id) continue;
     const key = coverKey(url);
     if (!have.has(key) && !todo.has(key)) todo.set(key, [url, id]);
@@ -315,7 +326,7 @@ async function gcCover(coverUrl) {
 
 export async function getMeta(id) {
   const db = await openDB();
-  return reqp(tx(db, "meta", "readonly").objectStore("meta").get(String(id)));
+  return reqp(tx(db, "meta", "readonly").objectStore("meta").get(diskId(id)));
 }
 
 export async function listDownloads() {
@@ -328,7 +339,7 @@ export async function listDownloads() {
 // Read the stored blob and hand back an object URL (caller revokes it).
 export async function getObjectURL(id) {
   const db = await openDB();
-  const rec = await reqp(tx(db, "audio", "readonly").objectStore("audio").get(String(id)));
+  const rec = await reqp(tx(db, "audio", "readonly").objectStore("audio").get(diskId(id)));
   if (!rec || !rec.blob) return null;
   return URL.createObjectURL(rec.blob);
 }
@@ -339,7 +350,7 @@ export async function touch(id) {
     const db = await openDB();
     const t = tx(db, "meta", "readwrite");
     const store = t.objectStore("meta");
-    const m = await reqp(store.get(String(id)));
+    const m = await reqp(store.get(diskId(id)));
     if (m) {
       m.lastPlayedAt = Date.now();
       store.put(m);
@@ -362,13 +373,13 @@ function setDownloading(id, on) {
 // Download `track` to the device at `quality` (e.g. "FLAC", "OPUS_320").
 // Returns true on success. Idempotent: a track already stored is skipped.
 export async function downloadTrack(track, quality, onProgress = null) {
-  const id = String(track.deezer_id);
+  const id = trackKey(track);
   if (isDownloaded(id) || get(downloading).has(id)) return true;
   setDownloading(id, true);
   const t0 = Date.now();
   logInfo("download", `start ${id} "${track.title || ""}" q=${quality || "default"}`);
   try {
-    const res = await fetch(api.streamUrl(id, quality), { credentials: "include" });
+    const res = await fetch(api.streamUrl(trackRef(track), quality), { credentials: "include" });
     if (!res.ok) throw new Error("stream " + res.status);
 
     // Stream the body so we can report progress (live transcodes have no
@@ -414,7 +425,7 @@ export async function downloadTrack(track, quality, onProgress = null) {
     downloads.update((s) => new Set(s).add(id));
     downloadsSize.update((n) => n + blob.size);
     // Also cache the archived cover so the pochette shows offline.
-    await cacheCover(track.album?.cover, id);
+    await cacheCover(track.album?.cover, trackRef(track));
     logInfo("download", `ok ${id} ${(blob.size / 1048576).toFixed(1)} MB in ${Date.now() - t0}ms`);
     return true;
   } catch (e) {
@@ -428,15 +439,17 @@ export async function downloadTrack(track, quality, onProgress = null) {
   }
 }
 
-export async function removeTrack(id) {
-  id = String(id);
+export async function removeTrack(key) {
+  const id = String(key);
+  const at = diskId(id);
   try {
     const db = await openDB();
-    const meta = await reqp(tx(db, "meta", "readonly").objectStore("meta").get(id));
+    const meta = await reqp(tx(db, "meta", "readonly").objectStore("meta").get(at));
     const t = tx(db, ["meta", "audio"], "readwrite");
-    t.objectStore("meta").delete(id);
-    t.objectStore("audio").delete(id);
+    t.objectStore("meta").delete(at);
+    t.objectStore("audio").delete(at);
     await done(t);
+    storedAs.delete(id);
     downloads.update((s) => {
       const n = new Set(s);
       n.delete(id);
@@ -484,3 +497,35 @@ export async function clearAll() {
   }
 }
 
+
+// Rename, once, the records the app wrote when it still keyed on Deezer ids.
+// Background work after the first screen: until a record is renamed the index
+// above already finds it, so nothing waits on this. A key that already exists
+// (the track was downloaded again since) wins, and the old record is dropped.
+export async function migrateStoredKeys() {
+  if (!storedAs.size) return 0;
+  const db = await openDB();
+  let moved = 0;
+  for (const [key, old] of [...storedAs]) {
+    const t = tx(db, ["meta", "audio"], "readwrite");
+    const meta = t.objectStore("meta");
+    const audio = t.objectStore("audio");
+    const [m, a, mNew] = await Promise.all([
+      reqp(meta.get(old)),
+      reqp(audio.get(old)),
+      reqp(meta.get(key)),
+    ]);
+    if (!mNew && m && a) {
+      meta.put({ ...m, id: key, track: m.track ? { ...m.track, id: key } : m.track });
+      audio.put({ ...a, id: key });
+    }
+    meta.delete(old);
+    audio.delete(old);
+    await done(t);
+    storedAs.delete(key);
+    moved++;
+    // Between records: this is a courtesy to the frame, not a rate limit.
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  return moved;
+}

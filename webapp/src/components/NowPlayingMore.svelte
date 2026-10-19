@@ -7,6 +7,7 @@
   // The similar tracks are Deezer's own mix for the track (the same call the
   // radio uses) — until we can compute them from our own analysis; the panel
   // only asks for a list of tracks, so that swap is one call.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { onMount, onDestroy } from "svelte";
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
@@ -19,9 +20,9 @@
 
   export let track = null;
 
-  // A Deezer id: the only kind the mix and the artist page know about (an
-  // upload or an episode has neither).
-  $: id = track && !track.podcast && /^[0-9]+$/.test(String(track.deezer_id)) ? String(track.deezer_id) : null;
+  // What the mix and the credits are asked by: the row's id (a request names a
+  // track by trackRef). An episode has neither.
+  $: id = track && !track.podcast ? trackRef(track) : null;
   $: artistId =
     track && track.artist && /^[0-9]+$/.test(String(track.artist.deezer_id)) ? String(track.artist.deezer_id) : null;
 
@@ -39,7 +40,7 @@
   // A string, on purpose: `track` is the store's object, handed over again on
   // every progress tick, and a reactive statement reading it would ask again
   // four times a second. A string only changes when the track does.
-  $: cid = track && !track.podcast ? String(track.deezer_id) : null;
+  $: cid = track && !track.podcast ? trackRef(track) : null;
   $: loadCredits(cid);
 
   // Who wrote it, composed it, produced it. Best-effort: with nothing to show
@@ -73,7 +74,7 @@
     try {
       const r = await api.trackRadio(tid);
       if (mine !== seqS) return;
-      similar = (r.tracks || []).filter((t) => String(t.deezer_id) !== tid);
+      similar = (r.tracks || []).filter((t) => trackKey(t) !== trackKey(track));
       if (similar.length) {
         if (memo.size > 30) memo.clear();
         memo.set(tid, similar);

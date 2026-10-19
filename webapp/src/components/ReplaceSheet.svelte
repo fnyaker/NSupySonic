@@ -6,6 +6,7 @@
   // the closest matches (or takes a file of your own), lets you LISTEN before
   // committing, and then swaps the track everywhere it appears in one go. The
   // rewrite runs on the server, so it survives closing the app.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { fade, scale } from "svelte/transition";
   import { onDestroy } from "svelte";
   import { api } from "../lib/api.js";
@@ -62,11 +63,11 @@
     const mine = seq;
     yt = "loading";
     try {
-      const r = await api.replacementCandidates(t.deezer_id, { youtube: true, q: activeQ });
+      const r = await api.replacementCandidates(trackRef(t), { youtube: true, q: activeQ });
       if (loadedFor !== t || mine !== seq) return;
-      const have = new Set(candidates.map((c) => c.deezer_id));
+      const have = new Set(candidates.map((c) => trackKey(c)));
       const extra = (r.candidates || []).filter(
-        (c) => c.source === "youtube" && !have.has(c.deezer_id)
+        (c) => c.source === "youtube" && !have.has(trackKey(c))
       );
       ytFound = extra.length;
       candidates = [...candidates, ...extra];
@@ -87,7 +88,7 @@
     ytAuto = false;
     stopPreview();
     try {
-      const r = await api.replacementCandidates(t.deezer_id, { q });
+      const r = await api.replacementCandidates(trackRef(t), { q });
       if (mine !== seq) return; // a newer search is on its way
       candidates = r.candidates || [];
       query = r.query || "";
@@ -175,8 +176,8 @@
     busy = true;
     stopPreview();
     try {
-      const r = await api.deleteTrack(target.deezer_id);
-      clearUnavailable(target.deezer_id);
+      const r = await api.deleteTrack(trackRef(target));
+      clearUnavailable(trackKey(target));
       invalidatePlaylists();
       loadFavorites(true);
       toasts.push(`« ${target.title} » retiré de la bibliothèque`);
@@ -240,17 +241,17 @@
           </p>
         {:else}
           <ul class="list">
-            {#each candidates as c (c.deezer_id)}
-              <li class="cand" class:playing={previewId === c.deezer_id}>
+            {#each candidates as c (trackKey(c))}
+              <li class="cand" class:playing={previewId === trackKey(c)}>
                 <button
                   class="prev"
                   on:click={() => preview(c)}
-                  aria-label={previewId === c.deezer_id ? "Arrêter l'écoute" : "Écouter"}
+                  aria-label={previewId === trackKey(c) ? "Arrêter l'écoute" : "Écouter"}
                   title="Écouter avant de remplacer">
-                  <Icon name={previewId === c.deezer_id ? "pause" : "play"} size={15} />
+                  <Icon name={previewId === trackKey(c) ? "pause" : "play"} size={15} />
                 </button>
                 <div class="thumb">
-                  <Cover src={c.album?.cover} alt={c.title} size={40} kind="track" fallbackId={c.deezer_id} />
+                  <Cover src={c.album?.cover} alt={c.title} size={40} kind="track" fallbackId={trackRef(c)} />
                 </div>
                 <div class="meta">
                   <div class="t">

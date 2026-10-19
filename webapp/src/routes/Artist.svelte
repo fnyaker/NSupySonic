@@ -2,7 +2,7 @@
   import { api } from "../lib/api.js";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { player, isAdmin, openGenreBulk } from "../lib/stores.js";
-  import { toggleEntityFavorite } from "../lib/actions.js";
+  import { toggleEntityFavorite, entityMeta } from "../lib/actions.js";
   import Cover from "../components/Cover.svelte";
   import Card from "../components/Card.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -17,6 +17,10 @@
   let id = null;
   let data = null;
   let disco = null;
+  // Albums Deezer has and the library does not: null = loading, [] = none (or
+  // Deezer unreachable — the library page above is complete on its own).
+  let onDeezer = null;
+  let deezerDown = false;
   let fav = false;
   let loading = true;
   let loadError = null; // why there is nothing to show (components/LoadFailed)
@@ -64,6 +68,8 @@
     loadError = null;
     data = null;
     disco = null;
+    onDeezer = null;
+    deezerDown = false;
     fav = false;
     tab = restoredTab || "overview";
     restoredTab = null;
@@ -77,6 +83,8 @@
         fav = !!r.artist?.is_favorite; // correct when the source reports it
         loading = false;
       });
+      // After the page is on screen: what only Deezer has.
+      if (mine === loadSeq && data?.library) loadOnDeezer(artistId, mine);
     } catch (e) {
       if (mine === loadSeq && !data) {
         data = null;
@@ -91,6 +99,19 @@
       })
       .catch(() => {
         if (mine === loadSeq) disco = null;
+      });
+  }
+
+  function loadOnDeezer(artistId, mine) {
+    api
+      .artistOnDeezer(artistId)
+      .then((r) => {
+        if (mine === loadSeq) onDeezer = r.albums || [];
+      })
+      .catch(() => {
+        if (mine !== loadSeq) return;
+        onDeezer = [];
+        deezerDown = true;
       });
   }
 
@@ -109,7 +130,7 @@
 
   async function toggleFav() {
     const next = !fav;
-    if (await toggleEntityFavorite("artist", id, next)) fav = next;
+    if (await toggleEntityFavorite("artist", id, next, entityMeta("artist", data?.artist || {}))) fav = next;
   }
 
   const TYPE_LABEL = { album: "Album", single: "Single", ep: "EP", compile: "Compilation" };
@@ -189,7 +210,17 @@
 
     {#if albums.length}
       <h2>Albums</h2>
-      <div class="grid">{#each albums as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+      <div class="grid">{#each albums as a (a.id || a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+    {/if}
+
+    {#if data.library && onDeezer === null}
+      <h2>Disponible sur Deezer</h2>
+      <Skeleton kind="shelf" count={5} />
+    {:else if onDeezer?.length}
+      <h2>Disponible sur Deezer</h2>
+      <div class="grid">{#each onDeezer as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+    {:else if deezerDown}
+      <p class="muted down">Deezer est injoignable : le reste du catalogue n'est pas affiché.</p>
     {/if}
 
     {#if singles.length}
@@ -204,7 +235,7 @@
 
     {#if data.related?.length}
       <h2>Artistes similaires</h2>
-      <div class="shelf">{#each data.related as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}</div>
+      <div class="shelf">{#each data.related as a (a.id || a.deezer_id)}<Card item={a} kind="artist" />{/each}</div>
     {/if}
 
     {#if data.bio}
@@ -269,6 +300,10 @@
   }
   .icon-btn.on {
     color: var(--accent-2);
+  }
+  .down {
+    margin: 18px 0 0;
+    font-size: 0.9rem;
   }
   .bio {
     line-height: 1.6;

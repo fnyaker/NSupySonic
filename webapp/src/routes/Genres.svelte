@@ -11,6 +11,7 @@
   //
   // Training runs in a Web Worker (lib/genre/trainer.js) because it is seconds
   // of solid arithmetic, and a frozen tab is not a progress bar.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { onMount, onDestroy } from "svelte";
   import { pop, push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
@@ -25,6 +26,7 @@
   import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
   import JobFailures from "../components/JobFailures.svelte";
+  import SimilarRebuild from "../components/SimilarRebuild.svelte";
   import Cover from "../components/Cover.svelte";
 
   const ARCHETYPES = [
@@ -165,6 +167,27 @@
   $: {
     try {
       localStorage.setItem("genre.construction", useConstruction ? "1" : "0");
+    } catch {
+      /* not remembered, still applied */
+    }
+  }
+  // Self-training: the untagged tracks the head is sure of join a second fit,
+  // each fold labelling them with its own head; the second head ships only on
+  // a held-out gain (webapp/trainer `pseudo`). Measured on overlapping
+  // synthetic genres: four tags a genre, 0.537 → 0.625 on tracks neither head
+  // saw; eight and more, within a point either way — so it is gated, not
+  // assumed.
+  const POOL_MAX = 600;
+  const PSEUDO_THRESHOLD = 0.9;
+  let useSelfTrain = true;
+  try {
+    useSelfTrain = localStorage.getItem("genre.selftrain") !== "0";
+  } catch {
+    /* default */
+  }
+  $: {
+    try {
+      localStorage.setItem("genre.selftrain", useSelfTrain ? "1" : "0");
     } catch {
       /* not remembered, still applied */
     }
@@ -360,7 +383,7 @@
     if (prev) bumpCount(prev.name, -1, false);
     lastAction = { track, tag, prev, at };
     try {
-      if (!prev || prev.id !== tag.id) await api.genreLabel(track.deezer_id || track.id, tag.id);
+      if (!prev || prev.id !== tag.id) await api.genreLabel(trackRef(track), tag.id);
     } catch (e) {
       toasts.push(e?.message || "étiquetage impossible", "error");
       lastAction = null;
@@ -390,7 +413,7 @@
     bumpCount(a.tag.name, -1, !a.prev);
     if (a.prev) bumpCount(a.prev.name, 1, false);
     try {
-      await api.genreLabel(a.track.deezer_id || a.track.id, a.prev ? a.prev.id : null);
+      await api.genreLabel(trackRef(a.track), a.prev ? a.prev.id : null);
       toasts.push(`Annulé : « ${a.track.title} »`);
     } catch (e) {
       toasts.push(e?.message || "annulation impossible", "error");
@@ -435,7 +458,7 @@
   // Any track the studio shows: the candidate being tagged, or a genre's
   // reference (which has no local id yet — its Deezer id is its key).
   function previewTrack(t) {
-    const key = t.id || t.deezer_id;
+    const key = trackKey(t);
     if (previewing && previewId === key) {
       stopPreview();
       return;
@@ -445,7 +468,7 @@
     previewId = key;
     previewTime = 0;
     previewDuration = 0;
-    audio.src = api.streamUrl(t.deezer_id || t.id, $downloadQuality);
+    audio.src = api.streamUrl(trackRef(t), $downloadQuality);
     // A third of the way in: past the intro, into whatever the track actually
     // is. A genre judged from the first eight bars is a genre judged wrong. The
     // stream may not be seekable yet (the server archives while it streams), so
@@ -533,7 +556,7 @@
     // vector is missing is simply left out rather than making the whole run wait.
     // Each comes with what the head can read next to it: the served tempo and
     // the construction summary (lib/genre/construction.js).
-    const ids = keep.map((r) => r.deezer_id || r.id);
+    const ids = keep.map((r) => trackRef(r));
     const vectors = new Map();
     const extras = new Map();
     const BATCH = 200;
@@ -545,7 +568,26 @@
         vectors.set(k, decodeEmbedding(v));
       for (const [k, v] of Object.entries(part.extras || {})) extras.set(k, v);
     }
-    const withVec = keep.filter((r) => vectors.has(String(r.deezer_id || r.id)));
+    // The pool for self-training: untagged tracks with a vector.
+    const poolV = [];
+    const poolRaws = [];
+    if (useSelfTrain) {
+      try {
+        const poolIds = (await api.genrePool(POOL_MAX)).ids || [];
+        for (let i = 0; i < poolIds.length; i += BATCH) {
+          progressStage = "titres non étiquetés";
+          progress = 0.2 * (i / Math.max(1, poolIds.length));
+          const part = await api.genreEmbeddings(poolIds.slice(i, i + BATCH));
+          for (const [k, v] of Object.entries(part.embeddings || {})) {
+            poolV.push(decodeEmbedding(v));
+            poolRaws.push(rawExtras((part.extras || {})[k]));
+          }
+        }
+      } catch {
+        // Best effort: without a pool the head is the one the labels make.
+      }
+    }
+    const withVec = keep.filter((r) => vectors.has(trackRef(r)));
     if (!withVec.length)
       throw new Error("aucun vecteur disponible — lancez « Calculer les empreintes »");
     // What would bias the head or its score is taken out BEFORE it trains
@@ -554,7 +596,7 @@
     const probe = withVec.map((r) => ({
       label: r.tag.name,
       artist: r.artist_id || null,
-      key: vectorKey(vectors.get(String(r.deezer_id || r.id))),
+      key: vectorKey(vectors.get(trackRef(r))),
     }));
     const prep = prepare(probe);
     const usable = prep.keep.map((i) => withVec[i]);
@@ -566,7 +608,7 @@
     // v3 vectors carry the loud half of the track after the v2 ones (which they
     // begin with, value for value). One matrix has one width: the loud block is
     // a candidate only when EVERY row has it; otherwise all train on the v2 part.
-    const older = usable.filter((r) => vectors.get(String(r.deezer_id || r.id)).length < V3_DIM).length;
+    const older = usable.filter((r) => vectors.get(trackRef(r)).length < V3_DIM).length;
     const d = older ? V2_DIM : V3_DIM;
     const y = new Int32Array(usable.length);
     // Each row's artist as a small integer, for the artist folds.
@@ -575,7 +617,7 @@
     const rowsV = [];
     const raws = [];
     usable.forEach((r, i) => {
-      const key = String(r.deezer_id || r.id);
+      const key = trackRef(r);
       rowsV.push(vectors.get(key));
       raws.push(rawExtras(extras.get(key)));
       y[i] = names.indexOf(r.tag.name);
@@ -584,7 +626,7 @@
       groups[i] = a ? artistIds.get(a) : -1;
     });
     return {
-      rowsV, raws, y, groups, n: usable.length, d, older, labels: names,
+      rowsV, raws, y, groups, n: usable.length, d, older, labels: names, poolV, poolRaws,
       measured: raws.filter((r) => r.slice(1).some(Number.isFinite)).length,
       skipped: keep.length - withVec.length,
       prep,
@@ -599,15 +641,27 @@
   // The matrix a trainer gets, built fresh per call (the worker takes the
   // buffers): the first `width` numbers of each embedding (a v3 vector's first
   // 2560 ARE its v2 one), then the extras block when there is a scaler.
-  function pack(data, scaler, width = data.d) {
+  // `withPool` appends the untagged rows wide enough for `width`, as class -1.
+  function pack(data, scaler, width = data.d, withPool = false) {
     const k = scaler ? EXTRAS.length + 1 : 0;
     const dim = width + k;
-    const X = new Float32Array(data.n * dim);
+    const pool = withPool ? data.poolV.map((v, j) => j).filter((j) => data.poolV[j].length >= width) : [];
+    const n = data.n + pool.length;
+    const X = new Float32Array(n * dim);
+    const y = new Int32Array(n).fill(-1);
+    const groups = new Int32Array(n).fill(-1);
     for (let i = 0; i < data.n; i++) {
       X.set(data.rowsV[i].subarray(0, width), i * dim);
       if (scaler) X.set(extrasBlock(data.raws[i], scaler, EXTRA_SCALE), i * dim + width);
     }
-    return { X, y: data.y.slice(), groups: data.groups.slice(), n: data.n, d: dim, labels: data.labels };
+    y.set(data.y);
+    groups.set(data.groups);
+    pool.forEach((j, p) => {
+      const i = data.n + p;
+      X.set(data.poolV[j].subarray(0, width), i * dim);
+      if (scaler) X.set(extrasBlock(data.poolRaws[j], scaler, EXTRA_SCALE), i * dim + width);
+    });
+    return { X, y, groups, n, d: dim, labels: data.labels };
   }
 
   async function runTraining() {
@@ -675,6 +729,8 @@
       }
       progressStage = mode === "linear" || mode === "auto" ? "entraînement" : "entraînement approfondi";
       let trained = quick;
+      let trainedMode = "linear";
+      let trainedOpts = base;
       let modeNote = "";
       const C = data.labels.length;
       if (mode === "auto") {
@@ -692,12 +748,16 @@
           );
           if (deepHead.metrics.balanced >= quick.metrics.balanced + AUTO_DEEP_MIN_GAIN) {
             trained = deepHead;
+            trainedMode = "deep";
+            trainedOpts = { ...TRAIN_OPTS.deep, ...base };
             modeNote = `réseau gardé : ${pct(deepHead.metrics.balanced)} % contre ${pct(quick.metrics.balanced)} % pour la tête linéaire`;
           } else {
             modeNote = `tête linéaire gardée : le réseau ne faisait pas mieux (${pct(deepHead.metrics.balanced)} %)`;
           }
         }
       } else if (mode !== "linear") {
+        trainedMode = "deep";
+        trainedOpts = { ...(TRAIN_OPTS[mode] || {}), ...base };
         trained = await train(
           pack(data, scaler, width),
           "deep",
@@ -705,8 +765,30 @@
             progressStage = stage === "done" ? "terminé" : progressStage;
             progress = 0.5 + 0.5 * (pct || 0);
           },
-          { ...(TRAIN_OPTS[mode] || {}), ...base }
+          trainedOpts
         );
+      }
+      // Self-training on top of whatever won: the same run with the pool. Its
+      // first head IS the one above, bit for bit (same seed, same folds, the
+      // pool's fits come after), so nothing is lost when the second one does
+      // not earn its place.
+      const poolRows = useSelfTrain ? data.poolV.filter((v) => v.length >= width).length : 0;
+      if (poolRows) {
+        progressStage = "titres non étiquetés";
+        const without = trained.metrics.balanced;
+        try {
+          const self = await train(
+            pack(data, scaler, width, true),
+            trainedMode,
+            (stage, p) => (progress = 0.5 + 0.5 * (p || 0)),
+            { ...trainedOpts, pseudo: PSEUDO_THRESHOLD }
+          );
+          const ps = self.metrics.pseudo || { pool: poolRows, balanced: null, rows: 0 };
+          if (ps.rows > 0) trained = self;
+          trained.metrics.pseudo = { ...ps, without };
+        } catch {
+          // The head trained on the labels stands.
+        }
       }
       if (construction) trained.metrics.construction = construction;
       if (loud) trained.metrics.loud = loud;
@@ -874,6 +956,121 @@
   }
   function stopMeasuring() {
     measureAbort?.abort();
+  }
+
+  // -- the model as a file (genreshare.py) --------------------------------------
+  // Out: the genres, the labels and the active head in one JSON file. In: a
+  // preview first (what is already here, what Deezer would have to supply, and
+  // whether this server can read the head), then the admin picks what to keep.
+  const SHARE_MAX_BYTES = 48 * 1024 * 1024;
+  let shareFile = null; // the parsed file being reviewed
+  let shareName = "";
+  let sharePreview = null;
+  let shareHead = false;
+  let shareTags = true;
+  let shareBusy = false;
+  let shareJob = null;
+  let shareTimer = null;
+  let shareInput;
+
+  async function exportShare() {
+    if (shareBusy) return;
+    shareBusy = true;
+    try {
+      const res = await fetch("/api/genre/share/export", { credentials: "include" });
+      if (!res.ok) throw new Error("export impossible (" + res.status + ")");
+      const text = await res.text();
+      const name = "modele-genres-" + new Date().toISOString().slice(0, 10) + ".nsgenre.json";
+      // The Android host cannot download a blob: URL (lib/log.js says why).
+      if (window.NSNative && typeof window.NSNative.saveText === "function") {
+        window.NSNative.saveText(name, text);
+      } else {
+        const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      }
+      toasts.push("Modèle exporté");
+    } catch (e) {
+      toasts.push(e?.message || "export impossible", "error");
+    } finally {
+      shareBusy = false;
+    }
+  }
+
+  async function pickShare(ev) {
+    const f = ev.target.files?.[0];
+    ev.target.value = "";
+    if (!f) return;
+    if (f.size > SHARE_MAX_BYTES) {
+      toasts.push("Fichier trop volumineux", "error");
+      return;
+    }
+    shareBusy = true;
+    try {
+      let parsed;
+      try {
+        parsed = JSON.parse(await f.text());
+      } catch {
+        throw new Error("Ce fichier n'est pas un modèle de genres");
+      }
+      const p = await api.genreSharePreview(parsed);
+      shareFile = parsed;
+      shareName = f.name;
+      sharePreview = p;
+      shareHead = !!p.head?.compatible;
+      shareTags = (p.tags?.total || 0) > 0;
+    } catch (e) {
+      toasts.push(e?.message || "fichier illisible", "error");
+    } finally {
+      shareBusy = false;
+    }
+  }
+
+  function cancelShare() {
+    shareFile = null;
+    sharePreview = null;
+  }
+
+  function watchShare() {
+    clearTimeout(shareTimer);
+    if (!shareJob?.running) return;
+    shareTimer = setTimeout(async () => {
+      try {
+        shareJob = await api.genreShareStatus();
+      } catch {}
+      if (shareJob?.running) watchShare();
+      else refresh();
+    }, 1000);
+  }
+
+  async function importShare() {
+    if (!shareFile || shareBusy || !(shareHead || shareTags)) return;
+    if (shareHead && status.model && !window.confirm("Le modèle du fichier remplacera le modèle actif. Continuer ?")) return;
+    shareBusy = true;
+    try {
+      const res = await api.genreShareImport(shareFile, { head: shareHead, tags: shareTags });
+      if (res.head) {
+        toasts.push("Modèle importé — il est appliqué à toute la bibliothèque");
+        relabel = null;
+        try {
+          relabel = (await api.genreRelabel()) || null;
+          watchRelabel();
+        } catch {}
+      }
+      shareJob = shareTags ? res.job : null;
+      cancelShare();
+      watchShare();
+      await refresh();
+    } catch (e) {
+      toasts.push(e?.message || "import impossible", "error");
+    } finally {
+      shareBusy = false;
+    }
   }
 
   async function sendModel() {
@@ -1230,6 +1427,7 @@
     loadCandidates();
   });
   onDestroy(() => {
+    clearTimeout(shareTimer);
     clearTimeout(probeTimer);
     stopPreview();
     stopExtPoll();
@@ -1396,9 +1594,9 @@
                         <button
                           class="ref-play"
                           on:click={() => previewTrack(ref.match)}
-                          aria-label={previewing && previewId === ref.match.deezer_id ? "Pause" : "Écouter"}
+                          aria-label={previewing && previewId === trackKey(ref.match) ? "Pause" : "Écouter"}
                         >
-                          <Icon name={previewing && previewId === ref.match.deezer_id ? "pause" : "play"} size={14} />
+                          <Icon name={previewing && previewId === trackKey(ref.match) ? "pause" : "play"} size={14} />
                         </button>
                       {:else}
                         <span class="ref-play off"><Icon name="close" size={12} /></span>
@@ -1560,7 +1758,7 @@
                 src={current.cover}
                 alt={current.title}
                 kind="track"
-                fallbackId={current.deezer_id || current.id}
+                fallbackId={trackRef(current)}
                 size={120}
                 eager
               />
@@ -1572,6 +1770,9 @@
               <h3>{current.title}</h3>
               <p class="who">{current.artist}</p>
               {#if current.album}<p class="muted small album">{current.album}</p>{/if}
+              {#if current.deezer_bpm}
+                <p class="muted small album">BPM Deezer · {Math.round(current.deezer_bpm * 10) / 10}</p>
+              {/if}
               {#if current.review}
                 <p class="was">
                   Étiqueté <b>{current.review.label}</b> · le modèle entend
@@ -1852,6 +2053,7 @@
                per-track reason sent the operator to the container log, which is
                exactly what somebody using the app from a phone cannot read. -->
           <JobFailures job={analysis} label="analyse" />
+          <SimilarRebuild />
       </section>
 
       <section class="card">
@@ -2043,6 +2245,18 @@
             </span>
           </span>
         </label>
+        <label class="option" class:on={useSelfTrain}>
+          <input type="checkbox" bind:checked={useSelfTrain} />
+          <span class="option-text">
+            <strong>Apprendre aussi des titres non étiquetés</strong>
+            <span class="muted">
+              Les titres de la bibliothèque dont le modèle est sûr servent d'exemples
+              supplémentaires, avec moins de poids que vos étiquettes. Le résultat n'est
+              gardé que s'il fait mieux sur des titres qu'il n'a jamais vus — l'entraînement
+              le vérifie. Utile surtout quand un genre n'a encore que quelques titres.
+            </span>
+          </span>
+        </label>
         </details>
         <!-- Outside the label: a button inside one would be a second control it
              labels, and a click on it would tick the box. -->
@@ -2172,6 +2386,16 @@
                     <span class="v">{l.used ? "utilisée" : "écartée"}</span>
                     <span class="muted small">tête rapide {pct(l.with)} % avec, {pct(l.without)} % sans</span>
                   {/if}
+                </div>
+              {/if}
+              {#if head.metrics.pseudo}
+                {@const ps = head.metrics.pseudo}
+                <div class="score">
+                  <span class="k">Titres non étiquetés</span>
+                  <span class="v">{ps.rows > 0 ? "utilisés" : "écartés"}</span>
+                  <span class="muted small">
+                    {ps.rows > 0 ? `${ps.rows} appris parmi ${ps.pool}` : `${ps.pool} lus`}{#if ps.balanced != null}{" · "}{pct(ps.balanced)} % avec, {pct(ps.without)} % sans{/if}
+                  </span>
                 </div>
               {/if}
               {#if head.metrics.construction}
@@ -2358,6 +2582,95 @@
           <button class="ghost small-btn" on:click={reapply}>
             <Icon name="refresh" size={14} /> Réappliquer à la bibliothèque
           </button>
+        {/if}
+      </section>
+
+      <section class="card">
+        <h2><Icon name="share" size={18} /> Partager le modèle</h2>
+        <p class="sub muted">
+          Un fichier avec vos genres, vos étiquettes et le modèle actif. Sur un autre
+          serveur, le modèle sert tel quel et les étiquettes s'ajoutent aux siennes :
+          un titre déjà étiqueté là-bas garde son genre.
+        </p>
+        {#if sharePreview}
+          {@const t = sharePreview.tags}
+          {@const h = sharePreview.head}
+          <div class="share-review">
+            <p class="share-file"><Icon name="archive" size={15} /> <strong>{shareName}</strong></p>
+            <label class="share-opt" class:off={!h?.compatible}>
+              <input type="checkbox" bind:checked={shareHead} disabled={!h?.compatible} />
+              <span>
+                <strong>Utiliser ce modèle</strong>
+                <span class="muted small">
+                  {#if !h}
+                    Le fichier n'en contient pas.
+                  {:else}
+                    {[
+                      `${h.labels.length} genres`,
+                      h.kind === "linear" ? "linéaire" : "réseau",
+                      h.balanced ? `${pct(h.balanced)} % équilibré` : null,
+                      h.examples ? `${h.examples} exemples` : null,
+                      h.compatible && status.model ? "remplace le modèle actif" : null,
+                    ].filter(Boolean).join(" · ")}
+                    {#if !h.compatible}<span class="bad">{" · "}inutilisable ici : {h.reason}</span>{/if}
+                  {/if}
+                </span>
+              </span>
+            </label>
+            <label class="share-opt" class:off={!t.total}>
+              <input type="checkbox" bind:checked={shareTags} disabled={!t.total} />
+              <span>
+                <strong>Ajouter les étiquettes</strong>
+                <span class="muted small">
+                  {t.total} titre{t.total > 1 ? "s" : ""} : {t.local} déjà dans la bibliothèque{#if t.deezer}, {t.deezer} à récupérer sur Deezer{/if}{#if t.unknown}, {t.unknown} introuvable{t.unknown > 1 ? "s" : ""} ici{/if}.{#if t.already}{" "}{t.already} {t.already > 1 ? "portent" : "porte"} déjà ce genre.{/if}{#if t.kept}{" "}{t.kept} {t.kept > 1 ? "ont" : "a"} déjà un autre genre et le {t.kept > 1 ? "gardent" : "garde"}.{/if}
+                  {#if sharePreview.new_genres.length}
+                    {sharePreview.new_genres.length} genre{sharePreview.new_genres.length > 1 ? "s" : ""} nouveau{sharePreview.new_genres.length > 1 ? "x" : ""}.
+                  {/if}
+                </span>
+              </span>
+            </label>
+            <div class="share-actions">
+              <button class="primary" on:click={importShare} disabled={shareBusy || !(shareHead || shareTags)}>
+                <Icon name="upload" size={16} /> {shareBusy ? "Import…" : "Importer"}
+              </button>
+              <button class="ghost" on:click={cancelShare} disabled={shareBusy}>Annuler</button>
+            </div>
+          </div>
+        {:else}
+          <div class="share-actions">
+            <button class="ghost" on:click={exportShare} disabled={shareBusy || !(status.model || status.labelled)}>
+              <Icon name="download" size={16} /> Exporter
+            </button>
+            <button class="ghost" on:click={() => shareInput.click()} disabled={shareBusy || shareJob?.running}>
+              <Icon name="upload" size={16} /> Importer un fichier
+            </button>
+            <input
+              bind:this={shareInput}
+              type="file"
+              accept=".json,application/json"
+              hidden
+              on:change={pickShare}
+            />
+          </div>
+        {/if}
+        {#if shareJob && (shareJob.running || shareJob.done)}
+          <div class="relabel">
+            {#if shareJob.running}
+              <div class="progress">
+                <i style={`width:${pct(shareJob.total ? shareJob.done / shareJob.total : 0)}%`}></i>
+              </div>
+            {/if}
+            <span class="muted small">
+              {shareJob.running ? "Import des étiquettes…" : "Étiquettes importées :"}
+              {[
+                `${shareJob.done} / ${shareJob.total}`,
+                `${shareJob.tagged} ajoutée${shareJob.tagged > 1 ? "s" : ""}`,
+                shareJob.already ? `${shareJob.already} déjà là` : null,
+                shareJob.kept ? `${shareJob.kept} ${shareJob.kept > 1 ? "gardent" : "garde"} son genre` : null,
+                shareJob.not_found ? `${shareJob.not_found} introuvable${shareJob.not_found > 1 ? "s" : ""}` : null,
+              ].filter(Boolean).join(" · ")}{#if shareJob.failed}<span class="bad">{" · "}{shareJob.failed} non récupéré{shareJob.failed > 1 ? "s" : ""} (Deezer injoignable)</span>{/if}
+            </span>
+          </div>
         {/if}
       </section>
     {/if}
@@ -2968,6 +3281,47 @@
     margin-top: 10px;
     font-size: 0.84rem;
   }
+  .share-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .share-review {
+    display: grid;
+    gap: 12px;
+  }
+  .share-file {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0;
+    font-size: 0.9rem;
+    overflow-wrap: anywhere;
+  }
+  .share-opt {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 12px 14px;
+    border: 1px solid var(--border, #2a2d33);
+    border-radius: 14px;
+    background: var(--surface-2, #1b1d21);
+    cursor: pointer;
+  }
+  .share-opt.off {
+    cursor: default;
+    opacity: 0.7;
+  }
+  .share-opt input {
+    margin-top: 3px;
+    accent-color: var(--accent, #22d3ee);
+    flex: none;
+  }
+  .share-opt > span {
+    display: grid;
+    gap: 3px;
+    line-height: 1.45;
+  }
   .refs {
     margin: -2px 0 10px 22px;
     padding: 10px 12px;
@@ -3126,11 +3480,14 @@
   .results {
     margin-top: 18px;
     display: grid;
+    /* An auto track grows to its widest child's intrinsic width: on a phone
+       the tile grid below pushed the verdict past the screen's edge. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 18px;
   }
   .scores {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
     gap: 10px;
   }
   .score {

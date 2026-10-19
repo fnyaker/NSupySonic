@@ -13,10 +13,11 @@ nowhere). This module makes them a first-class archived asset, exactly like the
   holding time-synced lyrics (standard `LRC` format), served locally and
   offline by the web player and embedded (plain) in the file's tags so plain
   Subsonic clients see them too.
-* Two sources feed it, best-first: **Deezer's own** (often synced) lyrics, then
-  the public **LRCLIB** API (https://lrclib.net) — a free, crowdsourced,
-  synced-lyrics database purpose-built for FOSS players. Whichever yields
-  *synced* lyrics wins; a plain hit is only kept when nothing synced is found.
+* One source feeds it: the public **LRCLIB** API (https://lrclib.net) — a free,
+  crowdsourced, synced-lyrics database purpose-built for FOSS players. Deezer's
+  own lyrics are no longer asked for. A hit whose duration is more than
+  ``MAX_DURATION_DELTA`` seconds off the track is another recording and is
+  refused; synced lyrics replace plain ones, never the other way round.
 
 The canonical in-memory shape shared with the web layer is::
 
@@ -29,6 +30,7 @@ import logging
 import os
 import os.path
 import re
+import time
 
 import requests
 
@@ -45,6 +47,9 @@ _HEADERS = {"User-Agent": USER_AGENT}
 # LRCLIB is a best-effort third party: if it is not accepting connections we
 # want to know in seconds, not to hold a request thread for it.
 _TIMEOUT = (5, 12)
+#: A lyrics hit this many seconds longer or shorter than the track is another
+#: version of the song, and its timestamps would be wrong all the way through.
+MAX_DURATION_DELTA = 3
 
 # `[mm:ss.xx]` / `[mm:ss.xxx]` (fraction optional) LRC timestamp.
 _LRC_TS = re.compile(r"\[(\d{1,3}):([0-5]?\d)(?:[.:](\d{1,3}))?\]")
@@ -136,14 +141,20 @@ def _lrclib_to_lyrics(data: dict | None) -> dict | None:
 # -- LRCLIB client ----------------------------------------------------------
 
 
-def _lrclib_search_best(session, title, artist, album, duration):
+def _lrclib_search_best(session, title, artist, album, duration, timeout=_TIMEOUT):
     """Fuzzy fallback when the exact signature misses (usually a duration diff):
     pick the closest hit, preferring one that actually has synced lyrics."""
     params = {"track_name": title, "artist_name": artist}
-    r = session.get(f"{LRCLIB_BASE}/search", params=params, timeout=_TIMEOUT, headers=_HEADERS)
+    r = session.get(f"{LRCLIB_BASE}/search", params=params, timeout=timeout, headers=_HEADERS)
     if r.status_code != 200:
         return None
     results = r.json() or []
+    if duration:  # another version of the song is no candidate at all
+        results = [
+            x for x in results
+            if x.get("duration") is not None
+            and abs(float(x["duration"]) - duration) <= MAX_DURATION_DELTA
+        ]
     if not results:
         return None
 
@@ -155,15 +166,22 @@ def _lrclib_search_best(session, title, artist, album, duration):
     return min(results, key=score)
 
 
-def fetch_lrclib(title, artist, album=None, duration=None, *, session=None) -> dict | None:
+def fetch_lrclib(title, artist, album=None, duration=None, *, session=None,
+                 timeout=None) -> dict | None:
     """Look a track up on LRCLIB by (title, artist, [album], [duration]).
 
     Tries the exact ``/get`` signature first, then falls back to ``/search``.
     Returns the canonical lyrics dict, or None on a miss / any network error
     (lyrics are best-effort — never let a lookup break the caller).
     """
+    return _fetch(title, artist, album, duration, session, timeout)[0]
+
+
+def _fetch(title, artist, album, duration, session=None, timeout=None):
+    """``(lyrics or None, answered)``: ``answered`` is False when LRCLIB could
+    not be reached (or spoke nonsense), so a miss is not mistaken for a verdict."""
     if not title or not artist:
-        return None
+        return None, True
     sess = session or requests
     params = {"track_name": title, "artist_name": artist}
     if album:
@@ -171,19 +189,27 @@ def fetch_lrclib(title, artist, album=None, duration=None, *, session=None) -> d
     if duration:
         params["duration"] = int(duration)
     try:
-        r = sess.get(f"{LRCLIB_BASE}/get", params=params, timeout=_TIMEOUT, headers=_HEADERS)
+        r = sess.get(f"{LRCLIB_BASE}/get", params=params,
+                     timeout=timeout or _TIMEOUT, headers=_HEADERS)
         if r.status_code == 200:
             data = r.json()
         elif r.status_code == 404:
-            data = _lrclib_search_best(sess, title, artist, album, duration or 0)
+            data = _lrclib_search_best(sess, title, artist, album, duration or 0,
+                                       timeout or _TIMEOUT)
         else:
-            return None
+            return None, False
     except requests.RequestException as exc:
         logger.debug("LRCLIB lookup failed for %s - %s: %s", artist, title, exc)
-        return None
+        return None, False
     except ValueError:  # malformed JSON
-        return None
-    return _lrclib_to_lyrics(data)
+        return None, False
+    if data and duration and data.get("duration") is not None:
+        try:
+            if abs(float(data["duration"]) - float(duration)) > MAX_DURATION_DELTA:
+                return None, True
+        except (TypeError, ValueError):
+            return None, True
+    return _lrclib_to_lyrics(data), True
 
 
 # -- sidecar storage --------------------------------------------------------
@@ -249,45 +275,48 @@ def _better(a: dict | None, b: dict | None) -> dict | None:
 # -- the two public entry points -------------------------------------------
 
 
+def lyrics_tried(track: Track) -> bool:
+    """Whether LRCLIB was ever asked about this track (the sidecar's marker)."""
+    from . import library
+
+    return "lyrics_tried" in library.read_track_facts(track)
+
+
 def ensure_lyrics(
     provider, track: Track, *, session=None, overwrite=False, embed=True, allow_lrclib=True
 ) -> dict | None:
     """Return a track's archived lyrics, fetching + archiving them on first need.
 
-    Order of preference: an existing ``.lrc`` sidecar, then Deezer's own
-    (frequently synced) lyrics, then LRCLIB. The first source yielding *synced*
-    lyrics wins. The chosen lyrics are written to the sidecar and (best-effort)
-    embedded as plain text in the audio tags. Returns None when no source has
-    anything, leaving nothing on disk so a later run retries.
+    An existing synced ``.lrc`` is returned as is. A plain one is offered a
+    synced replacement from LRCLIB (never the reverse). ``provider`` is kept for
+    callers' sake and ignored: Deezer is not a lyrics source any more.
 
-    ``allow_lrclib=False`` restricts lookups to Deezer, keeping the hot archive
-    path from fanning out to a second external service on every track; the
-    LRCLIB gap-fill then happens lazily on first view or via the backfill CLI.
+    Once LRCLIB has *answered* (a miss included) the track is marked
+    ``facts.lyrics_tried`` in its sidecar so a view does not ask again; a
+    transport failure marks nothing. ``allow_lrclib=False`` only reads.
     """
     if track is None:
         return None
-    if not overwrite:
-        existing = read_sidecar(track)
-        if existing:
-            return existing
+    existing = None if overwrite else read_sidecar(track)
+    if existing and existing.get("synced"):
+        return existing
+    if not allow_lrclib or (existing and lyrics_tried(track)):
+        return existing
 
-    best = None
-    if provider is not None and track.deezer_id:
-        try:
-            best = normalize_gw_lyrics(provider.get_lyrics(track.deezer_id))
-        except Exception as exc:  # network / auth — fall through to LRCLIB
-            logger.debug("Deezer lyrics lookup failed for %s: %s", track.deezer_id, exc)
+    artist = _safe_name(lambda: track.artist.name)
+    album = _safe_name(lambda: track.album.name)
+    found, answered = _fetch(track.title, artist, album, track.duration, session)
+    if answered and track.path:
+        from . import library
 
-    if allow_lrclib and (best is None or not best.get("synced")):
-        artist = _safe_name(lambda: track.artist.name)
-        album = _safe_name(lambda: track.album.name)
-        best = _better(best, fetch_lrclib(track.title, artist, album, track.duration, session=session))
-
+        library.update_track_facts(track, {"lyrics_tried": int(time.time())}, "local")
+    best = _better(existing, found)
     if best is None:
         return None
-    write_sidecar(track, best)
-    if embed:
-        _try_embed(track, best)
+    if best is not existing:
+        write_sidecar(track, best)
+        if embed:
+            _try_embed(track, best)
     return best
 
 
@@ -301,8 +330,6 @@ def backfill_archived_lyrics(
     if given, calls ``progress(str)`` once per processed track. Politely paced
     with ``sleep`` seconds between network lookups.
     """
-    import time
-
     sess = session or requests.Session()
     stats = {"scanned": 0, "synced": 0, "plain": 0, "missing": 0, "skipped": 0}
     done = 0

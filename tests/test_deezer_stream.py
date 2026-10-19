@@ -176,7 +176,10 @@ class Cdn:
 
 
 class FakeGW:
-    """The only gateway call an archive makes once the audio is in: lyrics."""
+    """Deezer is no lyrics source any more: an archive must never ask it for any."""
+
+    def __init__(self):
+        self.lyrics_calls = []
 
     LYRICS = {
         "LYRICS_TEXT": "Work it harder\nMake it better",
@@ -187,6 +190,7 @@ class FakeGW:
     }
 
     def get_track_lyrics(self, sng_id):
+        self.lyrics_calls.append(sng_id)
         return self.LYRICS
 
 
@@ -476,15 +480,14 @@ class LiveStreamTestCase(_CdnMixin, TestBase):
         self.assertEqual(audio["date"], ["2007-11-19"])
         self.assertEqual(audio["isrc"], ["GBDUW0000059"])
         # Deezer's GAIN is a loudness: the adjustment is -(GAIN + 18.4).
-        self.assertEqual(audio["replaygain_track_gain"], ["-10.00 dB"])
+        self.assertNotIn("replaygain_track_gain", audio)  # the gain is measured, not Deezer's
         self.assertEqual([p.data for p in audio.pictures], [COVER])
-        self.assertEqual(audio["lyrics"], ["Work it harder\nMake it better"])
+        self.assertNotIn("lyrics", audio)  # lyrics come from LRCLIB, lazily
 
         # Everything else about it is on disk too, beside the audio.
         folder = dest.parent
         self.assertEqual((folder / "cover.jpg").read_bytes(), COVER)
-        lrc = dest.with_suffix(".lrc").read_text(encoding="utf-8")
-        self.assertEqual(lrc.splitlines(), ["[00:01.50] Work it harder", "[00:03.25] Make it better"])
+        self.assertFalse(dest.with_suffix(".lrc").exists())
         self.assertTrue(os.path.isfile(library.metadata_path(self.track)))
         self.assertEqual(self._leftovers(), [])
 
@@ -518,7 +521,7 @@ class LiveStreamTestCase(_CdnMixin, TestBase):
         self.assertEqual(tags["TIT2"].text, ["Harder (Live)"])
         self.assertEqual(tags["TPE1"].text, ["Daft Punk", "Guest"])
         self.assertEqual(tags.getall("APIC")[0].data, COVER)
-        self.assertEqual(tags.getall("USLT")[0].text, "Work it harder\nMake it better")
+        self.assertEqual(tags.getall("USLT"), [])
         self.assertEqual(Track[ids.track_uuid(self.SID)].path, self.track.path)
 
     def test_a_listener_who_leaves_early_leaves_no_archive_and_it_is_fetched_again(self):

@@ -242,21 +242,17 @@ export const api = {
 
   // discovery
   home: () => req("/home"),
-  smartTracklist: (id) => req("/smarttracklist/" + id),
+  homeMix: (id) => req("/home/mix/" + encodeURIComponent(id)),
   flow: () => req("/flow"),
-  flowClusters: () => req("/flow/clusters"),
-  setFlowClusters: (clusters) =>
-    req("/flow/clusters", { method: "POST", body: body({ clusters }) }),
-  recommendations: () => req("/recommendations"),
-  explore: () => req("/explore"),
-  exploreGenre: (id) => req("/explore/genre/" + id),
-  exploreCountries: () => req("/explore/countries"),
   search: (q) => req("/search?q=" + encodeURIComponent(q)),
 
   // entities
   artist: (id) => req("/artist/" + id),
   artistTracks: (id) => req("/artist/" + id + "/tracks"),
   discography: (id) => req("/artist/" + id + "/discography"),
+  // The part of a library page that only Deezer has, asked once the page is shown.
+  artistOnDeezer: (id) => req("/artist/" + id + "/on-deezer"),
+  albumOnDeezer: (id) => req("/album/" + id + "/on-deezer"),
   album: (id) => req("/album/" + id),
   playlist: (id) => req("/playlist/" + id),
   lyrics: (id) => req("/lyrics/" + id),
@@ -302,6 +298,8 @@ export const api = {
   genreCandidates: (limit = 40, sort = null) =>
     req("/genre/candidates?limit=" + limit + (sort ? "&sort=" + sort : "")),
   genreLabelled: () => req("/genre/labelled"),
+  // Untagged tracks with a vector, for self-training (lib/genre/core.js `pseudo`).
+  genrePool: (limit = 600) => req("/genre/pool?limit=" + limit),
   // One track's tag and the vocabulary ranked for it (the tag sheet).
   genreTrack: (id) => req("/genre/track/" + encodeURIComponent(id)),
   genreEmbeddings: (ids) =>
@@ -310,6 +308,11 @@ export const api = {
   genreModelPut: (payload) =>
     req("/genre/model", { method: "PUT", body: body(payload) }),
   genreModelDelete: () => req("/genre/model", { method: "DELETE" }),
+  // A model as a file (supysonic/webui/genreshare.py): what it would do, then do it.
+  genreSharePreview: (file) => req("/genre/share/preview", { method: "POST", body: body(file) }),
+  genreShareImport: (file, opts) =>
+    req("/genre/share/import", { method: "POST", body: body({ file, ...opts }) }),
+  genreShareStatus: () => req("/genre/share/import"),
   // Re-deciding the stored verdicts under the active head (no re-measure).
   genreRelabel: () => req("/genre/relabel"),
   // How a track is built, as the analyser heard it (lib/genre/construction.js).
@@ -359,6 +362,14 @@ export const api = {
   genreEmbed: (force = false) =>
     req("/genre/embed" + (force ? "?force=1" : ""), { method: "POST" }),
   genreEmbedStatus: () => req("/genre/embed"),
+  // The tracks that sound alike (what the radio, the flow and the home read).
+  similarRebuild: (force = false) =>
+    req("/similar/rebuild" + (force ? "?force=1" : ""), { method: "POST" }),
+  similarStatus: () => req("/similar/rebuild"),
+  // Facts from MusicBrainz for the archived library (admin, worker + poll).
+  enrichBackfill: (force = false) =>
+    req("/enrich/backfill" + (force ? "?force=1" : ""), { method: "POST" }),
+  enrichStatus: () => req("/enrich/backfill"),
 
   // radios
   trackRadio: (id) => req("/radio/track/" + id),
@@ -372,6 +383,16 @@ export const api = {
   // The YouTube fallback: opt-in per search (lib/youtube.js). Its hits are
   // ordinary tracks whose id is the row they become once played or kept.
   youtubeSearch: (q) => req("/youtube/search?q=" + encodeURIComponent(q)),
+
+  // A playlist somebody shared (Deezer, Spotify, YouTube, Apple Music): read
+  // and matched on the server as a job — see supysonic/webui/playlist_import.py.
+  importPlaylist: (url) => req("/import/playlist", { method: "POST", body: body({ url }) }),
+  importStatus: (id) => req("/import/playlist/" + encodeURIComponent(id)),
+  importSave: (id, title, keep) =>
+    req("/import/playlist/" + encodeURIComponent(id) + "/save", {
+      method: "POST",
+      body: body({ title, keep }),
+    }),
   youtubeStatus: () => req("/youtube/status"),
   setYoutubeEnabled: (enabled) =>
     req("/youtube/settings", { method: "PUT", body: body({ enabled }) }),
@@ -461,10 +482,13 @@ export const api = {
   favoriteIds: () => req("/me/favorite-ids"),
 
   // mutations
-  favorite: (deezer_id, on) =>
-    req("/favorite", { method: "POST", body: body({ deezer_id, on }) }),
-  favoriteEntity: (kind, deezer_id, on) =>
-    req("/favorite/" + kind, { method: "POST", body: body({ deezer_id, on }) }),
+  // `ref` names the track the way the server resolves it (trackkey.js#trackRef).
+  favorite: (ref, on) =>
+    req("/favorite", { method: "POST", body: body({ id: ref, on }) }),
+  // `meta` ({ title, artist, artist_id }) names the entity for the server when
+  // it has never imported it (a star is local, the row is made from this).
+  favoriteEntity: (kind, deezer_id, on, meta = {}) =>
+    req("/favorite/" + kind, { method: "POST", body: body({ ...meta, deezer_id, on }) }),
   createPlaylist: (title, tracks) =>
     req("/playlists", { method: "POST", body: body({ title, tracks }) }),
   editPlaylist: (id, fields) =>
@@ -491,6 +515,8 @@ export const api = {
   // manual Deezer refresh (admin) — kicks off a background sync, then poll status
   sync: () => req("/sync", { method: "POST" }),
   syncStatus: () => req("/sync/status"),
+  importAccount: () => req("/deezer/import-account", { method: "POST" }),
+  importAccountStatus: () => req("/deezer/import-account"),
 
   // upload local audio files into the archive (multipart; let the browser set
   // the Content-Type/boundary, so this bypasses the JSON `req` helper).
@@ -536,6 +562,10 @@ export const api = {
   // What a cleanup would delete right now. Deletes nothing.
   cleanupPreview: () => req("/archive/cleanup/preview"),
   runCleanup: () => req("/archive/cleanup", { method: "POST" }),
+  // Admin: bring the files already archived to the current format (job + poll).
+  archiveMigrate: (force = false) =>
+    req("/archive/migrate", { method: "POST", body: body({ force }) }),
+  archiveMigrateStatus: () => req("/archive/migrate"),
   // Admin: what the archive costs and what's left of the disk.
   storage: () => req("/storage"),
   flushCache: () => req("/cache/flush", { method: "POST" }),
@@ -578,8 +608,8 @@ export const api = {
   // Build identity of the served app (+ the Android release it expects).
   version: () => req("/version"),
 
-  // telemetry — fire-and-forget; never let it break playback. A no-op server
-  // side unless report_listens is enabled in the config. Skipped entirely while
+  // telemetry — fire-and-forget; never let it break playback. It only counts the
+  // play on this server; nothing goes to Deezer. Skipped entirely while
   // offline (a doomed POST per track change is just noise).
   reportListen: (payload) => {
     if (!get(online)) return Promise.resolve();

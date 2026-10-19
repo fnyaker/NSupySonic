@@ -3,7 +3,7 @@
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
   import { player, toasts, isAdmin, openExport, openGenreBulk } from "../lib/stores.js";
-  import { toggleEntityFavorite, downloadTracks } from "../lib/actions.js";
+  import { toggleEntityFavorite, entityMeta, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -19,6 +19,10 @@
   let fav = false;
   let loading = true;
   let loadError = null; // why there is nothing to show (components/LoadFailed)
+  // Tracks Deezer lists on this album that the library does not hold:
+  // null = loading, [] = none (or Deezer unreachable).
+  let onDeezer = null;
+  let deezerDown = false;
 
   $: if (params.id && params.id !== id) {
     id = params.id;
@@ -33,6 +37,8 @@
     loading = true;
     loadError = null;
     data = null;
+    onDeezer = null;
+    deezerDown = false;
     try {
       // Stale-while-revalidate: an album you've opened before paints straight
       // from disk instead of showing a skeleton for the length of a round-trip.
@@ -42,6 +48,19 @@
         fav = !!r.album?.is_favorite; // correct heart state on open
         loading = false;
       });
+      // After the page is on screen: the rest of the tracklist.
+      if (mine === loadSeq && data?.library) {
+        api
+          .albumOnDeezer(albumId)
+          .then((r) => {
+            if (mine === loadSeq) onDeezer = r.tracks || [];
+          })
+          .catch(() => {
+            if (mine !== loadSeq) return;
+            onDeezer = [];
+            deezerDown = true;
+          });
+      }
     } catch (e) {
       if (mine === loadSeq && !data) {
         data = null;
@@ -60,7 +79,7 @@
 
   async function toggleFav() {
     const next = !fav;
-    if (await toggleEntityFavorite("album", id, next)) fav = next;
+    if (await toggleEntityFavorite("album", id, next, entityMeta("album", data?.album || {}))) fav = next;
   }
 
   let dlBusy = false;
@@ -103,7 +122,7 @@
     <div class="row actions">
       <button class="pill" on:click={() => playAll()}><Icon name="play" size={18} /> Lire</button>
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
-      {#if $isAdmin && CAN_KEEP}
+      {#if CAN_KEEP}
         <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
       {/if}
       {#if !REMOTE}
@@ -122,10 +141,27 @@
     </div>
 
     <TrackList tracks={data.tracks} numbered showAlbum={false} showCover={false} context={{ kind: "album", id }} />
+
+    {#if data.library && onDeezer === null}
+      <h2 class="more">Disponible sur Deezer</h2>
+      <Skeleton kind="list" count={3} />
+    {:else if onDeezer?.length}
+      <h2 class="more">Disponible sur Deezer</h2>
+      <TrackList tracks={onDeezer} showAlbum={false} showCover={false} context={{ kind: "album", id }} />
+    {:else if deezerDown}
+      <p class="muted down">Deezer est injoignable : la suite de l'album n'est pas affichée.</p>
+    {/if}
   </div>
 {/if}
 
 <style>
+  .more {
+    margin: 28px 0 10px;
+  }
+  .down {
+    margin: 18px 0 0;
+    font-size: 0.9rem;
+  }
   .art {
     width: 200px;
     flex: none;

@@ -154,13 +154,16 @@ POLICY = {
     "party_chunk": "queue",
     # reading the library
     "home": "read",
-    "smarttracklist": "read",
     "search": "read",
     "search_podcasts": "read",
     "youtube_search": "read",
+    "import_playlist_start": "read",
+    "import_playlist_status": "read",
     "youtube_status": "read",
     "artist": "read",
     "artist_tracks": "read",
+    "artist_on_deezer": "read",
+    "album_on_deezer": "read",
     "album": "read",
     "playlist": "read",
     "discography": "read",
@@ -168,13 +171,8 @@ POLICY = {
     "track_gain": "read",
     "track_gains": "read",  # a POST, and a read
     "flow": "read",
-    "flow_clusters": "read",
     "track_radio": "read",
     "artist_radio": "read",
-    "recommendations": "read",
-    "explore": "read",
-    "explore_genre": "read",
-    "explore_countries": "read",
     "my_playlists": "read",
     "my_favorite_ids": "read",
     "my_local": "read",
@@ -198,7 +196,6 @@ POLICY = {
     "genre_status": "read",
     "share_waveform": "read",
     # changing what is kept: the owner's own actions
-    "set_flow_clusters": "full",
     "subscribe_podcast": "full",
     "unsubscribe_podcast": "full",
     "save_podcast_progress": "full",
@@ -207,6 +204,7 @@ POLICY = {
     "favorite": "full",
     "favorite_entity": "full",
     "create_playlist": "full",
+    "import_playlist_save": "full",
     "edit_playlist": "full",
     "delete_playlist": "full",
     "add_playlist_tracks": "full",
@@ -242,19 +240,32 @@ POLICY = {
     # administration
     "trigger_sync": "admin",
     "sync_status": "admin",
+    "import_account": "admin",
+    "import_account_status": "admin",
     "get_settings": "admin",
     "youtube_settings": "admin",
     "set_settings": "admin",
     "analysis_backfill_start": "admin",
     "analysis_backfill_status": "admin",
+    "archive_migrate_start": "admin",
+    "archive_migrate_status": "admin",
     "genre_relabel": "admin",
     "genre_sounds": "admin",
+    "genre_share_export": "admin",
+    "genre_share_preview": "admin",
+    "genre_share_import": "admin",
+    "genre_pool": "admin",
     "genre_extractor_upload": "admin",
     "genre_extractor_delete": "admin",
     "genre_extractor_test": "admin",
     "genre_extractor_test_status": "admin",
     "genre_embed_start": "admin",
     "genre_embed_status": "admin",
+    "similar_rebuild_start": "admin",
+    "similar_rebuild_status": "admin",
+    "enrich_backfill_start": "admin",
+    "enrich_backfill_status": "admin",
+    "home_mix": "read",
     "genre_tags_defaults": "admin",
     "genre_tag_edit": "admin",
     "genre_construction": "admin",
@@ -499,7 +510,7 @@ def clean_track(t):
     """A track as the queue carries it, or None when it cannot be played."""
     if not isinstance(t, dict):
         return None
-    tid = t.get("deezer_id")
+    tid = t.get("deezer_id") or t.get("id")
     if isinstance(tid, int) and not isinstance(tid, bool):
         tid = str(tid)
     if not isinstance(tid, str) or not _ENTITY_ID_RE.match(tid):

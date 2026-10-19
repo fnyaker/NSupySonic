@@ -44,6 +44,7 @@
 
 import { get, writable } from "svelte/store";
 import { current, player } from "../stores.js";
+import { trackKey } from "../trackkey.js";
 import { knownAnalysis, onAnalysis, primeAnalyses } from "../analysis.js";
 import {
   getAnalysers,
@@ -380,7 +381,8 @@ function primeAround(id) {
   if (s && s.index >= 0)
     for (let i = 1; i <= ANALYSIS_WINDOW; i++) {
       const t = s.queue[s.index + i];
-      if (t?.deezer_id) ids.push(t.deezer_id);
+      const k = trackKey(t);
+      if (k) ids.push(k);
     }
   primeAnalyses(ids);
 }
@@ -397,7 +399,7 @@ function primeAround(id) {
 function adoptVerdict(id, late = false) {
   if (!id) return;
   if (!late && verdictSeeded) return;
-  if (late && get(current)?.deezer_id !== id) return;
+  if (late && trackKey(get(current)) !== id) return;
   const v = knownAnalysis(id);
   if (!v) return;
   verdict = v;
@@ -766,7 +768,7 @@ function deliver(q, nowMs, heard) {
   // A track change must not let the previous track's tempo, whitening state or
   // style verdict bleed into the new one — they would fight the new evidence
   // for several seconds, which is most of what a listener would notice.
-  const id = get(current)?.deezer_id ?? null;
+  const id = trackKey(get(current));
   if (id !== lastTrackId) {
     newTrack(id);
     recycle(buf);
@@ -1113,7 +1115,7 @@ function fallbackTick() {
   const now = performance.now() / 1000;
   const dt = fbLastT ? Math.min(0.25, Math.max(0.001, now - fbLastT)) : 1 / 60;
   fbLastT = now;
-  const id = get(current)?.deezer_id ?? null;
+  const id = trackKey(get(current));
   if (id !== lastTrackId) {
     lastTrackId = id;
     frame.trackId = id;

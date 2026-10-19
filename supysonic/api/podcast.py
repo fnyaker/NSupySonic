@@ -133,12 +133,6 @@ def create_podcast_channel():
         if not show_id:
             raise GenericError(f"Could not resolve show for episode {did}")
 
-    if _cfg().get("push_to_deezer", True):
-        try:
-            provider.add_favorite_show(show_id)
-        except Exception:
-            logger.debug("show.addFavorite failed for %s", show_id, exc_info=True)
-
     import_show(
         provider, _podcast_owner(), show_id,
         episode_limit=int(_cfg().get("podcast_episodes") or 30),
@@ -158,15 +152,6 @@ def _delete_episode_file(episode):
 def delete_podcast_channel():
     _require_admin()
     channel = get_entity(PodcastChannel)
-
-    provider = getattr(current_app, "deezer", None)
-    if provider is not None and channel.deezer_id and _cfg().get("push_to_deezer", True):
-        try:
-            provider.remove_favorite_show(channel.deezer_id)
-        except Exception:
-            logger.debug(
-                "show.deleteFavorite failed for %s", channel.deezer_id, exc_info=True
-            )
 
     # Never destroy archived audio: an episode already on disk is yours and
     # outlives both the subscription and the show. A channel with archived

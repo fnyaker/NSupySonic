@@ -133,18 +133,18 @@ def _run_sync(app, scan_local=True) -> bool:
             except Exception as exc:
                 logger.warning("Local scan failed: %s", exc)
         if not _reachable(app):
-            # Every call would fail against a dead host: a full sync would just
-            # be a few thousand pointless failures in the log, and would leave
-            # the real sync unrun. Postpone it instead (see _run_when_reachable).
+            # The refresh and the downloads below both need Deezer: postpone
+            # them (see _run_when_reachable). The local scan already ran.
             logger.info("Deezer is unreachable; postponing the sync")
             return False
+        # The Deezer account is never read here: the refresh is the subscribed
+        # podcasts (local rows) and nothing else.
         importer = DeezerImporter(app.deezer, cfg["sync_user"])
         out = importer.sync(cfg)
         logger.info("Deezer sync done: %s", out)
-        # Then make the archive match what the sync just imported. A sync that
-        # only writes database rows leaves your favorites, playlists and
-        # podcasts hostage to Deezer until you happen to press play on them —
-        # which may be after Deezer has removed them. Adds only; never deletes.
+        # Then make the archive match what the library holds: favourites,
+        # playlists and subscribed podcasts that have no file yet (database rows
+        # only; nothing is read from the account). Adds only; never deletes.
         if cfg.get("archive_library", True):
             try:
                 from ..db import User

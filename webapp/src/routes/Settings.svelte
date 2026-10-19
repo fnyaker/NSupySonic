@@ -1,5 +1,6 @@
 <script>
-  import { onMount } from "svelte";
+  import { trackRef } from "../lib/trackkey.js";
+  import { onMount, onDestroy } from "svelte";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, LEVEL_INFO } from "../lib/remote/mode.js";
   import { leaveRemote } from "../lib/remote/controller.js";
   import { push } from "svelte-spa-router";
@@ -18,6 +19,7 @@
     toasts,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
+  import { invalidatePlaylists, loadFavorites } from "../lib/actions.js";
   import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
   import { clearPlayCache, enforce } from "../lib/playcache.js";
   import { bytes as fmtBytes, duration as fmtDuration, artistLine } from "../lib/format.js";
@@ -29,6 +31,7 @@
   } from "../lib/nativeDeezer.js";
   import Icon from "../components/Icon.svelte";
   import HardReload from "../components/HardReload.svelte";
+  import EnrichBackfill from "../components/EnrichBackfill.svelte";
   import { youtubeStatus, loadYoutubeStatus, setYoutubeEnabled } from "../lib/youtube.js";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
@@ -102,6 +105,37 @@
   }
   onMount(refresh);
 
+  // One-off import of the Deezer account (playlists + favourites), polled while it runs.
+  let imp = null;
+  let impBusy = false;
+  let impTimer = null;
+  async function pollImport() {
+    try {
+      imp = await api.importAccountStatus();
+    } catch {
+      imp = null;
+    }
+    if (imp?.running) impTimer = setTimeout(pollImport, 2000);
+    else {
+      impBusy = false;
+      if (imp && (imp.playlists || imp.favorites)) {
+        invalidatePlaylists();
+        loadFavorites(true);
+      }
+    }
+  }
+  async function importAccount() {
+    impBusy = true;
+    try {
+      imp = await api.importAccount();
+      pollImport();
+    } catch (e) {
+      impBusy = false;
+      toasts.push(e?.message || "Import impossible", "error");
+    }
+  }
+  onDestroy(() => clearTimeout(impTimer));
+
   // Admin-only: per-user upload quota (GB) applied to non-admin accounts.
   let quotaGb = null;
   let quotaSaving = false;
@@ -136,6 +170,12 @@
     try {
       job = await api.archiveStatus();
       if (job?.running) pollJob();
+    } catch {
+      /* ignore */
+    }
+    try {
+      mig = await api.archiveMigrateStatus();
+      if (mig?.running) pollMigrate();
     } catch {
       /* ignore */
     }
@@ -251,6 +291,43 @@
       /* the job keeps running server-side regardless */
     } finally {
       jobPolling = false;
+    }
+  }
+
+  // -- migrating the files already on disk (admin) ---------------------------
+  // The archive's format changed (no Deezer loudness in the tags, a facts block
+  // in the sidecar). The server rewrites the old files in the background, once.
+  let mig = null;
+  let migPolling = false;
+
+  async function startMigrate() {
+    try {
+      mig = await api.archiveMigrate();
+      toasts.push("Mise à niveau lancée — elle continue même si vous fermez l'app");
+      pollMigrate();
+    } catch (e) {
+      toasts.push(e?.message || "Impossible de lancer la mise à niveau", "error");
+    }
+  }
+
+  async function pollMigrate() {
+    if (migPolling) return;
+    migPolling = true;
+    try {
+      for (;;) {
+        mig = await api.archiveMigrateStatus();
+        if (!mig.running) break;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      toasts.push(
+        mig.failed
+          ? `Mise à niveau terminée : ${mig.done} fichier(s), ${mig.failed} échec(s)`
+          : `Mise à niveau terminée : ${mig.done} fichier(s) vérifié(s)`
+      );
+    } catch {
+      /* the job keeps running server-side regardless */
+    } finally {
+      migPolling = false;
     }
   }
 
@@ -465,7 +542,7 @@
       <div class="list">
         {#each items as m (m.id)}
           <div class="row">
-            <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} kind="track" fallbackId={m.track?.deezer_id} /></div>
+            <div class="thumb"><Cover src={m.track?.album?.cover} alt={m.track?.title} size={40} kind="track" fallbackId={trackRef(m.track)} /></div>
             <div class="meta">
               <div class="t">{m.track?.title}</div>
               <div class="a muted">{artistLine(m.track)}</div>
@@ -671,6 +748,39 @@
       </p>
     {/if}
   {/if}
+
+  <h3>Mise à niveau des fichiers</h3>
+  <p class="muted hint">
+    Réécrit les titres archivés avant le détachement de Deezer&nbsp;: plus de
+    volume Deezer dans les étiquettes, la date de sortie la plus ancienne, les
+    faits dans le fichier compagnon. Sans risque&nbsp;: un titre en cours de
+    lecture n'est jamais touché à moitié, et relancer ne change plus rien.
+  </p>
+  {#if mig?.running}
+    <div class="gauge">
+      <div class="bar"><span class="indeterminate"></span></div>
+      <div class="gauge-txt">
+        <span>Mise à niveau en cours… {mig.done} fichier(s)</span>
+        <span class="muted">
+          {mig.counts?.tags || 0} étiquette(s) · {mig.counts?.bpm || 0} tempo(s) appris
+        </span>
+      </div>
+    </div>
+  {:else}
+    <div class="arch-btns">
+      <button class="ghost" on:click={startMigrate}>
+        <Icon name="refresh" size={16} /> Mettre à niveau les fichiers
+      </button>
+    </div>
+    {#if mig && (mig.done || mig.failed)}
+      <p class="muted hint">
+        Dernier passage&nbsp;: {mig.done} fichier(s){mig.failed ? `, ${mig.failed} échec(s)` : ""}.
+      </p>
+    {/if}
+  {/if}
+
+  <h3>Faits complétés par MusicBrainz</h3>
+  <EnrichBackfill />
 </section>
 {/if}
 
@@ -1019,6 +1129,18 @@
     <p class="muted hint">
       L'ARL est vérifié auprès de Deezer avant d'être enregistré&nbsp;: s'il est
       refusé, rien n'est modifié. Il n'est jamais réaffiché ensuite.
+    </p>
+    <button class="ghost" on:click={importAccount} disabled={impBusy || !dzStatus?.ok}>
+      <Icon name="refresh" size={16} /> Importer mon compte Deezer
+    </button>
+    <p class="muted hint">
+      Copie une fois vos playlists et vos favoris Deezer dans la bibliothèque.
+      Rien n'est jamais retiré ni renvoyé vers Deezer.
+      {#if imp?.running}<br />En cours&nbsp;: {imp.message || "…"}
+      {:else if imp && !imp.running && (imp.playlists || imp.favorites || imp.failed?.length)}
+        <br />Terminé&nbsp;: {imp.playlists} playlist(s), {imp.favorites} favori(s)
+        {#if imp.failed?.length}, {imp.failed.length} échec(s){/if}
+      {/if}
     </p>
     {#if dz.arl_source === "database"}
       <button class="ghost danger" on:click={clearArl} disabled={arlSaving}>
@@ -1661,6 +1783,25 @@
   }
   .bar span.warn {
     background: var(--accent-2);
+  }
+  .bar span.indeterminate {
+    width: 35%;
+    animation: bar-slide 1.4s ease-in-out infinite;
+  }
+  @keyframes bar-slide {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(300%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar span.indeterminate {
+      animation: none;
+      width: 100%;
+      opacity: 0.5;
+    }
   }
   .gauge-txt {
     display: flex;

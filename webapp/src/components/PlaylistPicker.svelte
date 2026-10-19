@@ -1,4 +1,5 @@
 <script>
+  import { trackRef } from "../lib/trackkey.js";
   import { api } from "../lib/api.js";
   import {
     playlistPicker,
@@ -49,7 +50,7 @@
     if (!track) return;
     // Optimistic: close instantly, the add runs in the background (a failure
     // shows its own toast from addTrackToPlaylist).
-    addTrackToPlaylist(p.id, track.deezer_id, p.title);
+    addTrackToPlaylist(p.id, trackRef(track), p.title);
     closePlaylistPicker();
   }
 
@@ -59,7 +60,7 @@
     if (!title) return;
     busy = true;
     try {
-      const r = await api.createPlaylist(title, [String(track.deezer_id)]);
+      const r = await api.createPlaylist(title, [trackRef(track)]);
       // Show it everywhere NOW (library tab, sidebar, this picker), then let the
       // refetch fill in the server's version of the row.
       if (r?.id)

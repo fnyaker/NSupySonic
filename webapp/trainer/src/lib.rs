@@ -112,7 +112,18 @@ pub extern "C" fn tr_config(
             noise: finite(noise, 0.0, 10.0, 0.0) as f32,
             seed,
             grouped: grouped != 0,
+            // Set apart by tr_pseudo, whichever is called first.
+            pseudo: j.opt.pseudo,
         };
+    }
+}
+
+/// Self-training: 0 off, else the probability a fold's head must give an
+/// unlabelled row (class -1) before it learns from it (train::Opts::pseudo).
+#[no_mangle]
+pub extern "C" fn tr_pseudo(threshold: f64) {
+    if let Some(j) = job() {
+        j.opt.pseudo = if threshold.is_finite() { threshold.clamp(0.0, 0.999) as f32 } else { 0.0 };
     }
 }
 
@@ -139,7 +150,9 @@ pub extern "C" fn tr_step(epochs: u32) -> f64 {
 
 /// The outcome's scalars: 0 kind, 1 folds, 2 projected, 3 bagged, 4 accuracy,
 /// 5 balanced, 6 temperature, 7 retried, 8 evaluated, 9 layer count,
-/// 10 the fits' balanced accuracy on their own training rows.
+/// 10 the fits' balanced accuracy on their own training rows, 11 the
+/// self-trained head's held-out balanced accuracy (-1: not trained), 12 how
+/// many pool rows the shipped head learnt from.
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub extern "C" fn tr_res() -> *const f64 {
@@ -157,6 +170,8 @@ pub extern "C" fn tr_res() -> *const f64 {
             RES[8] = o.evaluated as f64;
             RES[9] = o.layers.len() as f64;
             RES[10] = o.fit_balanced;
+            RES[11] = o.pseudo_balanced;
+            RES[12] = o.pseudo_rows as f64;
         }
         RES.as_ptr()
     }
@@ -348,5 +363,152 @@ mod tests {
         job.finish();
         let out = job.outcome.unwrap();
         assert!(out.fit_balanced - out.balanced < 0.05, "fit {} held {}", out.fit_balanced, out.balanced);
+    }
+
+    /// `labelled` rows per class plus `pool` unlabelled ones (class -1) drawn
+    /// from the same clusters; the pool's true classes are returned too.
+    fn with_pool(c: usize, labelled: usize, pool: usize, d: usize, noise: f32, seed: u32) -> (Data, Vec<i32>) {
+        let per = labelled + pool / c;
+        let full = clusters(c, per, d, noise, seed, per);
+        let n = c * per;
+        let mut data = Data::new(n, d, c);
+        data.x.copy_from_slice(&full.x);
+        let mut truth = vec![0; n];
+        for i in 0..n {
+            truth[i] = full.y[i];
+            let j = i % per;
+            data.y[i] = if j < labelled { full.y[i] } else { -1 };
+            data.groups[i] = full.groups[i];
+        }
+        (data, truth)
+    }
+
+    fn pool_accuracy(out: &super::train::Outcome, data: &Data, truth: &[i32]) -> f64 {
+        let l = &out.layers[0];
+        let (c, d) = (l.rows, l.cols);
+        let (mut ok, mut all) = (0, 0);
+        for i in 0..data.n {
+            if data.y[i] >= 0 {
+                continue;
+            }
+            let x = &data.x[i * d..(i + 1) * d];
+            let mut best = (f32::NEG_INFINITY, 0);
+            for k in 0..c {
+                let v: f32 = l.w[k * d..(k + 1) * d].iter().zip(x).map(|(a, b)| a * b).sum::<f32>() + l.b[k];
+                if v > best.0 {
+                    best = (v, k);
+                }
+            }
+            all += 1;
+            ok += (best.1 as i32 == truth[i]) as i32;
+        }
+        ok as f64 / all as f64
+    }
+
+    fn run(data: &Data, pseudo: f32) -> super::train::Outcome {
+        let mut o = Opts::linear();
+        o.proj = 0;
+        o.pseudo = pseudo;
+        let mut job = Job::new(clone_data(data), o);
+        job.start().unwrap();
+        job.finish();
+        job.outcome.unwrap()
+    }
+
+    #[test]
+    fn unlabelled_rows_change_nothing_when_self_training_is_off() {
+        let (data, _) = with_pool(5, 8, 200, 32, 2.0, 3);
+        let mut bare = Data::new(40, 32, 5);
+        let mut k = 0;
+        for i in 0..data.n {
+            if data.y[i] >= 0 {
+                bare.x[k * 32..(k + 1) * 32].copy_from_slice(&data.x[i * 32..(i + 1) * 32]);
+                bare.y[k] = data.y[i];
+                bare.groups[k] = data.groups[i];
+                k += 1;
+            }
+        }
+        let (a, b) = (run(&data, 0.0), run(&bare, 0.0));
+        assert_eq!(a.layers[0].w, b.layers[0].w);
+        assert_eq!(a.balanced, b.balanced);
+        assert_eq!((a.pseudo_balanced, a.pseudo_rows), (-1.0, 0));
+    }
+
+    #[test]
+    fn the_self_trained_head_ships_only_on_a_held_out_gain() {
+        // The teacher's fits all run before any self-trained one, so a run whose
+        // second head did not earn its place ships the first, bit for bit.
+        for seed in 1..=10u32 {
+            let (data, _) = with_pool(6, 4, 600, 64, 3.0, seed);
+            let (t, s) = (run(&data, 0.0), run(&data, 0.9));
+            assert!(s.pseudo_balanced >= 0.0);
+            if s.pseudo_rows > 0 {
+                assert!(s.balanced >= t.balanced + 0.01 - 1e-9, "seed {seed}: {} vs {}", s.balanced, t.balanced);
+                assert_eq!(s.balanced, s.pseudo_balanced);
+            } else {
+                assert_eq!(s.layers[0].w, t.layers[0].w, "seed {seed}");
+                assert_eq!(s.balanced, t.balanced);
+            }
+        }
+    }
+
+    #[test]
+    fn self_training_helps_where_the_labels_are_few() {
+        // Six overlapping clusters, four tags each, 600 untagged rows from the
+        // same clusters; scored on those rows' TRUE classes, which neither head
+        // ever saw. Measured over ten seeds (ratio 3, weight 0.5): labels alone
+        // 0.537, shipped 0.625; at eight tags and more noise the two agree to a
+        // point (0.404 / 0.413) — it is a few-labels tool, and it is gated.
+        let (mut t_pool, mut s_pool) = (0.0, 0.0);
+        for seed in 1..=10u32 {
+            let (data, truth) = with_pool(6, 4, 600, 64, 3.0, seed);
+            t_pool += pool_accuracy(&run(&data, 0.0), &data, &truth);
+            s_pool += pool_accuracy(&run(&data, 0.9), &data, &truth);
+        }
+        assert!(s_pool / 10.0 >= t_pool / 10.0 + 0.05, "labels only {:.3}, shipped {:.3}", t_pool / 10.0, s_pool / 10.0);
+    }
+
+    #[test]
+    fn a_dense_stack_self_trains_too() {
+        let (data, truth) = with_pool(4, 6, 200, 16, 1.5, 2);
+        let mut o = Opts::deep();
+        o.hidden = 16;
+        o.epochs = 20;
+        o.pseudo = 0.9;
+        let mut job = Job::new(clone_data(&data), o);
+        job.start().unwrap();
+        job.finish();
+        let out = job.outcome.unwrap();
+        assert!(out.pseudo_balanced >= 0.0);
+        assert_eq!(out.layers.len(), 2);
+        assert!(out.held_mask.iter().zip(&data.y).all(|(&m, &y)| (m == 1) == (y >= 0)));
+        let _ = truth;
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_self_training() {
+        for &(lab, noise) in &[(4usize, 3.0f32), (4, 4.5), (8, 4.5), (8, 6.0), (16, 6.0)] {
+            let (mut t_pool, mut s_pool, mut t_held, mut s_held, mut shipped) = (0.0, 0.0, 0.0, 0.0, 0);
+            for seed in 1..=10u32 {
+                let (data, truth) = with_pool(6, lab, 600, 64, noise, seed);
+                let (t, s) = (run(&data, 0.0), run(&data, 0.9));
+                t_pool += pool_accuracy(&t, &data, &truth);
+                s_pool += pool_accuracy(&s, &data, &truth);
+                t_held += t.balanced;
+                s_held += s.pseudo_balanced;
+                shipped += (s.pseudo_rows > 0) as i32;
+            }
+            println!("lab {lab} noise {noise}: held teacher {:.3} student {:.3} | unseen: labels-only {:.3} shipped {:.3} | student shipped {shipped}/10",
+                t_held / 10.0, s_held / 10.0, t_pool / 10.0, s_pool / 10.0);
+        }
+    }
+
+    fn clone_data(d: &Data) -> Data {
+        let mut o = Data::new(d.n, d.d, d.c);
+        o.x.copy_from_slice(&d.x);
+        o.y.copy_from_slice(&d.y);
+        o.groups.copy_from_slice(&d.groups);
+        o
     }
 }
