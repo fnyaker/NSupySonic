@@ -174,7 +174,7 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict, cover=None) 
             logger.warning("Saving cover sidecar failed for %s: %s", track.path, exc)
 
     # Refresh the row from the authoritative payload: title/version, credited
-    # artists, disc & track number, year, duration and gain. The row may have
+    # artists, disc & track number, release date, duration. The row may have
     # been created from a playlist listing, which carries a thinner subset — and
     # once Deezer drops the track, whatever is in the row IS the metadata.
     library.refresh_track_metadata(track, info)
@@ -204,6 +204,7 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict, cover=None) 
     # backup would otherwise have no way back to them.
     try:
         library.save_track_metadata(track, info)
+        library.update_track_facts(track, library.deezer_facts(track, info), "deezer")
     except Exception as exc:
         logger.debug("Saving the metadata sidecar failed for %s: %s", track.path, exc)
 

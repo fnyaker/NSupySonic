@@ -480,7 +480,7 @@ class LiveStreamTestCase(_CdnMixin, TestBase):
         self.assertEqual(audio["date"], ["2007-11-19"])
         self.assertEqual(audio["isrc"], ["GBDUW0000059"])
         # Deezer's GAIN is a loudness: the adjustment is -(GAIN + 18.4).
-        self.assertEqual(audio["replaygain_track_gain"], ["-10.00 dB"])
+        self.assertNotIn("replaygain_track_gain", audio)  # the gain is measured, not Deezer's
         self.assertEqual([p.data for p in audio.pictures], [COVER])
         self.assertNotIn("lyrics", audio)  # lyrics come from LRCLIB, lazily
 

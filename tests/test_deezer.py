@@ -561,24 +561,16 @@ class DeezerTestCase(TestBase):
         t3 = library.upsert_track(raw_track(2, "Unknown"), root, "FLAC")
         self.assertIsNone(t3.gain)
 
-    def test_replaygain_tag_metadata(self):
-        # The gain is also carried into the archived file's tags (ReplayGain),
-        # so it travels with the FLAC/MP3 like the cover — readable by other
-        # players (e.g. Subsonic clients) offline. Here we verify the tag value
-        # the writer emits (the mutagen write itself is best-effort and guarded).
-        from supysonic.deezer.metadata import meta_from_gw, _replaygain_tag
+    def test_deezers_gain_is_not_written_to_the_tags(self):
+        # The loudness is measured from the file now: Deezer's GAIN neither
+        # reaches the tagging dict nor a ReplayGain tag (tests.test_detach_d
+        # writes a real file and reads it back).
+        from supysonic.deezer import metadata
 
         info = raw_track(1, "Loud")
         info["GAIN"] = "-8.4"
-        self.assertEqual(meta_from_gw(info)["gain"], "-8.4")
-
-        # Deezer GAIN is the loudness; the ReplayGain adjustment is -(GAIN+18.4).
-        self.assertEqual(_replaygain_tag("-8.4"), "-10.00 dB")  # -(-8.4+18.4)
-        self.assertEqual(_replaygain_tag(-18.4), "0.00 dB")  # reference → no change
-        self.assertEqual(_replaygain_tag(-24), "5.60 dB")  # quiet track → boost
-        self.assertIsNone(_replaygain_tag(None))
-        self.assertIsNone(_replaygain_tag(""))
-        self.assertIsNone(_replaygain_tag("nan-ish"))
+        self.assertNotIn("gain", metadata.meta_from_gw(info))
+        self.assertFalse(hasattr(metadata, "_replaygain_tag"))
 
     def test_find_local_track_is_network_free(self):
         # An imported track is found by its Deezer id with a pure DB lookup, so
@@ -1033,8 +1025,9 @@ class DeezerTestCase(TestBase):
         self.assertGreater(track.bitrate, 0)
         reloaded = Track[ids.track_uuid("7")]
         self.assertTrue(reloaded.path.endswith(".mp3"))
-        # The loudness gain is archived on the row alongside bitrate/art.
-        self.assertAlmostEqual(reloaded.gain, -6.2)
+        # Deezer's GAIN is not the loudness any more: the gain is measured from
+        # the file (analysis.apply_measured_gain), archiving leaves it alone.
+        self.assertIsNone(reloaded.gain)
 
     def test_archiving_takes_the_full_metadata_not_just_the_audio(self):
         """A row often starts life from a playlist listing, which carries a
@@ -1084,7 +1077,8 @@ class DeezerTestCase(TestBase):
         self.assertEqual(row.number, 4)
         self.assertEqual(row.disc, 2)
         self.assertEqual(row.year, 2021)
-        self.assertAlmostEqual(row.gain, -8.5)
+        self.assertIsNone(row.gain)  # measured later, never taken from Deezer
+        self.assertEqual(row.release_date, "2021-05-03")
         self.assertIn("Guest", [a.name for a, _role in row.credited_artists()])
 
         # And the sidecar, so the archive describes itself even if the database

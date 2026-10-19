@@ -432,11 +432,11 @@ def _rows_for(ids):
             seen.add(track_id)
             out[ident] = ana.payload_for(None, tag=tag)
     # So does a local file whose own tags name its genre: its owner said so.
-    # Only the ids that are not Deezer's, and only those still unanswered.
+    # Only the ids asked as UUIDs, and only those still unanswered.
     local = [k for k in keys if k not in seen and not _valid_id(keys[k])]
     if local:
         for t in Track.select(Track.id, Track.deezer_id, Track.genre).where(
-            Track.id.in_(local), Track.deezer_id.is_null(True), Track.genre.is_null(False)
+            Track.id.in_(local), Track.genre.is_null(False)
         ):
             payload = ana.payload_for(None, from_file=ana.file_genre(t))
             if payload is not None:
