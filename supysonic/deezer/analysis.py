@@ -2443,6 +2443,11 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None,
                 )
             else:
                 stats["done"] += 1
+                # The vector is new: its neighbours are computed behind
+                # everything else, never in the way of the next extraction.
+                from .. import similar
+
+                similar.queue_track(track.id)
                 if stats["done"] % 20 == 0:
                     say(f"  {stats['done']} embedded...")
             report(stats)

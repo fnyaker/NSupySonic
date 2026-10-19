@@ -2422,7 +2422,8 @@
     const isFlow = !!(s.context && s.context.kind === "flow");
     const seed = isFlow ? null : s.queue[s.queue.length - 1] || s.queue[s.index];
     if (!isFlow && !seed) return;
-    const key = `${isFlow ? "flow" : seed.deezer_id}|${s.queue.length}`;
+    const seedId = isFlow ? null : seed.id || seed.deezer_id;
+    const key = `${isFlow ? "flow" : seedId}|${s.queue.length}`;
     if (key === exhausted) return;
     if (Date.now() - lastExtendAt < MIN_EXTEND_GAP) return;
     lastExtendAt = Date.now();
@@ -2430,7 +2431,7 @@
     try {
       const more = isFlow
         ? (await api.flow()).tracks || []
-        : (await api.trackRadio(seed.deezer_id)).tracks || [];
+        : (await api.trackRadio(seedId)).tracks || [];
       // extend() reports what it actually appended: nothing means this source
       // has no more to give at this queue length, so stop asking it.
       if (!player.extend(more)) {

@@ -77,6 +77,12 @@ def setup_deezer(app):
             _wa.reanalyse_if_stale(app)
             _wg.resume_if_interrupted(app)
             _wg.relabel_if_stale(app)
+
+            from . import libjob, similar
+
+            libjob.resume_if_interrupted(
+                app, {similar.CURSOR_KEY: lambda: similar.rebuild_job()}
+            )
     return app.deezer
 
 

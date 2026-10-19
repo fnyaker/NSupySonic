@@ -128,6 +128,56 @@ def populate(app, n_tracks, n_playlists, n_fav, big_playlist):
         }
 
 
+def make_archived(app, clusters=40):
+    """The library as a used server holds it: every track on disk, a third of
+    them played at some point, each measured (style, tempo) and carrying a
+    vector, so the radio, the flow and the home have something to read. Prints
+    how long the full neighbours rebuild takes."""
+    import datetime
+
+    import numpy as np
+
+    from supysonic import similar
+    from supysonic.db import Track, TrackAnalysis, now
+    from supysonic.deezer import embedding as emb
+
+    styles = ["frenchcore", "techno", "house", "trance", "dnb", "hardstyle", "ambient",
+              "pop", "rock", "jazz", "hiphop", "dubstep", "psytrance", "uptempo"]
+    r = random.Random(11)
+    rs = np.random.RandomState(3)
+    centres = rs.randn(clusters, emb.V2_EMBED_DIM)
+    t0 = time.time()
+    with app.app_context():
+        base = now()
+        rows = []
+        analyses = []
+        for t in Track.select():
+            plays = r.randint(1, 30) if r.random() < 0.33 else 0
+            last = base - datetime.timedelta(days=r.randint(0, 400)) if plays else None
+            c = r.randrange(clusters)
+            rows.append((t, plays, last, base - datetime.timedelta(days=r.randint(0, 300))))
+            analyses.append({"track": t.id, "bpm": 80 + (c % 12) * 10 + r.random() * 3,
+                             "style": styles[c % len(styles)]})
+            vec = centres[c] + rs.randn(emb.V2_EMBED_DIM) * 0.4
+            os.makedirs(os.path.dirname(t.path), exist_ok=True)
+            emb.save_embedding(t, [float(x) for x in vec])
+        with Track._meta.database.atomic():
+            for t, plays, last, created in rows:
+                Track.update(last_modification=1700000000, play_count=plays, last_play=last,
+                             created=created).where(Track.id == t.id).execute()
+            for i in range(0, len(analyses), 500):
+                TrackAnalysis.insert_many(analyses[i:i + 500]).execute()
+        print(f"  archived + measured + vectors in {time.time() - t0:.1f}s", file=sys.stderr)
+        t0 = time.time()
+        snap = similar.rebuild_job().run()
+        print(
+            f"  neighbours rebuilt for {snap['done']} tracks in {time.time() - t0:.1f}s "
+            f"({snap['failed']} failed)",
+            file=sys.stderr,
+        )
+        similar.drop_index()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tracks", type=int, default=8000)
@@ -141,6 +191,12 @@ def main():
         "--audio",
         help="a WAV file archived as the first 12 tracks (ids[\"ids\"]), so /api/stream "
         "serves them from disk with real byte ranges",
+    )
+    ap.add_argument(
+        "--archived",
+        action="store_true",
+        help="mark the whole library archived, played, measured and given vectors, "
+        "time the neighbours' rebuild, and ask the radio / flow / home routes too",
     )
     args = ap.parse_args()
 
@@ -180,6 +236,8 @@ def main():
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 shutil.copyfile(args.audio, path)
                 Track.update(path=path).where(Track.id == t.id).execute()
+    if args.archived:
+        make_archived(app)
     # Each request opens its own connection (web.py), as the server does.
     from supysonic.db import close_connection
 
@@ -209,6 +267,19 @@ def main():
         ("GET", "/api/version", None),
         ("GET", "/api/storage", None),
     ]
+    if args.archived:
+        from supysonic.db import Track
+
+        with app.app_context():
+            t = Track.select().where(Track.play_count > 0).first()
+            seed, artist = str(t.id), str(t.artist_id)
+        routes += [
+            ("GET", "/api/home/mix/techno", None),
+            ("GET", f"/api/radio/track/{seed}", None),
+            ("GET", f"/api/radio/artist/{artist}", None),
+            ("GET", "/api/flow", None),
+        ]
+        close_connection()
     print(f"{'route':42s} {'median':>9s} {'min':>8s} {'sql':>5s} {'bytes':>9s} {'gzip':>8s}  status")
     for method, url, body in routes:
         times = []

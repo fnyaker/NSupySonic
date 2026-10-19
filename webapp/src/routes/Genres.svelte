@@ -25,6 +25,7 @@
   import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
   import JobFailures from "../components/JobFailures.svelte";
+  import SimilarRebuild from "../components/SimilarRebuild.svelte";
   import Cover from "../components/Cover.svelte";
 
   const ARCHETYPES = [
@@ -2048,6 +2049,7 @@
                per-track reason sent the operator to the container log, which is
                exactly what somebody using the app from a phone cannot read. -->
           <JobFailures job={analysis} label="analyse" />
+          <SimilarRebuild />
       </section>
 
       <section class="card">

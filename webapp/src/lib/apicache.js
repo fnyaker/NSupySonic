@@ -45,6 +45,7 @@ const CACHE_PREFIXES = [
   "/album/",
   "/artist/",
   "/smarttracklist/",
+  "/home/mix/",
   "/home",
   "/recommendations",
   // Lyrics are fetched on every track change — caching them makes the Paroles

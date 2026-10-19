@@ -340,9 +340,10 @@ export async function subscribeToPodcast(showDeezerId) {
 
 export async function startTrackRadio(track) {
   try {
-    const r = await api.trackRadio(track.deezer_id);
+    const key = track.id || track.deezer_id;
+    const r = await api.trackRadio(key);
     if (r.tracks && r.tracks.length) {
-      player.playQueue(r.tracks, 0, { kind: "radio", id: track.deezer_id });
+      player.playQueue(r.tracks, 0, { kind: "radio", id: key });
       toasts.push("Radio lancée");
     }
   } catch {
@@ -444,7 +445,7 @@ export async function playEntity(kind, id, context = null) {
     let tracks = [];
     if (kind === "album") tracks = (await api.album(id)).tracks;
     else if (kind === "playlist") tracks = (await api.playlist(id)).tracks;
-    else if (kind === "mix") tracks = (await api.smartTracklist(id)).tracks;
+    else if (kind === "mix") tracks = (await api.homeMix(id)).tracks;
     else if (kind === "artist") tracks = (await api.artistRadio(id)).tracks;
     if (tracks && tracks.length) {
       player.playQueue(tracks, 0, context || { kind, id });
