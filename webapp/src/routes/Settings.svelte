@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, LEVEL_INFO } from "../lib/remote/mode.js";
   import { leaveRemote } from "../lib/remote/controller.js";
   import { push } from "svelte-spa-router";
@@ -18,6 +18,7 @@
     toasts,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
+  import { invalidatePlaylists, loadFavorites } from "../lib/actions.js";
   import { listDownloads, removeTrack, clearAll } from "../lib/offline.js";
   import { clearPlayCache, enforce } from "../lib/playcache.js";
   import { bytes as fmtBytes, duration as fmtDuration, artistLine } from "../lib/format.js";
@@ -99,6 +100,37 @@
     items = await listDownloads();
   }
   onMount(refresh);
+
+  // One-off import of the Deezer account (playlists + favourites), polled while it runs.
+  let imp = null;
+  let impBusy = false;
+  let impTimer = null;
+  async function pollImport() {
+    try {
+      imp = await api.importAccountStatus();
+    } catch {
+      imp = null;
+    }
+    if (imp?.running) impTimer = setTimeout(pollImport, 2000);
+    else {
+      impBusy = false;
+      if (imp && (imp.playlists || imp.favorites)) {
+        invalidatePlaylists();
+        loadFavorites(true);
+      }
+    }
+  }
+  async function importAccount() {
+    impBusy = true;
+    try {
+      imp = await api.importAccount();
+      pollImport();
+    } catch (e) {
+      impBusy = false;
+      toasts.push(e?.message || "Import impossible", "error");
+    }
+  }
+  onDestroy(() => clearTimeout(impTimer));
 
   // Admin-only: per-user upload quota (GB) applied to non-admin accounts.
   let quotaGb = null;
@@ -1016,6 +1048,18 @@
     <p class="muted hint">
       L'ARL est vérifié auprès de Deezer avant d'être enregistré&nbsp;: s'il est
       refusé, rien n'est modifié. Il n'est jamais réaffiché ensuite.
+    </p>
+    <button class="ghost" on:click={importAccount} disabled={impBusy || !dzStatus?.ok}>
+      <Icon name="refresh" size={16} /> Importer mon compte Deezer
+    </button>
+    <p class="muted hint">
+      Copie une fois vos playlists et vos favoris Deezer dans la bibliothèque.
+      Rien n'est jamais retiré ni renvoyé vers Deezer.
+      {#if imp?.running}<br />En cours&nbsp;: {imp.message || "…"}
+      {:else if imp && !imp.running && (imp.playlists || imp.favorites || imp.failed?.length)}
+        <br />Terminé&nbsp;: {imp.playlists} playlist(s), {imp.favorites} favori(s)
+        {#if imp.failed?.length}, {imp.failed.length} échec(s){/if}
+      {/if}
     </p>
     {#if dz.arl_source === "database"}
       <button class="ghost danger" on:click={clearArl} disabled={arlSaving}>

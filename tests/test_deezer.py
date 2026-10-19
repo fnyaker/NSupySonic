@@ -686,9 +686,7 @@ class DeezerTestCase(TestBase):
 
         pl = Playlist.get(Playlist.deezer_id == "100")
         got = [t.deezer_id for t in pl.get_tracks()]
-        self.assertIn("1", got)  # archived → preserved
-        self.assertIn("2", got)  # still on Deezer
-        self.assertNotIn("3", got)  # dropped and not archived → removed
+        self.assertEqual(got, ["1", "2", "3"])  # an import never empties a local playlist
 
     def test_sync_large_playlist_has_a_statement_budget(self):
         # 1000 tracks across 100 albums/artists (exercises the import cache).
@@ -800,13 +798,18 @@ class DeezerTestCase(TestBase):
             StarredTrack.select().where(StarredTrack.user == alice).count(), 2
         )
 
-        # Unlove track 2 on Deezer -> star removed locally on next sync
+        # Unlove track 2 on Deezer: an import keeps our star, only prune=True drops it.
         gw.fav_ids = [1]
         imp.sync_favorites()
         starred = {
             s.starred_id for s in StarredTrack.select().where(StarredTrack.user == alice)
         }
         self.assertIn(ids.track_uuid("1"), starred)
+        self.assertIn(ids.track_uuid("2"), starred)
+        imp.sync_favorites(prune=True)
+        starred = {
+            s.starred_id for s in StarredTrack.select().where(StarredTrack.user == alice)
+        }
         self.assertNotIn(ids.track_uuid("2"), starred)
 
     # -- flow, recommendations, what the nightly sync runs --------------
@@ -925,30 +928,16 @@ class DeezerTestCase(TestBase):
         self.assertEqual(imp.sync({}), {})
         self.assertEqual(calls, [])
 
-        imp.sync({"sync_playlists": True, "sync_podcasts": True, "podcast_episodes": "12"})
-        self.assertEqual(calls, [("sync_playlists", (), {}), ("sync_podcasts", (12,), {})])
+        # The scheduled refresh is the subscribed podcasts and nothing else.
+        imp.sync({
+            "sync_playlists": True, "sync_favorites": True, "import_flow": True,
+            "import_new_releases": True, "sync_podcasts": True, "podcast_episodes": "12",
+        })
+        self.assertEqual(calls, [("sync_podcasts", (12,), {})])
 
         calls.clear()
-        imp.sync({"import_new_releases": True, "smart_tracklists": "discovery, monthly-top"})
-        self.assertEqual(
-            calls,
-            [("sync_recommendations", (), {"smart_ids": ["discovery", "monthly-top"], "flow": False,
-                                           "new_albums": False})],
-        )
-
-        calls.clear()
-        imp.sync({"import_flow": True, "sync_favorites": True})
-        self.assertEqual(
-            calls,
-            [("sync_favorites", (), {}),
-             ("sync_recommendations", (), {"smart_ids": None, "flow": True, "new_albums": False})],
-        )
-        calls.clear()
-        imp.sync({"import_new_albums": True})
-        self.assertEqual(
-            calls,
-            [("sync_recommendations", (), {"smart_ids": None, "flow": False, "new_albums": True})],
-        )
+        imp.import_account()
+        self.assertEqual(calls, [("sync_playlists", (), {}), ("sync_favorites", (), {"prune": False})])
         # No list configured means the whole default set.
         self.assertEqual(importer.smart_ids_from_config({}), importer.DEFAULT_SMART_TRACKLISTS)
 

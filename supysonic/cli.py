@@ -479,6 +479,28 @@ def deezer_import(config, ref):
         raise ClickException(str(e)) from e
 
 
+@deezer.command("import-account")
+@click.pass_obj
+def deezer_import_account(config):
+    """One-off import of your Deezer playlists and favorites (never removes anything)."""
+
+    provider = _require_provider(config)
+    sync_user = config.DEEZER.get("sync_user")
+    if not sync_user:
+        raise ClickException("Set 'sync_user' in the [deezer] config to a supysonic username.")
+
+    from .deezer.importer import DeezerImporter
+
+    try:
+        importer = DeezerImporter(provider, sync_user, progress=click.echo)
+    except User.DoesNotExist as e:
+        raise ClickException(f"sync_user '{sync_user}' does not exist.") from e
+    out = importer.import_account()
+    click.echo(f"Playlists: {out['playlists']}, favorites: {out['favorites']}")
+    for f in out["failed"]:
+        click.echo(f"  ! {f}", err=True)
+
+
 @deezer.command("sync")
 @click.pass_obj
 def deezer_sync(config):

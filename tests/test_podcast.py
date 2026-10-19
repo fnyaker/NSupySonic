@@ -258,9 +258,9 @@ class PodcastLibraryTestCase(TestBase):
             PodcastChannel[ids.show_uuid("1002156761")].episodes.count(), 3
         )
 
-    def test_sync_podcasts_imports_deezer_favorites(self):
-        # A show favorited on Deezer (no local row yet) is imported by sync,
-        # closing the "list my favorite shows" gap.
+    def test_sync_podcasts_never_reads_the_deezer_account(self):
+        # A show favorited on Deezer (no local row yet) is NOT imported: the
+        # refresh only follows the local subscriptions.
         from supysonic.deezer.importer import DeezerImporter
 
         eps = [episode_obj(i, f"Ep {i}") for i in range(1, 3)]
@@ -272,9 +272,9 @@ class PodcastLibraryTestCase(TestBase):
         self.assertEqual(PodcastChannel.select().count(), 0)
         importer = DeezerImporter(provider, "alice")
         n = importer.sync_podcasts(episode_limit=30)
-        self.assertEqual(n, 1)
-        self.assertEqual(PodcastChannel.select().count(), 1)
-        self.assertEqual(PodcastEpisode.select().count(), 2)
+        self.assertEqual(n, 0)
+        self.assertEqual(PodcastChannel.select().count(), 0)
+        self.assertEqual(PodcastEpisode.select().count(), 0)
 
     def test_parse_deezer_ref_show_and_episode(self):
         self.assertEqual(
