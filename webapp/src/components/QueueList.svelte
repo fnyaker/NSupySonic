@@ -13,6 +13,7 @@
   // follows the finger is a separate floating copy, and the pointer is followed
   // on the window rather than on the grip — the row may scroll out of the DOM
   // while it is being dragged toward the end of a 4 000-track queue.
+  import { trackRef } from "../lib/trackkey.js";
   import { onDestroy, tick } from "svelte";
   import { player, toasts } from "../lib/stores.js";
   import { atLeast } from "../lib/remote/mode.js";
@@ -171,7 +172,7 @@
       data-qi={index}
     >
       <button class="qrow" on:click={() => pick(index)}>
-        <Cover src={item.album?.cover} alt="" size={42} kind={item.podcast ? "podcast" : "track"} fallbackId={item.deezer_id} />
+        <Cover src={item.album?.cover} alt="" size={42} kind={item.podcast ? "podcast" : "track"} fallbackId={trackRef(item)} />
         <span class="qm">
           <span class="qt">{item.title}</span>
           <span class="qa">{artistLine(item)}</span>
@@ -202,7 +203,7 @@
   <!-- The row as it is carried: a copy, so it survives the real one leaving the
        window when the list scrolls under the finger. -->
   <div class="ghost" style="top:{drag.y}px; left:{drag.left}px; width:{drag.width}px" aria-hidden="true">
-    <Cover src={drag.item.album?.cover} alt="" size={42} kind={drag.item.podcast ? "podcast" : "track"} fallbackId={drag.item.deezer_id} />
+    <Cover src={drag.item.album?.cover} alt="" size={42} kind={drag.item.podcast ? "podcast" : "track"} fallbackId={trackRef(drag.item)} />
     <span class="qm">
       <span class="qt">{drag.item.title}</span>
       <span class="qa">{artistLine(drag.item)}</span>

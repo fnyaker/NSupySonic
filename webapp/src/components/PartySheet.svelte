@@ -2,6 +2,7 @@
   // The host's side of a listen party: start it, hand the link out (a QR code
   // for the people in the room, the share sheet for everyone else), see who is
   // listening and how well they are locked, end it.
+  import { trackRef } from "../lib/trackkey.js";
   import { tick } from "svelte";
   import { partySheet, closePartySheet, current, toasts } from "../lib/stores.js";
   import { partyHost, startParty, endParty } from "../lib/party/host.js";
@@ -146,7 +147,7 @@
         </div>
         {#if $current}
           <div class="now">
-            <Cover src={$current.album?.cover} alt={$current.title} size={44} kind={$current.podcast ? "podcast" : "album"} fallbackId={$current.deezer_id} />
+            <Cover src={$current.album?.cover} alt={$current.title} size={44} kind={$current.podcast ? "podcast" : "album"} fallbackId={trackRef($current)} />
             <div class="txt">
               <span class="t">{$current.title}</span>
               <span class="a muted">{artistLine($current)}</span>

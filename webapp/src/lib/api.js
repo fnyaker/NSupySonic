@@ -462,8 +462,9 @@ export const api = {
   favoriteIds: () => req("/me/favorite-ids"),
 
   // mutations
-  favorite: (deezer_id, on) =>
-    req("/favorite", { method: "POST", body: body({ deezer_id, on }) }),
+  // `ref` names the track the way the server resolves it (trackkey.js#trackRef).
+  favorite: (ref, on) =>
+    req("/favorite", { method: "POST", body: body({ id: ref, on }) }),
   // `meta` ({ title, artist, artist_id }) names the entity for the server when
   // it has never imported it (a star is local, the row is made from this).
   favoriteEntity: (kind, deezer_id, on, meta = {}) =>

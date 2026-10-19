@@ -17,6 +17,7 @@
 import { api } from "./api.js";
 import { online } from "./net.js";
 import { get } from "svelte/store";
+import { migrateKey, trackKey } from "./trackkey.js";
 
 const DB_NAME = "nsupy-gains";
 const DB_VERSION = 1;
@@ -58,10 +59,11 @@ function reqp(request) {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const numericId = (x) => {
-  const id = x == null ? "" : String(x);
-  // A Deezer numeric id or a row UUID (an upload has a measured gain too).
-  return /^\d+$/.test(id) || UUID_RE.test(id) ? id : null;
+// The cache is keyed on the track's UUID; a Deezer id (what an older build
+// wrote, and what a caller still holding one asks with) is turned into it.
+const keyOf = (x) => {
+  const id = x == null ? "" : migrateKey(x);
+  return UUID_RE.test(id) ? id : null;
 };
 
 export async function initGainCache() {
@@ -71,14 +73,34 @@ export async function initGainCache() {
     const db = await openDB();
     const all = await reqp(db.transaction(STORE, "readonly").objectStore(STORE).getAll());
     const now = Date.now();
+    const legacy = [];
     for (const r of all) {
       if (!r || !r.id) continue;
+      const key = migrateKey(r.id);
+      if (key !== String(r.id)) legacy.push(r);
       // Drop expired negatives on the way in, so they are re-asked once.
       if (r.g == null && now - (r.ts || 0) > NULL_TTL) continue;
-      mem.set(String(r.id), { g: typeof r.g === "number" ? r.g : null, ts: r.ts || 0 });
+      mem.set(key, { g: typeof r.g === "number" ? r.g : null, ts: r.ts || 0 });
     }
+    if (legacy.length) renameLegacy(db, legacy);
   } catch {
     /* IndexedDB unavailable — the cache just lives for this session */
+  }
+}
+
+// Rows written under a Deezer id are rewritten under the UUID, once, in one
+// transaction after the index is up (a gain is a float: this is a few ms).
+function renameLegacy(db, rows) {
+  try {
+    const t = db.transaction(STORE, "readwrite");
+    const store = t.objectStore(STORE);
+    for (const r of rows) {
+      const key = migrateKey(r.id);
+      store.delete(r.id);
+      if (mem.has(key)) store.put({ id: key, g: mem.get(key).g, ts: mem.get(key).ts });
+    }
+  } catch {
+    /* best effort: the rows are read the same way next launch */
   }
 }
 
@@ -112,7 +134,7 @@ async function flush() {
 // What we know about a track's gain WITHOUT touching the network:
 // a number, null (asked, genuinely none) or undefined (never asked).
 export function knownGain(id) {
-  const key = numericId(id);
+  const key = keyOf(id);
   if (!key) return undefined;
   const rec = mem.get(key);
   if (!rec) return undefined;
@@ -121,7 +143,7 @@ export function knownGain(id) {
 }
 
 export function rememberGain(id, gain) {
-  const key = numericId(id);
+  const key = keyOf(id);
   if (!key) return;
   const g = typeof gain === "number" && isFinite(gain) ? gain : null;
   const prev = mem.get(key);
@@ -141,7 +163,7 @@ export function rememberGain(id, gain) {
 export function gainFor(track) {
   if (!track) return null;
   if (typeof track.gain === "number") return track.gain;
-  const g = knownGain(track.deezer_id);
+  const g = knownGain(trackKey(track));
   return typeof g === "number" ? g : null;
 }
 
@@ -156,7 +178,7 @@ export async function primeGains(tracks) {
   if (!list.length) return;
   const wanted = [];
   for (const t of list) {
-    const id = numericId(t.deezer_id);
+    const id = trackKey(t);
     if (!id) continue;
     if (typeof t.gain === "number") {
       rememberGain(id, t.gain); // the list already knew: keep it for next time
@@ -183,7 +205,7 @@ export async function primeGains(tracks) {
       rememberGain(id, typeof g === "number" ? g : null);
     }
     for (const t of list) {
-      const id = numericId(t.deezer_id);
+      const id = trackKey(t);
       if (!id || typeof t.gain === "number") continue;
       const g = knownGain(id);
       if (typeof g === "number") t.gain = g;

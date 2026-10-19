@@ -15,6 +15,7 @@
 // — the server tells it the channel it knew is gone and it publishes it all
 // again, and a command sent while it was reconnecting still lands.
 
+import { trackKey } from "../trackkey.js";
 import { get } from "svelte/store";
 import { player, seekTo, playbackStatus, current } from "../stores.js";
 import { logInfo } from "../log.js";
@@ -138,7 +139,7 @@ function watch() {
       const t = s.queue[s.index];
       const key = [
         s.index,
-        t ? t.deezer_id : "",
+        t ? trackKey(t) || "" : "",
         s.playing,
         Math.round((s.duration || 0) * 10),
         s.volume,

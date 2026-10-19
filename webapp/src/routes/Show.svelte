@@ -1,4 +1,5 @@
 <script>
+  import { trackKey } from "../lib/trackkey.js";
   import { push } from "svelte-spa-router";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
@@ -49,7 +50,7 @@
     playFrom(0);
   }
   function toggle(i, ep) {
-    if ($currentId === ep.deezer_id) player.toggle();
+    if ($currentId === trackKey(ep)) player.toggle();
     else playFrom(i);
   }
 
@@ -57,12 +58,12 @@
   // episode just seeks; another episode records the target as its resume point
   // first, so the player's load lands exactly there.
   function playAt(i, ep, position) {
-    if ($currentId === ep.deezer_id) {
+    if ($currentId === trackKey(ep)) {
       seekTo.set(position);
       player.play();
       return;
     }
-    setResumePoint(ep.deezer_id, position, ep.duration || 0);
+    setResumePoint(trackKey(ep), position, ep.duration || 0);
     playFrom(i);
   }
 
@@ -124,7 +125,7 @@
   // Resume state for an episode: fraction played (0..1), seconds remaining and
   // whether it was heard to the end. null when there's nothing to show.
   function resumeOf(ep) {
-    const p = $podcastProgress[ep.deezer_id];
+    const p = $podcastProgress[trackKey(ep)];
     if (!p || (!p.t && !p.done)) return null;
     if (p.done) return { done: true, pct: 1, left: 0 };
     const dur = p.d || ep.duration || 0;
@@ -205,10 +206,10 @@
       <p class="muted">Aucun épisode disponible.</p>
     {:else}
       <ul class="episodes">
-        {#each episodes as ep, i (ep.deezer_id)}
-          {@const active = $currentId === ep.deezer_id}
+        {#each episodes as ep, i (trackKey(ep))}
+          {@const active = $currentId === trackKey(ep)}
           {@const resume = resumeOf(ep)}
-          {@const marks = $episodeMarkers[ep.deezer_id] || []}
+          {@const marks = $episodeMarkers[trackKey(ep)] || []}
           <li class:active>
             <button class="pl" on:click={() => toggle(i, ep)} aria-label="Lire l'épisode">
               <Icon name={active && $playing ? "pause" : "play"} size={18} />
@@ -227,8 +228,8 @@
                 <button
                   type="button"
                   class="edesc"
-                  class:clamped={!expanded.has(ep.deezer_id)}
-                  on:click={() => toggleExpand(ep.deezer_id)}
+                  class:clamped={!expanded.has(trackKey(ep))}
+                  on:click={() => toggleExpand(trackKey(ep))}
                 >
                   {ep.description}
                 </button>

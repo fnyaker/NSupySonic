@@ -15,6 +15,7 @@
 // lets guests start the next track on the beat instead of a poll after the
 // host did.
 
+import { trackKey } from "../trackkey.js";
 import { shortLink } from "../applink.js";
 import { get } from "svelte/store";
 import { api } from "../api.js";
@@ -263,7 +264,7 @@ function latencyOf(el, nowMs = performance.now(), ctxTime) {
 
 function trackInfo(t) {
   return {
-    id: String(t.deezer_id),
+    id: trackKey(t),
     title: t.title || "",
     artist: artistLine(t) || "",
     album: (t.album && t.album.title) || "",
@@ -293,7 +294,7 @@ function measure() {
   const b = performance.now();
   const at = (a + b) / 2;
   const heard = Math.max(0, raw - latencyOf(el, at, ct));
-  const id = String(track.deezer_id);
+  const id = trackKey(track);
   if (id !== s.fitId) {
     s.fit.reset();
     s.fitId = id;
@@ -315,7 +316,7 @@ function measure() {
 
   // Does the element carry this track yet? Not between a skip and the new
   // source being attached — and a position read then is the OLD track's.
-  const loaded = source.loaded ? source.loaded() : track.deezer_id;
+  const loaded = source.loaded ? source.loaded() : trackKey(track);
   const onTrack = loaded != null && String(loaded) === id;
   // Playing, paused, or on its way to playing (loading, rebuffering, or just
   // past the end of a track the queue is about to move on from).

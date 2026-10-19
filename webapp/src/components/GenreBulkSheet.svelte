@@ -10,6 +10,7 @@
   // the tracks kept are tagged (/genre/bulk).
   //
   // Admin-only, like every write in the studio.
+  import { trackRef } from "../lib/trackkey.js";
   import { fade, scale } from "svelte/transition";
   import { api } from "../lib/api.js";
   import { genreBulkSheet, closeGenreBulk, toasts } from "../lib/stores.js";
@@ -38,7 +39,7 @@
   $: rows = preview ? (onlyDisagree ? preview.tracks.filter((r) => r.disagree) : preview.tracks) : [];
   $: selected = preview ? preview.tracks.filter((r) => picked[key(r)] && !r.same) : [];
 
-  const key = (r) => String(r.deezer_id || r.id);
+  const key = (r) => trackRef(r);
 
   function filter(list, q) {
     const needle = (q || "").trim().toLowerCase();
@@ -74,7 +75,7 @@
 
   function scopeBody(s) {
     if (s.kind === "artist" && s.artist) return { artist: s.artist };
-    return { tracks: (s.tracks || []).map((t) => t.deezer_id || t.id).filter(Boolean) };
+    return { tracks: (s.tracks || []).map(trackRef).filter(Boolean) };
   }
 
   async function choose(t) {

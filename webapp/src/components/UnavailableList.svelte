@@ -10,6 +10,7 @@
   //   click. Anything less certain stays behind "Autres choix", in the sheet,
   //   where it can be auditioned first. Fetched only for the rows on screen,
   //   two at a time: a 300-row list is not 300 Deezer searches on open.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { onDestroy, onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { CAN_KEEP, CAN_ADMIN } from "../lib/remote/mode.js";
@@ -24,7 +25,7 @@
   /** The unavailable tracks; rows dealt with here are dropped from it. */
   export let tracks = [];
 
-  const idOf = (t) => String(t.deezer_id);
+  const idOf = (t) => trackKey(t);
 
   // -- desktop: inline suggestions ---------------------------------------------
   const DESKTOP = "(min-width: 1000px) and (hover: hover) and (pointer: fine)";
@@ -313,7 +314,7 @@
         </button>
       {/if}
       <div class="thumb">
-        <Cover src={t.album?.cover} alt={t.title} size={44} kind="track" fallbackId={t.deezer_id} />
+        <Cover src={t.album?.cover} alt={t.title} size={44} kind="track" fallbackId={trackRef(t)} />
       </div>
       <div class="meta">
         <div class="t">{t.title}</div>
@@ -334,14 +335,14 @@
           {:else if s === "loading" || s === undefined}
             <span class="sug ghost-sug" aria-hidden="true"></span>
           {:else if Array.isArray(s) && s.length}
-            {#each s as c (c.deezer_id)}
-              <div class="sug" class:playing={$previewing === c.deezer_id}>
+            {#each s as c (trackKey(c))}
+              <div class="sug" class:playing={$previewing === trackKey(c)}>
                 <button
                   class="sug-prev"
                   on:click={() => togglePreview(c)}
-                  aria-label={$previewing === c.deezer_id ? "Arrêter l'écoute" : "Écouter"}
+                  aria-label={$previewing === trackKey(c) ? "Arrêter l'écoute" : "Écouter"}
                   title="Écouter avant de remplacer">
-                  <Icon name={$previewing === c.deezer_id ? "pause" : "play"} size={13} />
+                  <Icon name={$previewing === trackKey(c) ? "pause" : "play"} size={13} />
                 </button>
                 <button
                   class="sug-main"

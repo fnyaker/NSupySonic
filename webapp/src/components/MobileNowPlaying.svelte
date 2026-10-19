@@ -3,6 +3,7 @@
   // (smooth, momentum, no transform math): three slots [prev, current, next],
   // current centred, neighbours peeking. When the user settles on a neighbour we
   // advance the queue and re-centre, so the cover they swiped to stays put.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { tick, onMount, onDestroy } from "svelte";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { push } from "svelte-spa-router";
@@ -117,14 +118,14 @@
   // used to just keep the previous track's blur forever in that case.
   $: bg.set(
     resolveCover($offlineCovers, $current?.album?.cover),
-    $current?.deezer_id ? api.coverUrl($current.deezer_id) : ""
+    trackRef($current) ? api.coverUrl(trackRef($current)) : ""
   );
 
   $: q = $player.queue;
   $: idx = $player.index;
   $: prevT = idx > 0 ? q[idx - 1] : null;
   $: nextT = idx >= 0 && idx < q.length - 1 ? q[idx + 1] : null;
-  $: fav = $current && $favorites.has(String($current.deezer_id));
+  $: fav = $current && $favorites.has(trackKey($current));
   $: progress = $player.duration ? ($player.currentTime / $player.duration) * 100 : 0;
   $: bufferedPct = $player.duration
     ? Math.min(100, Math.max(progress, ($buffered / $player.duration) * 100))
@@ -369,7 +370,7 @@
     const s = [];
     if (idx < 0) return s;
     for (const i of [idx - 1, idx, idx + 1]) {
-      if (i >= 0 && i < q.length) s.push({ track: q[i], key: i + ":" + q[i].deezer_id });
+      if (i >= 0 && i < q.length) s.push({ track: q[i], key: i + ":" + trackKey(q[i]) });
     }
     return s;
   })();
@@ -766,7 +767,7 @@
   // the OLD slot, and the stale scroll position then made onSettled fire a bogus
   // swipe-advance (the "enabling shuffle skips to the next song" bug). Handling
   // the reindex re-centres instead.
-  $: if (scroller && idx >= 0 && $current) recenter($current.deezer_id, idx);
+  $: if (scroller && idx >= 0 && $current) recenter(trackKey($current), idx);
   async function recenter(id, index) {
     const idChanged = id !== lastId;
     const idxChanged = index !== prevIdx;
@@ -870,7 +871,7 @@
       on:touchcancel={onCoverCancel}
     >
       {#each slots as s (s.key)}
-        <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} kind={s.track.podcast ? "podcast" : "album"} fallbackId={s.track.deezer_id} eager /></div>
+        <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} kind={s.track.podcast ? "podcast" : "album"} fallbackId={trackRef(s.track)} eager /></div>
       {/each}
     </div>
 
@@ -884,7 +885,7 @@
           <Icon name={fav ? "heartFilled" : "heart"} size={24} />
         </button>
       {/if}
-      {#if $isAdmin && CAN_KEEP && ($current.deezer_id || $current.id)}
+      {#if $isAdmin && CAN_KEEP && trackKey($current)}
         <!-- Deliberately quiet, and next to the heart rather than in the header
              where it would fight the queue button for the thumb: tagging is
              something you reach for when the genre is wrong, not a call to

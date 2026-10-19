@@ -9,6 +9,7 @@
 // be on the path between pressing play and hearing audio.
 
 import { api } from "./api.js";
+import { migrateKey } from "./trackkey.js";
 
 // v2: bounds measured before the server read ffmpeg's EOF-closed trailing
 // silence had an untrimmed end. A new key re-asks once; the old one is dropped.
@@ -33,7 +34,8 @@ function load() {
     const raw = JSON.parse(localStorage.getItem(KEY) || "null");
     if (!raw || typeof raw !== "object") return;
     threshold = typeof raw.db === "number" ? raw.db : null;
-    for (const [id, v] of Object.entries(raw.e || {})) mem.set(id, v);
+    // Bounds kept under a Deezer id by an older build belong to the same UUID.
+    for (const [id, v] of Object.entries(raw.e || {})) mem.set(migrateKey(id), v);
   } catch {
     /* a corrupt cache is just an empty one */
   }
@@ -86,7 +88,7 @@ function ensureThreshold(db) {
  */
 export function knownEdges(id, db) {
   if (db != null && threshold !== db) return null;
-  return mem.get(String(id)) || null;
+  return mem.get(migrateKey(id)) || null;
 }
 
 /**
@@ -97,7 +99,7 @@ export function knownEdges(id, db) {
 export function primeEdges(id, db) {
   if (!id) return null;
   ensureThreshold(db);
-  const key = String(id);
+  const key = migrateKey(id);
   if (mem.has(key)) return mem.get(key);
   if (pending.has(key)) return null;
   const p = api

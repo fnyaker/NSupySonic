@@ -1,4 +1,5 @@
 <script>
+  import { trackKey } from "../lib/trackkey.js";
   import { onDestroy, onMount } from "svelte";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import {
@@ -74,7 +75,7 @@
   // list at once — the server work runs in a worker thread, so refetching here
   // would just re-read the old state and the row would flicker back.
   $: if ($resolvedUnavailable && gone) {
-    gone = gone.filter((t) => String(t.deezer_id) !== $resolvedUnavailable);
+    gone = gone.filter((t) => trackKey(t) !== $resolvedUnavailable);
   }
   // …then the truth, once the server says it's done.
   let seenVersion = 0;

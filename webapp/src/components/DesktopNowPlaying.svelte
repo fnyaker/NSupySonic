@@ -1,6 +1,7 @@
 <script>
   // Desktop now-playing: two panes — a large cover with controls and a bar
   // visualizer on the left, the up-next queue / lyrics on the right.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { onDestroy, tick } from "svelte";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { push } from "svelte-spa-router";
@@ -35,7 +36,7 @@
   // used to just keep the previous track's blur forever in that case.
   $: bg.set(
     resolveCover($offlineCovers, $current?.album?.cover),
-    $current?.deezer_id ? api.coverUrl($current.deezer_id) : ""
+    trackRef($current) ? api.coverUrl(trackRef($current)) : ""
   );
   // The cover glow reuses the last *decoded* backdrop (never a loading URL).
   $: glowSrc = $bg.length ? $bg[$bg.length - 1].src : "";
@@ -105,7 +106,7 @@
   }
   $: if (tab !== "queue" || !$immersiveOpen) firstQueueFollow = true;
 
-  $: fav = $current && $favorites.has(String($current.deezer_id));
+  $: fav = $current && $favorites.has(trackKey($current));
   $: progress = $player.duration ? ($player.currentTime / $player.duration) * 100 : 0;
   $: bufferedPct = $player.duration
     ? Math.min(100, Math.max(progress, ($buffered / $player.duration) * 100))
@@ -188,7 +189,7 @@
       {#if styleLabel}<em>{styleLabel}{#if $readout.bpm} · {$readout.bpm} BPM{/if}</em>{/if}
     </span>
     <span class="corner">
-      {#if $isAdmin && CAN_KEEP && ($current?.deezer_id || $current?.id)}
+      {#if $isAdmin && CAN_KEEP && trackKey($current)}
         <!-- Deliberately quiet: a small, dim tag in the corner the empty spacer
              used to hold, only for the admin. Tagging is what you do when you
              notice a wrong genre mid-listen, not a call to action — so it stays
@@ -216,12 +217,12 @@
 
       <div class="cover" bind:this={coverBox}>
         <div class="glow" style={`background-image:${cssUrl(glowSrc)}`}></div>
-        {#key $current.deezer_id}
+        {#key trackKey($current)}
           <div class="cover-fade" in:fade={{ duration: 260 }} out:fade={{ duration: 260 }}>
             <!-- 1000px: 1500 is 2-3× the bytes for a marginal gain, and the CDN
                  generates big sizes on demand (slow). Cover.svelte shows the
                  cached 500px instantly and upgrades when this one is decoded. -->
-            <Cover src={hiResCover($current.album?.cover, 1000)} alt={$current.title} kind={$current.podcast ? "podcast" : "album"} fallbackId={$current.deezer_id} eager />
+            <Cover src={hiResCover($current.album?.cover, 1000)} alt={$current.title} kind={$current.podcast ? "podcast" : "album"} fallbackId={trackRef($current)} eager />
           </div>
         {/key}
       </div>

@@ -17,6 +17,7 @@
   // Admin-only, like every write in the studio: one library, one model, and two
   // people labelling it would train it against itself. The whole component is
   // inert for anyone else.
+  import { trackKey, trackRef } from "../lib/trackkey.js";
   import { fade, scale } from "svelte/transition";
   import { onDestroy, tick } from "svelte";
   import { api } from "../lib/api.js";
@@ -54,7 +55,7 @@
       // whole labelled set read to find it.
       const [status, mine] = await Promise.all([
         api.genreStatus(),
-        api.genreTrack(t.deezer_id || t.id).catch(() => null),
+        api.genreTrack(trackRef(t)).catch(() => null),
       ]);
       tags = status?.tags || [];
       counts = status?.counts || {};
@@ -93,7 +94,7 @@
     // archetype, the label and the source all come from the same place the
     // player would have read them from anyway.
     try {
-      await api.genreLabel(track.deezer_id || track.id, tag ? tag.id : null);
+      await api.genreLabel(trackRef(track), tag ? tag.id : null);
       currentTagId = tag ? tag.id : null;
       if (tag) noteRecent(tag.id);
       toasts.push(
@@ -111,7 +112,7 @@
   // fetch it and hand it to the player's cache, so the animation adopts the
   // label NOW instead of on the next play (lib/analysis.js broadcasts it).
   async function refreshVerdict(t) {
-    const id = verdictId(t.deezer_id || t.id);
+    const id = verdictId(trackKey(t));
     if (!id) return;
     try {
       const r = await api.trackAnalysis(id);
@@ -153,7 +154,7 @@
     <div class="sheet" transition:scale={{ duration: 160, start: 0.97 }}>
       <header>
         <div class="thumb">
-          <Cover src={track.album?.cover} alt={track.title} size={48} kind="track" fallbackId={track.deezer_id} />
+          <Cover src={track.album?.cover} alt={track.title} size={48} kind="track" fallbackId={trackRef(track)} />
         </div>
         <div class="ttl">
           <h2>Donner un genre</h2>
