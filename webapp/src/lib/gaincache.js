@@ -57,9 +57,11 @@ function reqp(request) {
   });
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const numericId = (x) => {
   const id = x == null ? "" : String(x);
-  return /^\d+$/.test(id) ? id : null; // Deezer ids only (locals have no gain)
+  // A Deezer numeric id or a row UUID (an upload has a measured gain too).
+  return /^\d+$/.test(id) || UUID_RE.test(id) ? id : null;
 };
 
 export async function initGainCache() {

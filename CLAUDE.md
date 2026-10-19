@@ -631,6 +631,14 @@ server's own work). Four rules came out of it, each with its number:
   serves the smallest one the client accepts (`Vary: Accept-Encoding`, the type still the file's):
   main bundle **460 → 132 kB**, the analyser **219 → 71 kB**, the app core **63 → 19 kB**.
 
+**Gain and lyrics no longer come from Deezer.** `Track.gain` is the measured loudness
+(`analysis.apply_measured_gain`, `gain = lufs + GAIN_FROM_LUFS_OFFSET`; `/api/gain`, `/api/gains` read the
+database only and take UUIDs or Deezer ids; `regain_from_analyses` re-derives it from stored analyses without
+ffmpeg at the start of a backfill). Lyrics are LRCLIB only (`lyrics.ensure_lyrics`, hits more than 3 s off the
+track's duration refused, synced replaces plain, `facts.lyrics_tried` in the sidecar stops repeat searches;
+the route searches after answering). Shared building blocks: `library.update_track_facts` (sidecar `facts`),
+`supysonic/libjob.py` (resumable library job), `supysonic/filetags.py` (facts read from file tags).
+
 **Local play counts.** `/api/listen` writes `Track.play_count` / `last_play` (≥20 s counts, a skip
 doesn't). Before that only Subsonic's `scrobble` did, so a library played entirely through the web
 app looked untouched — and the cleanup decides what to drop from exactly this data.
@@ -852,6 +860,10 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
     tracked tempo moves it up (dnb at 87/174, double-kick metal); at half it is Deezer's hardcore
     listing and ignored, unless alternate beats are unequal in the bass (< 0.3: a one-drop tracked
     at double time) — then it halves; any other disagreement follows the tracker's confidence.
+  **Without any Deezer figure** (`python tools/tempo_eval.py --no-deezer DIR`, 26 arranged records
+  with a beat): the tracker alone is exact on 23, its three misses octaves (dnb 87/174, metal 90/180,
+  reggae 152/76); with a perfect Deezer witness 25 (only reggae stays). The server does not need Deezer's
+  BPM for hard dance, where Deezer publishes none anyway.
   Without numpy the envelope estimator below still answers. A version bump re-measures the library
   on boot (`webui/analysis.reanalyse_if_stale`) instead of waiting for the button.
 - The fallback envelope estimator measures a low-passed envelope — ffmpeg decimates to 1 kHz u8 and

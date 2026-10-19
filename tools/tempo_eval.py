@@ -53,11 +53,49 @@ def verdict(bpm, conf, ref, no_beat):
     return "WRONG"
 
 
+def no_deezer(dirpath):
+    """Two columns: the tracker alone, and the tracker with a perfect Deezer witness.
+
+    Deezer publishes no figure for nearly all of a hard-dance library (see
+    deezer/analysis.py), so the first column is what those tracks get. The
+    witness only ever settles the octave (``_reconcile_tracked``).
+    """
+    from supysonic.deezer.analysis import _measure_tempo, _reconcile_tracked
+
+    truth = json.load(open(os.path.join(dirpath, "truth.json")))
+    print(f"{'record':32s} {'truth':>7s} {'alone':>8s}  {'verdict':10s} {'witnessed':>9s}  verdict")
+    alone_ok = wit_ok = n = 0
+    for rid, t in truth.items():
+        if t["noBeat"]:
+            continue
+        bpm, conf, _g = _measure_tempo(os.path.join(dirpath, rid + ".wav"))
+        v1 = verdict(bpm, conf, t["bpm"], False)
+        if bpm is None:
+            wit, v2 = None, v1
+        else:
+            wit, _c, _s = _reconcile_tracked(t["bpm"], bpm, conf)
+            v2 = verdict(wit, conf, t["bpm"], False)
+        n += 1
+        alone_ok += v1 == "ok"
+        wit_ok += v2 == "ok"
+        print(f"{rid:32s} {t['bpm']:>7} {str(bpm):>8s}  {v1:10s} {str(wit):>9s}  {v2}")
+    print(f"\nrecords with a beat: {n} | tracker alone {alone_ok}/{n} exact | "
+          f"with a Deezer witness {wit_ok}/{n}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("dir")
     ap.add_argument("--render", action="store_true")
+    ap.add_argument(
+        "--no-deezer",
+        action="store_true",
+        help="score the tracker with NO Deezer figure, next to the same records "
+        "reconciled with a Deezer figure equal to the truth (the best Deezer can do)",
+    )
     a = ap.parse_args()
+    if a.no_deezer:
+        return no_deezer(a.dir)
     if a.render:
         render(a.dir)
     from supysonic.deezer.analysis import _measure_tempo

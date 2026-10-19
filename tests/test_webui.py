@@ -719,11 +719,11 @@ class WebUITestCase(unittest.TestCase):
     # -- lyrics / playlist / discography --------------------------------
 
     def test_lyrics(self):
+        # Deezer is no lyrics source: an id with no row answers null, and the
+        # gateway is never asked.
         self._login()
         data = self.client.get("/api/lyrics/3256388531").get_json()
-        self.assertEqual(len(data["lyrics"]["synced"]), 2)
-        self.assertEqual(data["lyrics"]["synced"][1]["time"], 2500)
-        self.assertIn("line one", data["lyrics"]["text"])
+        self.assertIsNone(data["lyrics"])
 
     def test_lyrics_archived_sidecar(self):
         # An archived track with a .lrc sidecar is served from disk (source
@@ -747,19 +747,27 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(data["lyrics"]["source"], "archive")
         self.assertEqual(data["lyrics"]["synced"][0]["text"], "archived line")
 
+    def _row_with_gain(self, sid, gain):
+        from supysonic.deezer import library
+
+        with self.app.app_context():
+            root = library.get_root_folder(self.archive)
+            row = library.upsert_track(raw_track(sid, "T%s" % sid), root, "FLAC")
+            row.gain = gain
+            row.save()
+
     def test_track_gain(self):
-        # ReplayGain endpoint (volume normalization): a numeric Deezer id with no
-        # DB row falls back to a live fetch; a non-numeric/local id is null.
+        # The gain comes from the row alone: no row, no gain, and no Deezer call.
         self._login()
-        data = self.client.get("/api/gain/5").get_json()
-        self.assertAlmostEqual(data["gain"], -7.0)
+        self.assertIsNone(self.client.get("/api/gain/5").get_json()["gain"])
+        self._row_with_gain(5, -7.0)
+        self.assertAlmostEqual(self.client.get("/api/gain/5").get_json()["gain"], -7.0)
         self.assertIsNone(self.client.get("/api/gain/not-a-number").get_json()["gain"])
 
     def test_track_gains_batch(self):
-        # The player asks for the gain of everything it is about to play in ONE
-        # call, BEFORE any of it starts — a gain that arrives later is a volume
-        # change in the middle of a song.
         self._login()
+        self._row_with_gain(5, -7.0)
+        self._row_with_gain(6, -7.0)
         gw = self.app.deezer.dz.gw
         gw.gain_batches = []
         data = self.client.post(
@@ -767,12 +775,9 @@ class WebUITestCase(unittest.TestCase):
         ).get_json()
         self.assertAlmostEqual(data["gains"]["5"], -7.0)
         self.assertAlmostEqual(data["gains"]["6"], -7.0)
-        # Asked about, not answered for: null, never a missing key or a 500.
         self.assertIsNone(data["gains"]["999"])
-        self.assertNotIn("not-a-number", data["gains"])  # locals have no gain
-        # One gateway call, de-duplicated, junk filtered out.
-        self.assertEqual(len(gw.gain_batches), 1)
-        self.assertEqual(gw.gain_batches[0], ["5", "6", "999"])
+        self.assertNotIn("not-a-number", data["gains"])
+        self.assertEqual(gw.gain_batches, [])  # database only
 
     def test_track_gains_batch_rejects_junk(self):
         self._login()

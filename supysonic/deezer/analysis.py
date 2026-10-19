@@ -1583,11 +1583,74 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
             track.path, exc, exc_info=True,
         )
         return None, f"database: {exc}"
+    apply_measured_gain(track, feats.get("lufs"))
     logger.info(
         "analysed %s: %s bpm (%s), %s (%.2f) in %.1fs",
         track.path, bpm, bpm_source, style, style_conf, payload["took"],
     )
     return row, None
+
+
+#: ``Track.gain`` is what the player reads as the track's loudness (it applies
+#: ``-(gain + 18.4)``). Measured integrated loudness maps onto it as
+#: ``gain = lufs + offset``. Theoretical value: Deezer's reference is 18.4 and
+#: the measure targets -18 LUFS, hence -0.4 dB. ``tools/gain_calibrate.py`` gives
+#: the median on a real library.
+GAIN_FROM_LUFS_OFFSET = -0.4
+
+
+def gain_from_lufs(lufs):
+    """The ``Track.gain`` value for a measured integrated loudness, or None."""
+    try:
+        v = float(lufs)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float("inf"), float("-inf")) or not -70.0 < v < 5.0:
+        return None  # ebur128 reads -inf on silence: no loudness, no gain
+    return round(v + GAIN_FROM_LUFS_OFFSET, 2)
+
+
+def apply_measured_gain(track, lufs):
+    """Store the measured gain on the row (an archive or an upload alike)."""
+    gain = gain_from_lufs(lufs)
+    if gain is None:
+        return False
+    try:
+        Track.update(gain=gain).where(Track.id == track.id).execute()
+    except Exception:
+        logger.debug("analysis: could not store the gain", exc_info=True)
+        return False
+    track.gain = gain
+    return True
+
+
+def regain_from_analyses(page_size=500):
+    """The gain of every analysed track, from the stored measure: no ffmpeg.
+
+    A quick pass over ``TrackAnalysis.data`` (the ``lufs`` it carries); returns
+    how many rows changed.
+    """
+    changed = 0
+    after = None
+    while True:
+        q = TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.data)
+        if after is not None:
+            q = q.where(TrackAnalysis.track > after)
+        rows = list(q.order_by(TrackAnalysis.track).limit(page_size))
+        if not rows:
+            return changed
+        after = rows[-1].track_id
+        for r in rows:
+            try:
+                lufs = (json.loads(r.data or "{}") or {}).get("lufs")
+            except ValueError:
+                continue
+            gain = gain_from_lufs(lufs)
+            if gain is None:
+                continue
+            changed += Track.update(gain=gain).where(
+                Track.id == r.track_id, (Track.gain.is_null()) | (Track.gain != gain)
+            ).execute()
 
 
 _FAMILY_ARCH = {fid: arch for fid, _label, arch, _fn in FAMILIES}
@@ -2268,6 +2331,11 @@ def backfill(provider=None, force=False, limit=None, progress=None, on_stats=Non
     workers = auto_workers(workers)
     if workers > 1:
         provider = None
+    try:
+        # Rows measured before the gain came from the measure: no ffmpeg needed.
+        regain_from_analyses()
+    except Exception:
+        logger.warning("analysis: regain pass failed", exc_info=True)
 
     stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None,
              "workers": workers, "failures": [], "failure_reasons": {}}

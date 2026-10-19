@@ -1922,138 +1922,143 @@ def discography(artist_id):
     return jsonify({"discography": out})
 
 
+def _lyrics_in_background(track_id):
+    """Ask LRCLIB for an archived track's lyrics once, after the response."""
+    app = current_app._get_current_object()
+
+    def run():
+        from ..db import close_connection, open_connection
+        from ..deezer import lyrics as deezer_lyrics
+
+        with app.app_context():
+            try:
+                open_connection(reuse=True)
+                track = Track.get_or_none(Track.id == track_id)
+                if track is not None:
+                    deezer_lyrics.ensure_lyrics(None, track)
+            except Exception:
+                logger.debug("background lyrics failed", exc_info=True)
+            finally:
+                close_connection()
+
+    threading.Thread(target=run, name="lyrics-bg", daemon=True).start()
+
+
+_LYRICS_COLD_TIMEOUT = (2, 4)
+
+
 @webapi.route("/lyrics/<track_id>")
 @login_required
 def lyrics(track_id):
     from ..deezer import lyrics as deezer_lyrics
-    from ..deezer.archive import find_local_track
 
-    provider = _provider()
-
-    # Archived track: serve (and, on first view, archive) its .lrc sidecar. This
-    # works even when Deezer is disabled/unreachable and upgrades to synced
-    # lyrics from the public LRCLIB API when Deezer itself had none.
-    track = find_local_track(track_id) if _valid_id(track_id) else None
-    if track is not None and track.path and os.path.isfile(track.path):
-        try:
-            lyr = deezer_lyrics.ensure_lyrics(provider, track)
-        except Exception:
-            lyr = None
-        if lyr:
-            return jsonify({"lyrics": lyr})
-
-    # Cold (not-yet-archived) track: live Deezer lookup, nothing to archive to.
-    # Degrade to "no lyrics" when Deezer is disabled or unreachable.
-    if provider is None or not _valid_id(track_id):
+    key = _gain_key(track_id)
+    track = Track.get_or_none(Track.id == key) if key is not None else None
+    if track is None or not _may_access_track(track):
         return jsonify({"lyrics": None})
+
+    # Archived: the .lrc sidecar, read from disk. A track LRCLIB was never asked
+    # about is searched AFTER the answer, never in the request.
+    if track.path and os.path.isfile(track.path):
+        lyr = deezer_lyrics.read_sidecar(track)
+        if lyr is None or not lyr.get("synced"):
+            if not deezer_lyrics.lyrics_tried(track):
+                _lyrics_in_background(track.id)
+        return jsonify({"lyrics": lyr})
+
+    # Not archived (a row with no file): one short LRCLIB request, nothing kept.
+    artist = track.artist.name if track.artist else None
+    album = track.album.name if track.album else None
+    lyr = deezer_lyrics.fetch_lrclib(
+        track.title, artist, album, track.duration, timeout=_LYRICS_COLD_TIMEOUT
+    )
+    return jsonify({"lyrics": lyr})
+
+
+def _gain_key(raw):
+    """The row id a gain request names: a UUID as is, a Deezer numeric id
+    through ``ids.track_uuid`` (a local computation); None for anything else."""
+    import uuid as _uuid
+
+    from ..deezer import ids
+
+    text = str(raw or "")
     try:
-        raw = provider.get_lyrics(track_id)
-    except Exception:
-        return jsonify({"lyrics": None})
-    return jsonify({"lyrics": deezer_lyrics.normalize_gw_lyrics(raw)})
+        return _uuid.UUID(text)
+    except ValueError:
+        pass
+    return ids.track_uuid(text) if _valid_id(text) else None
+
+
+def _gain_visible(row):
+    """Whether this row's gain may be shown to the caller (uploads are private)."""
+    owner = getattr(row, "owner_id", None)
+    if owner is None:
+        return True
+    user = getattr(request, "webuser", None)
+    return bool(user and (user.admin or user.id == owner))
 
 
 @webapi.route("/gain/<track_id>")
 @login_required
 def track_gain(track_id):
-    # ReplayGain for the web player's volume normalization. Browse responses
-    # already carry it when known; this fills the gap for tracks whose row
-    # predates the gain column (or was imported from a dict without GAIN) —
-    # fetched once from Deezer, then cached on the row so it's instant after.
-    if not _valid_id(track_id):  # Deezer tracks only (locals have no ReplayGain)
+    # ReplayGain for the web player's volume normalization: the loudness measured
+    # on the file (analysis), stored on the row. Database only — no Deezer call.
+    key = _gain_key(track_id)
+    if key is None:
         return jsonify({"gain": None})
-
-    from ..deezer import ids
-
-    row = None
-    try:
-        row = Track[ids.track_uuid(track_id)]
-        if row.gain is not None:
-            return jsonify({"gain": row.gain})
-    except Track.DoesNotExist:
-        pass
-
-    provider = _provider()
-    if provider is None:
+    row = Track.select(Track.gain, Track.owner).where(Track.id == key).first()
+    if row is None or not _gain_visible(row):
         return jsonify({"gain": None})
-    try:
-        info = provider.get_track_info(track_id)
-        gain = _gain(info.get("GAIN"))
-    except Exception:
-        return jsonify({"gain": None})
-    if gain is not None and row is not None:
-        row.gain = gain
-        row.save()
-    return jsonify({"gain": gain})
+    return jsonify({"gain": row.gain})
 
 
 # How many ids one batch may ask about. The player asks for what it is about to
-# play plus its lookahead window — a handful — so this is generous; it is here
-# to bound the gateway call, not the caller.
+# play plus its lookahead window — a handful — so this is generous.
 GAIN_BATCH_MAX = 100
 
 
 @webapi.route("/gains", methods=["POST"])
 @login_required
 def track_gains():
-    """ReplayGain for a whole run of tracks in ONE call.
+    """ReplayGain for a whole run of tracks in ONE query.
 
     The player normalizes a track at the instant its source is swapped in, so a
     gain that arrives later is a volume change in the middle of a song. This is
-    what lets it ask for everything it is about to play — the current track and
-    its lookahead window — before any of it starts, instead of one late request
-    per track.
-
-    Answers from the database first (already known for anything imported or
-    archived), then ONE gateway call for the rest. A Deezer outage costs
-    nothing: the DB answers are returned and the unknown ones stay null (an
-    unknown gain simply means that track isn't normalized, never an error).
+    what lets it ask for everything it is about to play before any of it starts.
+    Ids may be UUIDs or Deezer numeric ids; the answer is keyed by the id as
+    asked. The database is the only source: an unknown gain stays null (that
+    track simply isn't normalized).
     """
     data = request.get_json(silent=True) or {}
     raw = data.get("ids") or []
     if not isinstance(raw, list):
         return jsonify({"error": "ids must be a list"}), 400
-    # De-duplicated, order-preserving, numeric ids only (locals have no gain).
-    ids = list(dict.fromkeys(str(x) for x in raw if _valid_id(x)))[:GAIN_BATCH_MAX]
-    if not ids:
-        return jsonify({"gains": {}})
-
-    from ..deezer import ids as dz_ids
-
-    gains = {i: None for i in ids}
-    # One query for the lot, keyed by the canonical uuid5 (the rows' primary
-    # key) so this is an index lookup rather than a scan on deezer_id.
-    by_uuid = {dz_ids.track_uuid(i): i for i in ids}
-    rows = {}
-    try:
-        for row in Track.select().where(Track.id.in_(list(by_uuid))):
-            sng = by_uuid.get(row.id)
-            if sng is None:
-                continue
-            rows[sng] = row
-            if row.gain is not None:
-                gains[sng] = row.gain
-    except Exception:
-        logger.warning("gain batch DB lookup failed", exc_info=True)
-
-    missing = [i for i in ids if gains[i] is None]
-    provider = _dz_live() if missing else None
-    if provider is not None:
+    asked = list(dict.fromkeys(str(x) for x in raw))
+    keys = {}
+    for i in asked:
+        k = _gain_key(i)
+        if k is not None:
+            keys[i] = k
+        if len(keys) >= GAIN_BATCH_MAX:
+            break
+    gains = {i: None for i in keys}
+    if keys:
+        wanted = set(keys.values())
         try:
-            for info in provider.get_tracks(missing):
-                sng = str((info or {}).get("SNG_ID") or "")
-                if sng not in gains:
-                    continue
-                gain = _gain(info.get("GAIN"))
-                if gain is None:
-                    continue
-                gains[sng] = gain
-                row = rows.get(sng)
-                if row is not None:
-                    row.gain = gain
-                    row.save()
+            found = {
+                r.id: r
+                for r in Track.select(Track.id, Track.gain, Track.owner).where(
+                    Track.id.in_(list(wanted))
+                )
+            }
         except Exception:
-            _log_deezer_failure("gain batch lookup failed for %d track(s)", len(missing))
+            logger.warning("gain batch DB lookup failed", exc_info=True)
+            found = {}
+        for i, k in keys.items():
+            r = found.get(k)
+            if r is not None and _gain_visible(r):
+                gains[i] = r.gain
     return jsonify({"gains": gains})
 
 

@@ -182,15 +182,12 @@ class LyricsTestCase(TestBase):
         res = lyrics.ensure_lyrics(None, t)
         self.assertEqual(res["synced"][0]["text"], "cached")
 
-    def test_ensure_prefers_deezer_synced(self):
+    def test_ensure_never_asks_deezer(self):
         t = self._archived_track()
-        prov = FakeProvider(gw_lyrics=GW_SYNCED)
-        # Deezer already has synced lyrics -> LRCLIB is never consulted.
-        sess = FakeSession({})
+        prov = FakeProvider(gw_lyrics=GW_SYNCED, boom=True)  # get_lyrics would raise
+        sess = FakeSession({"get": FakeResp(200, {"syncedLyrics": SYNCED_LRC})})
         res = lyrics.ensure_lyrics(prov, t, session=sess, embed=False)
-        self.assertEqual(res["source"], "deezer")
-        self.assertEqual(sess.calls, [])
-        self.assertTrue(os.path.isfile(lyrics.sidecar_path(t)))
+        self.assertEqual(res["source"], "lrclib")
 
     def test_ensure_falls_back_to_lrclib_for_synced(self):
         t = self._archived_track()
@@ -232,23 +229,12 @@ class LyricsTestCase(TestBase):
         self.assertIsNotNone(res)
         self.assertTrue(os.path.isfile(lyrics.sidecar_path(t)))
 
-    def test_ensure_allow_lrclib_false_is_deezer_only(self):
-        # The archive hot path (allow_lrclib=False) never touches LRCLIB, even
-        # when Deezer only has plain lyrics.
+    def test_ensure_allow_lrclib_false_never_calls_out(self):
         t = self._archived_track()
-        prov = FakeProvider(gw_lyrics={"LYRICS_TEXT": "plain only"})
         sess = FakeSession({})  # any LRCLIB call would KeyError
-        res = lyrics.ensure_lyrics(prov, t, session=sess, embed=False, allow_lrclib=False)
-        self.assertEqual(res["source"], "deezer")
-        self.assertEqual(sess.calls, [])
-
-    def test_ensure_allow_lrclib_false_none_when_deezer_empty(self):
-        t = self._archived_track()
-        res = lyrics.ensure_lyrics(
-            FakeProvider(None), t, session=FakeSession({}), embed=False, allow_lrclib=False
-        )
+        res = lyrics.ensure_lyrics(None, t, session=sess, embed=False, allow_lrclib=False)
         self.assertIsNone(res)
-        self.assertFalse(os.path.isfile(lyrics.sidecar_path(t)))
+        self.assertEqual(sess.calls, [])
 
     # -- backfill -------------------------------------------------------
 
@@ -260,9 +246,9 @@ class LyricsTestCase(TestBase):
         already = self._archived_track(3, title="No Surprises")
         lyrics.write_sidecar(already, {"synced": [], "text": "have it"})
 
-        prov = FakeProvider(gw_lyrics=GW_SYNCED)
+        sess = FakeSession({"get": FakeResp(200, {"syncedLyrics": SYNCED_LRC})})
         stats = lyrics.backfill_archived_lyrics(
-            prov, session=FakeSession({}), sleep=0, progress=lambda s: None
+            None, session=sess, sleep=0, progress=lambda s: None
         )
         self.assertEqual(stats["scanned"], 1)  # only track 1 needed fetching
         self.assertEqual(stats["synced"], 1)
