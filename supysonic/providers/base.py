@@ -135,6 +135,23 @@ class Provider:
         """Instant, no network: is it worth calling this provider at all?"""
         return True
 
+    def configured(self) -> bool:
+        """Does it have what it needs (credentials, a dependency) to work at
+        all? Instant, no network, and NOT "reachable right now": an outage must
+        not read as a provider that was never set up. Decides whether a
+        provider nobody ever switched is on."""
+        return self.available()
+
+    def switch(self):
+        """The provider's own on/off switch when it predates the registry
+        (YouTube's ``yt.enabled``): True / False, or None for "the registry
+        decides"."""
+        return None
+
+    def toggle(self, on) -> bool:
+        """Flip that switch; False when the provider has none."""
+        return False
+
     def health(self, force=False) -> Health:
         return health()
 

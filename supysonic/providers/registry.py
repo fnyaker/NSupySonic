@@ -131,13 +131,16 @@ class Registry:
         provider = self._providers.get(provider_id)
         if provider is None:
             return False
+        own = provider.switch()
+        if own is not None:
+            return own
         _, flags = self._settings()
         flag = flags.get(provider_id)
         if flag is not None:
             return flag
         # Never switched by anybody: on, unless it needs a credential nobody
         # has given yet.
-        return not provider.requires_credentials or provider.available()
+        return not provider.requires_credentials or provider.configured()
 
     def require(self, provider_id, capability):
         """The provider ``provider_id``, which must declare ``capability``."""
@@ -171,6 +174,9 @@ class Registry:
     def set_enabled(self, provider_id, on):
         if provider_id not in self._providers:
             raise KeyError(provider_id)
+        if self._providers[provider_id].toggle(on):
+            self._cache = None
+            return
         self._store.set(_on_key(provider_id), "1" if on else "0")
         self._cache = None
 
