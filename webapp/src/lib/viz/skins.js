@@ -63,6 +63,7 @@
 // id is real, and importing the registry would drag every world's shader in
 // behind it (see worlds/catalogue.js).
 import { WORLD_META } from "./worlds/catalogue.js";
+import { ancestorsOf } from "../genretree.js";
 
 // --- the catalogue ----------------------------------------------------------
 export const SKINS = {
@@ -421,6 +422,12 @@ for (const [from, to] of Object.entries(ALIASES)) {
 export function skinId(name, archetype = "") {
   const hit = BY_KEY.get(normalise(name));
   if (hit) return hit;
+  // No row of its own: the nearest genre above it in the genre tree that has one
+  // (lib/genretree.js — the server's tree, a static copy of the shelves offline).
+  for (const up of ancestorsOf(name)) {
+    const above = BY_KEY.get(normalise(up));
+    if (above) return above;
+  }
   return ARCHETYPE_SKIN[archetype] || "";
 }
 

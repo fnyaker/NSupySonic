@@ -295,9 +295,22 @@ export const api = {
   genreDefaults: () => req("/genre/tags/defaults", { method: "POST" }),
   genreLabel: (track, tag) =>
     req("/genre/label", { method: "POST", body: body({ track, tag }) }),
-  genreCandidates: (limit = 40, sort = null) =>
-    req("/genre/candidates?limit=" + limit + (sort ? "&sort=" + sort : "")),
+  genreCandidates: (limit = 40, sort = null, last = null) =>
+    req(
+      "/genre/candidates?limit=" + limit + (sort ? "&sort=" + sort : "") +
+        (last ? "&last=" + encodeURIComponent(last) : ""),
+    ),
   genreLabelled: () => req("/genre/labelled"),
+  // The genre hierarchy (nodes, links, version) and its edits (admin).
+  genreTree: () => req("/genre/tree"),
+  genreTreeEdge: (child, parent, weight = 1, method = "POST") =>
+    req("/genre/tree/edge", { method, body: body({ child, parent, weight }) }),
+  genreTreeCut: (child, parent) =>
+    req("/genre/tree/edge", { method: "DELETE", body: body({ child, parent }) }),
+  genreTreeMove: (child, parent, oldParent = null, weight = 1) =>
+    req("/genre/tree/move", { method: "POST", body: body({ child, parent, old_parent: oldParent, weight }) }),
+  genreTreeUndo: () => req("/genre/tree/undo", { method: "POST" }),
+  genreTreeReset: () => req("/genre/tree/reset", { method: "POST" }),
   // Untagged tracks with a vector, for self-training (lib/genre/core.js `pseudo`).
   genrePool: (limit = 600) => req("/genre/pool?limit=" + limit),
   // One track's tag and the vocabulary ranked for it (the tag sheet).

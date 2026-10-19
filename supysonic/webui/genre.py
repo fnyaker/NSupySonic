@@ -484,7 +484,9 @@ def _scores_json(guess, protos):
     """The vocabulary ranked for one track: [[label, score, head, proto]]."""
     from ..deezer import genre as gen
 
-    return [list(r) for r in gen.rank_scores(guess, protos, SCORES_MAX)]
+    # ``?last=`` is the genre the person chose last: its tree neighbours rise.
+    last = (request.args.get("last") or "").strip()[:48] or None
+    return [list(r) for r in gen.rank_scores(guess, protos, SCORES_MAX, last=last)]
 
 
 def _served_bpm(track):
@@ -807,6 +809,20 @@ def genre_tags_defaults():
     return jsonify({"created": created})
 
 
+def _tree_changed(drop=None):
+    """A tag appeared, was renamed or went: the tree's nodes are the tags' names,
+    so its version moves (a deleted tag's children first rise to its parents)."""
+    from .. import genretree
+
+    try:
+        if drop is not None:
+            genretree.remove_node(drop)
+        else:
+            genretree.bump()
+    except Exception:
+        logger.warning("genre: could not update the tree", exc_info=True)
+
+
 @webapi.route("/genre/tags", methods=["POST"])
 @login_required
 @admin_required
@@ -821,6 +837,7 @@ def genre_tag_create():
     tag = GenreTag.get_or_none(GenreTag.name == name)
     if tag is None:
         tag = GenreTag.create(name=name, color=(data.get("color") or None), archetype=arch)
+        _tree_changed()
     return jsonify(_tag_json(tag))
 
 
@@ -835,6 +852,7 @@ def genre_tag_edit(tag_id):
         # The labels go with it; the trained model does not, because it stays
         # valid for whatever it was trained on until a new one replaces it.
         TrackTag.delete().where(TrackTag.tag == tag).execute()
+        _tree_changed(drop=tag.name)
         tag.delete_instance()
         return jsonify({"deleted": True})
     data = request.get_json(silent=True) or {}
@@ -850,8 +868,177 @@ def genre_tag_edit(tag_id):
         if arch is not None and arch not in ARCHETYPES:
             return jsonify({"error": "unknown archetype"}), 400
         tag.archetype = arch
+    renamed = "name" in data
     tag.save()
+    if renamed:
+        _tree_changed()
     return jsonify(_tag_json(tag))
+
+
+# --- the genre tree ----------------------------------------------------------
+# supysonic/genretree.py holds the tree and answers from memory; these routes
+# serve it and let the admin edit it. Every write moves its version, re-decides
+# the verdicts on a worker and tells the devices — exactly like a tag or a head.
+
+
+def _tree_json():
+    from .. import genretree
+
+    tree = genretree.get()
+    tags = {t.name: t for t in GenreTag.select()}
+    names = sorted(set(tree.nodes) | set(tags))
+    nodes = []
+    for n in names:
+        t = tags.get(n)
+        nodes.append({
+            "id": t.id if t else None,
+            "name": n,
+            "color": t.color if t else None,
+            "archetype": t.archetype if t else None,
+            "family": tree.family(n) if n in tree.nodes else None,
+        })
+    edges = [
+        {"child": c, "parent": p, "weight": w}
+        for c in sorted(tree.parents)
+        for p, w in sorted(tree.parents[c])
+    ]
+    return {
+        "version": tree.version,
+        "default": tree.virtual,
+        "can_undo": genretree.can_undo() if not tree.virtual else False,
+        "nodes": nodes,
+        "edges": edges,
+        "roots": [n for n in names if not tree.parents.get(n)],
+    }
+
+
+@webapi.route("/genre/tree")
+@login_required
+def genre_tree():
+    """Every genre and the links between them: ``nodes`` (tag id, colour,
+    archetype and engine family when it has one), ``edges`` (child, parent,
+    weight), ``roots``. The version rides in ``X-NS-Tree``; the body carries a
+    validator like every JSON GET, so an unchanged tree is an empty 304."""
+    from .. import genretree
+
+    if _is_admin() and genretree.get().virtual:
+        # The tree is written the first time the admin looks at it (it adds the
+        # shelves as tags, which the vocabulary's own seed leaves alone).
+        from ..deezer import genre as gen
+
+        gen.seed_default_tags()
+        genretree.seed_tree()
+    resp = jsonify(_tree_json())
+    resp.headers["X-NS-Tree"] = str(genretree.version())
+    return resp
+
+
+def _after_tree_write():
+    """The verdicts follow the tree: devices told, library re-decided."""
+    from ..deezer import genre as gen
+
+    _tell_devices()
+    if gen.active_head() is not None:
+        start_relabel(current_app._get_current_object())
+
+
+def _tree_answer(extra=None):
+    out = _tree_json()
+    if extra:
+        out.update(extra)
+    return jsonify(out)
+
+
+def _tree_names(data, *keys):
+    out = []
+    for k in keys:
+        v = data.get(k)
+        if isinstance(v, int) and not isinstance(v, bool):
+            tag = GenreTag.get_or_none(GenreTag.id == v)
+            v = tag.name if tag else None
+        elif isinstance(v, str):
+            v = v.strip()[:48] or None
+        else:
+            v = None
+        out.append(v)
+    return out
+
+
+def _tree_write(fn, *args, **kwargs):
+    from .. import genretree
+
+    try:
+        fn(*args, **kwargs)
+    except genretree.CycleError:
+        return jsonify({"error": "cycle"}), 409
+    except KeyError:
+        return jsonify({"error": "unknown genre"}), 404
+    except ValueError:
+        return jsonify({"error": "invalid request"}), 400
+    _after_tree_write()
+    return _tree_answer()
+
+
+@webapi.route("/genre/tree/edge", methods=["POST", "PATCH", "DELETE"])
+@login_required
+@admin_required
+def genre_tree_edge():
+    """POST puts ``child`` under ``parent`` (``weight`` 0..1, default 1) in
+    addition to the parents it has; PATCH changes the weight of an existing link;
+    DELETE cuts it. 409 when the link would make a genre its own ancestor."""
+    from .. import genretree
+
+    data = request.get_json(silent=True) or {}
+    child, parent = _tree_names(data, "child", "parent")
+    if not child or not parent:
+        return jsonify({"error": "child and parent required"}), 400
+    if request.method == "DELETE":
+        return _tree_write(genretree.remove_parent, child, parent)
+    weight = data.get("weight", 1.0)
+    if request.method == "PATCH":
+        tree = genretree.get()
+        if parent not in dict(tree.parents.get(child, ())):
+            return jsonify({"error": "no such link"}), 404
+    return _tree_write(genretree.add_parent, child, parent, weight)
+
+
+@webapi.route("/genre/tree/move", methods=["POST"])
+@login_required
+@admin_required
+def genre_tree_move():
+    """Move ``child`` under ``parent`` (null: make it a root), out of
+    ``old_parent`` when given, else out of every parent it had."""
+    from .. import genretree
+
+    data = request.get_json(silent=True) or {}
+    child, parent, old = _tree_names(data, "child", "parent", "old_parent")
+    if not child or (parent is None and data.get("parent") is not None):
+        return jsonify({"error": "child required"}), 400
+    return _tree_write(genretree.move, child, parent, data.get("weight", 1.0), old)
+
+
+@webapi.route("/genre/tree/undo", methods=["POST"])
+@login_required
+@admin_required
+def genre_tree_undo():
+    from .. import genretree
+
+    if not genretree.undo():
+        return jsonify({"error": "nothing to undo"}), 409
+    _after_tree_write()
+    return _tree_answer()
+
+
+@webapi.route("/genre/tree/reset", methods=["POST"])
+@login_required
+@admin_required
+def genre_tree_reset():
+    """Back to the default tree. Tags and the labels on tracks are untouched."""
+    from .. import genretree
+
+    genretree.reset_tree()
+    _after_tree_write()
+    return _tree_answer()
 
 
 @webapi.route("/genre/label", methods=["POST"])
@@ -1311,7 +1498,11 @@ def genre_bulk_preview():
     current = _current_tags(rows)
     head = gen.active_head()
     knows = bool(head) and tag.name in head["labels"]
-    family = (head or {}).get("families", {}).get(tag.name) if head else None
+    family = None
+    if head:
+        from .. import genretree
+
+        family = genretree.family_of(tag.name) or head.get("families", {}).get(tag.name)
     bpms = _served_bpms(rows) if head and head.get("inputs") else {}
     deadline = time.monotonic() + BULK_PREVIEW_BUDGET
     out = []
@@ -1344,6 +1535,10 @@ def genre_bulk_preview():
             if knows and reason is None:
                 if row["model"]["level"] == "family":
                     differs = not family or opinion["style"] != family
+                elif row["model"]["level"] == "ancestor":
+                    from .. import genretree
+
+                    differs = not genretree.within(tag.name, opinion["style"])
                 else:
                     differs = opinion["style"] != tag.name
                 if differs:

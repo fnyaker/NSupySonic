@@ -1770,8 +1770,8 @@ def _decide_style(track, feats, vec):
         )
         return out
     if verdict:
-        if verdict["level"] == "family":
-            fam_arch = _FAMILY_ARCH.get(verdict["style"])
+        if verdict["level"] in ("family", "ancestor"):
+            fam_arch = _FAMILY_ARCH.get(verdict["style"]) or gen.archetype_for(verdict["style"])
         else:
             fam_arch = gen.archetype_for(verdict["style"])
         out.update(style=verdict["style"], conf=verdict["conf"], source="model",
@@ -1885,7 +1885,7 @@ def reapply_head(on_stats=None, should_stop=None, page_size=None):
             except (TypeError, ValueError):
                 data = {}
             source = data.get("styleSource", "heuristic")
-            key = "family" if (source == "model" and data.get("styleLevel") == "family") else source
+            key = "family" if (source == "model" and data.get("styleLevel") in ("family", "ancestor")) else source
             if key in stats:
                 stats[key] += 1
             stats["scanned"] += 1
