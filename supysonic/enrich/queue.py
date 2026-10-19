@@ -107,7 +107,7 @@ def _drain():
             try:
                 close_connection()
             except Exception:
-                pass
+                logger.debug("enrich: closing the connection failed", exc_info=True)
 
 
 # -- one track ----------------------------------------------------------------------
