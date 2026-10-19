@@ -3,7 +3,7 @@
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
   import { player, toasts, isAdmin, openExport, openGenreBulk } from "../lib/stores.js";
-  import { toggleEntityFavorite, downloadTracks } from "../lib/actions.js";
+  import { toggleEntityFavorite, entityMeta, downloadTracks } from "../lib/actions.js";
   import { duration as fmtDuration } from "../lib/format.js";
   import Cover from "../components/Cover.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -60,7 +60,7 @@
 
   async function toggleFav() {
     const next = !fav;
-    if (await toggleEntityFavorite("album", id, next)) fav = next;
+    if (await toggleEntityFavorite("album", id, next, entityMeta("album", data?.album || {}))) fav = next;
   }
 
   let dlBusy = false;
@@ -103,7 +103,7 @@
     <div class="row actions">
       <button class="pill" on:click={() => playAll()}><Icon name="play" size={18} /> Lire</button>
       <button class="icon-btn" on:click={shufflePlay} aria-label="Lecture aléatoire"><Icon name="shuffle" size={22} /></button>
-      {#if $isAdmin && CAN_KEEP}
+      {#if CAN_KEEP}
         <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
       {/if}
       {#if !REMOTE}

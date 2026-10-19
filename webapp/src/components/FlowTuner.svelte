@@ -2,8 +2,7 @@
   import { onMount } from "svelte";
   import { fade, scale } from "svelte/transition";
   import { api } from "../lib/api.js";
-  import { toasts } from "../lib/stores.js";
-  import Icon from "./Icon.svelte";
+    import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
 
   export let onClose = () => {};
@@ -11,7 +10,6 @@
   let clusters = [];
   let available = true;
   let loading = true;
-  let saving = false;
 
   $: onCount = clusters.filter((c) => c.enabled).length;
 
@@ -25,35 +23,13 @@
     }
     loading = false;
   });
-
-  function toggle(c) {
-    c.enabled = !c.enabled;
-    clusters = clusters; // trigger reactivity
-  }
-
-  function setAll(value) {
-    clusters = clusters.map((c) => ({ ...c, enabled: value }));
-  }
-
-  async function save() {
-    saving = true;
-    try {
-      await api.setFlowClusters(clusters.map((c) => ({ id: c.id, enabled: c.enabled })));
-      toasts.push("Flow personnalisé mis à jour");
-      onClose();
-    } catch {
-      toasts.push("Échec de la personnalisation", "error");
-    } finally {
-      saving = false;
-    }
-  }
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="overlay" transition:fade={{ duration: 150 }} on:click|self={onClose}>
   <div class="modal" transition:scale={{ duration: 150, start: 0.96 }}>
     <header>
-      <h2>Personnaliser mon Flow</h2>
+      <h2>Mon Flow</h2>
       <button class="close" on:click={onClose} aria-label="Fermer"><Icon name="close" size={20} /></button>
     </header>
 
@@ -63,15 +39,14 @@
       <p class="muted pad">La personnalisation du Flow n'est pas disponible pour ce compte.</p>
     {:else}
       <div class="sub">
-        <p class="muted">Choisissez les styles à entendre dans votre Flow — {onCount}/{clusters.length} activés.</p>
-        <div class="bulk">
-          <button on:click={() => setAll(true)}>Tout activer</button>
-          <button on:click={() => setAll(false)}>Tout désactiver</button>
-        </div>
+        <p class="muted">
+          Les styles de votre Flow Deezer — {onCount}/{clusters.length} activés. Ils se règlent
+          depuis l'application Deezer ; ici, ils ne sont plus modifiés.
+        </p>
       </div>
       <div class="grid">
         {#each clusters as c (c.id)}
-          <button class="cl" class:on={c.enabled} on:click={() => toggle(c)} title={c.title}>
+          <div class="cl" class:on={c.enabled} title={c.title}>
             <div class="tile">
               <!-- Through Cover.svelte so a flaky CDN gets the same retry +
                    placeholder treatment as everywhere else (a bare <img> just
@@ -80,12 +55,11 @@
               <span class="check" aria-hidden="true"><Icon name="check" size={15} /></span>
               <span class="name">{c.title}</span>
             </div>
-          </button>
+          </div>
         {/each}
       </div>
       <footer>
-        <button class="pill ghost" on:click={onClose}>Annuler</button>
-        <button class="pill" on:click={save} disabled={saving}>{saving ? "…" : "Enregistrer"}</button>
+        <button class="pill" on:click={onClose}>Fermer</button>
       </footer>
     {/if}
   </div>
@@ -136,24 +110,6 @@
   }
   .sub p {
     margin: 0;
-  }
-  .bulk {
-    display: flex;
-    gap: 8px;
-    flex: none;
-  }
-  .bulk button {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--text-dim);
-    border: 1px solid var(--bg-hover);
-    border-radius: 999px;
-    padding: 5px 11px;
-    white-space: nowrap;
-  }
-  .bulk button:hover {
-    color: var(--text);
-    border-color: var(--text-dim);
   }
   .pad {
     padding: 24px 20px;
@@ -231,17 +187,11 @@
     opacity: 1;
     transform: scale(1);
   }
-  .cl:hover .tile {
-    transform: translateY(-2px);
-  }
   .cl.on .tile {
     box-shadow: 0 0 0 3px var(--accent);
   }
   .cl:not(.on) .tile {
     filter: grayscale(0.75) brightness(0.55);
-  }
-  .cl:not(.on):hover .tile {
-    filter: grayscale(0.35) brightness(0.8);
   }
   footer {
     display: flex;

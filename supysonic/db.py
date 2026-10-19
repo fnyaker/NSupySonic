@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261012"
+SCHEMA_VERSION = "20261019"
 
 
 def now():
@@ -280,6 +280,8 @@ class Album(_Model):
     artist = ForeignKeyField(Artist, backref="albums")
     deezer_id = CharField(null=True)
     cover_md5 = CharField(null=True)
+    # "YYYY", "YYYY-MM" or "YYYY-MM-DD": what is known of the release date.
+    release_date = CharField(10, null=True)
 
     def as_subsonic_album(self, user):  # "AlbumID3" type in XSD
         duration, created, year = self.tracks.select(
@@ -356,6 +358,11 @@ class Track(PathMixin, _Model):
     # (deezer/youtube.py). NULL for everything else. Such a row has no
     # deezer_id, so it is NOT an upload: it may be not yet archived.
     youtube_id = CharField(null=True)
+    # "YYYY", "YYYY-MM" or "YYYY-MM-DD": what is known of the release date.
+    release_date = CharField(10, null=True)
+    # The tempo Deezer publishes for the track, kept apart from the measured one
+    # (track_analysis.bpm). NULL when Deezer lists none.
+    deezer_bpm = FloatField(null=True)
 
     album = ForeignKeyField(Album, backref="tracks")
     artist = ForeignKeyField(Artist, backref="tracks")
@@ -905,11 +912,41 @@ class Playlist(_Model):
             ).execute()
 
 
+StarredPlaylist = _make_starred_model(Playlist)
+
+
 class PlaylistTrack(_Model):
     id = PrimaryKeyField()
     playlist = ForeignKeyField(Playlist, backref="+")
     track = ForeignKeyField(Track, backref="+")
     index = IntegerField()
+
+
+class TrackNeighbor(_Model):
+    """The tracks that sound closest to ``track``, best first, so a radio or a
+    "similar" shelf is one indexed read (supysonic/similar.py fills it)."""
+
+    track = ForeignKeyField(Track, backref="+", on_delete="CASCADE")
+    neighbor = ForeignKeyField(Track, backref="+", on_delete="CASCADE")
+    score = FloatField()
+    rank = IntegerField()
+
+    class Meta:
+        primary_key = CompositeKey("track", "neighbor")
+        indexes = ((("track", "rank"), False),)
+
+
+class TrackEnrichment(_Model):
+    """What was tried to complete a track's facts from outside Deezer, and how
+    it ended, so a lookup is not repeated for nothing."""
+
+    track = ForeignKeyField(Track, primary_key=True, backref="+",
+                            on_delete="CASCADE")
+    status = CharField(16)
+    method = CharField(16)
+    mbid = CharField(36, null=True)
+    tried = DateTimeField(default=now)
+    error = CharField(255, null=True)
 
 
 class RadioStation(_Model):
@@ -1250,7 +1287,10 @@ def _migration_order():
         RatingTrack,
         ChatMessage,
         Playlist,
+        StarredPlaylist,  # after Playlist and User
         PlaylistTrack,
+        TrackNeighbor,  # after Track
+        TrackEnrichment,  # after Track
         RadioStation,
         PodcastChannel,
         PodcastEpisode,

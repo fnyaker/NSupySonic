@@ -6,6 +6,7 @@
   import { player, isAdmin, toasts, lastPlaylist, openExport, openGenreBulk } from "../lib/stores.js";
   import {
     toggleEntityFavorite,
+    entityMeta,
     invalidatePlaylists,
     upsertPlaylistLocal,
     removePlaylistLocal,
@@ -117,7 +118,7 @@
 
   async function toggleFav() {
     const next = !fav;
-    if (await toggleEntityFavorite("playlist", id, next)) fav = next;
+    if (await toggleEntityFavorite("playlist", id, next, entityMeta("playlist", data?.playlist || {}))) fav = next;
   }
 
   // -- editing -------------------------------------------------------------
@@ -312,7 +313,7 @@
         >
           {editing ? "Terminé" : "Modifier"}
         </button>
-      {:else if $isAdmin && CAN_KEEP}
+      {:else if CAN_KEEP}
         <button class="icon-btn" class:on={fav} on:click={toggleFav} aria-label="Favori"><Icon name={fav ? "heartFilled" : "heart"} size={22} /></button>
       {/if}
     </div>

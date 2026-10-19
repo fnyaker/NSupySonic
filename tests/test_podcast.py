@@ -317,7 +317,7 @@ class PodcastApiTestCase(ApiTestBase):
 
     def test_create_and_get_podcasts(self):
         self._create_channel()
-        self.assertIn("1002156761", self.provider.fav_added)
+        self.assertEqual(self.provider.fav_added, [])  # nothing written to the account
 
         _, child = self._make_request("getPodcasts", tag="podcasts")
         channels = self._xpath(child, "./channel")
@@ -417,7 +417,7 @@ class PodcastApiTestCase(ApiTestBase):
         cid = str(ids.show_uuid("1002156761"))
         self._make_request("deletePodcastChannel", {"id": cid}, skip_post=True)
         # The Deezer subscription is dropped…
-        self.assertIn("1002156761", self.provider.fav_removed)
+        self.assertEqual(self.provider.fav_removed, [])  # nothing written to the account
         # …but nothing of ours is.
         channel = PodcastChannel[ids.show_uuid("1002156761")]
         self.assertFalse(channel.subscribed)
@@ -559,7 +559,7 @@ class PodcastWebUITestCase(unittest.TestCase):
         self._login()
         rv = self._subscribe()
         self.assertEqual(rv.status_code, 200)
-        self.assertIn("1002156761", self.provider.fav_added)
+        self.assertEqual(self.provider.fav_added, [])  # nothing written to the account
         body = rv.get_json()
         self.assertEqual(body["title"], "Test Podcast")
         self.assertEqual(len(body["episodes"]), 3)
@@ -684,7 +684,7 @@ class PodcastWebUITestCase(unittest.TestCase):
         cid = str(ids.show_uuid("1002156761"))
         rv = self.client.delete("/api/podcast/" + cid)
         self.assertEqual(rv.status_code, 204)
-        self.assertIn("1002156761", self.provider.fav_removed)
+        self.assertEqual(self.provider.fav_removed, [])  # nothing written to the account
         self.assertEqual(PodcastChannel.select().count(), 0)
 
     def test_subscribe_requires_admin(self):
