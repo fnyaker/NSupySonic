@@ -1,4 +1,5 @@
 <script>
+  import { entityRef, trackEntityRef } from "../lib/entity.js";
   // Desktop now-playing: two panes — a large cover with controls and a bar
   // visualizer on the left, the up-next queue / lyrics on the right.
   import { trackKey, trackRef } from "../lib/trackkey.js";
@@ -229,7 +230,7 @@
 
       <div class="info">
         <div class="txt">
-          <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
+          <button class="t" on:click={() => trackEntityRef($current, "album", $current.album) && go("/album/" + trackEntityRef($current, "album", $current.album))}>{$current.title}</button>
           <span class="a" class:status={$playbackLabel}>{#if $playbackLabel}{$playbackLabel}{:else}<ArtistLine track={$current} navigate={go} />{/if}</span>
         </div>
         {#if CAN_KEEP}

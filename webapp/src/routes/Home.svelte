@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
+  import { entityRef, trackEntityRef } from "../lib/entity.js";
   import { player, recent } from "../lib/stores.js";
   import Card from "../components/Card.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -13,12 +14,9 @@
   let flowLoading = false;
   let loading = true;
 
-  // An album card opens /album/<id>; until the album screen reads a row's own
-  // id, a Deezer album is addressed by its Deezer id and only one without
-  // keeps the UUID.
-  const cards = (list) =>
-    (list || []).map((a) => (a.deezer_id ? { ...a, id: undefined } : a));
-  const cardKey = (a) => a.id || a.deezer_id;
+  // An album card opens /album/<id>, by the row's own id.
+  const cards = (list) => list || [];
+  const cardKey = (a) => entityRef(a);
 
   $: greeting = (() => {
     const h = new Date().getHours();
@@ -34,9 +32,10 @@
     const out = [];
     for (const t of $recent) {
       const a = t.album;
-      if (!a || !a.deezer_id || seen.has(a.deezer_id)) continue;
-      seen.add(a.deezer_id);
-      out.push({ deezer_id: a.deezer_id, title: a.title, cover: a.cover, artist: t.artist });
+      const ref = trackEntityRef(t, "album", a);
+      if (!ref || seen.has(ref)) continue;
+      seen.add(ref);
+      out.push({ id: ref, deezer_id: a.deezer_id, title: a.title, cover: a.cover, artist: t.artist });
       if (out.length >= 12) break;
     }
     return out;
@@ -110,7 +109,7 @@
   {#if recentAlbums.length}
     <h2>Écoutés récemment</h2>
     <div class="shelf">
-      {#each recentAlbums as a (a.deezer_id)}<Card item={a} kind="album" />{/each}
+      {#each recentAlbums as a (entityRef(a))}<Card item={a} kind="album" />{/each}
     </div>
   {/if}
 

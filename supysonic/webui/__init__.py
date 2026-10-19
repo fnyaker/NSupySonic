@@ -1173,7 +1173,11 @@ def _db_album_card(alb: Album, stats: tuple | None = None) -> dict:
         "title": alb.name,
         "cover": cover_url_for(alb.id),
         "release_date": alb.release_date,
-        "artist": {"deezer_id": str(alb.artist.deezer_id or ""), "name": alb.artist.name},
+        "artist": {
+            "id": str(alb.artist.id),
+            "deezer_id": str(alb.artist.deezer_id or ""),
+            "name": alb.artist.name,
+        },
         "nb_tracks": stats[0] or 0,
         "year": stats[1] or None,
     }
@@ -1224,6 +1228,7 @@ def _db_album_response(alb: Album) -> dict:
             "cover": cover_url_for(alb.id),
             "release_date": alb.release_date,
             "artist": {
+                "id": str(alb.artist.id),
                 "deezer_id": str(alb.artist.deezer_id or ""),
                 "name": alb.artist.name,
             },
@@ -1287,6 +1292,7 @@ def _db_artist_response(ar: Artist) -> dict:
     )
     return {
         "artist": {
+            "id": str(ar.id),
             "deezer_id": str(ar.deezer_id or ""),
             "name": ar.name,
             # Deezer's picture is fetched (and kept) by the cover route; an
@@ -1549,7 +1555,11 @@ def _home_albums(cutoff):
             "deezer_id": str(a.deezer_id or ""),
             "title": a.name,
             "cover": _image("cover", a.cover_md5),
-            "artist": {"deezer_id": str(a.artist.deezer_id or ""), "name": a.artist.name},
+            "artist": {
+                "id": str(a.artist.id),
+                "deezer_id": str(a.artist.deezer_id or ""),
+                "name": a.artist.name,
+            },
             "nb_tracks": g["nb"] or 0,
             "year": g["year"] or None,
         }
@@ -1805,6 +1815,12 @@ def search():
     artists = [_artist_api(a) for a in raw_artists]
     playlists = [_playlist_api(p) for p in raw_playlists]
     podcasts = [_podcast_card(p) for p in raw_podcasts]
+    try:
+        _attach_local_ids(Album, albums)
+        _attach_local_ids(Artist, artists)
+        _attach_local_ids(Playlist, playlists)
+    except Exception:  # a shortcut is never worth failing the search over
+        logger.debug("Local id lookup failed", exc_info=True)
     # Downloaded/local tracks lead (they play from disk); drop the live-search
     # duplicates of the same Deezer ids so a track isn't listed twice.
     have = {t["deezer_id"] for t in local_tracks}
@@ -1836,6 +1852,28 @@ def search_podcasts():
         for p in _data(lambda: dzapi.search_podcast(query, limit=limit))
     ]
     return jsonify({"podcasts": [x for x in res if x]})
+
+
+def _attach_local_ids(model, items):
+    """Give the catalogue results the library already holds the ``id`` of their
+    row (the SPA opens a page by ``id`` when there is one, so a search hit and
+    the same entity reached from the library are one page, one cache entry).
+    One statement; a result the library does not hold keeps only its provider
+    id, which is what the catalogue page is asked by."""
+    wanted = {str(x["deezer_id"]) for x in items if x and x.get("deezer_id")}
+    have = {}
+    wanted = list(wanted)
+    for i in range(0, len(wanted), _IN_CHUNK):
+        for rid, did in (
+            model.select(_raw(model.id), model.deezer_id)
+            .where(model.deezer_id << wanted[i : i + _IN_CHUNK])
+            .tuples()
+        ):
+            have[str(did)] = _uuid_text(rid)
+    for x in items:
+        if x and str(x.get("deezer_id")) in have:
+            x["id"] = have[str(x["deezer_id"])]
+    return items
 
 
 def _entity_row(model, make_uuid, raw):

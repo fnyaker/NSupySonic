@@ -468,8 +468,14 @@ export const api = {
     req("/favorite", { method: "POST", body: body({ id: ref, on }) }),
   // `meta` ({ title, artist, artist_id }) names the entity for the server when
   // it has never imported it (a star is local, the row is made from this).
-  favoriteEntity: (kind, deezer_id, on, meta = {}) =>
-    req("/favorite/" + kind, { method: "POST", body: body({ ...meta, deezer_id, on }) }),
+  // `ref` is the entity's id, or the provider id of a catalogue result the
+  // library does not hold yet (digits): the server accepts both, by the key
+  // that says which.
+  favoriteEntity: (kind, ref, on, meta = {}) =>
+    req("/favorite/" + kind, {
+      method: "POST",
+      body: body({ ...meta, [/^[0-9]+$/.test(String(ref)) ? "deezer_id" : "id"]: ref, on }),
+    }),
   createPlaylist: (title, tracks) =>
     req("/playlists", { method: "POST", body: body({ title, tracks }) }),
   editPlaylist: (id, fields) =>

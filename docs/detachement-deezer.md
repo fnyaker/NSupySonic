@@ -442,6 +442,15 @@ favori.
 
 **Latence** : C'est un chantier de structure ; il ne doit coûter **rien** à l'exécution : même nombre de requêtes SQL par liste (les tests de `test_webui_lists.py` le comptent), même taille de réponse à quelques octets près, et la migration des données du navigateur se fait une fois, en arrière-plan, sans bloquer le premier écran. Vérifier avec `webapp/test/ui/run.mjs` (ouvrir les favoris, taper, trier) qu'aucun chiffre ne remonte.
 
+**Fait (lot J).** Albums, artistes et playlists s'ouvrent par l'`id` de leur ligne
+(`webapp/src/lib/entity.js`) : les pages, cartes et résultats de recherche que la bibliothèque
+détient le portent (`_attach_local_ids`, une requête par type) ; les titres d'une liste ne répètent
+pas l'id de leur album et de leurs artistes (+28 % d'octets sur 4 000 titres, mesuré), la SPA le
+calcule (`trackEntityRef` : uuid5 de l'id fournisseur, car toute ligne a été créée sous cet UUID).
+Un résultat de catalogue sans ligne garde l'id du fournisseur, seule forme dont le serveur sait
+encore faire une page ; l'état d'une ancienne version (file, `#/album/<id Deezer>`) s'ouvre
+toujours, et une page lue par id Deezer est aussi gardée hors ligne sous l'`id`.
+
 ## D15. Pages album, artiste et playlist : la base d'abord
 
 État actuel : `/api/album/<id>` et `/api/artist/<id>` demandent d'abord **Deezer** et ne lisent la

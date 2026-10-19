@@ -17,12 +17,15 @@
 // `ids.NS_TRACK` in Python (a namespace derived from "deezer.com/supysonic" and "track").
 const NS_TRACK = "349c6f7c-1d1f-508d-8539-9180c66e5ef7";
 
-const NS_BYTES = (() => {
-  const hex = NS_TRACK.replace(/-/g, "");
+/** A namespace UUID as 16 bytes. */
+export function nsBytes(uuid) {
+  const hex = uuid.replace(/-/g, "");
   const out = new Uint8Array(16);
   for (let i = 0; i < 16; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
   return out;
-})();
+}
+
+const NS_BYTES = nsBytes(NS_TRACK);
 
 const rotl = (x, n) => (x << n) | (x >>> (32 - n));
 
@@ -58,11 +61,11 @@ export function sha1(bytes) {
   return out;
 }
 
-/** Python's `uuid.uuid5(NS_TRACK, name)`, as text. */
-export function uuid5Track(name) {
+/** Python's `uuid.uuid5(ns, name)`, as text; `ns` is `nsBytes(...)`. */
+export function uuid5(ns, name) {
   const text = new TextEncoder().encode(String(name));
   const msg = new Uint8Array(16 + text.length);
-  msg.set(NS_BYTES);
+  msg.set(ns);
   msg.set(text, 16);
   const h = sha1(msg).slice(0, 16);
   h[6] = (h[6] & 0x0f) | 0x50;
@@ -70,6 +73,11 @@ export function uuid5Track(name) {
   let hex = "";
   for (let i = 0; i < 16; i++) hex += h[i].toString(16).padStart(2, "0");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Python's `ids.track_uuid(name)`, as text. */
+export function uuid5Track(name) {
+  return uuid5(NS_BYTES, name);
 }
 
 const DIGITS = /^[0-9]{1,20}$/;

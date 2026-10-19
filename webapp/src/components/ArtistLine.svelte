@@ -1,4 +1,5 @@
 <script>
+  import { entityRef, trackEntityRef } from "../lib/entity.js";
   import { push } from "svelte-spa-router";
   import { credits } from "../lib/format.js";
 
@@ -42,9 +43,9 @@
   }
 
   function go(a, e) {
-    if (!linked || !a.deezer_id) return;
+    if (!linked || !entityRef(a)) return;
     e.stopPropagation();
-    const path = "/artist/" + a.deezer_id;
+    const path = "/artist/" + trackEntityRef(track, "artist", a);
     if (navigate) navigate(path);
     else push(path);
   }
@@ -57,7 +58,7 @@
   is also why the loop is one unbroken line: a newline between two inline
   elements renders as a stray space.
 -->
-{#each parts as p, i (i)}{#if p.sep}<span class="sep" class:quiet={p.quiet}>{p.sep}</span>{:else}<button class="one" class:plain={!linked || !p.artist.deezer_id} tabindex={linked && p.artist.deezer_id ? 0 : -1} on:click={(e) => go(p.artist, e)}>{p.artist.name}</button>{/if}{/each}
+{#each parts as p, i (i)}{#if p.sep}<span class="sep" class:quiet={p.quiet}>{p.sep}</span>{:else}<button class="one" class:plain={!linked || !entityRef(p.artist)} tabindex={linked && entityRef(p.artist) ? 0 : -1} on:click={(e) => go(p.artist, e)}>{p.artist.name}</button>{/if}{/each}
 
 <style>
   /* Inherit everything: the wrapper decides how the credit line looks, this

@@ -83,10 +83,10 @@ export function slimTrack(t) {
   // make a row from.
   out.id = trackKey(t);
   if (!t.id && t.deezer_id != null) out.deezer_id = String(t.deezer_id);
-  if (t.artist) out.artist = pick(t.artist, ["deezer_id", "name"]);
+  if (t.artist) out.artist = pick(t.artist, ["id", "deezer_id", "name"]);
   if (Array.isArray(t.artists))
-    out.artists = t.artists.slice(0, 12).map((a) => pick(a, ["deezer_id", "name", "role"]));
-  if (t.album) out.album = pick(t.album, ["deezer_id", "title", "cover"]);
+    out.artists = t.artists.slice(0, 12).map((a) => pick(a, ["id", "deezer_id", "name", "role"]));
+  if (t.album) out.album = pick(t.album, ["id", "deezer_id", "title", "cover"]);
   return out;
 }
 

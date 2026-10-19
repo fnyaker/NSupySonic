@@ -9,7 +9,7 @@ export function duration(sec) {
   return m + ":" + String(s).padStart(2, "0");
 }
 
-// The credited artists of a track, normalized to [{deezer_id, name, role}].
+// The credited artists of a track, normalized to [{id, deezer_id, name, role}].
 //
 // `artists` is what the API sends for every track shape, but a track can reach
 // us from elsewhere — an offline record written before credits existed, a queue
@@ -19,7 +19,7 @@ export function credits(track) {
   const list = track && Array.isArray(track.artists) ? track.artists.filter((a) => a && a.name) : [];
   if (list.length) return list;
   return track && track.artist && track.artist.name
-    ? [{ deezer_id: track.artist.deezer_id, name: track.artist.name, role: "Main" }]
+    ? [{ id: track.artist.id, deezer_id: track.artist.deezer_id, name: track.artist.name, role: "Main" }]
     : [];
 }
 

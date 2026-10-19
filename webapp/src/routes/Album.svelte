@@ -1,4 +1,5 @@
 <script>
+  import { entityRef } from "../lib/entity.js";
   import { push } from "svelte-spa-router";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
@@ -109,7 +110,7 @@
         <span class="kind">Album</span>
         <h1>{data.album.title}</h1>
         <div class="sub">
-          <button class="artist" on:click={() => data.album.artist && push("/artist/" + data.album.artist.deezer_id)}>
+          <button class="artist" on:click={() => entityRef(data.album.artist) && push("/artist/" + entityRef(data.album.artist))}>
             {data.album.artist?.name}
           </button>
           <span class="muted">

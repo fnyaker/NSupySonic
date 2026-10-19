@@ -108,11 +108,15 @@ def _names(v) -> list[str]:
 def build(gw: dict | None, performers: list[dict]) -> dict:
     """The reply out of a gateway payload (or None) and the known performers.
 
-    ``performers`` are ``{deezer_id, name, role}`` — what the database and the
+    ``performers`` are ``{id, deezer_id, name, role}`` — what the database and the
     sidecar know — and are what lets a name link to its artist page.
     """
     gw = gw or {}
-    ids = {p["name"].lower(): p["deezer_id"] for p in performers if p.get("deezer_id") and p.get("name")}
+    known = {
+        p["name"].lower(): {k: p[k] for k in ("id", "deezer_id") if p.get(k)}
+        for p in performers
+        if p.get("name") and (p.get("deezer_id") or p.get("id"))
+    }
     groups: dict[str, list[str]] = {}
 
     contrib = gw.get("SNG_CONTRIBUTORS")
@@ -139,7 +143,7 @@ def build(gw: dict | None, performers: list[dict]) -> dict:
                 "role": key,
                 "label": _LABELS.get(key) or _humanize(key),
                 "people": [
-                    {"name": n, **({"deezer_id": ids[n.lower()]} if n.lower() in ids else {})}
+                    {"name": n, **known.get(n.lower(), {})}
                     for n in groups[key]
                 ],
             }
@@ -210,7 +214,7 @@ def _performers(track, meta) -> list[dict]:
         return []
     try:
         return [
-            {"deezer_id": str(a.deezer_id or a.id), "name": a.name, "role": role}
+            {"id": str(a.id), "deezer_id": str(a.deezer_id or a.id), "name": a.name, "role": role}
             for a, role in track.credited_artists()
         ]
     except Exception:
