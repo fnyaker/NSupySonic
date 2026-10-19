@@ -2980,7 +2980,7 @@ def favorite():
         try:
             track = archive.import_track(provider, raw)
         except Exception:
-            logger.warning("favorite: metadata fetch failed for %s", raw, exc_info=True)
+            logger.warning("favorite: metadata fetch failed for %s", int(raw), exc_info=True)
             return jsonify({"error": "track unavailable"}), 502
     _set_star(track, on)
     if on:
