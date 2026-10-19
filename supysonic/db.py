@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261019"
+SCHEMA_VERSION = "20261020"
 
 
 def now():
@@ -1170,6 +1170,58 @@ class ServiceLink(_Model):
         primary_key = CompositeKey("user", "service")
 
 
+class TrackSource(_Model):
+    """One provider's record of a track: which provider can deliver which
+    ``ref`` (see supysonic/sources.py). ``deezer_id`` / ``youtube_id`` stay on
+    the track and are written alongside. ``unavailable`` is a verdict about
+    THIS source only, set from a provider's answer, never from a failure."""
+
+    track = ForeignKeyField(Track, backref="+", on_delete="CASCADE")
+    provider = CharField(16)
+    ref = CharField(128)
+    quality = IntegerField(null=True)
+    fmt = CharField(8, null=True)
+    bitrate = IntegerField(null=True)
+    added = DateTimeField(default=now)
+    seen = DateTimeField(null=True)
+    unavailable = DateTimeField(null=True)
+
+    class Meta:
+        table_name = "track_source"
+        primary_key = CompositeKey("provider", "ref")
+
+
+class EntityRef(_Model):
+    """A provider's id for an album, artist, playlist or show, and the UUID of
+    the row it maps to. No foreign key: an orphan is harmless."""
+
+    kind = CharField(8)
+    provider = CharField(16)
+    ref = CharField(128)
+    entity = UUIDField()
+
+    class Meta:
+        table_name = "entity_ref"
+        primary_key = CompositeKey("kind", "provider", "ref")
+
+
+class ProviderAccount(_Model):
+    """A provider's credentials (``user`` null: the server's own account).
+    ``secret`` is never returned by the API, logged or written to a sidecar."""
+
+    id = PrimaryKeyField()
+    provider = CharField(16)
+    user = ForeignKeyField(User, null=True, backref="+", on_delete="CASCADE")
+    label = CharField(64, null=True)
+    secret = TextField(null=True)
+    status = CharField(12)
+    checked = DateTimeField(null=True)
+    created = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "provider_account"
+
+
 def get_resource_text(respath):
     return importlib.resources.files(__package__).joinpath(respath).read_text("utf-8")
 
@@ -1319,6 +1371,9 @@ def _migration_order():
         PodcastMarker,
         RemoteLink,  # after User: it references it
         ServiceLink,  # after User: it references it
+        TrackSource,  # after Track
+        EntityRef,
+        ProviderAccount,  # after User
     ]
 
 

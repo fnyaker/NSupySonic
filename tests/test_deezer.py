@@ -668,8 +668,10 @@ class DeezerTestCase(TestBase):
         self.assertEqual(Artist.select().count(), 100)
         self.assertEqual(Album.select().count(), 100)
         # Every row inserted once: the tracks, 100 artists, 100 albums, their
-        # 100 folders, and the playlist.
-        self.assertLessEqual(first["INSERT"], n + 3 * 100 + 5, first)
+        # 100 folders, and the playlist — plus one statement each for the
+        # track's source and the album's and artist's refs (one INSERT that
+        # ignores a conflict, nothing read first).
+        self.assertLessEqual(first["INSERT"], 2 * n + 5 * 100 + 5, first)
         self.assertLessEqual(sum(first.values()), 5 * first["INSERT"], first)
 
         with count_statements() as again:

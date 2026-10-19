@@ -15,10 +15,14 @@ and the ids Deezer would have given them in one ``IN``, then the rows that
 carry a Deezer id of their own), however long the list.
 """
 
+import re
 import uuid
 
-from ..db import Track
+from peewee import JOIN
+
+from ..db import EntityRef, Track, TrackSource
 from ..deezer import ids
+from ..providers.base import ID_RE, REF_MAX
 
 # Deezer's ids are far shorter than this; the bound only keeps a hostile string
 # of digits from being hashed and queried.
@@ -42,6 +46,21 @@ def _classify(raw):
         return None, None
 
 
+_REF_RE = re.compile(r"^[\w.\-~=+/@%%]{1,%d}$" % REF_MAX)
+
+
+def _prefixed(raw):
+    """``(provider, ref)`` for a client-supplied ``<provider>:<ref>``, else
+    ``None``. Syntax only: the database answers whether it is known."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    provider, sep, ref = text.partition(":")
+    if not sep or not ID_RE.match(provider) or not _REF_RE.match(ref):
+        return None
+    return provider, ref
+
+
 def track_key(track) -> str:
     """The id the clients address a track by from now on: its row UUID."""
     return str(track.id)
@@ -55,32 +74,68 @@ def _may_access(track):
 
 def resolve_tracks(raws):
     """The rows behind ``raws``, in order; ``None`` where an id is unknown,
-    malformed or names a track the caller may not read."""
+    malformed or names a track the caller may not read. An id is a row UUID, a
+    Deezer id or ``<provider>:<ref>``."""
     raws = list(raws)
-    parsed = [_classify(r) for r in raws]
+    parsed = []
+    for r in raws:
+        pref = _prefixed(r)
+        if pref is not None and pref[0] == "deezer":
+            # "deezer:123" is the Deezer id 123, whatever else it might be.
+            u, d = _classify(pref[1])
+            parsed.append((None, d, None) if d else (None, None, None))
+        elif pref is not None:
+            parsed.append((None, None, pref))
+        else:
+            parsed.append(_classify(r) + (None,))
     wanted = set()
-    for u, d in parsed:
+    for u, d, pref in parsed:
         if u is not None:
             wanted.add(u)
         elif d is not None:
             wanted.add(ids.track_uuid(d))
+        elif pref is not None:
+            wanted.add(ids.entity_uuid(pref[0], "track", pref[1]))
     by_id = {}
     if wanted:
         by_id = {t.id: t for t in Track.select().where(Track.id.in_(list(wanted)))}
-    # An id Deezer gave a row that does not carry the derived UUID.
-    missing = {d for (u, d) in parsed if d is not None and ids.track_uuid(d) not in by_id}
+    # What the derived UUID did not find: an id Deezer gave a row that does not
+    # carry the derived UUID, or a provider's record attached to another title.
+    missing = {d for (u, d, p) in parsed if d is not None and ids.track_uuid(d) not in by_id}
+    pairs = {}
+    for u, d, pref in parsed:
+        if pref is not None and ids.entity_uuid(pref[0], "track", pref[1]) not in by_id:
+            pairs.setdefault(pref[0], set()).add(pref[1])
     by_deezer = {}
-    if missing:
-        by_deezer = {
-            str(t.deezer_id): t
-            for t in Track.select().where(Track.deezer_id.in_(list(missing)))
-        }
+    by_pair = {}
+    if missing or pairs:
+        cond = None
+        if missing:
+            cond = Track.deezer_id.in_(list(missing))
+        for provider, refs in pairs.items():
+            part = (TrackSource.provider == provider) & TrackSource.ref.in_(list(refs))
+            cond = part if cond is None else (cond | part)
+        # ONE statement for both: the rows by their legacy column, and by the
+        # source that names them.
+        query = (
+            Track.select(Track, TrackSource.provider.alias("_p"), TrackSource.ref.alias("_r"))
+            .join(TrackSource, JOIN.LEFT_OUTER, on=(TrackSource.track == Track.id))
+            .where(cond)
+            .objects()
+        )
+        for t in query:
+            if t.deezer_id is not None and str(t.deezer_id) in missing:
+                by_deezer[str(t.deezer_id)] = t
+            if getattr(t, "_p", None) is not None:
+                by_pair[(t._p, t._r)] = t
     out = []
-    for u, d in parsed:
+    for u, d, pref in parsed:
         if u is not None:
             row = by_id.get(u)
         elif d is not None:
             row = by_id.get(ids.track_uuid(d)) or by_deezer.get(d)
+        elif pref is not None:
+            row = by_id.get(ids.entity_uuid(pref[0], "track", pref[1])) or by_pair.get(pref)
         else:
             row = None
         out.append(row if row is not None and _may_access(row) else None)
@@ -101,6 +156,34 @@ def resolve_track(raw, *, materialize=False):
 
     row = make(u)
     return row if row is not None and _may_access(row) else None
+
+
+def resolve_ref(provider, kind, ref):
+    """The UUID of the row ``provider``'s ``ref`` is (or will be). What the
+    database knows wins (a record found again under another provider is the
+    title already owned, plan §4); otherwise the deterministic UUID, so a search
+    result plays before it has a row."""
+    ref = str(ref)
+    if kind == "track":
+        row = TrackSource.select(TrackSource.track).where(
+            (TrackSource.provider == provider) & (TrackSource.ref == ref)
+        ).first()
+        if row is not None:
+            return row.track_id
+    else:
+        row = EntityRef.select(EntityRef.entity).where(
+            (EntityRef.kind == kind) & (EntityRef.provider == provider) & (EntityRef.ref == ref)
+        ).first()
+        if row is not None:
+            return row.entity
+    return ids.entity_uuid(provider, kind, ref)
+
+
+def drop_entity(kind, entity):
+    """A row was deleted: forget the provider refs that named it."""
+    from ..sources import drop_entity as drop
+
+    return drop(kind, entity)
 
 
 def cover_url_for(album_id) -> str:

@@ -340,3 +340,38 @@ CREATE TABLE IF NOT EXISTS track_enrichment (
     tried TIMESTAMP NOT NULL,
     error VARCHAR(255)
 );
+
+-- Several sources for one title: see schema/migration/postgres/20261020.sql.
+CREATE TABLE IF NOT EXISTS track_source (
+    track_id UUID NOT NULL REFERENCES track ON DELETE CASCADE,
+    provider VARCHAR(16) NOT NULL,
+    ref VARCHAR(128) NOT NULL,
+    quality SMALLINT,
+    fmt VARCHAR(8),
+    bitrate INTEGER,
+    added TIMESTAMP NOT NULL,
+    seen TIMESTAMP,
+    unavailable TIMESTAMP,
+    PRIMARY KEY (provider, ref)
+);
+CREATE INDEX IF NOT EXISTS index_track_source_track_id_fk ON track_source(track_id);
+CREATE TABLE IF NOT EXISTS entity_ref (
+    kind VARCHAR(8) NOT NULL,
+    provider VARCHAR(16) NOT NULL,
+    ref VARCHAR(128) NOT NULL,
+    entity UUID NOT NULL,
+    PRIMARY KEY (kind, provider, ref)
+);
+CREATE INDEX IF NOT EXISTS index_entity_ref_kind_entity ON entity_ref(kind, entity);
+CREATE TABLE IF NOT EXISTS provider_account (
+    id UUID PRIMARY KEY,
+    provider VARCHAR(16) NOT NULL,
+    user_id UUID REFERENCES "user" ON DELETE CASCADE,
+    label VARCHAR(64),
+    secret TEXT,
+    status VARCHAR(12) NOT NULL,
+    checked TIMESTAMP,
+    created TIMESTAMP NOT NULL,
+    UNIQUE (provider, user_id)
+);
+CREATE INDEX IF NOT EXISTS index_provider_account_user_id_fk ON provider_account(user_id);

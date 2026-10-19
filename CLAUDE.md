@@ -2613,6 +2613,29 @@ second interface to keep in step with the first, and that is the whole design:
   too, and where the service worker answers the navigation, `lib/linkrescue.js` (main.js's FIRST
   import, before the router reads the location) turns the path back into its hash route.
 
+**Providers (multi-provider plan, lot A)** (`supysonic/providers/`, `supysonic/sources.py`, plan `docs/multi-provider.md`).
+Deezer and YouTube are meant to become two instances of one interface. Lot A lays the ground and
+wires nothing to the hot paths yet:
+
+- `providers/base.py` is the interface (`Provider`: id of at most 16 lowercase letters/digits, `role`
+  main|fallback, `capabilities`, `available()` with no network, `health()`, `config_schema()`; values are plain
+  dicts), `errors.py` carries the rule "a failure is never a verdict" (only `NotFound`/`Gone` may mark a
+  SOURCE unavailable), `registry.py` is `app.providers` (order and switches in `Meta` `prov.order` /
+  `prov.<id>.on`, third parties through the `supysonic.providers` entry points, a broken one is logged and
+  skipped), `fake.py` is the test provider (real 0.2 s WAV, `gone`, outages, a per-method call counter;
+  `tests/multi_helpers.py`). `app.deezer` is untouched.
+- Schema `20261020`: `track_source` (PK `(provider, ref)`, index on `track`), `entity_ref` (`(kind, provider,
+  ref)` to a UUID, no FK) and `provider_account`, filled from `deezer_id` / `youtube_id` by plain
+  `INSERT ... SELECT` (idempotent; no existing row is touched). The legacy columns stay and are written too.
+- `sources.attach` is the ONE general writer (idempotent, a ref belongs to one title, fills an empty legacy
+  column); the importers use `attach_new` / `attach_entity`, one conflict-ignoring `INSERT` each and only when
+  a row is CREATED (a first import costs one statement more per track, a re-sync none). **Lists never read
+  `track_source`**; `for_tracks` is one statement per 500 ids.
+- Identity: `ids.entity_uuid(provider, kind, ref)` gives Deezer's and YouTube's exact historical UUIDs
+  (pinned by literals) and `uuid5(NS_PROVIDER, "<p>:<kind>:<ref>")` to anyone else;
+  `webui/refs.resolve_ref` prefers what `track_source`/`entity_ref` know, and `resolve_tracks` accepts
+  `<provider>:<ref>` beside UUIDs and Deezer ids in at most two statements.
+
 ## Database / schema
 
 Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261018`); bump it

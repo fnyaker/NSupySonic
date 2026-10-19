@@ -338,3 +338,37 @@ CREATE TABLE IF NOT EXISTS track_enrichment (
     tried DATETIME NOT NULL,
     error VARCHAR(255)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- Several sources for one title: see schema/migration/mysql/20261020.sql.
+CREATE TABLE IF NOT EXISTS track_source (
+    track_id CHAR(32) NOT NULL REFERENCES track(id) ON DELETE CASCADE,
+    provider VARCHAR(16) NOT NULL,
+    ref VARCHAR(128) NOT NULL,
+    quality SMALLINT,
+    fmt VARCHAR(8),
+    bitrate INTEGER,
+    added DATETIME NOT NULL,
+    seen DATETIME,
+    unavailable DATETIME,
+    PRIMARY KEY (provider, ref),
+    INDEX index_track_source_track_id_fk (track_id)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS entity_ref (
+    kind VARCHAR(8) NOT NULL,
+    provider VARCHAR(16) NOT NULL,
+    ref VARCHAR(128) NOT NULL,
+    entity CHAR(32) NOT NULL,
+    PRIMARY KEY (kind, provider, ref),
+    INDEX index_entity_ref_kind_entity (kind, entity)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS provider_account (
+    id CHAR(32) PRIMARY KEY,
+    provider VARCHAR(16) NOT NULL,
+    user_id CHAR(32) REFERENCES user(id) ON DELETE CASCADE,
+    label VARCHAR(64),
+    secret TEXT,
+    status VARCHAR(12) NOT NULL,
+    checked DATETIME,
+    created DATETIME NOT NULL,
+    UNIQUE (provider, user_id)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

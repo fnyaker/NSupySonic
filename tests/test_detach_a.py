@@ -204,6 +204,8 @@ class RefsTestCase(_AppCase):
 
     def test_a_row_with_its_own_id_is_found_by_its_deezer_id(self):
         t = self.make_track("1")
+        # A row from before the derived UUIDs: its sources follow its id.
+        dbmod.TrackSource.delete().where(dbmod.TrackSource.track == t.id).execute()
         Track.update(id=uuid.uuid4()).where(Track.id == t.id).execute()
         row = Track.get(Track.deezer_id == "1")
         self.assertNotEqual(row.id, ids.track_uuid("1"))
