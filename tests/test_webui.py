@@ -517,9 +517,10 @@ class WebUITestCase(unittest.TestCase):
         self._login()
         data = self.client.get("/api/artist/9").get_json()
         self.assertEqual(data["artist"]["name"], "Foo")
-        self.assertTrue(data["top"])
+        # An artist the library does not hold: Deezer's facts, no shelves.
+        self.assertEqual(data["top"], [])
         self.assertTrue(data["albums"])
-        self.assertEqual(data["related"][0]["name"], "Rel")
+        self.assertEqual(data["related"], [])
 
     def test_favorite_toggle(self):
         self._login()

@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from urllib.parse import urlsplit
 
-from flask import Blueprint, current_app, jsonify, request, send_file, session
+from flask import Blueprint, current_app, jsonify, redirect, request, send_file, session
 import peewee
 from peewee import fn
 
@@ -56,6 +56,7 @@ from ..ratelimit import auth_limiter
 from .. import similar
 from . import refs
 from ..utils import like_term
+from .refs import cover_url_for
 
 logger = logging.getLogger(__name__)
 
@@ -771,10 +772,12 @@ def _stream_size(stream) -> int:
 
 def _local_track(t: Track) -> dict:
     out = {
+        "id": str(t.id),
         "deezer_id": str(t.id),  # the universal id for local tracks is the UUID
         "local": True,
         "title": t.title,
         "duration": t.duration or 0,
+        "release_date": t.release_date,
         "explicit": False,
         "unavailable": t.unavailable is not None,
         "gain": t.gain,
@@ -788,7 +791,7 @@ def _local_track(t: Track) -> dict:
         "album": {
             "deezer_id": str(t.album.id),
             "title": t.album.name,
-            "cover": "/api/localcover/" + str(t.id),
+            "cover": cover_url_for(t.album.id),
         },
     }
     if t.youtube_id:
@@ -1011,6 +1014,7 @@ def _row_columns():
             Track.gain,
             Track.youtube_id,
             Track.bitrate,
+            Track.release_date,
             _raw(Artist.id),
             Artist.deezer_id,
             Artist.name,
@@ -1065,17 +1069,19 @@ def _db_track_rows(query) -> list:
     credits = _credits_by_raw_id([r[0] for r in rows if r[1] is not None], within)
     out = []
     for (
-        tid, dz, title, duration, gone, gain, ytid, bitrate,
+        tid, dz, title, duration, gone, gain, ytid, bitrate, released,
         aid, adz, aname, alid, aldz, alname, md5,
     ) in rows:
         if dz is None:
             uid = _uuid_text(tid)
             artist_id = _uuid_text(aid)
             row = {
+                "id": uid,
                 "deezer_id": uid,
                 "local": True,
                 "title": title,
                 "duration": duration or 0,
+                "release_date": released,
                 "explicit": False,
                 "unavailable": bool(gone),
                 "gain": gain,
@@ -1085,7 +1091,7 @@ def _db_track_rows(query) -> list:
                 "album": {
                     "deezer_id": _uuid_text(alid),
                     "title": alname,
-                    "cover": "/api/localcover/" + uid,
+                    "cover": cover_url_for(alid),
                 },
             }
             if ytid:
@@ -1097,9 +1103,11 @@ def _db_track_rows(query) -> list:
         ]
         out.append(
             {
+                "id": _uuid_text(tid),
                 "deezer_id": str(dz),
                 "title": title,
                 "duration": duration or 0,
+                "release_date": released,
                 "explicit": False,
                 "unavailable": bool(gone),
                 "gain": gain,
@@ -1109,7 +1117,7 @@ def _db_track_rows(query) -> list:
                 "album": {
                     "deezer_id": str(aldz or ""),
                     "title": alname,
-                    "cover": _image("cover", md5),
+                    "cover": cover_url_for(alid),
                 },
             }
         )
@@ -1127,9 +1135,11 @@ def _db_track(t: Track, credits: list | None = None) -> dict:
         return _local_track(t)
     artists = _db_credits(t) if credits is None else (credits or _primary_credit(t))
     return {
+        "id": str(t.id),
         "deezer_id": str(t.deezer_id),
         "title": t.title,
         "duration": t.duration or 0,
+        "release_date": t.release_date,
         "explicit": False,
         # Straight off the row — no extra query for the lists that come from the
         # database (your playlists, the offline browse pages).
@@ -1141,7 +1151,7 @@ def _db_track(t: Track, credits: list | None = None) -> dict:
         "album": {
             "deezer_id": str(t.album.deezer_id or ""),
             "title": t.album.name,
-            "cover": _image("cover", t.album.cover_md5),
+            "cover": cover_url_for(t.album.id),
         },
     }
 
@@ -1158,9 +1168,11 @@ def _db_album_card(alb: Album, stats: tuple | None = None) -> dict:
     if stats is None:
         stats = (alb.tracks.count(), alb.tracks.select(fn.min(Track.year)).scalar())
     return {
+        "id": str(alb.id),
         "deezer_id": str(alb.deezer_id or ""),
         "title": alb.name,
-        "cover": _image("cover", alb.cover_md5),
+        "cover": cover_url_for(alb.id),
+        "release_date": alb.release_date,
         "artist": {"deezer_id": str(alb.artist.deezer_id or ""), "name": alb.artist.name},
         "nb_tracks": stats[0] or 0,
         "year": stats[1] or None,
@@ -1175,24 +1187,30 @@ def _db_album_cards(albums) -> list:
     ids = [a.id for a in albums]
     for i in range(0, len(ids), _IN_CHUNK):
         for aid, nb, year in (
-            Track.select(Track.album, fn.COUNT(Track.id), fn.MIN(Track.year))
-            .where(Track.album << ids[i : i + _IN_CHUNK])
+            _visible_tracks(
+                Track.select(Track.album, fn.COUNT(Track.id), fn.MIN(Track.year))
+                .where(Track.album << ids[i : i + _IN_CHUNK])
+            )
             .group_by(Track.album)
             .tuples()
         ):
             stats[aid] = (nb, year)
-    return [_db_album_card(a, stats.get(a.id, (0, None))) for a in albums]
+    # An album of somebody else's upload has no visible track: no card.
+    return [
+        _db_album_card(a, stats.get(a.id, (0, None)))
+        for a in albums
+        if a.deezer_id is not None or a.id in stats
+    ]
 
 
 def _db_album_tracks(alb: Album) -> list:
-    q = (
+    q = _visible_tracks(
         Track.select(Track, Album, Artist)
         .join(Album)
         .switch(Track)
         .join(Artist)
         .where(Track.album == alb)
-        .order_by(Track.disc, Track.number)
-    )
+    ).order_by(Track.disc, Track.number)
     return _db_tracks(q)
 
 
@@ -1200,9 +1218,11 @@ def _db_album_response(alb: Album) -> dict:
     tracks = _db_album_tracks(alb)
     return {
         "album": {
+            "id": str(alb.id),
             "deezer_id": str(alb.deezer_id or ""),
             "title": alb.name,
-            "cover": _image("cover", alb.cover_md5),
+            "cover": cover_url_for(alb.id),
+            "release_date": alb.release_date,
             "artist": {
                 "deezer_id": str(alb.artist.deezer_id or ""),
                 "name": alb.artist.name,
@@ -1212,6 +1232,9 @@ def _db_album_response(alb: Album) -> dict:
             "is_favorite": _starred("album", row=alb),
         },
         "tracks": tracks,
+        # The page is the library's own: the part only Deezer has is asked
+        # for separately (``/album/<id>/on-deezer``).
+        "library": True,
     }
 
 
@@ -1225,11 +1248,13 @@ def _db_artist_response(ar: Artist) -> dict:
     cards = _db_album_cards(albums)
     # A few of the artist's tracks as a stand-in "top" shelf (DB order).
     top_q = (
-        Track.select(Track, Album, Artist)
-        .join(Album)
-        .switch(Track)
-        .join(Artist)
-        .where(Track.artist == ar)
+        _visible_tracks(
+            Track.select(Track, Album, Artist)
+            .join(Album)
+            .switch(Track)
+            .join(Artist)
+            .where(Track.artist == ar)
+        )
         .order_by(Track.play_count.desc())
         .limit(15)
     )
@@ -1237,7 +1262,9 @@ def _db_artist_response(ar: Artist) -> dict:
         "artist": {
             "deezer_id": str(ar.deezer_id or ""),
             "name": ar.name,
-            "picture": None,  # not stored locally
+            # Deezer's picture is fetched (and kept) by the cover route; an
+            # artist with no Deezer id has none.
+            "picture": f"/api/cover/{ar.id}" if ar.deezer_id else None,
             "nb_fan": None,
             "is_favorite": _starred("artist", row=ar),
         },
@@ -1245,6 +1272,7 @@ def _db_artist_response(ar: Artist) -> dict:
         "top": _db_tracks(top_q),
         "albums": cards,
         "related": [],
+        "library": True,  # ``/artist/<id>/on-deezer`` completes it
     }
 
 
@@ -1855,52 +1883,114 @@ def search_podcasts():
     return jsonify({"podcasts": [x for x in res if x]})
 
 
+def _entity_row(model, make_uuid, raw):
+    """The library row of an album / artist named by its UUID or a Deezer id,
+    or None. Database only; a private upload nobody here may read is no row."""
+    text = str(raw)
+    try:
+        key = uuid.UUID(text)
+        row = model.get_or_none(model.id == key)
+    except ValueError:
+        if not _valid_id(text):
+            return None
+        row = model.select().where(
+            (model.deezer_id == text) | (model.id == make_uuid(text))
+        ).first()
+    if row is None or row.deezer_id is not None:
+        return row
+    # No Deezer id: an upload or a scanned folder, shown only with a track the
+    # caller may read.
+    field = Track.album if model is Album else Track.artist
+    seen = _visible_tracks(Track.select(Track.id).where(field == row)).limit(1)
+    return row if seen.exists() else None
+
+
+def _artist_row(raw):
+    from ..deezer import ids as dz_ids
+
+    return _entity_row(Artist, dz_ids.artist_uuid, raw)
+
+
+def _album_row(raw):
+    from ..deezer import ids as dz_ids
+
+    return _entity_row(Album, dz_ids.album_uuid, raw)
+
+
 @webapi.route("/artist/<artist_id>")
 @login_required
 def artist(artist_id):
-    """Artist page via the public API (the gateway pageArtist is legacy)."""
-    provider = _provider()
+    """The artist page. A library artist is answered from the database alone;
+    Deezer is only the page of an artist we do not hold (its facts: the
+    artist and the albums, no shelves of recommendations), and the part of a
+    library artist that is only on Deezer is ``/artist/<id>/on-deezer``."""
+    ar = _artist_row(artist_id)
+    if ar is not None:
+        return jsonify(_db_artist_response(ar))
     # The id is concatenated into the outgoing api.deezer.com URL: validate it
     # here rather than letting "%3F..." smuggle query parameters into the call.
     dzapi = _dz_api() if _valid_id(artist_id) else None
     exc = None
     if dzapi is not None:
-        # All four at once: the shelves only need the id, not the artist's
-        # answer, and one after the other they were four round trips.
-        (info, exc), (top, _), (albums, _), (related, _) = _side_by_side(
+        (info, exc), (albums, _) = _side_by_side(
             lambda: dzapi.get_artist(artist_id),
-            lambda: _data(lambda: dzapi.get_artist_top(artist_id, limit=15)),
             lambda: _data(lambda: dzapi.get_artist_albums(artist_id, limit=50)),
-            lambda: _data(lambda: dzapi.get_artist_related(artist_id, limit=20)),
         )
         if exc is not None:
-            _log_deezer_failure("artist %s lookup failed; trying local DB", artist_id, exc=exc)
+            _log_deezer_failure("artist %s lookup failed", artist_id, exc=exc)
         if info and info.get("id"):
-            top = flag_unavailable([x for x in map(_track_api, top or []) if x])
-            albums = [_album_api(a) for a in albums or []]
-            related = [_artist_api(a) for a in related or []]
             artist_out = _artist_api(info)
             artist_out["is_favorite"] = _starred("artist", deezer_id=artist_id)
             return jsonify(
                 {
                     "artist": artist_out,
                     "bio": None,
-                    "top": [x for x in top if x],
-                    "albums": [x for x in albums if x],
-                    "related": [x for x in related if x],
+                    "top": [],
+                    "albums": [x for x in map(_album_api, albums or []) if x],
+                    "related": [],
                 }
             )
-    # Fall back to the imported/archived artist in the DB (offline browsing).
-    ar = (
-        Artist.select().where(Artist.deezer_id == str(artist_id)).first()
-        if _valid_id(artist_id)
-        else None
-    )
-    if ar is not None:
-        return jsonify(_db_artist_response(ar))
     if not _valid_id(artist_id):
         return jsonify({"error": "not found"}), 404
     return _deezer_missing(exc)
+
+
+@webapi.route("/artist/<artist_id>/on-deezer")
+@login_required
+def artist_on_deezer(artist_id):
+    """The albums of an artist that Deezer has and the library does not: the
+    part of the page that needs Deezer, asked after the page is on screen."""
+    ar = _artist_row(artist_id)
+    did = str(ar.deezer_id) if ar is not None and ar.deezer_id else str(artist_id)
+    if not _valid_id(did):
+        return jsonify({"albums": []})
+    if _provider() is None:  # switched off: nothing more to offer, no error
+        return jsonify({"albums": []})
+    dzapi = _dz_api()
+    if dzapi is None:
+        return _deezer_missing()
+    try:
+        raw = (dzapi.get_artist_albums(did, limit=50) or {}).get("data") or []
+    except Exception as exc:
+        _log_deezer_failure("artist %s albums failed", did, exc=exc)
+        return _deezer_missing(exc)
+    albums = [x for x in map(_album_api, raw or []) if x]
+    return jsonify({"albums": _not_in_library(Album, albums)})
+
+
+def _not_in_library(model, items):
+    """`items` (API dicts carrying a ``deezer_id``) whose row the library does
+    not hold."""
+    ids_ = [str(x.get("deezer_id")) for x in items if x.get("deezer_id")]
+    have = set()
+    for i in range(0, len(ids_), _IN_CHUNK):
+        have.update(
+            str(d)
+            for (d,) in model.select(model.deezer_id)
+            .where(model.deezer_id << ids_[i : i + _IN_CHUNK])
+            .tuples()
+        )
+    return [x for x in items if str(x.get("deezer_id")) not in have]
 
 
 @webapi.route("/artist/<artist_id>/tracks")
@@ -1908,11 +1998,21 @@ def artist(artist_id):
 def artist_tracks(artist_id):
     """All of an artist's tracks as a playlist-like list (the 'Titres' tab).
 
-    The public API's /artist/{id}/top endpoint is paged, so gather several pages
-    (deduping, since collaborations can repeat) up to a sane cap.
+    A library artist: the tracks the library holds. Otherwise the public API's
+    /artist/{id}/top (paged, so several pages gathered, deduped, up to a cap).
     """
     PAGE = 100
     MAX = 300
+    ar = _artist_row(artist_id)
+    if ar is not None:
+        rows = _visible_tracks(
+            Track.select(Track, Album, Artist)
+            .join(Album)
+            .switch(Track)
+            .join(Artist)
+            .where(Track.artist == ar)
+        ).order_by(Album.name, Track.disc, Track.number)
+        return jsonify({"tracks": _db_tracks(rows)})
     dzapi = _dz_api() if _valid_id(artist_id) else None
     failure = None
     if dzapi is not None:
@@ -1923,7 +2023,7 @@ def artist_tracks(artist_id):
             try:
                 batch = (dzapi.get_artist_top(artist_id, index=index, limit=PAGE) or {}).get("data") or []
             except Exception as exc:
-                _log_deezer_failure("artist %s tracks failed; trying local DB", artist_id)
+                _log_deezer_failure("artist %s tracks failed", artist_id)
                 failure = exc
                 break
             if not batch:
@@ -1938,37 +2038,21 @@ def artist_tracks(artist_id):
             index += PAGE
         if tracks:
             return jsonify({"tracks": tracks})
-    # Deezer disabled/unreachable: serve the artist's archived tracks from the DB.
-    ar = (
-        Artist.select().where(Artist.deezer_id == str(artist_id)).first()
-        if _valid_id(artist_id)
-        else None
-    )
-    if ar is not None:
-        rows = (
-            Track.select(Track, Album, Artist)
-            .join(Album)
-            .switch(Track)
-            .join(Artist)
-            .where(Track.artist == ar)
-            .order_by(Album.name, Track.disc, Track.number)
-        )
-        return jsonify({"tracks": _db_tracks(rows)})
     if not _valid_id(artist_id):
         return jsonify({"error": "not found"}), 404
     return _deezer_missing(failure)
 
 
-def _db_album_by_id(album_id):
-    """The DB Album for a Deezer numeric id, or None (no network)."""
-    if not _valid_id(album_id):
-        return None
-    return Album.select().where(Album.deezer_id == str(album_id)).first()
-
-
 @webapi.route("/album/<album_id>")
 @login_required
 def album(album_id):
+    """The album page. A library album is answered from the database alone
+    (the tracks the library holds); the rest of its tracklist is
+    ``/album/<id>/on-deezer``. Deezer is the page only of an album we do not
+    hold."""
+    alb = _album_row(album_id)
+    if alb is not None:
+        return jsonify(_db_album_response(alb))
     provider = _provider()
     exc = None
     if provider is not None and _valid_id(album_id):
@@ -1979,7 +2063,7 @@ def album(album_id):
             lambda: provider.get_album_tracks(album_id),
         )
         if exc is not None:
-            _log_deezer_failure("album %s page failed; trying local DB", album_id, exc=exc)
+            _log_deezer_failure("album %s page failed", album_id, exc=exc)
         else:
             data = (page or {}).get("DATA") or {}
             if data.get("ALB_ID"):
@@ -1988,14 +2072,31 @@ def album(album_id):
                 alb_out = _album(data)
                 alb_out["is_favorite"] = _starred("album", deezer_id=album_id)
                 return jsonify({"album": alb_out, "tracks": _tracks(songs)})
-    # Deezer disabled/unreachable (or the album isn't on Deezer): serve the
-    # imported/archived copy from the DB so downloaded albums browse offline.
-    alb = _db_album_by_id(album_id)
-    if alb is not None:
-        return jsonify(_db_album_response(alb))
     if not _valid_id(album_id):
         return jsonify({"error": "not found"}), 404
     return _deezer_missing(exc)
+
+
+@webapi.route("/album/<album_id>/on-deezer")
+@login_required
+def album_on_deezer(album_id):
+    """The tracks of an album that Deezer has and the library does not."""
+    alb = _album_row(album_id)
+    did = str(alb.deezer_id) if alb is not None and alb.deezer_id else str(album_id)
+    provider = _provider()
+    if not _valid_id(did):
+        return jsonify({"tracks": []})
+    if provider is None:  # switched off: nothing more to offer, no error
+        return jsonify({"tracks": []})
+    if not provider.available():
+        return _deezer_missing()
+    try:
+        songs = provider.get_album_tracks(did)
+    except Exception as exc:
+        _log_deezer_failure("album %s tracks failed", did, exc=exc)
+        return _deezer_missing(exc)
+    tracks = [t for t in _tracks(songs) if t]
+    return jsonify({"tracks": _not_in_library(Track, tracks)})
 
 
 @webapi.route("/playlist/<playlist_id>")
@@ -2049,23 +2150,24 @@ def playlist(playlist_id):
 @webapi.route("/artist/<artist_id>/discography")
 @login_required
 def discography(artist_id):
+    ar = _artist_row(artist_id)
+    if ar is not None:
+        # The library's own albums; the others are ``/artist/<id>/on-deezer``.
+        albums = Album.select(Album, Artist).join(Artist).where(Album.artist == ar)
+        cards = _db_album_cards(albums)
+        cards.sort(key=lambda x: str(x.get("year") or ""), reverse=True)
+        # Keys the Artist page reads: `album` (grid) and `all` (latest shelf).
+        return jsonify({"discography": {"album": cards, "all": cards} if cards else {}})
+    if not _valid_id(artist_id):
+        return jsonify({"error": "not found"}), 404
     provider = _provider()
     tabs = {}
-    if provider is not None and _valid_id(artist_id):
+    if provider is not None:
         try:
             tabs = provider.get_artist_discography(artist_id)
         except Exception:
-            _log_deezer_failure("discography %s failed; trying local DB", artist_id)
+            _log_deezer_failure("discography %s failed", artist_id)
             tabs = {}
-    # Deezer gave nothing (down/disabled): list the artist's archived albums.
-    if not tabs and _valid_id(artist_id):
-        ar = Artist.select().where(Artist.deezer_id == str(artist_id)).first()
-        if ar is not None:
-            albums = Album.select(Album, Artist).join(Artist).where(Album.artist == ar)
-            cards = _db_album_cards(albums)
-            cards.sort(key=lambda x: str(x.get("year") or ""), reverse=True)
-            # Keys the Artist page reads: `album` (grid) and `all` (latest shelf).
-            return jsonify({"discography": {"album": cards, "all": cards} if cards else {}})
     out = {}
     for tab, releases in (tabs or {}).items():
         items = [
@@ -2428,8 +2530,8 @@ def my_playlists():
             .group_by(PlaylistTrack.playlist)
             .alias("first")
         )
-        for pid, tid, dz, md5 in (
-            PlaylistTrack.select(_raw(PlaylistTrack.playlist), _raw(Track.id), Track.deezer_id, Album.cover_md5)
+        for pid, alid in (
+            PlaylistTrack.select(_raw(PlaylistTrack.playlist), _raw(Album.id))
             .join(first, on=((PlaylistTrack.playlist == first.c.pl) & (PlaylistTrack.index == first.c.ix)))
             .switch(PlaylistTrack)
             .join(Track)
@@ -2438,7 +2540,7 @@ def my_playlists():
         ):
             if pid in covers:
                 continue
-            covers[pid] = "/api/localcover/" + _uuid_text(tid) if dz is None else _image("cover", md5)
+            covers[pid] = cover_url_for(alid)
     out = [
         {
             "id": _uuid_text(pid),
@@ -3371,9 +3473,21 @@ def download():
     # a hundred thousand ids would pin the archiver for days and fill the disk —
     # available to any logged-in account. A whole playlist still fits in one
     # request; anything larger is a client bug or an attack.
+    from . import refs
+
+    texts = [str(x) for x in raw[: _DOWNLOAD_BATCH_MAX * 2]]
+    # A row UUID of a Deezer track names that track: one IN for all of them.
+    guids = [x for x in texts if not _valid_id(x)]
+    mapped = {}
+    if guids:
+        mapped = {
+            x: str(row.deezer_id)
+            for x, row in zip(guids, refs.resolve_tracks(guids))
+            if row is not None and row.deezer_id
+        }
     seen, ids = set(), []
-    for x in raw:
-        x = str(x)
+    for x in texts:
+        x = mapped.get(x, x)
         if _valid_id(x) and x not in seen:
             seen.add(x)
             ids.append(x)
@@ -4091,6 +4205,35 @@ def cover(cid):
     return cover_response(cid)
 
 
+def _album_cover_response(cid, vetted):
+    """``/cover/<album uuid>`` from the database and the disk, with no request
+    to Deezer: the archived ``cover.jpg``, else the art embedded in (or beside)
+    a track of the album that the caller may read, else — a Deezer album with
+    no file yet — a redirect to the CDN address the row's ``cover_md5``
+    spells. None when `cid` is not an album."""
+    from ..deezer import library
+
+    try:
+        alb = Album[uuid.UUID(str(cid))]
+    except (ValueError, Album.DoesNotExist):
+        return None
+    first = alb.tracks.first()
+    if first is not None and not vetted and not _may_access_track(first):
+        # Someone else's private upload: indistinguishable from an unknown id.
+        return jsonify({"error": "not found"}), 404
+    local = library.album_cover_file(alb)
+    if local:
+        return send_file(local, conditional=True)
+    for tr in alb.tracks.where(Track.last_modification > 0).limit(20):
+        if (vetted or _may_access_track(tr)) and os.path.isfile(tr.path):
+            found = _serve_embedded_cover(tr)
+            if not isinstance(found, tuple):  # (json, 404) when it has none
+                return found
+    if alb.cover_md5:
+        return redirect(_image("cover", alb.cover_md5, 1000))
+    return jsonify({"error": "not found"}), 404
+
+
 def cover_response(cid, *, vetted=False):
     """The body of ``/cover/<cid>``, shared with the listen party.
 
@@ -4113,6 +4256,10 @@ def cover_response(cid, *, vetted=False):
             return jsonify({"error": "not found"}), 404
     if track is not None and os.path.isfile(track.path):
         return _serve_embedded_cover(track)
+    if track is None and not _valid_id(cid):
+        resp = _album_cover_response(cid, vetted)
+        if resp is not None:
+            return resp
     if not _valid_id(cid) and (track is None or track.youtube_id):
         # A YouTube hit or a YouTube row not fetched yet: the search's art.
         resp = youtube.cover(track, cid)
@@ -4159,6 +4306,10 @@ def stream(deezer_id):
     even if Deezer is unreachable. Local tracks are addressed by their UUID.
     """
     from ..deezer import archive
+    from .refs import canonical
+
+    # A row UUID of a Deezer track is that track: same answer as its Deezer id.
+    deezer_id = canonical(deezer_id)
 
     # Resolve the requested quality up front: it decides whether a cold track can
     # take the stream-first (live FLAC) fast path or must be fully archived first.

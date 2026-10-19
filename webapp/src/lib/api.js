@@ -253,6 +253,9 @@ export const api = {
   artist: (id) => req("/artist/" + id),
   artistTracks: (id) => req("/artist/" + id + "/tracks"),
   discography: (id) => req("/artist/" + id + "/discography"),
+  // The part of a library page that only Deezer has, asked once the page is shown.
+  artistOnDeezer: (id) => req("/artist/" + id + "/on-deezer"),
+  albumOnDeezer: (id) => req("/album/" + id + "/on-deezer"),
   album: (id) => req("/album/" + id),
   playlist: (id) => req("/playlist/" + id),
   lyrics: (id) => req("/lyrics/" + id),
