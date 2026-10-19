@@ -16,6 +16,7 @@
 import { derived, writable } from "svelte/store";
 import { current } from "./stores.js";
 import { knownAnalysis, onAnalysis } from "./analysis.js";
+import { trackKey } from "./trackkey.js";
 
 const verdict = writable(null);
 let watching = null;
@@ -25,7 +26,7 @@ function refresh(id) {
 }
 
 current.subscribe(($c) => {
-  const id = $c?.deezer_id ? String($c.deezer_id) : null;
+  const id = trackKey($c);
   if (id === watching) return;
   watching = id;
   refresh(id);

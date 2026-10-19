@@ -6,6 +6,7 @@
 // real bitrate is asked of OUR server, never of YouTube.
 import { writable } from "svelte/store";
 import { api } from "./api.js";
+import { trackKey, trackRef } from "./trackkey.js";
 
 export const youtubeStatus = writable(null);
 
@@ -66,11 +67,11 @@ export function realBitrateBadge(track, quality, real) {
 const known = new Map();
 export async function realBitrate(track) {
   if (!isYoutube(track)) return 0;
-  const id = String(track.deezer_id);
+  const id = trackKey(track);
   if (track.bitrate) return track.bitrate;
   if (known.has(id)) return known.get(id);
   try {
-    const r = await api.probeTrack(id);
+    const r = await api.probeTrack(trackRef(track));
     const kbps = +r?.bitrate || 0;
     if (kbps) known.set(id, kbps);
     return kbps;

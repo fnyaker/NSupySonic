@@ -11,7 +11,9 @@
 // where the server put them. When nothing at all changed, hand back the very
 // same array reference, which makes the update a no-op all the way down.
 
-const idOf = (t) => String((t && (t.deezer_id ?? t.id)) ?? "");
+import { trackKey } from "./trackkey.js";
+
+const idOf = (t) => String(trackKey(t) ?? "");
 
 // Merge `next` (authoritative order + content) into `prev`.
 export function reconcileList(prev, next, key = idOf) {

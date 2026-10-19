@@ -1,6 +1,7 @@
 import { writable, derived, get } from "svelte/store";
 import { logInfo, flushLog } from "./log.js";
 import { REMOTE } from "./remote/mode.js";
+import { trackKey, migrateKey } from "./trackkey.js";
 
 // -- auth -------------------------------------------------------------------
 
@@ -488,7 +489,7 @@ export function closePartySheet() {
 
 export const shareSheet = writable(null);
 export function openShare(track) {
-  if (track && track.deezer_id) shareSheet.set({ track });
+  if (trackKey(track)) shareSheet.set({ track });
 }
 export function closeShare() {
   shareSheet.set(null);
@@ -501,7 +502,7 @@ export function closeShare() {
 // from the badge on a dead row, and from the library's "indisponibles" section.
 export const replaceSheet = writable(null);
 export function openReplace(track) {
-  if (track && track.deezer_id) replaceSheet.set({ track });
+  if (trackKey(track)) replaceSheet.set({ track });
 }
 export function closeReplace() {
   replaceSheet.set(null);
@@ -525,7 +526,7 @@ export function closeGenreBulk() {
 
 export const genreTagSheet = writable(null);
 export function openGenreTag(track) {
-  if (track && (track.deezer_id || track.id)) genreTagSheet.set({ track });
+  if (trackKey(track)) genreTagSheet.set({ track });
 }
 export function closeGenreTag() {
   genreTagSheet.set(null);
@@ -589,9 +590,10 @@ export const favTracks = writable(null);
 
 export const recent = persisted("recent.tracks", []);
 export function pushRecent(track) {
-  if (!track || !track.deezer_id) return;
+  const key = trackKey(track);
+  if (!key) return;
   recent.update((list) => {
-    const next = [track, ...list.filter((t) => t.deezer_id !== track.deezer_id)];
+    const next = [track, ...list.filter((t) => trackKey(t) !== key)];
     return next.slice(0, 30);
   });
 }
@@ -678,7 +680,10 @@ function readSession() {
     return sess; // the snapshot is the fresh one
   }
   const queue = Array.isArray(sess.queue) ? sess.queue : [];
-  if (queue[pos.i]?.deezer_id === pos.id) {
+  // A tick written before the app keyed on UUIDs names the track by its Deezer
+  // id; the same track, so the same place.
+  const wantId = migrateKey(pos.id);
+  if (queue[pos.i] && trackKey(queue[pos.i]) === wantId) {
     sess.index = pos.i;
     sess.currentTime = pos.t;
     logInfo("restore", `tick accepted -> index ${pos.i} @ ${pos.t.toFixed(1)}s`);
@@ -695,7 +700,7 @@ function readSession() {
   let found = -1;
   let ambiguous = false;
   for (let k = 0; k < queue.length; k++) {
-    if (queue[k]?.deezer_id !== pos.id) continue;
+    if (trackKey(queue[k]) !== wantId) continue;
     if (found >= 0) {
       ambiguous = true; // the same track twice: no way to tell which one
       break;
@@ -833,10 +838,10 @@ function createPlayer() {
   function savePos(s) {
     if (DISPLAY_ONLY) return;
     lastPosAt = Date.now();
-    logInfo("pos", `i=${s.index - savedOffset} id=${s.queue[s.index]?.deezer_id ?? "-"} t=${(s.currentTime || 0).toFixed(1)}`);
+    logInfo("pos", `i=${s.index - savedOffset} id=${trackKey(s.queue[s.index]) ?? "-"} t=${(s.currentTime || 0).toFixed(1)}`);
     writeJSON(POS_KEY, {
       i: s.index - savedOffset, // same coordinates as the persisted window
-      id: s.queue[s.index]?.deezer_id ?? null,
+      id: trackKey(s.queue[s.index]),
       t: s.currentTime,
       at: Date.now(),
     });
@@ -888,7 +893,7 @@ function createPlayer() {
     // where it is needed most.
     const queueChanged = s.queue !== lastQueue;
     const playChanged = s.playing !== lastPlaying;
-    const idxKey = `${s.index}|${s.queue[s.index]?.deezer_id ?? ""}`;
+    const idxKey = `${s.index}|${trackKey(s.queue[s.index]) ?? ""}`;
     const moved = idxKey !== lastIndexKey;
     lastQueue = s.queue;
     lastPlaying = s.playing;
@@ -913,7 +918,7 @@ function createPlayer() {
   });
 
   function clean(tracks) {
-    return (tracks || []).filter((t) => t && t.deezer_id);
+    return (tracks || []).filter((t) => t && trackKey(t));
   }
 
   const player = {
@@ -937,7 +942,7 @@ function createPlayer() {
       const wanted = src[Math.min(Math.max(start, 0), Math.max(0, src.length - 1))];
       let queue = clean(src);
       if (!queue.length) return;
-      const startTrack = wanted && wanted.deezer_id ? wanted : queue[0];
+      const startTrack = wanted && trackKey(wanted) ? wanted : queue[0];
       queue = filterQueue(queue);
       if (!queue.length) return;
       let index = queue.indexOf(startTrack);
@@ -1007,8 +1012,8 @@ function createPlayer() {
       // storm (a /api/radio/track call every ~250ms, for hours), which pegs the
       // main thread and makes the whole UI stop responding.
       const s = get({ subscribe });
-      const have = new Set(s.queue.map((t) => t.deezer_id));
-      const add = extra.filter((t) => !have.has(t.deezer_id));
+      const have = new Set(s.queue.map(trackKey));
+      const add = extra.filter((t) => !have.has(trackKey(t)));
       if (!add.length) return 0;
       update((cur) => ({
         ...cur,
@@ -1186,7 +1191,7 @@ function createPlayer() {
         // Find the playing track by IDENTITY first — an id lookup could point
         // at another copy when the queue holds the same track twice.
         let index = base.indexOf(cur);
-        if (index < 0) index = base.findIndex((t) => t.deezer_id === cur?.deezer_id);
+        if (index < 0) index = base.findIndex((t) => trackKey(t) === trackKey(cur));
         index = Math.max(0, index);
         return { ...s, shuffle, queue: base, index, _orig: null };
       });
@@ -1242,5 +1247,5 @@ export const current = derived(player, ($p) =>
 // Lightweight stores that only change on track/play-state changes — NOT on every
 // timeupdate. Track rows subscribe to these instead of the whole player store,
 // so long lists (e.g. thousands of favorites) don't re-render 4×/second.
-export const currentId = derived(current, ($c) => ($c ? $c.deezer_id : null));
+export const currentId = derived(current, ($c) => trackKey($c));
 export const playing = derived(player, ($p) => $p.playing);
