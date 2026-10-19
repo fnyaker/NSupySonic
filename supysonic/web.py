@@ -152,6 +152,13 @@ def create_application(config=None):
     from .providers import Registry
 
     app.providers = Registry()
+    if not app.testing:
+        # Under test only the fake is registered (the tests of the lots that
+        # ask "who is enabled" must not depend on whether yt-dlp is installed);
+        # the built-ins are registered there by the tests that exercise them.
+        from .providers.builtin import register_builtin
+
+        register_builtin(app.providers, lambda: app.deezer)
     if app.testing:
         from .providers.fake import FakeProvider
 

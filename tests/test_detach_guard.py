@@ -200,6 +200,94 @@ class DeezerGuardTestCase(_AppCase):
         self.assertEqual(self.calls, [])
 
 
+#: What each provider's adapter may ask its service (lot B). Deezer's list is
+#: ``ALLOWED`` above, call for call; YouTube's are the three functions of
+#: ``deezer/youtube.py`` that search, download or fetch art.
+PROVIDER_ALLOWED = {
+    "deezer": ALLOWED,
+    "youtube": {"search", "download_audio", "fetch_thumbnail", "recall"},
+}
+WRITE_WORDS = re.compile(
+    r"favorite|star|love|follow|create|edit|delete|remove|add_|set_|push|sync_to|rate|scrobble|listen|bookmark",
+    re.I,
+)
+
+
+class ProviderGuardTestCase(unittest.TestCase):
+    """The detachment holds for every provider, not only Deezer: the interface
+    has no way to write to an account, and each adapter, driven through every
+    method, only makes the calls its list allows."""
+
+    def test_the_interface_has_no_way_to_write_to_an_account(self):
+        from supysonic.providers import base
+
+        names = [n for n in dir(base.Provider) if not n.startswith("_")]
+        self.assertEqual([n for n in names if WRITE_WORDS.search(n)], [])
+        for caps in base.METHODS.values():
+            self.assertEqual([m for m in caps if WRITE_WORDS.search(m)], [])
+
+    def _drive(self, adapter):
+        """Call every method of every capability the adapter declares."""
+        from supysonic.providers import base
+
+        for cap in adapter.capabilities:
+            for name in base.METHODS[cap]:
+                method = getattr(adapter, name)
+                args = {
+                    "search": ("q",), "search_shows": ("q",),
+                    "parse_link": ("https://www.deezer.com/album/1",),
+                    "fetch": ("1", {"fmt": "flac"}, "/nonexistent/x"),
+                    "open_stream": ("1", {"fmt": "flac"}),
+                    "account": (), "import_account": (),
+                }.get(name, ("1",))
+                try:
+                    out = method(*args)
+                    if hasattr(out, "__next__"):
+                        list(out)
+                except Exception:
+                    pass  # the spy answers nothing useful; only the calls matter
+
+    def test_the_deezer_adapter_only_makes_allowed_calls(self):
+        from supysonic.providers.deezer import DeezerAdapter
+
+        calls = []
+        spy = Spy(calls)
+        provider = DeezerProvider("arl", "/nonexistent", "FLAC")
+        provider._dz = spy
+        provider.relogin = lambda: spy
+        with mock.patch.object(DeezerProvider, "dz", property(lambda _self: spy)):
+            self._drive(DeezerAdapter(lambda: provider))
+        heard = {c for _w, c in calls}
+        self.assertTrue(heard, "the walk should reach Deezer")
+        self.assertLessEqual(heard, PROVIDER_ALLOWED["deezer"] | IMPORT_READS)
+        # the account is read only by import_account, with the import's own calls
+        account_calls = {c for c in heard if re.search(r"user_|favorite", c)}
+        self.assertLessEqual(account_calls, IMPORT_READS | {"gw.get_user_data"})
+
+    def test_the_youtube_adapter_only_makes_allowed_calls(self):
+        from supysonic.deezer import youtube as yt
+        from supysonic.providers.youtube import YoutubeAdapter
+
+        heard = []
+
+        def spy(name):
+            def call(*args, **kwargs):
+                heard.append(name)
+                raise yt.YoutubeError("spy")
+
+            return call
+
+        with mock.patch.object(yt, "installed", return_value=True), mock.patch.multiple(
+            yt, search=spy("search"), download_audio=spy("download_audio"),
+            fetch_thumbnail=spy("fetch_thumbnail"), recall=spy("recall"),
+        ):
+            adapter = YoutubeAdapter()
+            adapter.switch = lambda: True
+            self._drive(adapter)
+        self.assertTrue(heard)
+        self.assertLessEqual(set(heard), PROVIDER_ALLOWED["youtube"])
+
+
 class SpyTestCase(unittest.TestCase):
     def test_the_spy_hears_a_call_and_an_unknown_one_is_not_allowed(self):
         calls = []
