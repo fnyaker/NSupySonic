@@ -207,7 +207,9 @@ class DeezerAdapterTestCase(unittest.TestCase):
                 self.assertNotIsInstance(caught.exception, NotFound)
 
     def test_an_open_circuit_answers_at_once_and_is_not_a_verdict(self):
-        adapter, _ = adapter_on(StubDz())
+        adapter, provider = adapter_on(StubDz())
+        # monotonic() counts from boot: 0.0 would read "checked just now" on a young machine
+        provider._last_check = float("-inf")
         for _ in range(3):
             breaker.on_failure("api.deezer.com", requests.ConnectionError("x"), False)
         self.assertFalse(adapter.available())
