@@ -577,6 +577,32 @@ def deezer_lyrics(config, overwrite, limit):
     _lyrics_command(config, overwrite, limit)
 
 
+@deezer.command("migrate-disk")
+@click.option("--force", is_flag=True, help="Start over instead of resuming an interrupted run.")
+@click.option("--no-bpm", is_flag=True, help="Do not ask Deezer for the tempo of the tracks missing it.")
+@click.pass_obj
+def deezer_migrate_disk(config, force, no_bpm):
+    """Bring the archives already on disk to the current format.
+
+    Rewrites each archive's sidecar (no Deezer gain or rank, a facts block) and
+    its tags (no Deezer ReplayGain, the oldest release date), outside the
+    published file, and learns Deezer's published tempo where it is missing.
+    Safe to run again and to interrupt: a second run changes nothing.
+    """
+    from .deezer import diskmigrate, get_provider
+
+    provider = None if no_bpm else get_provider(config)
+    job = diskmigrate.make_job(provider, force)
+    click.echo("Migrating archived tracks...")
+    stats = job.run()
+    c = diskmigrate._counts
+    click.echo(
+        "Done. migrated={done} failed={failed} (sidecars {sidecar}, tags {tags}, "
+        "tempos {bpm}).".format(**stats, **{k: c.get(k, 0) for k in ("sidecar", "tags", "bpm")})
+    )
+    _echo_failures(stats)
+
+
 def _echo_failures(stats):
     """Print WHY a library job failed, not only how many times.
 

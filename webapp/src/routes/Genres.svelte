@@ -1768,6 +1768,9 @@
               <h3>{current.title}</h3>
               <p class="who">{current.artist}</p>
               {#if current.album}<p class="muted small album">{current.album}</p>{/if}
+              {#if current.deezer_bpm}
+                <p class="muted small album">BPM Deezer · {Math.round(current.deezer_bpm * 10) / 10}</p>
+              {/if}
               {#if current.review}
                 <p class="was">
                   Étiqueté <b>{current.review.label}</b> · le modèle entend

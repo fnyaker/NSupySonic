@@ -77,6 +77,10 @@ def setup_deezer(app):
             _wa.reanalyse_if_stale(app)
             _wg.resume_if_interrupted(app)
             _wg.relabel_if_stale(app)
+
+            from .deezer import diskmigrate as _dm
+
+            _dm.resume_if_interrupted(app)
     return app.deezer
 
 
