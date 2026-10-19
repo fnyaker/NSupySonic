@@ -310,15 +310,85 @@ def save_track_metadata(track, info: dict) -> str | None:
         "gw": {k: info[k] for k in _KEEP_FIELDS if k in info},
     }
     path = metadata_path(track)
+    # The facts block is written by other sources (tags, MusicBrainz…) and is
+    # not part of the Deezer payload: a rewrite must carry it over.
+    previous = read_track_metadata(track)
+    if previous and isinstance(previous.get("facts"), dict):
+        payload["facts"] = previous["facts"]
+    return path if _write_sidecar(path, payload) else None
+
+
+def _write_sidecar(path: str, payload: dict) -> bool:
+    """Atomic write (tmp + replace): an exception never leaves a cut file."""
+    tmp = f"{path}.part"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.part"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=1, default=str)
         os.replace(tmp, path)
     except (OSError, TypeError, ValueError):
-        return None
-    return path
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+# Which source wins when two disagree on a fact; later in the tuple = weaker.
+FACT_SOURCES = ("tags", "deezer", "musicbrainz", "acoustid")
+
+
+def _rank(source) -> int:
+    try:
+        return FACT_SOURCES.index(source)
+    except ValueError:
+        return len(FACT_SOURCES)
+
+
+def update_track_facts(
+    track, facts: dict, source: str, *, override: bool = False
+) -> bool:
+    """Merge ``facts`` into the sidecar's ``facts`` block as ``{value, source}``.
+
+    A fact is never overwritten by a weaker source (``FACT_SOURCES`` order)
+    unless ``override`` says so; the same source refreshes its own value.
+    Empty values are ignored. Returns True when the file changed.
+    """
+    if not track.path or not facts:
+        return False
+    data = read_track_metadata(track) or {}
+    block = data.get("facts")
+    if not isinstance(block, dict):
+        block = {}
+    changed = False
+    for key, value in facts.items():
+        if value is None or value == "":
+            continue
+        current = block.get(key)
+        if (
+            isinstance(current, dict)
+            and not override
+            and _rank(current.get("source")) < _rank(source)
+        ):
+            continue
+        new = {"value": value, "source": source}
+        if current != new:
+            block[key] = new
+            changed = True
+    if not changed:
+        return False
+    data["facts"] = block
+    return _write_sidecar(metadata_path(track), data)
+
+
+def read_track_facts(track) -> dict:
+    """``{key: {value, source}}`` from the sidecar; empty when there is none."""
+    if not track.path:
+        return {}
+    data = read_track_metadata(track)
+    block = data.get("facts") if data else None
+    return block if isinstance(block, dict) else {}
 
 
 def read_track_metadata(track) -> dict | None:
