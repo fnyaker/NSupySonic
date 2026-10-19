@@ -75,6 +75,7 @@ masque le reste.
 | `AUDIO` | `offers(ref) -> [Offer]`, `fetch(ref, offer, dest)` / `open_stream(ref, offer)` ; `fetch_cover(ref, size)` |
 | `CATALOG` | `get_track(ref)`, `get_album(ref)` (**avec la liste complète des pistes**), `get_artist(ref)`, `get_artist_albums(ref)`, `get_playlist(ref)` (idem) |
 | `ACCOUNT` | `account()` (nom, statut), `import_account()` (générateur de playlists et favoris, **lecture seule**) |
+| `FOLLOWS` | `followed_artists()` (les abonnements du compte, lecture seule), `artist_releases(ref, since)` (les sorties récentes d'un artiste), `similar_artists(ref)` (artistes proches, avec un score si le fournisseur en donne) |
 | `LINKS` | `parse_link(url) -> Ref | None` (le fournisseur sait lire ses propres liens de partage) |
 | `PODCASTS` | `search_shows`, `get_show`, `get_episodes` (seul Deezer au départ ; hors du cœur du plan) |
 
@@ -326,8 +327,76 @@ Chaque lot qui touche au schéma ou à la configuration le teste :
    Bandcamp ou un autre serveur Subsonic suivent le même gabarit ; **le choix du suivant est à la
    personne**, pas à ce plan.
 
-## 11. Ce que ce plan ne fait pas
+## 12. Abonnements aux artistes, nouveautés, artistes proches
+
+Demande du propriétaire (19/10/2026) : importer depuis chaque fournisseur **les abonnements aux
+artistes**, pour avoir **les nouveautés** de ces artistes, et **les artistes proches**.
+
+- **Suivre est local.** `artist_follow` (`user`, `artist` FK, `provider` d'origine ou null,
+  `followed`, `last_checked`) : une personne suit un artiste de la bibliothèque, quel que soit le
+  fournisseur d'où il vient. Rien n'est écrit sur un compte de fournisseur (frontière).
+- **Importer est ponctuel et additif**, comme l'import de playlists : `Provider.followed_artists()`
+  (capacité `FOLLOWS`) ajoute des suivis, n'en retire jamais ; chaque artiste importé reçoit sa ligne
+  « souche » et son `entity_ref`. Un bouton par fournisseur dans Réglages → Sources, et la même chose
+  en ligne de commande.
+- **Les nouveautés** : un travail de fond `BULK` interroge `artist_releases(ref, since)` pour chaque
+  artiste suivi, **au plus une fois par jour et par artiste** (étalé, avec le disjoncteur et
+  l'échéance du fournisseur), et range le résultat dans `new_release` (`artist`, `provider`, `ref`,
+  `title`, `date`, `found`, `seen_by_user`). Jamais dans le fil d'un clic : l'écran lit la table.
+  Les sorties s'affichent dans une rangée « Nouveautés » de l'accueil et un compteur ; elles se jouent
+  par `sources.pick` comme tout hit ; elles ne sont **archivées que si la règle `on_new_release` le
+  dit** (désactivée par défaut).
+- **Les artistes proches** : `similar_artists(ref)` est lu **une fois**, en arrière-plan, pour chaque
+  artiste suivi (et quand une personne ouvre une page artiste, après la réponse), et rangé dans
+  `artist_link` (`artist`, `other`, `provider`, `score`, `fetched`) ; le détachement a retiré les
+  recommandations de Deezer, ici elles redeviennent une **donnée importée une fois**, jamais un
+  appel par clic. Quand aucun fournisseur n'en donne, le graphe local (`similar.artist_neighbors`,
+  voisins par embeddings) répond seul ; aucun algorithme ne dépend de la présence de l'import.
+
+### Découverte à plusieurs niveaux de variété
+
+Un écran « Découvrir » et des rangées d'accueil, avec un **curseur d'éloignement** (quatre crans
+nommés et une valeur continue 0 à 1, mémorisés par personne) :
+
+| Cran | Éloignement | Ce qu'on propose |
+|---|---|---|
+| 1 Proche | 0 à 0,25 | titres voisins par embeddings (`track_neighbor`) des écoutes et favoris récents ; autres titres des mêmes artistes |
+| 2 Voisin | 0,25 à 0,5 | artistes proches (`artist_link`) des artistes écoutés ou suivis, leurs titres les plus écoutés / leurs nouveautés |
+| 3 Exploration | 0,5 à 0,75 | artistes à deux pas dans le graphe, familles de genre voisines (`style.js#genreOf`), même plage de tempo |
+| 4 Aventure | 0,75 à 1 | familles de genre éloignées, à l'écart des habitudes, une part de hasard graduée |
+
+Le curseur règle ensemble le nombre de pas dans le graphe d'artistes, la bande de distance entre
+embeddings, les familles de genre admises, et la part de connu (de 80 % à 20 %). Exclusions
+réglables : déjà écouté, déjà possédé, artistes ignorés (`artist_mute`). Tout est calculé sur des
+**données locales précalculées** (`track_neighbor`, `artist_link`, historique) : une requête indexée par
+rangée ; les candidats non archivés se jouent par `sources.pick` et ne sont **jamais téléchargés pour
+être proposés**. Une sortie bornée et dédupliquée (`matching`) ; une graine aléatoire par session pour
+que « Rafraîchir » change la rangée sans dépendre de l'heure.
+
+## 13. Tout se règle depuis la web UI
+
+Exigence du propriétaire (19/10/2026) : **tout ce qui est configurable l'est depuis la web UI**,
+en particulier **toutes les clés d'API** (MusicBrainz/AcoustID, Last.fm, fournisseurs). Seuls les
+**chemins de fichiers** et ce qui doit être connu avant que la base ne s'ouvre (URI de base de
+données, hôte, port) restent dans le fichier de configuration.
+
+- Un **registre de réglages** (`supysonic/settings.py`) : chaque réglage déclare sa clé, sa section,
+  son type, s'il est secret, son défaut, son validateur, s'il demande un redémarrage et une action de
+  test. Les valeurs vivent en base, **lues avant le fichier de configuration, avant l'environnement**
+  (comme l'ARL aujourd'hui) : une installation existante continue de marcher sans rien saisir.
+- **Les secrets** ne sont jamais renvoyés (masqués), jamais journalisés, remplaçables et effaçables ;
+  un bouton « Tester » valide une clé avant de la garder quand le service s'y prête.
+- **Couverture** : `[enrich]` (activation, `acoustid_key`, `contact`), `[lastfm]` (`api_key`,
+  `secret`), `[listenbrainz]`, les options Deezer et YouTube, les clés et identifiants de chaque
+  fournisseur (Jamendo, puis les suivants), les règles de qualité et d'amélioration, la découverte.
+  **Un test garde-fou** parcourt toutes les clés de `config.py` : chacune est dans le registre ou dans
+  une liste `FILE_ONLY` écrite avec sa raison (chemins, base, hôte). Ajouter une option sans l'une
+  des deux fait échouer la suite.
+- Un fournisseur déclare ses réglages par `config_schema()` (§5) : ils passent par le même registre,
+  donc par la même interface, et le même masquage.
+
+## 14. Ce que ce plan ne fait pas
 
 Pas de réécriture de la SPA hors des écrans nommés, pas de renommage de package, pas de suppression
 des colonnes héritées, pas de nouvelle source de faits (MusicBrainz/LRCLIB restent comme elles sont),
-pas de synchronisation vers un compte de fournisseur.
+pas de synchronisation vers un compte de fournisseur (les abonnements importés ne sont jamais renvoyés).
