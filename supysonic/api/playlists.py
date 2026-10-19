@@ -15,19 +15,10 @@ from . import get_entity, api_routing
 from .exceptions import Forbidden, MissingParameter
 
 
-def _deezer_provider():
-    """Return the Deezer provider if push-to-Deezer is enabled, else None."""
-    provider = getattr(current_app, "deezer", None)
-    if provider is None or not current_app.config["DEEZER"].get("push_to_deezer"):
-        return None
-    return provider
-
-
 def _archive_added(tracks):
     """Adding a track to a playlist archives it, exactly as in the web app.
 
-    Independent of push-to-Deezer: keeping your own copy is not a mirroring
-    concern. Fail-soft — the playlist edit has already succeeded.
+    Fail-soft — the playlist edit has already succeeded.
     """
     if not tracks:
         return
@@ -115,12 +106,6 @@ def create_playlist():
         added.append(track)
     playlist.save()
 
-    provider = _deezer_provider()
-    if provider is not None:
-        from ..deezer import push
-
-        push.reconcile_playlist(provider, playlist)
-
     _archive_added(added)
     return request.formatter.empty
 
@@ -131,15 +116,8 @@ def delete_playlist():
     if res.user != request.user and not request.user.admin:
         raise Forbidden()
 
-    deezer_id = res.deezer_id
     PlaylistTrack.delete().where(PlaylistTrack.playlist == res).execute()
     res.delete_instance()
-
-    provider = _deezer_provider()
-    if provider is not None:
-        from ..deezer import push
-
-        push.delete_playlist(provider, deezer_id)
 
     return request.formatter.empty
 
@@ -174,12 +152,6 @@ def update_playlist():
 
     playlist.remove_at_indexes(to_remove)
     playlist.save()
-
-    provider = _deezer_provider()
-    if provider is not None:
-        from ..deezer import push
-
-        push.reconcile_playlist(provider, playlist)
 
     _archive_added(added)
     return request.formatter.empty

@@ -20,17 +20,10 @@ from .exceptions import AggregateException, GenericError, MissingParameter, NotF
 
 
 def _deezer_favorite(cls, entity, add):
-    """Mirror a star/unstar to the user's Deezer favorites (best-effort)."""
+    """A star is local; starring also archives what it holds (nothing is written
+    to the Deezer account)."""
     if add:
         _archive_starred(cls, entity)
-    provider = getattr(current_app, "deezer", None)
-    if provider is None or not current_app.config["DEEZER"].get("push_to_deezer"):
-        return
-    if not getattr(entity, "deezer_id", None):
-        return
-    from ..deezer import push
-
-    push.push_favorite(provider, cls.__name__, entity.deezer_id, add)
 
 
 def _archive_starred(cls, entity):

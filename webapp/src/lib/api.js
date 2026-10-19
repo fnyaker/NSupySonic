@@ -245,8 +245,6 @@ export const api = {
   smartTracklist: (id) => req("/smarttracklist/" + id),
   flow: () => req("/flow"),
   flowClusters: () => req("/flow/clusters"),
-  setFlowClusters: (clusters) =>
-    req("/flow/clusters", { method: "POST", body: body({ clusters }) }),
   recommendations: () => req("/recommendations"),
   explore: () => req("/explore"),
   exploreGenre: (id) => req("/explore/genre/" + id),
@@ -461,8 +459,10 @@ export const api = {
   // mutations
   favorite: (deezer_id, on) =>
     req("/favorite", { method: "POST", body: body({ deezer_id, on }) }),
-  favoriteEntity: (kind, deezer_id, on) =>
-    req("/favorite/" + kind, { method: "POST", body: body({ deezer_id, on }) }),
+  // `meta` ({ title, artist, artist_id }) names the entity for the server when
+  // it has never imported it (a star is local, the row is made from this).
+  favoriteEntity: (kind, deezer_id, on, meta = {}) =>
+    req("/favorite/" + kind, { method: "POST", body: body({ ...meta, deezer_id, on }) }),
   createPlaylist: (title, tracks) =>
     req("/playlists", { method: "POST", body: body({ title, tracks }) }),
   editPlaylist: (id, fields) =>

@@ -1204,6 +1204,7 @@ def _db_album_response(alb: Album) -> dict:
             },
             "nb_tracks": len(tracks),
             "year": alb.tracks.select(fn.min(Track.year)).scalar() or None,
+            "is_favorite": _starred("album", row=alb),
         },
         "tracks": tracks,
     }
@@ -1233,6 +1234,7 @@ def _db_artist_response(ar: Artist) -> dict:
             "name": ar.name,
             "picture": None,  # not stored locally
             "nb_fan": None,
+            "is_favorite": _starred("artist", row=ar),
         },
         "bio": None,
         "top": _db_tracks(top_q),
@@ -1271,8 +1273,8 @@ def _deezer_starred():
 # The web app's *user* playlists live in supysonic's own Playlist/PlaylistTrack
 # tables (ordered by PlaylistTrack.index), exactly like the Subsonic side. This
 # lets a playlist mix Deezer tracks and purely-local files (deezer_id NULL), and
-# gives reliable reordering. Edits are mirrored back to the Deezer account
-# fail-soft (deezer/push.py), but only the Deezer-track subset is pushed.
+# gives reliable reordering. They are local only: nothing is written back to the
+# Deezer account.
 
 
 def _track_uid(t: Track) -> str:
@@ -1338,36 +1340,27 @@ def _ensure_track_row(provider, deezer_id, root, cache):
 
 def _resolve_tracks(provider, raw_ids) -> list:
     """Map universal track ids to Track rows: a UUID is a local/DB track, a
-    numeric id is a Deezer track whose row is created on demand."""
+    numeric id is a Deezer track whose row is created on demand.
+
+    Rows that already exist are read in one go (``refs.resolve_tracks``); only an
+    id the database does not know goes further. With no ``provider`` (Deezer
+    switched off) an unknown Deezer id is simply left out.
+    """
     from ..deezer import library
+    from . import refs
 
-    from ..deezer import archive
-
+    raw_ids = list(raw_ids)
+    known = refs.resolve_tracks(raw_ids)
     root = None
     cache = library.ImportCache()
     out = []
-    for raw in raw_ids:
+    for raw, row in zip(raw_ids, known):
+        if row is not None:
+            out.append(row)
+            continue
         sid = str(raw)
-        try:
-            row = Track[uuid.UUID(sid)]
-            # Don't let a playlist smuggle in another user's private upload.
-            if _may_access_track(row):
-                out.append(row)
-            continue
-        except ValueError:
-            pass
-        except Track.DoesNotExist:
-            # A YouTube search hit: its row is made from the search's answer.
-            row = youtube.materialize(sid)
-            if row is not None:
-                out.append(row)
-            continue
         if _valid_id(sid):
-            # Known Deezer track? Reuse the DB row (no network) so adding an
-            # already-imported track to a playlist works even when Deezer is down.
-            known = archive.find_local_track(sid)
-            if known is not None:
-                out.append(known)
+            if provider is None:
                 continue
             if root is None:
                 root = library.get_root_folder(provider.archive_dir)
@@ -1375,120 +1368,12 @@ def _resolve_tracks(provider, raw_ids) -> list:
                 out.append(_ensure_track_row(provider, sid, root, cache))
             except Exception:
                 logger.warning("could not materialize Deezer track %s", sid, exc_info=True)
-    return out
-
-
-def _mirror_now(provider, pl):
-    """Push the playlist's Deezer-track subset back to the Deezer account
-    (fail-soft: a Deezer error must never break the local edit)."""
-    from ..deezer import push
-
-    try:
-        push.reconcile_playlist(provider, pl)
-    except Exception:
-        logger.warning("playlist mirror failed for %s", pl.id, exc_info=True)
-
-
-# The Deezer mirror is asynchronous and coalesced: playlist edits must respond
-# at local-DB speed, never waiting on Deezer round-trips (which took seconds and
-# made every add/remove/reorder feel laggy). Each edit stamps its playlist id
-# here; a single worker thread reconciles a playlist once things settle
-# (_MIRROR_DELAY), so a burst of rapid edits becomes ONE reconcile with the
-# final state — reconcile_playlist is state-based, intermediate states are
-# irrelevant. The worker exits when idle and is restarted on demand.
-_MIRROR_DELAY = 1.5
-_mirror_lock = threading.Lock()
-_mirror_pending: dict = {}  # playlist uuid -> monotonic timestamp of last edit
-_mirror_thread: threading.Thread | None = None
-
-
-def _mirror_playlist(provider, pl):
-    if current_app.testing:  # keep tests deterministic: reconcile inline
-        _mirror_now(provider, pl)
-        return
-    app = current_app._get_current_object()
-    global _mirror_thread
-    with _mirror_lock:
-        _mirror_pending[pl.id] = time.monotonic()
-        if _mirror_thread is None or not _mirror_thread.is_alive():
-            _mirror_thread = threading.Thread(
-                target=_mirror_worker, args=(app,), name="playlist-mirror", daemon=True
-            )
-            _mirror_thread.start()
-
-
-def _mirror_worker(app):
-    from ..db import close_connection, open_connection
-
-    global _mirror_thread
-    while True:
-        time.sleep(0.3)
-        due = []
-        with _mirror_lock:
-            now_m = time.monotonic()
-            for pid, ts in list(_mirror_pending.items()):
-                if now_m - ts >= _MIRROR_DELAY:
-                    due.append(pid)
-                    del _mirror_pending[pid]
-            if not due and not _mirror_pending:
-                _mirror_thread = None  # idle: exit; next edit restarts us
-                return
-        provider = getattr(app, "deezer", None)
-        if provider is None:
             continue
-        for pid in due:
-            try:
-                open_connection(reuse=True)
-                try:
-                    pl = Playlist[pid]
-                except Playlist.DoesNotExist:
-                    continue  # deleted meanwhile
-                _mirror_now(provider, pl)
-            except Exception:
-                logger.warning("playlist mirror worker failed for %s", pid, exc_info=True)
-            finally:
-                try:
-                    close_connection()
-                except Exception:
-                    pass
-
-
-# One OS thread per push meant a request loop could exhaust the thread table
-# ("can't start new thread") and take the whole worker with it. A small shared
-# pool caps the damage; a full pool drops the push, which is fine — every
-# caller is already fail-soft, and the next sync reconciles.
-_PUSH_POOL_SIZE = 4
-_push_pool: ThreadPoolExecutor | None = None
-_push_pool_lock = threading.Lock()
-
-
-def _get_push_pool() -> ThreadPoolExecutor:
-    global _push_pool
-    with _push_pool_lock:
-        if _push_pool is None:
-            _push_pool = ThreadPoolExecutor(
-                max_workers=_PUSH_POOL_SIZE, thread_name_prefix="deezer-push"
-            )
-        return _push_pool
-
-
-def _push_async(label, fn, *args):
-    """Run a single fail-soft Deezer push off the request thread (inline in
-    tests). For calls that need no DB access — pass plain values, not rows."""
-
-    def run():
-        try:
-            fn(*args)
-        except Exception:
-            _log_deezer_failure("Deezer %s failed", label)
-
-    if current_app.testing:
-        run()
-        return
-    try:
-        _get_push_pool().submit(run)
-    except RuntimeError:  # interpreter shutting down
-        logger.debug("Deezer %s not queued (pool unavailable)", label)
+        # A YouTube search hit: its row is made from the search's answer.
+        row = youtube.materialize(sid)
+        if row is not None and _may_access_track(row):
+            out.append(row)
+    return out
 
 
 # -- auth -------------------------------------------------------------------
@@ -1829,9 +1714,11 @@ def artist(artist_id):
             top = flag_unavailable([x for x in map(_track_api, top or []) if x])
             albums = [_album_api(a) for a in albums or []]
             related = [_artist_api(a) for a in related or []]
+            artist_out = _artist_api(info)
+            artist_out["is_favorite"] = _starred("artist", deezer_id=artist_id)
             return jsonify(
                 {
-                    "artist": _artist_api(info),
+                    "artist": artist_out,
                     "bio": None,
                     "top": [x for x in top if x],
                     "albums": [x for x in albums if x],
@@ -1933,7 +1820,9 @@ def album(album_id):
             if data.get("ALB_ID"):
                 if songs_exc is not None:
                     songs = ((page or {}).get("SONGS") or {}).get("data", [])
-                return jsonify({"album": _album(data), "tracks": _tracks(songs)})
+                alb_out = _album(data)
+                alb_out["is_favorite"] = _starred("album", deezer_id=album_id)
+                return jsonify({"album": alb_out, "tracks": _tracks(songs)})
     # Deezer disabled/unreachable (or the album isn't on Deezer): serve the
     # imported/archived copy from the DB so downloaded albums browse offline.
     alb = _db_album_by_id(album_id)
@@ -1962,7 +1851,7 @@ def playlist(playlist_id):
                     "cover": _db_playlist_cover(tracks),
                     "nb_tracks": len(tracks),
                     "owner": pl.user.name,
-                    "is_favorite": False,
+                    "is_favorite": _starred("playlist", row=pl),
                     "editable": _is_admin(),
                 },
                 "tracks": tracks,
@@ -2230,37 +2119,6 @@ def flow_clusters():
             }
         )
     return jsonify({"available": True, "clusters": clusters})
-
-
-@webapi.route("/flow/clusters", methods=["POST"])
-@login_required
-@admin_required
-def set_flow_clusters():
-    provider, err = _need_provider()
-    if err:
-        return err
-    items = (request.get_json(silent=True) or {}).get("clusters") or []
-    clusters = []
-    for it in items:
-        cid = it.get("id")
-        if not cid:
-            continue
-        enabled = bool(it.get("enabled", True))
-        # Every cluster the user touched here is an explicit choice, so flag it
-        # as edited in BOTH directions. Marking only disabled ones as edited let
-        # Deezer treat the enabled ones as "default" and drop them, so reopening
-        # the tuner showed nothing checked.
-        clusters.append(
-            {"clusterId": cid, "isEnabled": enabled, "isEditedByUser": True}
-        )
-    if not clusters:
-        return jsonify({"error": "no clusters"}), 400
-    try:
-        provider.set_flow_clusters(clusters)
-    except Exception:
-        logger.warning("Flow clusters update failed", exc_info=True)
-        return jsonify({"error": "update failed"}), 502
-    return jsonify({"ok": True})
 
 
 @webapi.route("/radio/track/<track_id>")
@@ -2548,38 +2406,31 @@ def my_playlists():
 @webapi.route("/me/favorite-ids")
 @login_required
 def my_favorite_ids():
-    """Just the favorite track ids (cheap) — for accurate heart state in the UI."""
+    """The ids of everything the user starred (cheap) — for accurate heart state
+    in the UI. Read from the database only: nothing asks Deezer."""
     # Two columns, as text: this used to hydrate a Track, an Album and an
     # Artist per star (twice, local then Deezer) to read one id from each —
     # 314 ms for 4000 stars, measured, for a 40 KB answer.
     rows = (
         Track.select(_raw(Track.id), Track.deezer_id)
-        .join(Album)
-        .switch(Track)
-        .join(Artist)
-        .switch(Track)
         .join(StarredTrack, on=(StarredTrack.starred == Track.id))
         .where(StarredTrack.user == request.webuser)
         .order_by(StarredTrack.date.desc())
         .tuples()
     )
-    # Guests: their own private stars only (Deezer id when known, else UUID).
-    if not _is_admin():
-        return jsonify({"ids": [str(dz) if dz else _uuid_text(tid) for tid, dz in rows]})
-    # Always seed from the DB stars (local UUIDs + the admin's Deezer stars),
-    # THEN union the live Deezer favorites. Reading only the live list dropped a
-    # star whose push was disabled (push_to_deezer off) or failed, leaving its
-    # heart empty; the union keeps every star the user actually made. A set
-    # de-dupes the overlap between the DB mirror and the live list.
-    ids = {str(dz) if dz is not None else _uuid_text(tid) for tid, dz in rows}
-    provider = _provider()
-    if provider is not None:
-        try:
-            raw = provider.dz.gw.get_user_favorite_ids(limit=100000)
-            ids |= {str(x.get("SNG_ID")) for x in (raw.get("data") or []) if x.get("SNG_ID")}
-        except Exception:
-            pass
-    return jsonify({"ids": list(ids)})
+    out = {"ids": [str(dz) if dz else _uuid_text(tid) for tid, dz in rows]}
+    # Albums, artists and playlists: the Deezer id when the row has one, else its
+    # UUID, like the tracks.
+    for key, (model, star, _) in zip(("albums", "artists", "playlists"),
+                                     (_star_kinds()[k] for k in ("album", "artist", "playlist"))):
+        out[key] = [
+            str(dz) if dz else _uuid_text(rid)
+            for rid, dz in model.select(_raw(model.id), model.deezer_id)
+            .join(star, on=(star.starred == model.id))
+            .where(star.user == request.webuser)
+            .tuples()
+        ]
+    return jsonify(out)
 
 
 @webapi.route("/me/local")
@@ -2799,12 +2650,6 @@ def subscribe_podcast():
             return jsonify({"error": "could not resolve show"}), 400
 
     cfg = current_app.config["DEEZER"]
-    if cfg.get("push_to_deezer", True):
-        try:
-            provider.add_favorite_show(show_id)
-        except Exception:
-            logger.debug("show.addFavorite failed for %s", show_id, exc_info=True)
-
     try:
         c = import_show(
             provider, _podcast_owner(), show_id,
@@ -2830,14 +2675,6 @@ def unsubscribe_podcast(pid):
         c = PodcastChannel[uuid.UUID(str(pid))]
     except (ValueError, PodcastChannel.DoesNotExist):
         return jsonify({"error": "not found"}), 404
-
-    provider = _provider()
-    cfg = current_app.config["DEEZER"]
-    if provider is not None and c.deezer_id and cfg.get("push_to_deezer", True):
-        try:
-            provider.remove_favorite_show(c.deezer_id)
-        except Exception:
-            logger.debug("show.deleteFavorite failed for %s", c.deezer_id, exc_info=True)
 
     # Unsubscribing stops the subscription — it does NOT destroy what has
     # already been archived. An episode on disk is yours: it survives Deezer
@@ -2950,26 +2787,11 @@ def save_podcast_progress():
         row.updated = now()
         row.save()
 
-    # The admin owns the linked Deezer account: mirror their position into the
-    # legacy per-episode offset (Subsonic bookmarkPosition) and push it to
-    # Deezer fail-soft, so the official apps resume at the same spot too.
+    # The admin's position also goes into the legacy per-episode offset
+    # (Subsonic bookmarkPosition). It stays on this server.
     if _is_admin():
         episode.play_offset = 0 if finished else position
         episode.save(only=(PodcastEpisode.play_offset,))
-        provider = _provider()
-        if (
-            provider is not None
-            and episode.deezer_id
-            and current_app.config["DEEZER"].get("push_to_deezer", True)
-        ):
-            _push_async(
-                "episode_bookmark",
-                provider.set_episode_position,
-                episode.deezer_id,
-                position,
-                duration,
-                finished,
-            )
     return jsonify({"ok": True, "finished": finished})
 
 
@@ -3066,7 +2888,7 @@ def delete_episode_marker(mid):
 _LISTEN_MIN_SECONDS = 20
 
 
-def _record_play(deezer_id, listened):
+def _record_play(track, listened):
     """Count a play locally: ``play_count`` / ``last_play`` on the Track row.
 
     Subsonic's ``scrobble`` was the only thing writing these, so a library
@@ -3074,39 +2896,38 @@ def _record_play(deezer_id, listened):
     that the archive cleanup decides what to drop from exactly this data. A skip
     is not a play (hence the floor), and this never touches Deezer.
     """
-    from ..deezer.archive import find_local_track
-
-    if listened < _LISTEN_MIN_SECONDS:
-        return
-    track = find_local_track(deezer_id)
-    if track is None:
+    if listened < _LISTEN_MIN_SECONDS or track is None:
         return
     try:
         Track.update(play_count=Track.play_count + 1, last_play=now()).where(
             Track.id == track.id
         ).execute()
     except Exception:  # a stats write must never break playback
-        logger.debug("Could not record a play for %s", deezer_id, exc_info=True)
+        logger.debug("Could not record a play for %s", track.id, exc_info=True)
 
 
 @webapi.route("/listen", methods=["POST"])
 @login_required
 def report_listen():
-    """A track finished playing: count it locally, and tell Deezer if asked to.
+    """A track finished playing: count it locally. Nothing is reported to Deezer.
 
-    The local count always happens (it is what "not played for six months"
-    means everywhere else in the app). The Deezer half is opt-in via
-    ``report_listens`` and only for the account owner — guests never feed
-    somebody else's recommendations.
+    The web player calls this on every track change, so it stays cheap: one
+    indexed lookup and one update."""
+    from . import refs
 
-    The web player calls this on every track change, so both halves stay cheap.
-    """
     data = request.get_json(silent=True) or {}
-    deezer_id = str(data.get("deezer_id") or "")
-    if not _valid_id(deezer_id):
-        return jsonify({"error": "invalid deezer_id"}), 400
-    listened = int(data.get("listened") or 0)
-    _record_play(deezer_id, listened)
+    raw = str(data.get("deezer_id") or data.get("id") or "")
+    track = refs.resolve_track(raw)
+    if track is None and not _valid_id(raw):
+        try:
+            uuid.UUID(raw)
+        except ValueError:
+            return jsonify({"error": "invalid deezer_id"}), 400
+    try:
+        listened = int(data.get("listened") or 0)
+    except (TypeError, ValueError):
+        listened = 0
+    _record_play(track, listened)
 
     # Playing from an album or a playlist can archive the whole thing — off by
     # default; see rules.on_play_context.
@@ -3115,92 +2936,52 @@ def report_listen():
     backfill.archive_play_context(
         current_app._get_current_object(), _provider(), data.get("context") or {}
     )
-
-    if not _is_admin():
-        return ("", 204)
-    provider = _provider()
-    if provider is None or not current_app.config["DEEZER"].get("report_listens"):
-        return ("", 204)
-    next_id = data.get("next_id")
-    next_id = str(next_id) if _valid_id(next_id) else None
-    ctx = data.get("context") or {}
-    context = {"id": ctx.get("id", ""), "t": ctx.get("kind", "")}
-    try:
-        provider.report_listen(
-            deezer_id,
-            listened=listened,
-            next_id=next_id,
-            context=context,
-            is_shuffle=bool(data.get("shuffle")),
-        )
-    except Exception:  # telemetry is best-effort; a Deezer outage must not 500
-        logger.warning("report_listen failed", exc_info=True)
     return ("", 204)
 
 
-def _set_star(track, on):
-    """Star/unstar a track locally for the current web user."""
+def _set_star(track, on, star=None):
+    """Star/unstar a row locally for the current web user (a track unless
+    ``star`` names another starred model)."""
+    star = star or StarredTrack
     if on:
         try:
-            StarredTrack[request.webuser.id, track.id]
-        except StarredTrack.DoesNotExist:
-            StarredTrack.create(user=request.webuser, starred=track, date=now())
+            star[request.webuser.id, track.id]
+        except star.DoesNotExist:
+            star.create(user=request.webuser, starred=track, date=now())
     else:
-        StarredTrack.delete().where(
-            StarredTrack.user == request.webuser, StarredTrack.starred == track.id
+        star.delete().where(
+            star.user == request.webuser, star.starred == track.id
         ).execute()
 
 
 @webapi.route("/favorite", methods=["POST"])
 @login_required
 def favorite():
+    from . import refs
+
     data = request.get_json(silent=True) or {}
-    deezer_id = str(data.get("deezer_id") or "")
+    raw = str(data.get("deezer_id") or data.get("id") or "")
     on = bool(data.get("on", True))
 
-    # Local track (UUID): star locally only, never touches Deezer.
-    if not _valid_id(deezer_id):
-        try:
-            track = Track[uuid.UUID(deezer_id)]
-        except Track.DoesNotExist:
-            track = youtube.materialize(deezer_id)
-            if track is None:
-                return jsonify({"error": "invalid deezer_id"}), 400
-        except ValueError:
-            return jsonify({"error": "invalid deezer_id"}), 400
-        if not _may_access_track(track):
-            return jsonify({"error": "invalid deezer_id"}), 400
-        _set_star(track, on)
-        return jsonify({"ok": True, "favorite": on, "local": True})
-
-    from ..deezer import archive
-
-    provider = _provider()
-    # A track we already know (imported/archived) is starred with no Deezer call,
-    # so favoriting works offline. Only an unknown track needs Deezer to fetch its
-    # metadata row.
-    track = archive.find_local_track(deezer_id)
+    # Stars are local: nothing is written to the Deezer account. A track we know
+    # (a row UUID, a Deezer id already imported, a remembered YouTube hit) is
+    # starred from the database alone, so it works with Deezer unreachable.
+    track = refs.resolve_track(raw, materialize=True)
     if track is None:
+        if not _valid_id(raw):
+            return jsonify({"error": "invalid deezer_id"}), 400
+        # A Deezer track we never imported: its metadata row is a catalogue
+        # lookup, the one thing here that needs Deezer.
+        from ..deezer import archive
+
+        provider = _provider()
         if provider is None:
             return _deezer_disabled()
         try:
-            track = archive.import_track(provider, deezer_id)
+            track = archive.import_track(provider, raw)
         except Exception:
-            logger.warning("favorite: metadata fetch failed for %s", deezer_id, exc_info=True)
+            logger.warning("favorite: metadata fetch failed for %s", raw, exc_info=True)
             return jsonify({"error": "track unavailable"}), 502
-    # Guests keep favorites private/local — never mirror them to the Deezer
-    # account. The admin's stars mirror to Deezer only when push_to_deezer is on;
-    # either way the local star is recorded, so it survives a disabled/failed push.
-    push = current_app.config["DEEZER"].get("push_to_deezer", True)
-    if _is_admin() and provider is not None and push:
-        try:
-            if on:
-                provider.dz.gw.add_song_to_favorites(deezer_id)
-            else:
-                provider.dz.gw.remove_song_from_favorites(deezer_id)
-        except Exception as exc:
-            logger.warning("Deezer favorite toggle failed: %s", exc)
-        provider.invalidate_favorites_cache()  # next /me/favorites refetches
     _set_star(track, on)
     if on:
         # Starring it puts it in your library, so archive it now rather than
@@ -3211,44 +2992,181 @@ def favorite():
         backfill.archive_tracks(
             current_app._get_current_object(), [track], event="on_fav_track"
         )
-    return jsonify({"ok": True, "favorite": on})
+    out = {"ok": True, "favorite": on}
+    if not _valid_id(raw):
+        out["local"] = True
+    return jsonify(out)
+
+
+# What a favourite of each kind is stored against: the model, its starred
+# table and the deterministic id the importer would give the row.
+def _star_kinds():
+    from ..db import StarredAlbum, StarredArtist, StarredPlaylist
+    from ..deezer import ids as dz_ids
+
+    return {
+        "album": (Album, StarredAlbum, dz_ids.album_uuid),
+        "artist": (Artist, StarredArtist, dz_ids.artist_uuid),
+        "playlist": (Playlist, StarredPlaylist, dz_ids.playlist_uuid),
+    }
+
+
+def _starred(kind, row=None, deezer_id=None) -> bool:
+    """Whether the current user starred this album / artist / playlist: one
+    indexed statement, no call to Deezer. The entity is given as a row or by the
+    Deezer id the page was opened with."""
+    model, star, make_uuid = _star_kinds()[kind]
+    user = getattr(request, "webuser", None)
+    if user is None:
+        return False
+    if row is not None:
+        cond = star.starred == row.id
+    elif _valid_id(deezer_id):
+        cond = (model.deezer_id == str(deezer_id)) | (model.id == make_uuid(deezer_id))
+    else:
+        return False
+    return (
+        star.select()
+        .join(model, on=(star.starred == model.id))
+        .where(star.user == user.id, cond)
+        .exists()
+    )
+
+
+def _name_field(data, key):
+    value = data.get(key)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()[:256]
+    return value or None
+
+
+def _stub_entity(kind, deezer_id, data):
+    """The row a favourite of an album / artist hangs on, made from what the
+    client knows when we never imported it (a stub: the importer or the archive
+    fills it in later). ``None`` when the body does not name it."""
+    from ..deezer import library
+
+    if kind == "artist":
+        name = _name_field(data, "title") or _name_field(data, "artist")
+        if not name:
+            return None
+        return library.upsert_artist(deezer_id, name)
+    title = _name_field(data, "title")
+    artist_name = _name_field(data, "artist")
+    if not title or not artist_name:
+        return None
+    artist_id = data.get("artist_id")
+    if _valid_id(artist_id):
+        artist = library.upsert_artist(str(artist_id), artist_name)
+    else:
+        artist = Artist.select().where(Artist.name == artist_name).first() or Artist.create(
+            name=artist_name
+        )
+    return library.upsert_album(deezer_id, title, artist, None)
+
+
+def _star_playlist_when_there(app, provider, deezer_id, user_id, user_name, title):
+    """Worker: import a Deezer playlist nobody here has, then star it for
+    ``user_id``. The star of a playlist that was never imported therefore shows
+    up once the import is done (a few seconds), not at the click."""
+    from ..db import StarredPlaylist, User, close_connection, open_connection
+    from ..deezer import ids as dz_ids
+    from ..deezer.importer import DeezerImporter
+
+    try:
+        with app.app_context():
+            open_connection(reuse=True)
+            try:
+                raw = provider.get_playlist_tracks(deezer_id)
+                importer = DeezerImporter(provider, user_name)
+                name = title
+                if not name:
+                    page = provider.dz.gw.get_playlist_page(deezer_id)
+                    name = ((page or {}).get("DATA") or {}).get("TITLE") or "Playlist"
+                pl, _ = importer._materialize_playlist(
+                    dz_ids.playlist_uuid(deezer_id), name, deezer_id, raw
+                )
+                user = User.get_or_none(User.id == user_id)
+                if user is not None and not StarredPlaylist.select().where(
+                    StarredPlaylist.user == user, StarredPlaylist.starred == pl
+                ).exists():
+                    StarredPlaylist.create(user=user, starred=pl, date=now())
+            finally:
+                close_connection()
+    except Exception:
+        _log_deezer_failure("import of favourited playlist %s failed", deezer_id)
 
 
 @webapi.route("/favorite/<kind>", methods=["POST"])
 @login_required
-@admin_required
 def favorite_entity(kind):
-    """Toggle a Deezer favorite for an album, artist or playlist."""
-    provider, err = _need_provider()
-    if err:
-        return err
-    handlers = {
-        "album": (provider.add_favorite_album, provider.remove_favorite_album),
-        "artist": (provider.add_favorite_artist, provider.remove_favorite_artist),
-        "playlist": (provider.add_favorite_playlist, provider.remove_favorite_playlist),
-    }
-    if kind not in handlers:
+    """Star / unstar an album, artist or playlist for the current user.
+
+    Local, like the track stars: no write to the Deezer account. Archiving what
+    it holds stays the admin's (it spends the shared disk and Deezer session)."""
+    kinds = _star_kinds()
+    if kind not in kinds:
         return jsonify({"error": "unknown favorite kind"}), 400
+    model, star, make_uuid = kinds[kind]
     data = request.get_json(silent=True) or {}
-    deezer_id = str(data.get("deezer_id") or "")
+    raw = str(data.get("deezer_id") or data.get("id") or "")
     on = bool(data.get("on", True))
-    if not _valid_id(deezer_id):
-        return jsonify({"error": "invalid deezer_id"}), 400
-    add, remove = handlers[kind]
-    try:
-        (add if on else remove)(deezer_id)
-    except Exception as exc:
-        logger.warning("Deezer %s favorite toggle failed: %s", kind, exc)
-        return jsonify({"error": "deezer rejected the request"}), 502
-    if on:
+    row = None
+    if _valid_id(raw):
+        row = (
+            model.select()
+            .where((model.deezer_id == raw) | (model.id == make_uuid(raw)))
+            .first()
+        )
+        deezer_id = raw
+    else:
+        try:
+            row = model.get_or_none(model.id == uuid.UUID(raw))
+        except ValueError:
+            return jsonify({"error": "invalid deezer_id"}), 400
+        deezer_id = row.deezer_id if row is not None else None
+        if row is None:
+            return jsonify({"error": "not found"}), 404
+    provider = _provider()
+    app = current_app._get_current_object()
+    pending = False
+    if row is None:
+        if kind == "playlist":
+            if not on:
+                return jsonify({"ok": True, "favorite": False})
+            if provider is None:
+                return _deezer_disabled()
+            pending = True
+        else:
+            if not on:
+                return jsonify({"ok": True, "favorite": False})
+            row = _stub_entity(kind, deezer_id, data)
+            if row is None:
+                return jsonify({"error": "missing title"}), 400
+    if row is not None:
+        if kind == "playlist" and row.user_id != request.webuser.id and not row.public and not _is_admin():
+            return jsonify({"error": "not found"}), 404
+        _set_star(row, on, star)
+    if on and deezer_id and _is_admin():
         # A favourited album, playlist or artist is now yours: archive everything
         # it holds, in the background. For an artist that means the FULL
         # discography, fed release by release (see backfill.archive_entity).
         from ..deezer import backfill
 
-        backfill.archive_entity(
-            current_app._get_current_object(), provider, kind, deezer_id
+        backfill.archive_entity(app, provider, kind, deezer_id)
+    if pending:
+        args = (
+            app, provider, deezer_id, request.webuser.id, request.webuser.name,
+            _name_field(data, "title"),
         )
+        if current_app.testing:
+            _star_playlist_when_there(*args)
+        else:
+            threading.Thread(
+                target=_star_playlist_when_there, args=args,
+                name="star-playlist", daemon=True,
+            ).start()
     return jsonify({"ok": True, "favorite": on})
 
 
@@ -3262,48 +3180,17 @@ def favorite_entity(kind):
 @login_required
 @admin_required
 def create_playlist():
-    provider, err = _need_provider()
-    if err:
-        return err
+    provider = _provider()
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     if not title:
         return jsonify({"error": "missing title"}), 400
     description = data.get("description") or None
     track_rows = _resolve_tracks(provider, data.get("tracks") or [])
-    deezer_ids = [t.deezer_id for t in track_rows if t.deezer_id]
-
-    # Create the playlist on Deezer FIRST, then key the local row by the canonical
-    # uuid5(deezer_id) — the very id the importer uses — so a client-created
-    # playlist and its later re-import are ONE row, not a split-brain duplicate.
-    # Only the Deezer-track subset is pushed; purely-local tracks are kept locally
-    # but ignored on Deezer.
-    from ..deezer import ids as dz_ids
-
-    dz_id = None
-    try:
-        dz_id = str(provider.dz.gw.create_playlist(title, description=description, songs=deezer_ids))
-    except Exception:
-        logger.warning("Deezer create_playlist failed; creating local-only", exc_info=True)
-
-    if dz_id:
-        pid = dz_ids.playlist_uuid(dz_id)
-        try:  # an importer run may already hold this canonical id — reuse it
-            pl = Playlist[pid]
-            pl.name, pl.comment, pl.deezer_id, pl.user = title, description, dz_id, request.webuser
-            pl.clear()
-            pl.save()
-        except Playlist.DoesNotExist:
-            pl = Playlist.create(
-                id=pid, user=request.webuser, name=title, comment=description, deezer_id=dz_id
-            )
-    else:
-        pl = Playlist.create(user=request.webuser, name=title, comment=description)
+    pl = Playlist.create(user=request.webuser, name=title, comment=description)
 
     for track in track_rows:
         pl.add(track)
-    if not dz_id:
-        _mirror_playlist(provider, pl)  # offline fallback: push when reachable
     from ..deezer import backfill
 
     backfill.archive_tracks(
@@ -3316,9 +3203,6 @@ def create_playlist():
 @login_required
 @admin_required
 def edit_playlist(playlist_id):
-    provider, err = _need_provider()
-    if err:
-        return err
     pl = _resolve_db_playlist(playlist_id)
     if pl is None:
         return jsonify({"error": "not found"}), 404
@@ -3330,12 +3214,6 @@ def edit_playlist(playlist_id):
     if "description" in data:
         pl.comment = data.get("description") or None
     pl.save()
-    if pl.deezer_id:
-        # Deezer rename happens in the background — the local edit already
-        # succeeded and must not wait on (or fail with) the network.
-        _push_async(
-            "edit_playlist", provider.edit_playlist, pl.deezer_id, pl.name, pl.comment
-        )
     return jsonify({"ok": True})
 
 
@@ -3343,20 +3221,10 @@ def edit_playlist(playlist_id):
 @login_required
 @admin_required
 def delete_playlist(playlist_id):
-    provider, err = _need_provider()
-    if err:
-        return err
     pl = _resolve_db_playlist(playlist_id)
     if pl is None:
         return jsonify({"error": "not found"}), 404
-    dz = pl.deezer_id
     pl.delete_instance(recursive=True)
-    if dz:
-        from ..deezer import push
-
-        # Local delete already done; the Deezer-side delete is fail-soft and
-        # runs in the background (never blocks or 500s the response).
-        _push_async("delete_playlist", push.delete_playlist, provider, dz)
     return jsonify({"ok": True})
 
 
@@ -3364,9 +3232,7 @@ def delete_playlist(playlist_id):
 @login_required
 @admin_required
 def add_playlist_tracks(playlist_id):
-    provider, err = _need_provider()
-    if err:
-        return err
+    provider = _provider()
     pl = _resolve_db_playlist(playlist_id)
     if pl is None:
         return jsonify({"error": "not found"}), 404
@@ -3375,7 +3241,6 @@ def add_playlist_tracks(playlist_id):
         return jsonify({"error": "no tracks"}), 400
     for track in tracks:
         pl.add(track)
-    _mirror_playlist(provider, pl)
     from ..deezer import backfill
 
     backfill.archive_tracks(
@@ -3388,9 +3253,6 @@ def add_playlist_tracks(playlist_id):
 @login_required
 @admin_required
 def remove_playlist_tracks(playlist_id):
-    provider, err = _need_provider()
-    if err:
-        return err
     pl = _resolve_db_playlist(playlist_id)
     if pl is None:
         return jsonify({"error": "not found"}), 404
@@ -3398,9 +3260,18 @@ def remove_playlist_tracks(playlist_id):
     indexes = data.get("indexes")
     if indexes is None:
         wanted = {str(s) for s in (data.get("tracks") or [])}
+        # One statement for the whole list: ``pl.get_tracks()`` loads nothing
+        # but is the wrong shape here, and per-row lookups would be thousands.
+        rows = (
+            PlaylistTrack.select(PlaylistTrack.index, Track.id, Track.deezer_id)
+            .join(Track, on=(PlaylistTrack.track == Track.id))
+            .where(PlaylistTrack.playlist == pl)
+            .order_by(PlaylistTrack.index)
+            .tuples()
+        )
         indexes = [
-            i for i, t in enumerate(pl.get_tracks())
-            if _track_uid(t) in wanted or str(t.id) in wanted
+            i for i, (_, tid, dz) in enumerate(rows)
+            if str(tid) in wanted or (dz and str(dz) in wanted)
         ]
     try:
         indexes = [int(i) for i in indexes]
@@ -3409,7 +3280,6 @@ def remove_playlist_tracks(playlist_id):
     if not indexes:
         return jsonify({"error": "no tracks"}), 400
     pl.remove_at_indexes(indexes)
-    _mirror_playlist(provider, pl)
     return jsonify({"ok": True})
 
 
@@ -3417,16 +3287,18 @@ def remove_playlist_tracks(playlist_id):
 @login_required
 @admin_required
 def reorder_playlist(playlist_id):
-    provider, err = _need_provider()
-    if err:
-        return err
     pl = _resolve_db_playlist(playlist_id)
     if pl is None:
         return jsonify({"error": "not found"}), 404
     order = [str(s) for s in ((request.get_json(silent=True) or {}).get("tracks") or [])]
     if not order:
         return jsonify({"error": "no order"}), 400
-    current = pl.get_tracks()
+    current = list(
+        Track.select(Track.id, Track.deezer_id)
+        .join(PlaylistTrack, on=(PlaylistTrack.track == Track.id))
+        .where(PlaylistTrack.playlist == pl)
+        .order_by(PlaylistTrack.index)
+    )
     by_uid = {}
     for t in current:
         by_uid.setdefault(_track_uid(t), t)
@@ -3457,7 +3329,6 @@ def reorder_playlist(playlist_id):
         # (a 500-track reorder was 500 round-trips on Postgres/MySQL).
         for i in range(0, len(rows), 300):
             PlaylistTrack.insert_many(rows[i : i + 300], fields=fields).execute()
-    _mirror_playlist(provider, pl)
     return jsonify({"ok": True})
 
 

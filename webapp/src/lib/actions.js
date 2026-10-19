@@ -307,13 +307,13 @@ function updateFavTracksCache(track, on) {
   }
 }
 
-export async function toggleEntityFavorite(kind, id, on) {
+export async function toggleEntityFavorite(kind, id, on, meta = {}) {
   if (!CAN_KEEP) {
     toasts.push("Ce lien est en lecture seule", "info");
     return false;
   }
   try {
-    await api.favoriteEntity(kind, id, on);
+    await api.favoriteEntity(kind, id, on, meta);
     toasts.push(on ? "Ajouté à vos favoris" : "Retiré de vos favoris");
     return true;
   } catch {
@@ -456,6 +456,18 @@ export async function playEntity(kind, id, context = null) {
   }
 }
 
+// What the server needs to name an entity it has never imported.
+export function entityMeta(kind, item) {
+  if (kind === "album")
+    return {
+      title: item.title || item.name,
+      artist: item.artist?.name,
+      artist_id: item.artist?.deezer_id,
+    };
+  if (kind === "artist") return { title: item.name || item.title };
+  return { title: item.title || item.name };
+}
+
 // Context menu for an album/artist/playlist/mix card.
 export function buildEntityMenu(kind, item, nav) {
   const route = kind === "mix" ? "/mix/" : "/" + kind + "/";
@@ -470,23 +482,21 @@ export function buildEntityMenu(kind, item, nav) {
       icon: "download",
       action: () => downloadEntity(kind, routeId),
     });
-  // Favoriting an album/artist/playlist writes to the shared Deezer account, so
-  // it's admin-only (guests don't mutate the owner's account) — and on a remote
-  // control, only a link that may change what is kept.
-  if (get(isAdmin) && CAN_KEEP) {
-    // Only Deezer-backed entities can be favorited on the account (a user's own
-    // playlist has no Deezer favorite to add).
+  // A favourite is local to the user's own account; on a remote control, only a
+  // link that may change what is kept can make one.
+  if (CAN_KEEP) {
+    const meta = entityMeta(kind, item);
     if ((kind === "album" || kind === "playlist") && item.deezer_id)
       items.push({
         label: "Ajouter aux favoris",
         icon: "heart",
-        action: () => toggleEntityFavorite(kind, item.deezer_id, true),
+        action: () => toggleEntityFavorite(kind, item.deezer_id, true, meta),
       });
-    if (kind === "artist")
+    if (kind === "artist" && item.deezer_id)
       items.push({
         label: "Suivre",
         icon: "heart",
-        action: () => toggleEntityFavorite("artist", item.deezer_id, true),
+        action: () => toggleEntityFavorite("artist", item.deezer_id, true, meta),
       });
   }
   return items;

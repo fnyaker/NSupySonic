@@ -2,7 +2,7 @@
   import { api } from "../lib/api.js";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { player, isAdmin, openGenreBulk } from "../lib/stores.js";
-  import { toggleEntityFavorite } from "../lib/actions.js";
+  import { toggleEntityFavorite, entityMeta } from "../lib/actions.js";
   import Cover from "../components/Cover.svelte";
   import Card from "../components/Card.svelte";
   import TrackList from "../components/TrackList.svelte";
@@ -109,7 +109,7 @@
 
   async function toggleFav() {
     const next = !fav;
-    if (await toggleEntityFavorite("artist", id, next)) fav = next;
+    if (await toggleEntityFavorite("artist", id, next, entityMeta("artist", data?.artist || {}))) fav = next;
   }
 
   const TYPE_LABEL = { album: "Album", single: "Single", ep: "EP", compile: "Compilation" };

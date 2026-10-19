@@ -191,7 +191,6 @@ POLICY = {
     "genre_status": "read",
     "share_waveform": "read",
     # changing what is kept: the owner's own actions
-    "set_flow_clusters": "full",
     "subscribe_podcast": "full",
     "unsubscribe_podcast": "full",
     "save_podcast_progress": "full",
