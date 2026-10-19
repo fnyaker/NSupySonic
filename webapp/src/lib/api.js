@@ -538,6 +538,10 @@ export const api = {
   // What a cleanup would delete right now. Deletes nothing.
   cleanupPreview: () => req("/archive/cleanup/preview"),
   runCleanup: () => req("/archive/cleanup", { method: "POST" }),
+  // Admin: bring the files already archived to the current format (job + poll).
+  archiveMigrate: (force = false) =>
+    req("/archive/migrate", { method: "POST", body: body({ force }) }),
+  archiveMigrateStatus: () => req("/archive/migrate"),
   // Admin: what the archive costs and what's left of the disk.
   storage: () => req("/storage"),
   flushCache: () => req("/cache/flush", { method: "POST" }),

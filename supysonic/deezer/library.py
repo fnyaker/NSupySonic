@@ -230,11 +230,16 @@ def refresh_track_metadata(track, info: dict) -> None:
         track.disc = f["disc"]
     if f["year"]:
         track.year = f["year"]
-    if f["gain"] is not None:
-        track.gain = f["gain"]
+    # The gain is not Deezer's to give any more: it is measured from the file.
+    track.release_date = better_date(track.release_date, f["release_date"])
     if f["cover_md5"] and track.album is not None and not track.album.cover_md5:
         track.album.cover_md5 = f["cover_md5"]
         track.album.save()
+    if track.album is not None:
+        newer = better_date(track.album.release_date, f["release_date"])
+        if newer != track.album.release_date:
+            track.album.release_date = newer
+            track.album.save(only=[Album.release_date])
     # `_sync_credits` is a no-op on an empty list, which is exactly right here:
     # a payload without ARTISTS must not wipe a known "A feat. B".
     try:
@@ -264,12 +269,8 @@ _KEEP_FIELDS = (
     "PHYSICAL_RELEASE_DATE",
     "DIGITAL_RELEASE_DATE",
     "ISRC",
-    "GAIN",
     "EXPLICIT_LYRICS",
     "COPYRIGHT",
-    "LYRICS_ID",
-    "PROVIDER_ID",
-    "RANK_SNG",
     # Everybody else on the record (author, composer, producer…) and who
     # released it: the credits panel reads them from here, offline.
     "SNG_CONTRIBUTORS",
@@ -302,7 +303,6 @@ def save_track_metadata(track, info: dict) -> str | None:
         "number": track.number,
         "year": track.year,
         "duration": track.duration,
-        "gain": track.gain,
         "credits": [
             {"deezer_id": aid, "name": name, "role": role}
             for aid, name, role in _credits(info)
@@ -316,6 +316,24 @@ def save_track_metadata(track, info: dict) -> str | None:
     if previous and isinstance(previous.get("facts"), dict):
         payload["facts"] = previous["facts"]
     return path if _write_sidecar(path, payload) else None
+
+
+def deezer_facts(track, info: dict) -> dict:
+    """The facts Deezer states with certainty, for the sidecar's ``facts`` block.
+
+    Deterministic catalogue data only (the oldest release date, the ISRC, the
+    label, the published tempo when it is known): anything a source of
+    ``tags`` says outranks it, see ``FACT_SOURCES``.
+    """
+    facts = {
+        "release_date": release_date_of(info),
+        "isrc": (info.get("ISRC") or "").strip() or None,
+        "label": (info.get("LABEL_NAME") or "").strip() or None,
+    }
+    bpm = getattr(track, "deezer_bpm", None)
+    if bpm:
+        facts["deezer_bpm"] = bpm
+    return {k: v for k, v in facts.items() if v}
 
 
 def _write_sidecar(path: str, payload: dict) -> bool:
@@ -497,15 +515,60 @@ def _credits(t: dict) -> list[tuple[str, str, str]]:
     return out
 
 
+_FULL_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def valid_release_date(raw):
+    """``"AAAA-MM-JJ"`` when ``raw`` is a real calendar-looking date, else None.
+
+    Deezer sends ``0000-00-00`` for "unknown", and sometimes a month or a day of
+    zero; none of those is a date.
+    """
+    m = _FULL_DATE.match(str(raw or "").strip())
+    if not m:
+        return None
+    y, mo, d = (int(g) for g in m.groups())
+    if y < 1 or not 1 <= mo <= 12 or not 1 <= d <= 31:
+        return None
+    return m.group(0)
+
+
+def release_date_of(t: dict):
+    """The OLDEST valid date among the physical and the digital release.
+
+    A digital reissue of 2015 of an album pressed in 1998 is a record of 1998:
+    ``PHYSICAL`` is not always the older of the two, nor always present.
+    """
+    dates = [
+        d
+        for d in (
+            valid_release_date(t.get("PHYSICAL_RELEASE_DATE")),
+            valid_release_date(t.get("DIGITAL_RELEASE_DATE")),
+        )
+        if d
+    ]
+    return min(dates) if dates else None
+
+
+def better_date(current, candidate):
+    """The date to keep: only ever an improvement (present, and older)."""
+    if not candidate:
+        return current
+    if not current or candidate < current:
+        return candidate
+    return current
+
+
 def normalize_track(t: dict) -> dict:
     """Flatten a gateway track dict (song.getData / playlist / album list)."""
     title = t.get("SNG_TITLE", "")
     version = t.get("VERSION") or ""
     if version and version not in title:
         title = f"{title} {version}".strip()
-    date = str(t.get("PHYSICAL_RELEASE_DATE") or t.get("DIGITAL_RELEASE_DATE") or "")
-    year = int(date[:4]) if date[:4].isdigit() else None
+    release_date = release_date_of(t)
+    year = int(release_date[:4]) if release_date else None
     return {
+        "release_date": release_date,
         "gain": _parse_gain(t.get("GAIN")),
         "sng_id": str(t.get("SNG_ID")),
         "title": title or "[unknown]",
@@ -542,16 +605,29 @@ def upsert_artist(art_id, name: str, cache=None) -> Artist:
     return artist
 
 
-def upsert_album(alb_id, name: str, artist: Artist, cover_md5, cache=None) -> Album:
+def _improve_album_date(album: Album, release_date) -> None:
+    """Give an album the oldest release date any of its tracks carries."""
+    newer = better_date(album.release_date, release_date)
+    if newer != album.release_date:
+        album.release_date = newer
+        album.save(only=[Album.release_date])
+
+
+def upsert_album(
+    alb_id, name: str, artist: Artist, cover_md5, cache=None, release_date=None
+) -> Album:
     key = str(alb_id)
     if cache is not None and key in cache.albums:
-        return cache.albums[key]
+        album = cache.albums[key]
+        _improve_album_date(album, release_date)
+        return album
     aid = ids.album_uuid(alb_id)
     try:
         album = Album[aid]
         if cover_md5 and not album.cover_md5:
             album.cover_md5 = cover_md5
             album.save()
+        _improve_album_date(album, release_date)
     except Album.DoesNotExist:
         album = create_or_get(
             lambda: Album.create(
@@ -560,6 +636,7 @@ def upsert_album(alb_id, name: str, artist: Artist, cover_md5, cache=None) -> Al
                 artist=artist,
                 deezer_id=key,
                 cover_md5=cover_md5,
+                release_date=release_date,
             ),
             lambda: Album.get_or_none(Album.id == aid),
         )
@@ -594,7 +671,10 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
     f = normalize_track(t)
     tid = ids.track_uuid(f["sng_id"])
     artist = upsert_artist(f["art_id"], f["artist"], cache=cache)
-    album = upsert_album(f["alb_id"], f["album"], artist, f["cover_md5"], cache=cache)
+    album = upsert_album(
+        f["alb_id"], f["album"], artist, f["cover_md5"], cache=cache,
+        release_date=f["release_date"],
+    )
     folder = get_album_folder(root, f["artist"], f["album"], cache=cache)
 
     try:
@@ -618,6 +698,9 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
         }
         if f["gain"] is not None:
             fresh["gain"] = f["gain"]
+        newer = better_date(track.release_date, f["release_date"])
+        if newer != track.release_date:
+            fresh["release_date"] = newer
         _sync_credits(track, f["credits"], artist, cache=cache)
         changed = [
             name
@@ -656,6 +739,7 @@ def upsert_track(t: dict, root: Folder, default_quality: str = "FLAC", cache=Non
                         number=f["number"],
                         title=f["title"],
                         year=f["year"],
+                        release_date=f["release_date"],
                         genre=None,
                         duration=f["duration"],
                         has_art=False,

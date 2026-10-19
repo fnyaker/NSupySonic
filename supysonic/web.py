@@ -83,6 +83,10 @@ def setup_deezer(app):
             libjob.resume_if_interrupted(
                 app, {similar.CURSOR_KEY: lambda: similar.rebuild_job()}
             )
+
+            from .deezer import diskmigrate as _dm
+
+            _dm.resume_if_interrupted(app)
     return app.deezer
 
 

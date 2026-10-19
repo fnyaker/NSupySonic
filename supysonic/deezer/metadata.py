@@ -26,10 +26,11 @@ from mutagen.id3 import (
     TPOS,
     TRCK,
     TSRC,
-    TXXX,
     USLT,
 )
 from mutagen.id3 import error as ID3Error
+
+from .library import release_date_of
 
 
 def meta_from_gw(info: dict) -> dict:
@@ -41,7 +42,8 @@ def meta_from_gw(info: dict) -> dict:
     version = info.get("VERSION") or ""
     if version and version not in title:
         title = f"{title} {version}".strip()
-    date = info.get("PHYSICAL_RELEASE_DATE") or info.get("DIGITAL_RELEASE_DATE") or None
+    # The oldest real date: a digital reissue must not date the record.
+    date = release_date_of(info)
     return {
         "title": title,
         "artists": artists,
@@ -52,24 +54,7 @@ def meta_from_gw(info: dict) -> dict:
         "date": date,
         "isrc": info.get("ISRC"),
         "md5_image": info.get("ALB_PICTURE", ""),
-        "gain": info.get("GAIN"),
     }
-
-
-def _replaygain_tag(raw) -> str | None:
-    """Format a ``REPLAYGAIN_TRACK_GAIN`` value from Deezer's ``GAIN``.
-
-    Deezer's ``GAIN`` is the track's loudness, not the adjustment to apply, so
-    the actual ReplayGain adjustment is ``-(GAIN + 18.4)`` — the same transform
-    deemix uses. Returns e.g. ``"-10.00 dB"``, or None when absent/unparseable.
-    """
-    if raw in (None, ""):
-        return None
-    try:
-        # `+ 0.0` normalizes a -0.0 result to 0.0 ("0.00" not "-0.00").
-        return f"{-(float(raw) + 18.4) + 0.0:.2f} dB"
-    except (TypeError, ValueError):
-        return None
 
 
 def tag_file(path: Path, meta: dict, cover: bytes | None, suffix: str | None = None) -> None:
@@ -93,9 +78,6 @@ def tag_file(path: Path, meta: dict, cover: bytes | None, suffix: str | None = N
             audio["date"] = meta["date"]
         if meta.get("isrc"):
             audio["isrc"] = meta["isrc"]
-        rg = _replaygain_tag(meta.get("gain"))
-        if rg:
-            audio["replaygain_track_gain"] = rg
         if cover:
             pic = Picture()
             pic.type = 3  # front cover
@@ -124,9 +106,6 @@ def tag_file(path: Path, meta: dict, cover: bytes | None, suffix: str | None = N
         audio.add(TDRC(encoding=3, text=str(meta["date"])))
     if meta.get("isrc"):
         audio.add(TSRC(encoding=3, text=meta["isrc"]))
-    rg = _replaygain_tag(meta.get("gain"))
-    if rg:
-        audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=rg))
     if cover:
         audio.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover))
     audio.save(path)
