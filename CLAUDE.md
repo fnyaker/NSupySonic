@@ -675,6 +675,18 @@ plays it unchanged). Sharing goes through `components/ShareSheet.svelte` (global
 (peaks from `/api/share/waveform`), cut server-side by `/api/share/clip` and handed to the Web Share
 API (download fallback). Podcast markers live in `lib/markers.js`.
 
+**Export to another service** (`supysonic/services/`, `supysonic/webui/services.py`, the *Service* and *Liste*
+tabs of `components/ExportSheet.svelte`, Réglages → Compte → *Services de streaming*; survey in
+`docs/playlist-export.md`). Spotify (the operator's own app, PKCE, `POST /me/playlists` + `/items` — the
+February 2026 endpoints), YouTube Music (`ytmusicapi` signed in with a tab's pasted headers; searches go
+through `deezer/youtube.search` and its holds) and, for the admin, the server's Deezer account as a one-shot
+NEW playlist. Apple Music, Tidal & co. have no door without a paid developer programme: the list file (CSV
+with ISRC, XSPF, text) is that route. A song is exported only when the service's copy IS the recording (its
+id, the ISRC read off disk, then a search judged by `availability.match_score`); nothing is created when
+nothing matched or when the service stopped answering. Credentials live in `service_link`, encrypted like
+`password_clear`, never lent to a remote session. The Spotify PKCE state is kept server-side, not in the
+session: Android opens the consent page in the system browser.
+
 **Search leads with the titles**: the "Tout" tab is ten tracks, then a shelf of albums, then
 artists, playlists and podcasts — a search is usually for a song, and the shortlist has to be the
 first thing on screen rather than something you scroll past two shelves to reach. Each section
@@ -2603,7 +2615,7 @@ second interface to keep in step with the first, and that is the whole design:
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261012`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261018`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported. A migration script is split on `;` AFTER its
 `--` comment lines are dropped (`db.split_sql_script`): a `;` inside a comment used to cut it in two

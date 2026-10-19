@@ -456,6 +456,25 @@ export const api = {
   exportUrl: (kind, id, fmt) =>
     BASE + "/export/" + kind + "/" + encodeURIComponent(id) + "?fmt=" + encodeURIComponent(fmt),
 
+  // export to another streaming service (supysonic/webui/services.py): the
+  // user's own linked accounts, the job that matches and creates, and the
+  // list file for every service there is no door to (Apple Music…).
+  services: () => req("/services"),
+  setSpotifyApp: (clientId) =>
+    req("/services/spotify/app", { method: "PUT", body: body({ client_id: clientId }) }),
+  spotifyAuthorize: () => req("/services/spotify/authorize"),
+  connectYoutube: (headers) =>
+    req("/services/youtube/connect", { method: "POST", body: body({ headers }) }),
+  disconnectService: (id) => req("/services/" + id, { method: "DELETE" }),
+  exportToService: (service, kind, id, name, isPublic) =>
+    req("/services/" + service + "/export", {
+      method: "POST",
+      body: body({ kind, id: String(id), name, public: !!isPublic }),
+    }),
+  serviceExportJob: (job) => req("/services/export/" + encodeURIComponent(job)),
+  listFileUrl: (kind, id, fmt) =>
+    BASE + "/services/list/" + kind + "/" + encodeURIComponent(id) + "?fmt=" + encodeURIComponent(fmt),
+
   // library
   myPlaylists: () => req("/me/playlists"),
   myFavorites: () => req("/me/favorites"),

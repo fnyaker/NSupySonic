@@ -36,6 +36,7 @@
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
   import VisualizerSettings from "../components/VisualizerSettings.svelte";
+  import ServicesSettings from "../components/ServicesSettings.svelte";
 
   const QUALITIES = [
     { id: "FLAC", label: "FLAC", hint: "Sans perte — lourd" },
@@ -71,7 +72,8 @@
     ...(REMOTE ? [] : [{ id: "quality", label: "Qualité sonore" }]),
     { id: "account", label: REMOTE ? "Contrôle" : "Compte" },
   ];
-  let tab = TABS[0].id;
+  // Back from Spotify's consent page (?svc=…): the services live in "Compte".
+  let tab = /[?&]svc=/.test(window.location.hash) && !REMOTE ? "account" : TABS[0].id;
   // A settings tab that opens onto a full LIST needs to be a page of its own —
   // otherwise the list buries the settings under it. `sub` is that page; the
   // header turns into a back button while it's up.
@@ -699,6 +701,7 @@
     <button class="logout" on:click={logout}><Icon name="user" size={16} /> Déconnexion</button>
   </div>
 </section>
+<ServicesSettings />
 {/if}
 
 {#if $user?.admin && CAN_ADMIN}

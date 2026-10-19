@@ -219,7 +219,7 @@
   {:else}
     <div class="row fav-head">
       <button class="pill" on:click={playFavorites}><Icon name="play" size={18} /> Tout lire</button>
-      <button class="ghost-btn" on:click={() => openExport("favorites", "me", "Favoris")} title="Exporter en ZIP (clé USB, autre lecteur…)">
+      <button class="ghost-btn" on:click={() => openExport("favorites", "me", "Favoris")} title="Exporter : vers un service, en ZIP ou en liste">
         <Icon name="archive" size={17} /> Exporter
       </button>
       <span class="muted">{favorites.length} titres</span>
