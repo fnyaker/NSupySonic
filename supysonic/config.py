@@ -79,6 +79,9 @@ class DefaultConfig:
     }
     LASTFM = {"api_key": None, "secret": None}
     LISTENBRAINZ = {"api_url": "https://api.listenbrainz.org"}
+    # Completing facts from MusicBrainz (and AcoustID with a key) in the
+    # background; see supysonic/enrich/.
+    ENRICH = {"enabled": True, "acoustid_key": None, "contact": None}
     TRANSCODING = {}
     MIMETYPES = {}
     DEEZER = {
@@ -143,6 +146,7 @@ APP_CONFIG_KEYS = frozenset(
         "DAEMON",
         "LASTFM",
         "LISTENBRAINZ",
+        "ENRICH",
         "TRANSCODING",
         "MIMETYPES",
         "DEEZER",

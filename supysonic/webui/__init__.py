@@ -1238,6 +1238,33 @@ def _db_album_response(alb: Album) -> dict:
     }
 
 
+def _related_artists(ar: Artist, limit: int = 20) -> list:
+    """The artists whose tracks sound closest to this one's, as cards: the
+    stored neighbours (``similar.artist_neighbors``), read from the database
+    alone and only those the caller may see (an upload is its owner's)."""
+    near = similar.artist_neighbors(ar.id, limit)
+    if not near:
+        return []
+    ids = [aid for aid, _ in near]
+    seen = {
+        r[0]
+        for r in _visible_tracks(Track.select(Track.artist).where(Track.artist.in_(ids)))
+        .distinct()
+        .tuples()
+    }
+    rows = {a.id: a for a in Artist.select().where(Artist.id.in_(list(seen)))}
+    return [
+        {
+            "id": str(a.id),
+            "deezer_id": str(a.deezer_id or ""),
+            "name": a.name,
+            "picture": f"/api/cover/{a.id}" if a.deezer_id else None,
+        }
+        for a in (rows.get(aid) for aid in ids)
+        if a is not None
+    ]
+
+
 def _db_artist_response(ar: Artist) -> dict:
     albums = (
         Album.select(Album, Artist)
@@ -1271,7 +1298,7 @@ def _db_artist_response(ar: Artist) -> dict:
         "bio": None,
         "top": _db_tracks(top_q),
         "albums": cards,
-        "related": [],
+        "related": _related_artists(ar),
         "library": True,  # ``/artist/<id>/on-deezer`` completes it
     }
 
@@ -3702,6 +3729,12 @@ def upload():
                 analysis_mod.queue_analysis(track, None)
             except Exception:
                 logger.debug("upload: could not queue the analysis", exc_info=True)
+            try:
+                from ..enrich import queue as enrich_queue
+
+                enrich_queue.queue_track(track.id)
+            except Exception:
+                logger.debug("upload: could not queue the enrichment", exc_info=True)
             imported.append(_local_track(track))
         else:
             try:
@@ -4446,6 +4479,7 @@ from . import edges  # noqa: E402,F401  isort:skip
 from . import analysis  # noqa: E402,F401  isort:skip
 from . import genre  # noqa: E402,F401  isort:skip
 from . import neighbors  # noqa: E402,F401  isort:skip
+from . import enrich as _enrich_routes  # noqa: E402,F401  isort:skip
 from . import genreshare  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip
 from . import credits  # noqa: E402,F401  isort:skip

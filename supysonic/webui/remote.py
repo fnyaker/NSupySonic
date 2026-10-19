@@ -255,6 +255,8 @@ POLICY = {
     "genre_embed_status": "admin",
     "similar_rebuild_start": "admin",
     "similar_rebuild_status": "admin",
+    "enrich_backfill_start": "admin",
+    "enrich_backfill_status": "admin",
     "home_mix": "read",
     "genre_tags_defaults": "admin",
     "genre_tag_edit": "admin",

@@ -208,6 +208,15 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict, cover=None) 
     except Exception as exc:
         logger.debug("Saving the metadata sidecar failed for %s: %s", track.path, exc)
 
+    # MusicBrainz completes what Deezer does not state, later and politely: a
+    # queue entry here, never a wait.
+    try:
+        from ..enrich import queue as enrich_queue
+
+        enrich_queue.queue_track(track.id)
+    except Exception:
+        logger.debug("Queueing enrichment failed for %s", track.path, exc_info=True)
+
     # Archive lyrics alongside the audio (a .lrc sidecar + embedded plain text).
     # On the archive hot path we only consult Deezer (already logged in for the
     # audio) — the public LRCLIB gap-fill happens lazily on first view / via the

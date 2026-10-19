@@ -30,6 +30,7 @@
   } from "../lib/nativeDeezer.js";
   import Icon from "../components/Icon.svelte";
   import HardReload from "../components/HardReload.svelte";
+  import EnrichBackfill from "../components/EnrichBackfill.svelte";
   import { youtubeStatus, loadYoutubeStatus, setYoutubeEnabled } from "../lib/youtube.js";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
@@ -773,6 +774,9 @@
       </p>
     {/if}
   {/if}
+
+  <h3>Faits complétés par MusicBrainz</h3>
+  <EnrichBackfill />
 </section>
 {/if}
 
