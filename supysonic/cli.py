@@ -577,6 +577,36 @@ def deezer_lyrics(config, overwrite, limit):
     _lyrics_command(config, overwrite, limit)
 
 
+@cli.command("enrich")
+@click.option("--force", is_flag=True, help="Ask again even for tracks already tried.")
+@click.option("--limit", type=int, default=None, help="Stop after N processed tracks.")
+@click.pass_obj
+def enrich_cmd(config, force, limit):
+    """Complete the facts of archived tracks from MusicBrainz.
+
+    Tries the ISRC, then AcoustID (needs 'fpcalc' and [enrich] acoustid_key),
+    then a strict title/artist/length search, at the services' own pace (one
+    request a second for MusicBrainz). Safe to interrupt and to run again.
+    """
+    from .enrich import backfill, queue as enrich_queue
+
+    enrich_queue.configure(getattr(config, "ENRICH", None))
+    job = backfill.make_job(force)
+    click.echo("Enriching archived tracks (MusicBrainz)...")
+    job.run(limit=limit)
+    snap = job.snapshot()
+    cov = backfill.coverage()
+    click.echo(
+        "Done. processed={done} failed={failed}. Library: {tried} tried, "
+        "{untried} not yet, found by method {found}, outcomes {status}.".format(
+            done=snap["done"], failed=snap["failed"], **cov
+        )
+    )
+    if snap.get("failure_reasons"):
+        for reason, n in sorted(snap["failure_reasons"].items(), key=lambda kv: -kv[1]):
+            click.echo(f"  {n} x {reason}")
+
+
 @deezer.command("migrate-disk")
 @click.option("--force", is_flag=True, help="Start over instead of resuming an interrupted run.")
 @click.option("--no-bpm", is_flag=True, help="Do not ask Deezer for the tempo of the tracks missing it.")

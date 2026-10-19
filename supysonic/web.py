@@ -146,6 +146,15 @@ def create_application(config=None):
     # Initialize the optional Deezer proxy (lazy login on first use)
     setup_deezer(app)
 
+    # MusicBrainz enrichment: the options for the worker (it has no app
+    # context), and a catch-up run an interrupted restart left unfinished.
+    from .enrich import backfill as _enrich_backfill
+    from .enrich import queue as _enrich_queue
+
+    _enrich_queue.configure(app.config.get("ENRICH"))
+    if not app.testing:
+        _enrich_backfill.resume_if_interrupted(app)
+
     # Test for the cache directory
     cache_path = app.config["WEBAPP"]["cache_dir"]
     if not path.exists(cache_path):

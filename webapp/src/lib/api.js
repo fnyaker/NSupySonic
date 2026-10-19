@@ -369,6 +369,10 @@ export const api = {
   similarRebuild: (force = false) =>
     req("/similar/rebuild" + (force ? "?force=1" : ""), { method: "POST" }),
   similarStatus: () => req("/similar/rebuild"),
+  // Facts from MusicBrainz for the archived library (admin, worker + poll).
+  enrichBackfill: (force = false) =>
+    req("/enrich/backfill" + (force ? "?force=1" : ""), { method: "POST" }),
+  enrichStatus: () => req("/enrich/backfill"),
 
   // radios
   trackRadio: (id) => req("/radio/track/" + id),

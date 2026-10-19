@@ -235,7 +235,7 @@
 
     {#if data.related?.length}
       <h2>Artistes similaires</h2>
-      <div class="shelf">{#each data.related as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}</div>
+      <div class="shelf">{#each data.related as a (a.id || a.deezer_id)}<Card item={a} kind="artist" />{/each}</div>
     {/if}
 
     {#if data.bio}

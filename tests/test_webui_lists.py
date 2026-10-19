@@ -293,8 +293,9 @@ class ListsTestCase(unittest.TestCase):
         self.assertEqual(cards["Album Un"]["nb_tracks"], 2)
         self.assertIsNone(cards["Album Un"]["year"])
         # Seven albums, and the grid costs the same as it would for one: the
-        # count per album is gone (it was 2 statements each).
-        self.assertLessEqual(counts["SELECT"], 8, counts)
+        # count per album is gone (it was 2 statements each). Two more than it
+        # was: the similar artists, read from the stored neighbours.
+        self.assertLessEqual(counts["SELECT"], 10, counts)
         with count_statements() as counts:
             disco = self.client.get("/api/artist/11/discography").get_json()["discography"]
         self.assertEqual(len(disco["album"]), 7)

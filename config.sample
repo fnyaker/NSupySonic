@@ -119,6 +119,16 @@ log_rotate = yes
 ;api_key =
 ;secret =
 
+[enrich]
+; Complete tracks' facts (first release date, composer, lyricist, producer)
+; from MusicBrainz in the background, one request a second. Default: yes
+;enabled = yes
+; AcoustID identifies a file by its audio: needs the 'fpcalc' binary and an
+; application key from https://acoustid.org/new-application . Default: none
+;acoustid_key =
+; Added to the User-Agent so MusicBrainz can reach you. Default: this project's URL
+;contact =
+
 [listenbrainz]
 ; root URL of the ListenBrainz API.
 ; Defaults: https://api.listenbrainz.org/
