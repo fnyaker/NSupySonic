@@ -464,6 +464,16 @@ since a wrong song is worse than a hole. A worker job (4 searches in flight), po
 TEMPORARY (process memory, 3 h) and plays as it is. *Enregistrer* (admin) makes a LOCAL playlist —
 not created on the Deezer account — and queues its tracks for archiving.
 
+**One rule for "is it the same recording" and one scale for quality** (multi-provider lot C, `supysonic/matching.py`,
+`supysonic/providers/quality.py`). `match_score`, `closeness`, `_core_title`, `PLAUSIBLE` moved out of
+`webui/availability.py` unchanged (it and `playlist_import` re-import the same objects) and gained
+`same_recording(a, b)` -> `sure|maybe|no` (equal ISRC, else core title + main artist + length within 3 s + same
+version words; a cut's label such as "Radio Edit" is `maybe`, never `sure`) and `match_key` (one dict pass to group a
+list; confirm a collision with `same_recording`). `quality.py` notes an offer or an archived file's header (mutagen,
+nothing decoded) as `Quality(cls, effective_kbps)`: 50 hires, 40 lossless, 30 from 192 effective kbit/s, 20 from 96, 10
+below; the effective rate applies the codec factor (Opus x1.5, AAC x1.3, Vorbis x1.2, MP3 x1). Pure functions,
+no schema, nothing on a route's path; `tests/test_multi_c.py` pins the table.
+
 **Unavailable means BOTH sources are gone** — not "Deezer dropped it". `DELETE /api/track/<id>` is
 the third answer next to replace-and-upload, and `availability.verify_gone` re-checks *at the moment
 of deletion*: a file on disk → refuse (and clear the verdict); Deezer still resolves → refuse; an

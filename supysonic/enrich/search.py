@@ -18,7 +18,7 @@ def _escape(text):
 
 def find(http, title, artist, duration):
     """``{"mbid", "date", "release"}`` or None."""
-    from ..webui.availability import _core_title, _fold
+    from ..matching import _core_title, _fold
 
     core = _fold(_core_title(title))
     who = _fold(artist)

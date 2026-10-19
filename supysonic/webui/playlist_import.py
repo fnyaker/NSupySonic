@@ -57,7 +57,7 @@ from . import (
     login_required,
     webapi,
 )
-from .availability import PLAUSIBLE, _artist_names, _core_title, _fold, closeness, match_score
+from ..matching import PLAUSIBLE, _artist_names, _core_title, _fold, closeness, match_score
 
 logger = logging.getLogger(__name__)
 
