@@ -2226,12 +2226,11 @@ def lyrics(track_id):
                 _lyrics_in_background(track.id)
         return jsonify({"lyrics": lyr})
 
-    # Not archived (a row with no file): one short LRCLIB request, nothing kept.
+    # Not archived (a row with no file): one short LRCLIB request, its answer
+    # kept in memory for the archive to write (deezer/lyrics.remember_cold).
     artist = track.artist.name if track.artist else None
     album = track.album.name if track.album else None
-    lyr = deezer_lyrics.fetch_lrclib(
-        track.title, artist, album, track.duration, timeout=_LYRICS_COLD_TIMEOUT
-    )
+    lyr = deezer_lyrics.fetch_cold(track, artist, album, timeout=_LYRICS_COLD_TIMEOUT)
     return jsonify({"lyrics": lyr})
 
 

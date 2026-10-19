@@ -455,7 +455,19 @@
   }
   $: if (coverRgb) pal.setCover(coverRgb);
   $: if (coverUrl) useCover(loResCover(coverUrl, 256) || coverUrl);
-  $: if (!external && !coverRgb && $current) loadCover($current);
+  // Once per TRACK: `$current` is handed over again on every progress tick
+  // (four times a second), and this asked for the artwork and re-set the
+  // palette on each one — measured, thirteen requests for a cover in three
+  // seconds of the full-screen player when the cover answered 404 (a failure
+  // is deliberately not memoised by dominantColor).
+  let coverFor = null;
+  $: if (!external && !coverRgb && $current) {
+    const key = trackRef($current) + "|" + ($current.album?.cover || "");
+    if (key !== coverFor) {
+      coverFor = key;
+      loadCover($current);
+    }
+  }
   async function loadCover(t) {
     const url =
       resolveCover(get(offlineCovers), t.album?.cover) ||

@@ -291,6 +291,10 @@ class MockDz:
 
 class WebUITestCase(unittest.TestCase):
     def setUp(self):
+        # Process memory a previous test's first-play lyrics may have left.
+        from supysonic.deezer import lyrics as _lyrics
+
+        _lyrics._cold.clear()
         self.__db = tempfile.mkstemp()
         self.__dir = tempfile.mkdtemp()
         self.archive = tempfile.mkdtemp()

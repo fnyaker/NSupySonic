@@ -92,6 +92,11 @@ class TestBase(unittest.TestCase):
     __with_api__ = False
 
     def setUp(self):
+        # Process memory a previous test's first-play lyrics may have left
+        # (deezer/lyrics.remember_cold is keyed by a track id tests reuse).
+        from supysonic.deezer import lyrics as _lyrics
+
+        _lyrics._cold.clear()
         self.__db = tempfile.mkstemp()
         self.__dir = tempfile.mkdtemp()
         self.config = TestConfig(self.__with_webui__, self.__with_api__)

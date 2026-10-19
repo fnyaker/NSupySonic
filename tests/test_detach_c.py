@@ -414,6 +414,56 @@ class LyricsRoutesTest(WebUITestCase):
         self.assertEqual(len(sess.calls), 1)
         self.assertEqual(len(data["lyrics"]["synced"]), 3)
 
+    def test_cold_answer_is_asked_once_and_kept_by_the_archive(self):
+        # A first play's view gets LRCLIB's answer in the request; a second
+        # view (another device, the panel reopened) used to ask again, and so
+        # did the archive's next view in the background. Measured: 2 then 3
+        # LRCLIB requests for one track; now 1.
+        self._login()
+        with self.app.app_context():
+            t = library.upsert_track(
+                dict(raw_track(32, "Cold"), DURATION=200),
+                library.get_root_folder(self.archive), "FLAC",
+            )
+        sess = FakeSession({"get": FakeResp(200, {"syncedLyrics": SYNCED_LRC, "duration": 201})})
+        with mock.patch.object(lyrics, "requests", sess):
+            sess.RequestException = Exception
+            self.client.get(f"/api/lyrics/{t.id}")
+            again = self.client.get(f"/api/lyrics/{t.id}").get_json()
+            self.assertEqual(len(sess.calls), 1)
+            self.assertEqual(len(again["lyrics"]["synced"]), 3)
+            # The play finishes and archives it: the finalize step (which never
+            # asks LRCLIB itself) writes the answer the view already had.
+            os.makedirs(os.path.dirname(t.path), exist_ok=True)
+            open(t.path, "wb").write(b"\x00")
+            with self.app.app_context():
+                kept = lyrics.ensure_lyrics(None, Track[t.id], allow_lrclib=False, embed=False)
+            self.assertEqual(len(kept["synced"]), 3)
+            self.assertEqual(len(lyrics.read_sidecar(t)["synced"]), 3)
+            with self.app.app_context():
+                self.assertTrue(lyrics.lyrics_tried(Track[t.id]))
+            started = []
+            with mock.patch("supysonic.webui._lyrics_in_background", started.append):
+                self.client.get(f"/api/lyrics/{t.id}")
+            self.assertEqual(started, [])
+            self.assertEqual(len(sess.calls), 1)
+
+    def test_cold_transport_failure_is_not_kept(self):
+        self._login()
+        with self.app.app_context():
+            t = library.upsert_track(
+                dict(raw_track(33, "Cold"), DURATION=200),
+                library.get_root_folder(self.archive), "FLAC",
+            )
+        sess = FakeSession({"get": FakeResp(500, {})})
+        with mock.patch.object(lyrics, "requests", sess):
+            sess.RequestException = Exception
+            self.client.get(f"/api/lyrics/{t.id}")
+            self.client.get(f"/api/lyrics/{t.id}")
+        # LRCLIB did not answer: nothing to remember, the next view asks again.
+        self.assertEqual(len(sess.calls), 2)
+        self.assertEqual(lyrics.recall_cold(t.id), (False, None))
+
 
 class LrclibRulesTest(LyricsTestCase):
     def test_duration_off_by_20s_refused(self):
