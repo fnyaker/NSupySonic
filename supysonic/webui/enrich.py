@@ -17,6 +17,10 @@ from ..db import now
 from ..enrich import backfill, queue as enrich_queue
 from . import admin_required, login_required, webapi
 
+def _truthy(value):
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 _lock = threading.Lock()
 _job = None
 _started = None
@@ -42,7 +46,7 @@ def _snapshot():
 def enrich_backfill_start():
     global _job, _started
     data = request.get_json(silent=True) or {}
-    force = bool(data.get("force") or request.args.get("force"))
+    force = _truthy(data.get("force")) or _truthy(request.args.get("force"))
     with _lock:
         if _job is None or not _job.snapshot()["running"]:
             _job = backfill.make_job(force=force)
