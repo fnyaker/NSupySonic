@@ -139,7 +139,7 @@ class Provider:
         return health()
 
     def config_schema(self) -> list:
-        """The fields the person fills in: ``{"key", "type", "secret", "help"}``."""
+        """The fields the person fills in: ``{"key", "type", "masked", "help"}`` (masked: never shown back)."""
         return []
 
     def has(self, capability) -> bool:

@@ -111,7 +111,7 @@ class FakeProvider(base.Provider):
         return base.health(self.status)
 
     def config_schema(self):
-        return [{"key": "token", "type": "text", "secret": True, "help": "test"}]
+        return [{"key": "access", "type": "text", "masked": True, "help": "test"}]
 
     # -- SEARCH -----------------------------------------------------------------
 
