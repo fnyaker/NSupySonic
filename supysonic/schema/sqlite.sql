@@ -375,3 +375,15 @@ CREATE TABLE IF NOT EXISTS provider_account (
     UNIQUE (provider, user_id)
 );
 CREATE INDEX IF NOT EXISTS index_provider_account_user_id_fk ON provider_account(user_id);
+CREATE TABLE IF NOT EXISTS genre_parent (
+    child INTEGER NOT NULL REFERENCES genre_tag ON DELETE CASCADE,
+    parent INTEGER NOT NULL REFERENCES genre_tag ON DELETE CASCADE,
+    weight FLOAT NOT NULL DEFAULT 1,
+    PRIMARY KEY (child, parent)
+);
+CREATE INDEX IF NOT EXISTS index_genre_parent_parent_fk ON genre_parent(parent);
+CREATE TABLE IF NOT EXISTS genre_alias (
+    name VARCHAR(48) NOT NULL PRIMARY KEY,
+    genre INTEGER NOT NULL REFERENCES genre_tag ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS index_genre_alias_genre_fk ON genre_alias(genre);

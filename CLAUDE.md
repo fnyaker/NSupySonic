@@ -2623,6 +2623,19 @@ second interface to keep in step with the first, and that is the whole design:
   too, and where the service worker answers the navigation, `lib/linkrescue.js` (main.js's FIRST
   import, before the router reads the location) turns the path back into its hash route.
 
+**Genre hierarchy (multi-provider lot O)** (`supysonic/genretree.py`, `supysonic/deezer/genre_tree.py`,
+`webui/genre.py` `/genre/tree*`, `webapp/src/lib/genretree.js`, `components/GenreTree.svelte`, the *Arbre* tab of
+the studio). Genres form a DAG: `genre_parent` (weighted multi-parent edges, 1 = outright sub-genre) and `genre_alias`
+(schema `20261021`). The engine's *family* is the nearest ancestor that is a `FAMILIES` label. The tree is cached
+in the process, rechecked against `Meta genre_tree_v` (30 s TTL); a server whose tree was never seeded answers from a
+VIRTUAL tree built from the default data, so verdicts are identical on an upgraded server until the admin edits it
+(`seed_tree`, run on the admin's first look, also creates the shelves as tags; the vocabulary seed alone writes no
+tree). `genre.decide` climbs ancestors (level `ancestor`, roots excluded) when the head hesitates; `rank_scores(last=)`
+lifts the last pick's parent and siblings. Every write bumps the version, tells the devices and relabels only if a
+head is active; the undo log is compact per-key `Meta` rows (256-char limit). The SPA mirrors the tree
+(`refreshTree` on a verdict-generation change) and `genreOf`/`skinId` fall back to the nearest known ancestor.
+`tests/test_multi_o.py` pins statement counts and the unchanged verdicts; `node test/genretree/run.mjs` is the bench.
+
 **Providers (multi-provider plan, lot A)** (`supysonic/providers/`, `supysonic/sources.py`, plan `docs/multi-provider.md`).
 Deezer and YouTube are meant to become two instances of one interface. Lot A lays the ground and
 wires nothing to the hot paths yet:

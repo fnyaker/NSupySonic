@@ -27,6 +27,8 @@
 // Nothing here ever hard-switches. Both outputs are weights, smoothed over
 // seconds, and the dominant family only changes with hysteresis.
 
+import { ancestorsOf, onTreeChange } from "../genretree.js";
+
 // --- fuzzy membership helpers ---------------------------------------------
 // Trapezoids with soft shoulders. `w` is the width of the ramp on each side.
 function inRange(x, lo, hi, w = (hi - lo) * 0.45) {
@@ -1222,6 +1224,8 @@ function genreEntry(key, by) {
 }
 
 const RESOLVED = new Map();
+// A tree that arrives (or changes) can resolve a name that did not resolve before.
+onTreeChange(() => RESOLVED.clear());
 
 /**
  * Resolve any genre name (see above). Null when nothing matches, which means
@@ -1249,6 +1253,16 @@ export function genreOf(name) {
     for (const k of PARTS) if (k.length > best.length && id.includes(k)) best = k;
     if (best) hit = genreEntry(best, "part");
   }
+  // A genre with no row of its own (a shelf, a name the person made up and
+  // placed in the genre tree) is read as the nearest genre above it that has one.
+  if (!hit)
+    for (const up of ancestorsOf(raw)) {
+      const g = genreEntry(flatten(up), "tree");
+      if (g) {
+        hit = g;
+        break;
+      }
+    }
   if (RESOLVED.size > 512) RESOLVED.clear();
   RESOLVED.set(raw, hit);
   return hit;

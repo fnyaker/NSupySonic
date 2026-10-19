@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261020"
+SCHEMA_VERSION = "20261021"
 
 
 def now():
@@ -757,6 +757,33 @@ class TrackTag(_Model):
         primary_key = CompositeKey("track", "tag")
 
 
+class GenreParent(_Model):
+    """``child`` sits under ``parent``. A genre may have several parents and
+    each link says how firmly (``weight``: 1 = a sub-genre outright, less =
+    related), which a strict tree could not. Cycles are refused by
+    ``supysonic.genretree``, not by the table."""
+
+    child = ForeignKeyField(GenreTag, column_name="child", object_id_name="child_id", backref="parents", on_delete="CASCADE")
+    parent = ForeignKeyField(GenreTag, column_name="parent", object_id_name="parent_id", backref="children", on_delete="CASCADE")
+    weight = FloatField(default=1.0)
+
+    class Meta:
+        table_name = "genre_parent"
+        primary_key = CompositeKey("child", "parent")
+
+
+class GenreAlias(_Model):
+    """A name another service uses (folded: lowercase, no accents) hung on a
+    node, so third-party genres land in the tree instead of becoming one more
+    tag."""
+
+    name = CharField(48, primary_key=True)
+    genre = ForeignKeyField(GenreTag, column_name="genre", object_id_name="genre_id", backref="aliases", on_delete="CASCADE")
+
+    class Meta:
+        table_name = "genre_alias"
+
+
 class GenreModel(_Model):
     """A classification head trained in the browser and shipped here.
 
@@ -1348,6 +1375,8 @@ def _migration_order():
         TrackAnalysis,  # after Track: it references it
         TrackArtist,  # after Track and Artist: it references both
         GenreTag,
+        GenreParent,
+        GenreAlias,
         TrackTag,  # after Track and GenreTag: it references both
         GenreModel,
         User,

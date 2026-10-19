@@ -27,6 +27,7 @@
   import Icon from "../components/Icon.svelte";
   import JobFailures from "../components/JobFailures.svelte";
   import SimilarRebuild from "../components/SimilarRebuild.svelte";
+  import GenreTree from "../components/GenreTree.svelte";
   import Cover from "../components/Cover.svelte";
 
   const ARCHETYPES = [
@@ -45,6 +46,7 @@
   ];
   const TABS = [
     { id: "vocab", label: "Genres" },
+    { id: "tree", label: "Arbre" },
     { id: "tag", label: "Étiquetage" },
     { id: "model", label: "Modèle" },
   ];
@@ -275,7 +277,7 @@
     if (tagging) return;
     tagging = true;
     try {
-      const res = await api.genreCandidates(40, candidateSort === "active" ? "active" : null);
+      const res = await api.genreCandidates(40, candidateSort === "active" ? "active" : null, lastAction?.tag?.name || null);
       candidates = res.candidates || [];
       cursor = 0;
       noMore = candidates.length === 0;
@@ -1507,6 +1509,10 @@
         </button>
       {/each}
     </nav>
+
+    {#if tab === "tree"}
+      <GenreTree />
+    {/if}
 
     {#if tab === "vocab"}
       <section class="card">

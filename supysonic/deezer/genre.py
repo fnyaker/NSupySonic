@@ -381,17 +381,28 @@ def predict(vec, extra=None):
     return head["labels"][best], round(probs[best], 4), dist, margin
 
 
+#: A label under this probability does not take part in climbing the tree.
+ANCESTOR_MIN_P = 0.01
+
+
 def decide(vec, min_conf, min_margin, extra=None):
     """What the head may say about a track, or None when it should keep quiet.
 
     ``{"style", "conf", "dist", "level"}``: ``level`` is "label" when its own
     top label passes the gate, "family" when only the FAMILY it is sure of
-    does. The second case is the one the label gate used to throw away: a head
-    that answers Rawstyle 0.40, Rawphase 0.35 is 75% sure the track is raw and
+    does, "ancestor" when no family is sure but a genre above them is. The
+    second case is the one the label gate used to throw away: a head that
+    answers Rawstyle 0.40, Rawphase 0.35 is 75% sure the track is raw and
     unsure only which raw, and it fell through to the heuristic — the weakest
-    of the three sources — for want of a margin between two siblings. The
-    families come from the studio (``_families``); a label without one is no
-    evidence for any family and competes on its own.
+    of the three sources — for want of a margin between two siblings. The third
+    is the same reasoning one step further up the genre tree
+    (``supysonic.genretree``): frenchcore 0.4 and speedcore 0.35 are 75% sure
+    of hardcore, a genre the head may never have been given a single tag for.
+
+    A label's family is its nearest engine family in the tree and, where the
+    tree knows nothing of it, the one the studio shipped with the head
+    (``_families``). With an unmodified default tree the two agree label for
+    label, so the family step answers exactly as it always did.
     """
     guess = predict(vec, extra)
     if not guess:
@@ -402,10 +413,15 @@ def decide(vec, min_conf, min_margin, extra=None):
     fams = (active_head() or {}).get("families") or {}
     if not fams:
         return None
+    from .. import genretree
+
+    def fam_of(lab):
+        return genretree.family_of(lab) or fams.get(lab)
+
     mass = {}
     loners = []
     for lab, p in dist.items():
-        fam = fams.get(lab)
+        fam = fam_of(lab)
         if fam is None:
             loners.append(p)
         else:
@@ -417,6 +433,44 @@ def decide(vec, min_conf, min_margin, extra=None):
     second = max([ranked[1][1] if len(ranked) > 1 else 0.0] + loners)
     if top >= min_conf and top - second >= min_margin:
         return {"style": fam, "conf": round(top, 4), "dist": dist, "level": "family"}
+    return _decide_ancestor(dist, fam_of, min_conf, min_margin)
+
+
+def _decide_ancestor(dist, fam_of, min_conf, min_margin):
+    """The smallest genre above the labels the head hesitates between that
+    passes the same gate: its probability is the sum over everything under it,
+    and the rival is the best group outside it."""
+    from .. import genretree
+
+    tree = genretree.get()
+    sig = []
+    for lab, p in dist.items():
+        if p >= ANCESTOR_MIN_P:
+            n = tree.node(lab)
+            sig.append((lab, p, n, {n} | {a for a, _h, _f in tree.up(n)} if n is not None else set()))
+    if len(sig) < 2:
+        return None
+    mass = {}
+    candidates = set()
+    for lab, p, n, chain in sig:
+        for a in chain:
+            mass[a] = mass.get(a, 0.0) + p
+            # A root is a whole continent ("Électronique"), too vague to serve.
+            if a != n and tree.parents.get(a):
+                candidates.add(a)
+    for node in sorted(candidates, key=lambda a: (len(tree.down(a)), -mass[a], a)):
+        top = mass[node]
+        if top < min_conf:
+            continue
+        rivals = {}
+        for lab, p, n, chain in sig:
+            if node in chain:
+                continue
+            key = fam_of(lab) or lab
+            rivals[key] = rivals.get(key, 0.0) + p
+        if top - max(rivals.values(), default=0.0) >= min_margin:
+            fid = genretree._family_ids().get(genretree.fold(node))
+            return {"style": fid or node, "conf": round(top, 4), "dist": dist, "level": "ancestor"}
     return None
 
 
@@ -599,11 +653,20 @@ PROTO_SHARPNESS = 0.015
 HEAD_WEIGHT = 0.75
 
 
-def rank_scores(guess, protos, limit=None):
+#: What the last genre chosen lends to the genres around it in the tree: the
+#: studio is used in runs ("all of these are hardtekk"), so the parent and the
+#: siblings of the last pick are worth a look before anything else equal to them.
+PARENT_BONUS = 0.06
+SIBLING_BONUS = 0.04
+
+
+def rank_scores(guess, protos, limit=None, last=None):
     """Every genre either opinion has a word on, as [(label, score, head, proto)],
     best first. ``score`` is in 0..1 and only ORDERS the vocabulary; ``head`` is
     the calibrated probability (None when the head does not know the genre) and
-    ``proto`` the prototype's share (None without a prototype)."""
+    ``proto`` the prototype's share (None without a prototype). ``last``: the
+    genre the person chose last; its parents and siblings in the genre tree
+    rise (``PARENT_BONUS``, ``SIBLING_BONUS``) and may join the list."""
     head = dict(guess[2]) if guess and len(guess) > 2 and guess[2] else {}
     share = {}
     if protos:
@@ -629,8 +692,32 @@ def rank_scores(guess, protos, limit=None):
                 None if p is None else round(p, 4),
             )
         )
+    if last:
+        out = _lift_relatives(out, last)
     out.sort(key=lambda r: (-r[1], r[0]))
     return out[:limit] if limit else out
+
+
+def _lift_relatives(rows, last):
+    from .. import genretree
+
+    tree = genretree.get()
+    node = tree.node(last)
+    if node is None:
+        return rows
+    bonus = {}
+    for parent, _w in tree.parents.get(node, ()):
+        bonus[parent] = PARENT_BONUS
+        for sib, _sw in tree.children.get(parent, ()):
+            if sib != node:
+                bonus.setdefault(sib, SIBLING_BONUS)
+    seen = set()
+    out = []
+    for name, score, h, p in rows:
+        seen.add(name)
+        out.append((name, round(min(1.0, score + bonus.get(name, 0.0)), 4), h, p))
+    out.extend((name, b, None, None) for name, b in bonus.items() if name not in seen)
+    return out
 
 
 def invalidate_centroids():

@@ -33,6 +33,7 @@
 
 import { api } from "./api.js";
 import { migrateKey } from "./trackkey.js";
+import { refreshTree } from "./genretree.js";
 
 const KEY = "audio.analysis";
 const MAX = 500; // a few tens of KB; the LRU drops the oldest half
@@ -163,6 +164,9 @@ function noteGeneration(g) {
   if (generation !== null && g !== generation) {
     mem.clear();
     stamps.clear();
+    // The genre tree may be what moved: take the server's copy (an unchanged
+    // one is a 304), so a genre without a picture of its own finds its shelf.
+    refreshTree();
   }
   if (g !== generation) {
     generation = g;

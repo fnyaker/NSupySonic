@@ -251,6 +251,7 @@ def main():
         ("GET", "/api/me", None),
         ("GET", "/api/home", None),
         ("GET", "/api/me/playlists", None),
+        ("GET", "/api/genre/tree", None),
         ("GET", "/api/me/favorites", None),
         ("GET", "/api/me/favorite-ids", None),
         ("GET", f"/api/playlist/{ids['big']}", None),
