@@ -90,26 +90,12 @@ class DefaultConfig:
         "archive_dir": None,
         "default_quality": "FLAC",  # FLAC | MP3_320 | MP3_128
         "sync_user": None,  # supysonic user owning imported playlists/favorites
-        "sync_playlists": True,
-        "sync_favorites": True,
         "sync_podcasts": True,  # refresh subscribed podcasts' episodes on each sync
         "podcast_episodes": 30,  # recent episodes to import per podcast
-        "import_new_releases": True,  # import the smart tracklists below
-        "import_flow": True,
-        # "Nouveautés pour toi"'s albums, all of them, as one local playlist
-        # ("Deezer · Nouveautés en vrac"), refreshed on every sync.
-        "import_new_albums": True,
-        # Smart tracklists to expose as "Deezer · ..." playlists (None = default
-        # set: new-releases, discovery, monthly-top, inspired-by-1..5).
-        "smart_tracklists": None,
-        "push_to_deezer": True,  # mirror Subsonic playlist/favorite changes to Deezer
         # Import user-dropped audio files in archive_dir as local library tracks
         # (deezer_id NULL). They're searchable/playlistable like Deezer tracks but
         # the Deezer sync never touches them. Scanned on each sync run.
         "scan_local": True,
-        # Report played tracks to Deezer (log.listen) so your recommendations and
-        # Flow keep learning from what you play here. Off by default (opt-in).
-        "report_listens": False,
         "preload": True,
         "preload_count": 2,
         # Parallel workers for explicit "download now" batch pre-archiving

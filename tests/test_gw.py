@@ -51,39 +51,6 @@ class GatewayRequestShapeTest(unittest.TestCase):
     def _last(self):
         return self.sess.calls[-1]
 
-    def test_add_favorite_uses_song_addFavorites(self):
-        self.gw.add_song_to_favorites("42")
-        call = self._last()
-        self.assertEqual(call["method"], "song.addFavorites")
-        self.assertEqual(call["body"]["IDS"], ["42"])
-        self.assertEqual(call["body"]["CTXT"], {"id": "42", "t": "player"})
-
-    def test_remove_favorite_uses_song_removeFavorites(self):
-        self.gw.remove_song_from_favorites(7)
-        call = self._last()
-        self.assertEqual(call["method"], "song.removeFavorites")
-        self.assertEqual(call["body"]["IDS"], ["7"])
-        self.assertEqual(call["body"]["CTXT"], {"id": "7", "t": "player"})
-
-    def test_favorites_can_be_batched(self):
-        self.gw.add_songs_to_favorites(["1", "2", "3"])
-        call = self._last()
-        self.assertEqual(call["method"], "song.addFavorites")
-        self.assertEqual(call["body"]["IDS"], ["1", "2", "3"])
-        self.assertEqual(call["body"]["CTXT"]["id"], "1")
-
-    def test_flow_config_id_is_forwarded(self):
-        self.gw.get_user_radio(42, config_id="motivation")
-        call = self._last()
-        self.assertEqual(call["method"], "radio.getUserRadio")
-        # The gateway takes these as the POST body, as in the HAR capture.
-        self.assertEqual(call["body"]["user_id"], 42)
-        self.assertEqual(call["body"]["config_id"], "motivation")
-
-    def test_flow_without_config_omits_it(self):
-        self.gw.get_user_radio(42)
-        self.assertNotIn("config_id", self._last()["body"])
-
     def test_episode_batch_uses_getListData(self):
         self.gw.get_episodes(["907", 0, "905"])
         call = self._last()

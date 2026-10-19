@@ -68,13 +68,7 @@ render_config() {
             printf 'archive_dir = %s\n' "${DEEZER_ARCHIVE_DIR:-/data/archive}"
             printf 'default_quality = %s\n' "${DEEZER_QUALITY:-FLAC}"
             printf 'sync_user = %s\n' "${DEEZER_SYNC_USER:-${SUPYSONIC_ADMIN_USER:-admin}}"
-            printf 'sync_playlists = %s\n' "${DEEZER_SYNC_PLAYLISTS:-yes}"
-            printf 'sync_favorites = %s\n' "${DEEZER_SYNC_FAVORITES:-yes}"
-            printf 'import_new_releases = %s\n' "${DEEZER_IMPORT_NEW_RELEASES:-yes}"
-            printf 'import_new_albums = %s\n' "${DEEZER_IMPORT_NEW_ALBUMS:-yes}"
-            printf 'push_to_deezer = %s\n' "${DEEZER_PUSH:-yes}"
             printf 'scan_local = %s\n' "${DEEZER_SCAN_LOCAL:-yes}"
-            printf 'report_listens = %s\n' "${DEEZER_REPORT_LISTENS:-no}"
             printf 'preload = %s\n' "${DEEZER_PRELOAD:-yes}"
             [ -n "$DEEZER_SYNC_AT" ] && printf 'sync_at = %s\n' "$DEEZER_SYNC_AT"
             printf '\n'

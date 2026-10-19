@@ -21,7 +21,6 @@ services:
       DEEZER_SYNC_AT: ${DEEZER_SYNC_AT:-}
       # Report what you play back to Deezer so recommendations/Flow keep learning.
       # Off by default (opt-in). Set to "yes" to enable.
-      DEEZER_REPORT_LISTENS: ${DEEZER_REPORT_LISTENS:-}
       # Database: PostgreSQL, out of the box, served by the `db` service below.
       # POSTGRES_PASSWORD (set it in .env) is the single source of truth — this
       # URI reuses it, so there's nothing to keep in sync by hand. Override

@@ -242,11 +242,8 @@ export const api = {
 
   // discovery
   home: () => req("/home"),
-  smartTracklist: (id) => req("/smarttracklist/" + id),
   homeMix: (id) => req("/home/mix/" + encodeURIComponent(id)),
   flow: () => req("/flow"),
-  flowClusters: () => req("/flow/clusters"),
-  recommendations: () => req("/recommendations"),
   search: (q) => req("/search?q=" + encodeURIComponent(q)),
 
   // entities
@@ -592,8 +589,8 @@ export const api = {
   // Build identity of the served app (+ the Android release it expects).
   version: () => req("/version"),
 
-  // telemetry — fire-and-forget; never let it break playback. A no-op server
-  // side unless report_listens is enabled in the config. Skipped entirely while
+  // telemetry — fire-and-forget; never let it break playback. It only counts the
+  // play on this server; nothing goes to Deezer. Skipped entirely while
   // offline (a doomed POST per track change is just noise).
   reportListen: (payload) => {
     if (!get(online)) return Promise.resolve();

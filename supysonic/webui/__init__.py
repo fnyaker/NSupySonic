@@ -1303,17 +1303,6 @@ def _db_artist_response(ar: Artist) -> dict:
     }
 
 
-def _db_mix_for(sid: str):
-    """The synced 'Deezer · <title>' DB playlist for a smart-tracklist id, or None."""
-    from ..deezer import ids as dz_ids
-
-    try:
-        pl = Playlist[dz_ids.playlist_uuid("smart:" + str(sid))]
-    except Playlist.DoesNotExist:
-        return None
-    return pl
-
-
 def _deezer_starred():
     """The current user's starred *Deezer* tracks (from the DB), newest first,
     as a query (``_db_tracks`` reads it as tuples)."""
@@ -1497,18 +1486,6 @@ def me():
 
 
 # -- discovery --------------------------------------------------------------
-
-
-def _smart_cover(data):
-    cover = data.get("COVER") or {}
-    md5 = cover.get("MD5")
-    kind = (cover.get("TYPE") or "misc").lower()
-    if not md5:
-        pics = data.get("PICTURES") or []
-        if pics:
-            md5 = pics[0].get("MD5")
-            kind = (pics[0].get("TYPE") or kind).lower()
-    return _image(kind, md5)
 
 
 # -- the home, from the library -----------------------------------------------
@@ -1732,55 +1709,6 @@ def home_mix(slug):
             "tracks": tracks,
         }
     )
-
-
-@webapi.route("/smarttracklist/<sid>")
-@login_required
-def smarttracklist(sid):
-    if not _valid_slug(sid):
-        return jsonify({"error": "invalid id"}), 400
-    live = _dz_live()
-    failure = None
-    if live is not None:
-        try:
-            res = live.get_smart_tracklist(sid)
-            data = (res or {}).get("DATA") or {}
-            songs = (res or {}).get("SONGS") or {}
-            return jsonify(
-                {
-                    "playlist": {
-                        "deezer_id": sid,
-                        "title": data.get("TITLE") or sid,
-                        "description": data.get("SUBTITLE") or data.get("DESCRIPTION") or "",
-                        "cover": _smart_cover(data),
-                        "nb_tracks": songs.get("total") or len(songs.get("data", [])),
-                    },
-                    "tracks": _tracks(songs.get("data", [])),
-                }
-            )
-        except Exception as exc:
-            _log_deezer_failure("smart tracklist %s failed; trying local DB", sid)
-            failure = exc
-    # Deezer down/disabled: serve the last synced copy of this mix from the DB.
-    pl = _db_mix_for(sid)
-    if pl is not None:
-        # Not pl.get_tracks(): it lazy-loads each row's album and artist, two
-        # queries per track.
-        tracks = _db_tracks(_db_playlist_track_rows(pl))
-        title = pl.name[len("Deezer · "):] if pl.name.startswith("Deezer · ") else pl.name
-        return jsonify(
-            {
-                "playlist": {
-                    "deezer_id": sid,
-                    "title": title,
-                    "description": pl.comment or "",
-                    "cover": _db_playlist_cover(tracks),
-                    "nb_tracks": len(tracks),
-                },
-                "tracks": tracks,
-            }
-        )
-    return _deezer_missing(failure)
 
 
 def _data(fn):
@@ -2382,49 +2310,6 @@ def flow():
     return jsonify({"tracks": _tracks_in_order(similar.radio(seeds, _RADIO_SIZE))})
 
 
-def _gql_pic(pic):
-    """A picture's `medium` field is a URL or a list of URLs."""
-    m = (pic or {}).get("medium")
-    if isinstance(m, list):
-        return m[0] if m else None
-    return m if isinstance(m, str) else None
-
-
-@webapi.route("/flow/clusters")
-@login_required
-def flow_clusters():
-    """The Flow's genre/style clusters and whether each is enabled."""
-    if not _is_admin():
-        return jsonify({"available": False, "clusters": []})
-    provider, err = _need_provider()
-    if err:
-        return err
-    try:
-        nodes = provider.flow_clusters()
-    except Exception:
-        _log_deezer_failure("Flow clusters lookup failed")
-        return jsonify({"available": False, "clusters": []})
-    clusters = []
-    for n in nodes:
-        cl = n.get("cluster") or {}
-        artists = cl.get("artists") or []
-        cover = None
-        for a in artists:
-            cover = _gql_pic(a.get("picture"))
-            if cover:
-                break
-        clusters.append(
-            {
-                "id": cl.get("id"),
-                "title": cl.get("title"),
-                "enabled": bool(n.get("isEnabled")),
-                "cover": cover,
-                "artists": [a.get("name") for a in artists[:4] if a.get("name")],
-            }
-        )
-    return jsonify({"available": True, "clusters": clusters})
-
-
 @webapi.route("/radio/track/<track_id>")
 @login_required
 def track_radio(track_id):
@@ -2472,32 +2357,6 @@ def artist_radio(artist_id):
     ]
     ids = own[:6] + similar.radio(own, _RADIO_SIZE - len(own[:6]), exclude=own[:6])
     return jsonify({"tracks": _tracks_in_order(ids)})
-
-
-@webapi.route("/recommendations")
-@login_required
-def recommendations():
-    """Discovery rows for the home: new releases + charts (public API, stable)."""
-    if not _is_admin():
-        return jsonify({"albums": [], "artists": [], "playlists": []})
-    provider, err = _need_provider()
-    if err:
-        return err
-    dzapi = _dz_api()
-    if dzapi is None:
-        # Discovery is the one thing with no offline equivalent: empty rows are
-        # the honest answer, and the home keeps rendering everything else.
-        return jsonify({"albums": [], "artists": [], "playlists": []})
-    albums = [_album_api(a) for a in _data(lambda: dzapi.get_editorial_releases(limit=25))]
-    artists = [_artist_api(a) for a in _data(lambda: dzapi.get_chart_artists(limit=25))]
-    playlists = [_playlist_api(p) for p in _data(lambda: dzapi.get_chart_playlists(limit=25))]
-    return jsonify(
-        {
-            "albums": [x for x in albums if x],
-            "artists": [x for x in artists if x],
-            "playlists": [x for x in playlists if x],
-        }
-    )
 
 
 # -- my library -------------------------------------------------------------

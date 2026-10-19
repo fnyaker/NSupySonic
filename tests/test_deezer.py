@@ -77,17 +77,7 @@ class MockGW:
         self.fav_ids = []
         self.tracks_by_id = {}
         self.album_tracks = {}
-        self.user_artists = []
         self.discographies = {}
-        self.smart_tracklists = {}
-        # Recorded write calls (Subsonic -> Deezer push)
-        self.created = []
-        self.added = []
-        self.removed = []
-        self.deleted = []
-        self.fav_added = []
-        self.fav_removed = []
-        self.next_create_id = 999
 
     def get_user_playlists(self, user_id, limit=25):
         return self.playlists
@@ -104,46 +94,16 @@ class MockGW:
     def get_album_tracks(self, alb_id):
         return self.album_tracks.get(str(alb_id), [])
 
-    def get_user_artists(self, user_id, limit=25):
-        return self.user_artists
-
     def get_artist_discography(self, art_id, index=0, limit=25):
         return self.discographies.get(str(art_id), {"data": []})
-
-    def get_smart_tracklist(self, stl_id):
-        return self.smart_tracklists.get(str(stl_id)) or {"DATA": {}, "SONGS": {"data": []}}
-
-    # writes
-    def create_playlist(self, title, status=0, description=None, songs=[]):
-        self.created.append((title, list(songs)))
-        return self.next_create_id
-
-    def add_songs_to_playlist(self, playlist_id, songs, offset=-1):
-        self.added.append((str(playlist_id), list(songs)))
-
-    def remove_songs_from_playlist(self, playlist_id, songs):
-        self.removed.append((str(playlist_id), list(songs)))
-
-    def delete_playlist(self, playlist_id):
-        self.deleted.append(str(playlist_id))
-
-    def add_song_to_favorites(self, sng_id):
-        self.fav_added.append(str(sng_id))
-
-    def remove_song_from_favorites(self, sng_id):
-        self.fav_removed.append(str(sng_id))
 
 
 class MockApi:
     def __init__(self):
         self.releases = {"data": []}
-        self.flow = {"data": []}
 
     def get_editorial_releases(self, limit=10):
         return self.releases
-
-    def get_user_flow(self, user_id, limit=25):
-        return self.flow
 
 
 class MockDz:
@@ -261,11 +221,9 @@ class DeezerTestCase(TestBase):
         self.assertEqual(status["account"], "tester")
 
     def test_set_arl_drops_everything_derived_from_the_old_one(self):
-        self.provider._fav_cache = ("checksum", [1, 2, 3])
         self.provider.set_arl("  newarl  ")
         self.assertEqual(self.provider.arl, "newarl")
         self.assertIsNone(self.provider._dz)  # forces a fresh login
-        self.assertIsNone(self.provider._fav_cache)  # no data from the old account
 
     def test_stored_arl_overrides_the_configured_one(self):
         from supysonic import deezer as dzmod
@@ -804,134 +762,27 @@ class DeezerTestCase(TestBase):
         }
         self.assertNotIn(ids.track_uuid("2"), starred)
 
-    # -- flow, recommendations, what the nightly sync runs --------------
-
-    def _flow(self):
-        pl = Playlist.get_or_none(Playlist.id == ids.playlist_uuid(importer.RECO_FLOW))
-        return None if pl is None else [t.deezer_id for t in pl.get_tracks()]
-
-    def test_the_flow_is_a_playlist_that_follows_deezer_day_to_day(self):
-        dz = self.provider._dz
-        dz.gw.tracks_by_id = {str(i): raw_track(i, f"T{i}") for i in (1, 2, 3)}
-        imp = importer.DeezerImporter(self.provider, "alice")
-        dz.api.flow = {"data": [{"id": 1}, {"id": 2}]}
-        self.assertEqual(imp.sync_flow(), 2)
-        self.assertEqual(self._flow(), ["1", "2"])
-        flow = Playlist[ids.playlist_uuid(importer.RECO_FLOW)]
-        self.assertEqual((flow.name, flow.user.name), ("Deezer · Flow", "alice"))
-        # The next day's Flow replaces it wholesale, in Deezer's order, in place.
-        dz.api.flow = {"data": [{"id": 3}, {"id": 1}]}
-        self.assertEqual(imp.sync_flow(), 2)
-        self.assertEqual(self._flow(), ["3", "1"])
-        self.assertEqual(Playlist.select().where(Playlist.name == "Deezer · Flow").count(), 1)
-        # A day Deezer hands back nothing keeps the last one rather than an empty list.
-        dz.api.flow = {"data": []}
-        self.assertEqual(imp.sync_flow(), 0)
-        self.assertEqual(self._flow(), ["3", "1"])
-
-    def test_a_flow_that_cannot_be_read_does_not_stop_the_recommendations(self):
-        # Some accounts need OAuth for the Flow endpoint; that must cost the
-        # Flow, not the smart playlists fetched alongside it.
-        dz = self.provider._dz
-        dz.api.get_user_flow = lambda user_id, limit=25: (_ for _ in ()).throw(RuntimeError("OAuth"))
-        dz.gw.smart_tracklists = {
-            "discovery": {"DATA": {"TITLE": "Discovery"}, "SONGS": {"data": [raw_track(5)]}}
-        }
-        with self.assertLogs("supysonic.deezer.importer", "WARNING"):
-            out = importer.DeezerImporter(self.provider, "alice").sync_recommendations(
-                smart_ids=["discovery"], flow=True
-            )
-        self.assertEqual(out, {"smart": {"discovery": 1}})
-        pl = Playlist.get(Playlist.id == ids.playlist_uuid("smart:discovery"))
-        self.assertEqual((pl.name, [t.deezer_id for t in pl.get_tracks()]), ("Deezer · Discovery", ["5"]))
-
-    def test_smart_playlists_retire_the_old_new_releases_list(self):
-        alice = User.get(name="alice")
-        legacy = Playlist.create(id=ids.playlist_uuid("reco:newreleases"), user=alice, name="Nouveautés")
-        importer.DeezerImporter(self.provider, "alice").sync_recommendations(
-            smart_ids=["new-releases"], flow=False
-        )
-        self.assertIsNone(Playlist.get_or_none(Playlist.id == legacy.id))
-        # An empty smart list is skipped, not written as an empty playlist.
-        self.assertIsNone(Playlist.get_or_none(Playlist.id == ids.playlist_uuid("smart:new-releases")))
+    # -- what the nightly sync runs ---------------------------------------
 
     # The shape of "Nouveautés pour toi" as the web app received it (a HAR
     # capture, 2026-10-14), cut down to what is read: the smart mix first, then
     # the albums "en vrac", one of them unavailable.
-    @staticmethod
-    def _module(album_ids, unavailable=()):
-        items = [{"id": "new-releases", "type": "smarttracklist",
-                  "data": {"SMARTTRACKLIST_ID": "new-releases", "TITLE": "Nouveautés"}}]
-        for aid in album_ids:
-            items.append({
-                "id": str(aid), "type": "album", "title": f"Album {aid}",
-                "data": {"ALB_ID": str(aid), "ALB_TITLE": f"Album {aid}", "ART_ID": "464",
-                         "ART_NAME": "Rammstein", "DIGITAL_RELEASE_DATE": "2026-10-05",
-                         "AVAILABLE": aid not in unavailable, "__TYPE__": "album"},
-            })
-        return {"title": "Nouveautés pour toi", "persistent": True,
-                "sections": [{"layout": "grid", "items": items,
-                              "module_id": "33d3a14c-5716-4343-87e1-4ec3ac4fd49b"}]}
-
-    def test_the_new_albums_become_one_playlist_each_album_whole(self):
-        dz = self.provider._dz
-        asked = []
-        dz.gw.get_module_page = lambda mid: asked.append(mid) or self._module([70, 71, 72], {72})
-        dz.gw.album_tracks = {
-            "70": [raw_track(1, alb=("70", "A")), raw_track(2, alb=("70", "A"))],
-            "71": [raw_track(3, alb=("71", "B")), raw_track(1, alb=("71", "B"))],
-        }
-        n = importer.DeezerImporter(self.provider, "alice").sync_new_albums()
-        self.assertEqual(asked, ["33d3a14c-5716-4343-87e1-4ec3ac4fd49b"])
-        pl = Playlist.get(Playlist.id == ids.playlist_uuid(importer.RECO_NEW_ALBUMS))
-        # Deezer's order, every track of every available album, each track once.
-        self.assertEqual([t.deezer_id for t in pl.get_tracks()], ["1", "2", "3"])
-        self.assertEqual((n, pl.name), (3, "Deezer · Nouveautés en vrac"))
-        self.assertIn("2 nouveaux albums", pl.comment)
-
-    def test_a_week_deezer_cannot_answer_keeps_the_last_new_albums(self):
-        dz = self.provider._dz
-        dz.gw.get_module_page = lambda mid: self._module([70])
-        dz.gw.album_tracks = {"70": [raw_track(1, alb=("70", "A"))]}
-        imp = importer.DeezerImporter(self.provider, "alice")
-        imp.sync_new_albums()
-        dz.gw.get_module_page = lambda mid: {"sections": []}
-        dz.gw.get_page = lambda page: {"sections": []}
-        self.assertEqual(imp.sync_new_albums(), 0)
-        pl = Playlist.get(Playlist.id == ids.playlist_uuid(importer.RECO_NEW_ALBUMS))
-        self.assertEqual([t.deezer_id for t in pl.get_tracks()], ["1"])
-
-    def test_a_moved_module_is_found_from_the_home_page(self):
-        dz = self.provider._dz
-        moved = "0f0f0f0f-1111-2222-3333-444444444444"
-        dz.gw.get_module_page = lambda mid: self._module([80]) if mid == moved else {"sections": []}
-        dz.gw.get_page = lambda page: {"sections": [
-            {"title": "Pour toi", "target": "/channels/module/aaaaaaaa-1111-2222-3333-444444444444"},
-            {"title": "Nouveautés pour toi", "target": f"/channels/module/{moved}"},
-        ]}
-        self.assertEqual([a["id"] for a in self.provider.get_new_release_albums()], ["80"])
-
     def test_the_sync_runs_what_the_config_asks_for_and_nothing_else(self):
         imp = importer.DeezerImporter(self.provider, "alice")
         calls = []
-        for name in ("sync_playlists", "sync_favorites", "sync_podcasts", "sync_recommendations"):
+        for name in ("sync_playlists", "sync_favorites", "sync_podcasts"):
             setattr(imp, name, lambda *a, _n=name, **k: calls.append((_n, a, k)) or 0)
 
         self.assertEqual(imp.sync({}), {})
         self.assertEqual(calls, [])
 
         # The scheduled refresh is the subscribed podcasts and nothing else.
-        imp.sync({
-            "sync_playlists": True, "sync_favorites": True, "import_flow": True,
-            "import_new_releases": True, "sync_podcasts": True, "podcast_episodes": "12",
-        })
+        imp.sync({"sync_podcasts": True, "podcast_episodes": "12"})
         self.assertEqual(calls, [("sync_podcasts", (12,), {})])
 
         calls.clear()
         imp.import_account()
         self.assertEqual(calls, [("sync_playlists", (), {}), ("sync_favorites", (), {"prune": False})])
-        # No list configured means the whole default set.
-        self.assertEqual(importer.smart_ids_from_config({}), importer.DEFAULT_SMART_TRACKLISTS)
 
     # -- archive: fetch + extension fix ----------------------------------
 
@@ -1203,57 +1054,6 @@ class DeezerTestCase(TestBase):
             self.provider.resolve("7")
         self.assertEqual(relogins, [])
 
-    # -- push: playlist reconcile (Subsonic -> Deezer) -------------------
-
-    def test_push_reconcile_playlist(self):
-        from supysonic.deezer import library, push
-
-        root = library.get_root_folder(self.archive_dir)
-        t1 = library.upsert_track(raw_track(1, "A"), root, "FLAC")
-        t2 = library.upsert_track(raw_track(2, "B"), root, "FLAC")
-        gw = self.provider._dz.gw
-
-        pl = Playlist.create(user=User.get(name="alice"), name="Mix")
-        pl.add(t1)
-        pl.add(t2)
-
-        # First push -> creates the Deezer playlist and stores its id
-        push.reconcile_playlist(self.provider, pl)
-        self.assertEqual(len(gw.created), 1)
-        self.assertEqual(gw.created[0], ("Mix", ["1", "2"]))
-        self.assertEqual(pl.deezer_id, "999")
-
-        # Now Deezer has tracks 1,2. Add a 3rd locally, drop the 1st -> diff push
-        gw.playlist_tracks["999"] = [{"SNG_ID": "1"}, {"SNG_ID": "2"}]
-        t3 = library.upsert_track(raw_track(3, "C"), root, "FLAC")
-        pl.clear()
-        pl.add(t2)
-        pl.add(t3)
-        push.reconcile_playlist(self.provider, pl)
-        self.assertEqual(gw.added[-1], ("999", ["3"]))
-        self.assertEqual(gw.removed[-1], ("999", ["1"]))
-
-    def test_push_reconcile_skips_reco_playlists(self):
-        from supysonic.deezer import push
-
-        gw = self.provider._dz.gw
-        pl = Playlist.create(user=User.get(name="alice"), name="Deezer · Flow")
-        push.reconcile_playlist(self.provider, pl)
-        self.assertEqual(gw.created, [])
-        self.assertIsNone(pl.deezer_id)
-
-    # -- push: favorites -------------------------------------------------
-
-    def test_push_favorite(self):
-        from supysonic.deezer import push
-
-        gw = self.provider._dz.gw
-        push.push_favorite(self.provider, "Track", "5", True)
-        push.push_favorite(self.provider, "Track", "5", False)
-        push.push_favorite(self.provider, "Folder", "9", True)  # unsupported -> no-op
-        self.assertEqual(gw.fav_added, ["5"])
-        self.assertEqual(gw.fav_removed, ["5"])
-
     # -- cover art for Deezer entities -----------------------------------
 
     def test_deezer_entities_expose_coverart(self):
@@ -1317,44 +1117,6 @@ class DeezerTestCase(TestBase):
         pl = Playlist.create(user=User.get(name="alice"), name="P", deezer_id="77")
         archive.deezer_cover_path(self.provider, cache, str(pl.id))
         self.assertIn(("playlist", "77"), calls)
-
-    # -- smart tracklists (new releases, discovery, inspired-by, ...) -----
-
-    def test_smart_tracklists(self):
-        gw = self.provider._dz.gw
-        gw.smart_tracklists["new-releases"] = {
-            "DATA": {"TITLE": "Nouveautés"},
-            "SONGS": {"data": [raw_track(201, "NR1"), raw_track(202, "NR2")]},
-        }
-        gw.smart_tracklists["discovery"] = {
-            "DATA": {"TITLE": "Découverte"},
-            "SONGS": {"data": [raw_track(203, "D1")]},
-        }
-        # "empty-one" returns nothing -> skipped, no playlist
-
-        imp = importer.DeezerImporter(self.provider, "alice")
-        out = imp.sync_smart_tracklists(["new-releases", "discovery", "empty-one"])
-
-        self.assertEqual(out, {"new-releases": 2, "discovery": 1})
-
-        nr = Playlist.get(Playlist.id == ids.playlist_uuid("smart:new-releases"))
-        self.assertEqual(nr.name, "Deezer · Nouveautés")
-        self.assertEqual([t.deezer_id for t in nr.get_tracks()], ["201", "202"])
-
-        disc = Playlist.get(Playlist.id == ids.playlist_uuid("smart:discovery"))
-        self.assertEqual(disc.name, "Deezer · Découverte")
-
-        with self.assertRaises(Playlist.DoesNotExist):
-            Playlist.get(Playlist.id == ids.playlist_uuid("smart:empty-one"))
-
-    def test_smart_ids_from_config(self):
-        self.assertEqual(
-            importer.smart_ids_from_config({"smart_tracklists": "new-releases, discovery"}),
-            ["new-releases", "discovery"],
-        )
-        self.assertEqual(
-            importer.smart_ids_from_config({}), importer.DEFAULT_SMART_TRACKLISTS
-        )
 
     # -- prefetch worker -------------------------------------------------
 

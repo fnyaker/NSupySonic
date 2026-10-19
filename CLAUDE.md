@@ -242,22 +242,27 @@ inside any WebView — email + password is the supported route. SPA side: `lib/n
 
 ## Architecture
 
-Three Deezer code layers, from low to high:
+**The frontier (detachment, lots A-I).** Deezer is a supplier of SOUND and of catalogue FACTS, nothing
+else. An archived track is a file like an upload: identity (UUID of the row), cover, tempo, genre,
+gain, lyrics, neighbours, radio and home are all this server's own, from the database and the disk.
+Nothing the user does writes to the Deezer account (no star, playlist, listen or position is
+mirrored; there is no option for it), and nothing reads the account except the ONE-OFF import in
+Réglages → Compte Deezer (`importer.import_account`: playlists and favourites, added, never removed).
+`tests/test_detach_guard.py` enforces it: a spy client, every `/api` route visited, and an `ALLOWED`
+list of the calls that fetch sound or catalogue facts — adding a Deezer call means adding it there.
+What stays on Deezer on purpose is listed in `docs/detachement-deezer.md` (D18).
 
-1. **`deezerpy/`** — the vendored Deezer client (based on RemixDev's deezer-py). Three transports
+Three code layers, from low to high:
+
+1. **`deezerpy/`** — the vendored Deezer client (based on RemixDev's deezer-py). Two transports
    with deliberate reliability roles (learned the hard way; do not "simplify" back to one):
-   - `api.py` — **public `api.deezer.com`**. Used for **search**, **recommendations** (editorial
-     releases + chart artists/playlists), and **artist pages/radio**. Stable, typed, returns image URLs.
-   - `gw.py` — **private gateway `gw-light.php`**. Used for album/playlist/mix pages, lyrics, Flow
-     (`radio.getUserRadio`), track radio, favorites & playlist writes, and stream tokens.
-   - `graphql.py` — **`pipe.deezer.com`** (`Deezer.gql`). Auths with a JWT minted from the ARL.
-     Currently only powers **customizable Flow clusters** (`FlowConfig`/`UpdateFlowConfig`).
+   - `api.py` — **public `api.deezer.com`**. Used for **search**, the **catalogue charts**
+     (Explore) and **artist pages**. Stable, typed, returns image URLs.
+   - `gw.py` — **private gateway `gw-light.php`**. Used for album/playlist/show pages, the track
+     records, track and artist radio seeds, the one-off account import and stream tokens.
    - **Gotcha — full tracklists:** album/playlist *page* calls only return the first ~10–40 tracks.
      Always fetch the full list via `get_album_tracks` (`song.getListByAlbum` nb:-1) /
      `get_playlist_tracks` (`playlist.getSongs` nb:-1).
-   - **Gotcha — JWT minting:** `POST https://auth.deezer.com/login/arl?...` (POST, not GET) with the
-     session cookies returns JSON `{"jwt": ...}`. An expired/invalid JWT comes back as a GraphQL
-     error on HTTP 200 (`Jwt*Error`), so the client re-mints + retries once on any `Jwt*` error.
 
 2. **`supysonic/deezer/`** — the proxy logic:
    - `provider.py` — ARL login + stream decryption; the single object the rest of the app talks to.
@@ -265,14 +270,10 @@ Three Deezer code layers, from low to high:
      `archive_dir`) and import helpers.
    - `library.py` — DB upsert + deterministic archive paths. `ids.py` — deterministic `uuid5` IDs
      from Deezer IDs (plus nullable `deezer_id` columns on Track/Album/Artist/Playlist).
-   - `importer.py` — Deezer → Subsonic sync (writes straight to DB). Besides the smart tracklists it imports
-     **"Nouveautés pour toi" en vrac** (`sync_new_albums`, `[deezer] import_new_albums`, on): the CMS
-     module page `channels/module/<uuid>` (`gw.get_module_page`, id captured from a HAR, the home page
-     searched should it move) lists the new-releases mix then ~100 new albums; each album's FULL
-     tracklist goes, in Deezer's order, into one local playlist "Deezer · Nouveautés en vrac". A run
-     that reads no album keeps last week's. `push.py` — Subsonic → Deezer
-     mirror (star/unstar, playlist CRUD), hooked from `api/playlists.py` & `api/annotation.py`,
-     guarded by `push_to_deezer`, fail-soft.
+   - `importer.py` — the one-off account import (`import_account`) and the scheduled refresh of
+     subscribed podcasts (`sync`); writes straight to the DB and never to Deezer. The playlists the
+     old nightly sync wrote ("Deezer · Flow", smart tracklists, "Nouveautés en vrac") are ordinary
+     playlists now: kept, never refreshed or purged.
    - `lyrics.py` — archive synced lyrics as a `.lrc` sidecar next to each archived audio file
      (+ embedded plain text in the tags), sourced best-first from **Deezer's own** lyrics then the
      public **LRCLIB** API (https://lrclib.net); synced wins over plain. `ensure_lyrics` is called on
@@ -394,8 +395,7 @@ no Blowfish — `provider.download_episode_to` just follows redirects), archived
 The local channel rows are the source of truth for subscriptions; `importer.sync_podcasts` refreshes them.
 Per-user playback state is server-side: `PodcastProgress` (auto-saved position, `finished` flag) and
 `PodcastMarker` (manual bookmarks) via `/api/podcast/progress` + marker CRUD; the SPA merges them with
-its localStorage copy newest-wins (`webapp/src/lib/podcastProgress.js`), and the admin's positions are
-mirrored to Deezer (`episode.bookmarkSet`) fail-soft.
+its localStorage copy newest-wins (`webapp/src/lib/podcastProgress.js`); nothing is sent to Deezer.
 
 **Unavailable tracks** (`supysonic/webui/availability.py`): Deezer drops tracks from its catalogue,
 and `Track.unavailable` (a timestamp, so a verdict expires and is re-tested) records the ones we
@@ -469,7 +469,7 @@ the third answer next to replace-and-upload, and `availability.verify_gone` re-c
 of deletion*: a file on disk → refuse (and clear the verdict); Deezer still resolves → refuse; an
 inconclusive network answer → refuse. Only `TrackUnavailable` with no file, or a local upload whose
 file is gone, authorises it. Scoped like a replacement (own playlists/favourites; an admin also drops
-the row, `recursive=True`) and mirrored to Deezer for the admin, fail-soft.
+the row, `recursive=True`); nothing is mirrored to Deezer.
 
 **The "Indisponibles" list is built for clearing out** (`components/UnavailableList.svelte`,
 `lib/replace.js`). Tick several (shift-click for a range) and `POST /api/tracks/delete` (≤ 200 ids)
@@ -2670,8 +2670,8 @@ Three rules hold it together, and each was bought:
 Renders and analyses are memoised per options object, which is what keeps the suite at ~30 s.
 
 All proxy/web tests run offline with mocks: `tests/test_deezer.py` (mock provider),
-`tests/test_webui.py` (`MockGW` + `MockApi` cover every `/api` route), `tests/test_graphql.py`
-(fake session routing auth-vs-pipe POSTs by host), `tests/test_deezer_resilience.py` (a fake HTTP
+`tests/test_webui.py` (`MockGW` + `MockApi` cover every `/api` route), `tests/test_detach_guard.py`
+(the spy client: what the app may ask Deezer), `tests/test_deezer_resilience.py` (a fake HTTP
 adapter that times out / answers garbage, pinning the rules above: the breaker opens and stops
 costing sockets, retries stay inside their budget, and no transport failure ever condemns a track or
 a show). Note that its circuit breaker is a process-wide singleton — reset it in `setUp` when a test

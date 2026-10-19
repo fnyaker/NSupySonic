@@ -145,7 +145,6 @@ POLICY = {
     "party_chunk": "queue",
     # reading the library
     "home": "read",
-    "smarttracklist": "read",
     "search": "read",
     "search_podcasts": "read",
     "youtube_search": "read",
@@ -163,10 +162,8 @@ POLICY = {
     "track_gain": "read",
     "track_gains": "read",  # a POST, and a read
     "flow": "read",
-    "flow_clusters": "read",
     "track_radio": "read",
     "artist_radio": "read",
-    "recommendations": "read",
     "my_playlists": "read",
     "my_favorite_ids": "read",
     "my_local": "read",

@@ -91,8 +91,6 @@ class MockProvider:
         # shows: {show_id: (data_dict, [episode_objs])}
         self.shows = {str(k): v for k, v in shows.items()}
         self.favorite_show_ids = [str(s) for s in (favorite_show_ids or [])]
-        self.fav_added = []
-        self.fav_removed = []
         self.downloaded = []
         self.streamed = []
         self._locks = {}
@@ -104,13 +102,6 @@ class MockProvider:
         self.dz = types.SimpleNamespace(
             api=MockPublicApi(episode_to_show, search_results)
         )
-
-    def get_user_shows(self):
-        return [
-            {"SHOW_ID": sid, "SHOW_NAME": self.shows[sid][0]["SHOW_NAME"]}
-            for sid in self.favorite_show_ids
-            if sid in self.shows
-        ]
 
     def search_podcasts(self, query, limit=25):
         return self.dz.api.search_podcast(query, limit=limit)["data"]
@@ -129,12 +120,6 @@ class MockProvider:
 
     def get_show_episodes(self, show_id):
         return list(self.shows[str(show_id)][1])
-
-    def add_favorite_show(self, show_id):
-        self.fav_added.append(str(show_id))
-
-    def remove_favorite_show(self, show_id):
-        self.fav_removed.append(str(show_id))
 
     def track_lock(self, key):
         return self._locks.setdefault(key, threading.Lock())
@@ -302,7 +287,7 @@ class PodcastApiTestCase(ApiTestBase):
         app.deezer = self.provider
         app.config["DEEZER"] = dict(app.config["DEEZER"])
         app.config["DEEZER"].update(
-            {"sync_user": "alice", "push_to_deezer": True, "podcast_episodes": 30}
+            {"sync_user": "alice", "podcast_episodes": 30}
         )
 
     def tearDown(self):
@@ -317,7 +302,6 @@ class PodcastApiTestCase(ApiTestBase):
 
     def test_create_and_get_podcasts(self):
         self._create_channel()
-        self.assertEqual(self.provider.fav_added, [])  # nothing written to the account
 
         _, child = self._make_request("getPodcasts", tag="podcasts")
         channels = self._xpath(child, "./channel")
@@ -417,7 +401,6 @@ class PodcastApiTestCase(ApiTestBase):
         cid = str(ids.show_uuid("1002156761"))
         self._make_request("deletePodcastChannel", {"id": cid}, skip_post=True)
         # The Deezer subscription is dropped…
-        self.assertEqual(self.provider.fav_removed, [])  # nothing written to the account
         # …but nothing of ours is.
         channel = PodcastChannel[ids.show_uuid("1002156761")]
         self.assertFalse(channel.subscribed)
@@ -531,7 +514,7 @@ class PodcastWebUITestCase(unittest.TestCase):
         self.app.deezer = self.provider
         self.app.config["DEEZER"] = dict(self.app.config["DEEZER"])
         self.app.config["DEEZER"].update(
-            {"sync_user": "alice", "push_to_deezer": True, "podcast_episodes": 30}
+            {"sync_user": "alice", "podcast_episodes": 30}
         )
         self.client = self.app.test_client()
 
@@ -559,7 +542,6 @@ class PodcastWebUITestCase(unittest.TestCase):
         self._login()
         rv = self._subscribe()
         self.assertEqual(rv.status_code, 200)
-        self.assertEqual(self.provider.fav_added, [])  # nothing written to the account
         body = rv.get_json()
         self.assertEqual(body["title"], "Test Podcast")
         self.assertEqual(len(body["episodes"]), 3)
@@ -684,7 +666,6 @@ class PodcastWebUITestCase(unittest.TestCase):
         cid = str(ids.show_uuid("1002156761"))
         rv = self.client.delete("/api/podcast/" + cid)
         self.assertEqual(rv.status_code, 204)
-        self.assertEqual(self.provider.fav_removed, [])  # nothing written to the account
         self.assertEqual(PodcastChannel.select().count(), 0)
 
     def test_subscribe_requires_admin(self):

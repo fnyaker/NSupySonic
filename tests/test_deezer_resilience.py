@@ -1027,7 +1027,3 @@ class GatewayListTestCase(unittest.TestCase):
     def test_a_full_answer_is_read_in_order(self):
         gw = self._gw([{"SNG_ID": "1"}, {"SNG_ID": "2"}])
         self.assertEqual([r["SNG_ID"] for r in gw.get_tracks(["1", 0, "2"])], ["1", 0, "2"])
-
-    def test_favourites_skip_a_track_deezer_no_longer_has(self):
-        gw = self._gw([{"SNG_ID": "1", "SNG_TITLE": "one"}, {"SNG_ID": "3", "SNG_TITLE": "three"}])
-        self.assertEqual([t["id"] for t in gw.get_my_favorite_tracks()], ["1", "3"])
