@@ -973,8 +973,8 @@ def _tree_write(fn, *args, **kwargs):
         return jsonify({"error": "cycle"}), 409
     except KeyError:
         return jsonify({"error": "unknown genre"}), 404
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except ValueError:
+        return jsonify({"error": "invalid request"}), 400
     _after_tree_write()
     return _tree_answer()
 
