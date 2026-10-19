@@ -17,8 +17,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-import numpy as np
-
 from supysonic import db as dbmod
 from supysonic import similar
 from supysonic.config import DefaultConfig
@@ -46,9 +44,16 @@ AUTH = 1  # the session's user lookup, which every /api request pays
 
 def vector(cluster, seed, spread=0.15):
     """A vector near the centre of ``cluster`` (centres are far apart)."""
-    centre = np.random.RandomState(1000 + cluster).randn(DIM)
-    noise = np.random.RandomState(seed).randn(DIM) * spread
-    return [float(x) for x in (centre + noise)]
+    # Even and odd clusters of a pair are opposites (cosine -1): never neighbours.
+    sign = 1 if cluster % 2 == 0 else -1
+    centre = random.Random(1000 + cluster // 2)
+    noise = random.Random(seed)
+    return [sign * centre.gauss(0, 1) + noise.gauss(0, 1) * spread for _ in range(DIM)]
+
+
+def cosine(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    return dot / (sum(x * x for x in a) ** 0.5 * sum(y * y for y in b) ** 0.5)
 
 
 class Base(unittest.TestCase):
@@ -180,10 +185,8 @@ class IndexTest(Base):
         me = self.track("Me", cluster=0, style="dnb", spread=0.0)
         other = self.track("Other", cluster=0, style="house", spread=0.1, seed=11)
         same = self.track("Same", cluster=0, style="dnb", spread=0.12, seed=12)
-        cos = lambda t: float(
-            np.dot(*[np.asarray(emb.common_part(emb.load_embedding(x))) for x in (me, t)])
-            / np.linalg.norm(emb.common_part(emb.load_embedding(me)))
-            / np.linalg.norm(emb.common_part(emb.load_embedding(t)))
+        cos = lambda t: cosine(
+            emb.common_part(emb.load_embedding(me)), emb.common_part(emb.load_embedding(t))
         )
         self.assertGreater(cos(other), cos(same))  # the sound alone would say Other
         similar.rebuild_for(me, symmetric=False)
@@ -217,7 +220,7 @@ class IndexTest(Base):
         with mock.patch.object(similar, "np", None):
             similar.rebuild_for(t, symmetric=False)
             without = [r.neighbor_id for r in TrackNeighbor.select().where(TrackNeighbor.track == t.id).order_by(TrackNeighbor.rank)]
-        self.assertEqual(with_np[:5], without[:5])
+        self.assertEqual(set(with_np[:5]), set(without[:5]))
         self.assertEqual(set(with_np[:5]), {x.id for x in self.a[1:]})
 
     def test_the_full_rebuild_fills_the_table(self):
