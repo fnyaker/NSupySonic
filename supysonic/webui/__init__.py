@@ -2426,16 +2426,6 @@ def track_radio(track_id):
     return jsonify({"tracks": rows})
 
 
-def _artist_row(raw):
-    text = str(raw or "")
-    if _valid_id(text):
-        return Artist.select().where(Artist.deezer_id == text).first()
-    try:
-        return Artist.get_or_none(Artist.id == uuid.UUID(text))
-    except ValueError:
-        return None
-
-
 @webapi.route("/radio/artist/<artist_id>")
 @login_required
 def artist_radio(artist_id):
