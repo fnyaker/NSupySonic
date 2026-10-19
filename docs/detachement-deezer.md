@@ -497,6 +497,21 @@ Dépend de : D4, D5.
 
 **Latence** : Moins de code chargé : vérifier que le bundle principal de la SPA ne grossit pas (`npm run build`), et qu'il diminue si des écrans sont retirés.
 
+**Fait (lot I).** Les huit options (`push_to_deezer`, `report_listens`, `sync_playlists`,
+`sync_favorites`, `import_new_releases`, `import_flow`, `import_new_albums`, `smart_tracklists`)
+ne sont plus dans `config.py`, `config.sample`, `config/supysonic.conf.example`, `.env.example`,
+`docker-compose.yml` ni `docker/entrypoint.sh` ; un ancien fichier qui les nomme est lu sans erreur
+et elles sont ignorées (`tests/test_detach_i.py`). Supprimés : `deezer/push.py`,
+`deezerpy/graphql.py`, les écritures du fournisseur et de `gw` (favoris, playlists, `log_listen`,
+signets d'épisodes), les lectures du compte dont plus rien ne se sert (`get_user_radio`,
+`get_smart_tracklist`, `get_module_page`, `get_user_albums/artists`, `get_my_favorite_tracks`),
+`importer.sync_smart_tracklists/sync_flow/sync_new_albums/sync_recommendations`, les routes
+`/api/flow/clusters`, `/api/smarttracklist/<id>`, `/api/recommendations`, leurs entrées de
+`api.js` / `apicache.js` / `remote.py#POLICY` et le réglage « Personnaliser » du Flow
+(`FlowTuner.svelte`). Les playlists « Deezer · … » déjà écrites par l'ancienne synchronisation
+restent, comme des playlists ordinaires : rien n'est supprimé. Bundle principal de la SPA :
+561,9 → 559,2 kB (193,8 → 192,9 kB en gzip).
+
 ## D18. Ce qui reste volontairement dépendant de Deezer (à ne pas casser)
 
 Pour mémoire, ces parties appellent Deezer mais **pour récupérer des sons**, et restent :
@@ -514,6 +529,12 @@ Pour mémoire, ces parties appellent Deezer mais **pour récupérer des sons**, 
   elles concernent désormais moins de routes, pas moins de rigueur.
 
 **Latence** : Inchangé : ces chemins sont déjà ceux qui servent la musique, et c'est eux que la règle 3 protège.
+
+**Garde-fou (lot I).** `tests/test_detach_guard.py` remplace le client Deezer par un espion, visite
+chaque route de `/api` avec chacune de ses méthodes, et échoue si l'espion entend un appel hors de
+la liste `ALLOWED` (son, recherche, pages de catalogue). Seule l'importation ponctuelle du compte
+lit le compte, et par deux appels nommés. Ajouter un appel Deezer, c'est l'ajouter à cette liste
+en justifiant qu'il récupère du son ou un fait de catalogue.
 
 ## D19. MusicBrainz, l'« IMDb de la musique » : évaluation et usage
 

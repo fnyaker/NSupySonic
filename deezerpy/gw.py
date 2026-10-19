@@ -2,7 +2,7 @@ import requests
 from time import monotonic, sleep
 
 import json
-from deezerpy.utils import map_artist_album, map_user_track, map_user_artist, map_user_album, map_user_playlist
+from deezerpy.utils import map_artist_album, map_user_track, map_user_playlist
 from deezerpy.errors import GWAPIError, DeezerUnavailable
 from deezerpy._throttle import limiter
 
@@ -15,6 +15,7 @@ NET_RETRY_DELAY = 1.5
 # a fresh retry budget each time, so a gateway stuck on "invalid api token"
 # looped until the stack (or the worker) gave out.
 MAX_REPLAYS = 3
+
 
 class PlaylistStatus():
     PUBLIC = 0
@@ -33,6 +34,7 @@ EMPTY_TRACK_OBJ = {
     'ART_ID': 0,
     'ART_NAME': ""
 }
+
 
 class GW:
     def __init__(self, session, headers):
@@ -266,111 +268,6 @@ class GW:
             tracks_array.append(track)
         return tracks_array
 
-    def create_playlist(self, title, status=PlaylistStatus.PUBLIC, description=None, songs=[]):
-        newSongs = []
-        for song in songs:
-            newSongs.append([song, 0])
-        return self.api_call('playlist.create', {
-            'title': title,
-            'status': status,
-            'description': description,
-            'songs': newSongs
-        })
-
-    def edit_playlist(self, playlist_id, title, status=None, description=None, songs=[]):
-        newSongs = []
-        for song in songs:
-            newSongs.append([song, 0])
-        return self.api_call('playlist.update', {
-            'PLAYLIST_ID': playlist_id,
-            'title': title,
-            'status': status,
-            'description': description,
-            'songs': newSongs
-        })
-
-    def add_songs_to_playlist(self, playlist_id, songs, offset=-1):
-        newSongs = []
-        for song in songs:
-            newSongs.append([song, 0])
-        return self.api_call('playlist.addSongs', {
-            'PLAYLIST_ID': playlist_id,
-            'songs': newSongs,
-            'offset': offset
-        })
-
-    def add_song_to_playlist(self, playlist_id, sng_id, offset=-1):
-        return self.add_songs_to_playlist(playlist_id, [sng_id], offset)
-
-    def remove_songs_from_playlist(self, playlist_id, songs):
-        newSongs = []
-        for song in songs:
-            newSongs.append([song, 0])
-        return self.api_call('playlist.deleteSongs', {
-            'PLAYLIST_ID': playlist_id,
-            'songs': newSongs
-        })
-
-    def remove_song_from_playlist(self, playlist_id, sng_id):
-        return self.remove_songs_from_playlist(playlist_id, [sng_id])
-
-    def delete_playlist(self, playlist_id):
-        return self.api_call('playlist.delete', {'PLAYLIST_ID': playlist_id})
-
-    def add_songs_to_favorites(self, songs, context="player"):
-        """Add tracks to the account's Deezer favourites (``song.addFavorites``).
-
-        The batch form: ``IDS`` takes every id at once and the gateway answers
-        a favourites ``checksum`` (the current web app's method; the old
-        ``favorite_song.add`` is superseded). Confirmed from a HAR capture.
-        """
-        return self.api_call('song.addFavorites', {
-            'IDS': [str(s) for s in songs],
-            'CTXT': {'id': str(songs[0]) if songs else '', 't': context},
-        })
-
-    def remove_songs_from_favorites(self, songs, context="player"):
-        """Remove tracks from the account's Deezer favourites
-        (``song.removeFavorites``); batch, mirrors ``add_songs_to_favorites``."""
-        return self.api_call('song.removeFavorites', {
-            'IDS': [str(s) for s in songs],
-            'CTXT': {'id': str(songs[0]) if songs else '', 't': context},
-        })
-
-    def add_song_to_favorites(self, sng_id, context="player"):
-        return self.add_songs_to_favorites([sng_id], context)
-
-    def remove_song_from_favorites(self, sng_id, context="player"):
-        return self.remove_songs_from_favorites([sng_id], context)
-
-    def add_album_to_favorites(self, alb_id):
-        return self.api_call('album.addFavorite', {'ALB_ID': alb_id})
-
-    def remove_album_from_favorites(self, alb_id):
-        return self.api_call('album.deleteFavorite', {'ALB_ID': alb_id})
-
-    def add_artist_to_favorites(self, art_id, context=None):
-        params = {'ART_ID': art_id}
-        if context:
-            params['CTXT'] = {'id': str(art_id), 't': context}
-        return self.api_call('artist.addFavorite', params)
-
-    def remove_artist_from_favorites(self, art_id, context=None):
-        params = {'ART_ID': art_id}
-        if context:
-            params['CTXT'] = {'id': str(art_id), 't': context}
-        return self.api_call('artist.deleteFavorite', params)
-
-    def add_playlist_to_favorites(self, playlist_id):
-        return self.api_call('playlist.addFavorite', {'PARENT_PLAYLIST_ID': playlist_id})
-
-    def remove_playlist_from_favorites(self, playlist_id):
-        return self.api_call('playlist.deleteFavorite', {'PLAYLIST_ID': playlist_id})
-
-    def get_smart_tracklist(self, smarttracklist_id):
-        """Personalized smart tracklist (e.g. "new-releases"); SONGS.data holds the tracks."""
-        return self.api_call('deezer.pageSmartTracklist', {'SMARTTRACKLIST_ID': smarttracklist_id})
-
     def get_page(self, page):
         params = {
             'gateway_input': json.dumps({
@@ -386,24 +283,6 @@ class GW:
                     ],
                 },
                 'LANG': 'en'
-            })
-        }
-        return self.api_call('page.get', params=params)
-
-    def get_module_page(self, module_id):
-        """A CMS module page (``channels/module/<uuid>``), asked the way the
-        web app asks it (VERSION 2.5, albums in a plain grid) — e.g. "Nouveautés
-        pour toi": the new-releases mix, then every new album, in one grid."""
-        params = {
-            'gateway_input': json.dumps({
-                'PAGE': 'channels/module/' + str(module_id),
-                'VERSION': '2.5',
-                'SUPPORT': {
-                    'grid': ['album', 'smarttracklist', 'playlist'],
-                    'horizontal-grid': ['album', 'smarttracklist', 'playlist'],
-                    'large-card': ['album', 'playlist', 'smarttracklist'],
-                },
-                'LANG': 'fr',
             })
         }
         return self.api_call('page.get', params=params)
@@ -493,20 +372,6 @@ class GW:
             result.append(map_user_playlist(playlist, blog_name))
         return result
 
-    def get_user_albums(self, user_id, limit=25):
-        data = self.get_user_profile_page(user_id, 'albums', limit=limit)['TAB']['albums']['data']
-        result = []
-        for album in data:
-            result.append(map_user_album(album))
-        return result
-
-    def get_user_artists(self, user_id, limit=25):
-        data = self.get_user_profile_page(user_id, 'artists', limit=limit)['TAB']['artists']['data']
-        result = []
-        for artist in data:
-            result.append(map_user_artist(artist))
-        return result
-
     def get_user_tracks(self, user_id, limit=25):
         user_data = self.get_user_data()
         if user_data['USER']['USER_ID'] == user_id: return self.get_my_favorite_tracks()
@@ -516,66 +381,7 @@ class GW:
             result.append(map_user_track(track))
         return result
 
-    def get_my_favorite_tracks(self, limit=25):
-        ids_raw = self.get_user_favorite_ids(limit=limit)
-        ids = [ x['SNG_ID'] for x in ids_raw['data'] ]
-        if len(ids) == 0: return []
-        data = self.get_tracks(ids)
-        result = []
-        for (i, track) in enumerate(data):
-            if not track.get('SNG_ID'):
-                continue  # a favourite Deezer no longer has (see get_tracks)
-            track = dict(track, **ids_raw['data'][i])
-            result.append(map_user_track(track))
-        return result
-
-    def log_listen(self, sng_id, listened=0, next_id=None, fmt="MP3_MISC",
-                   context=None, is_shuffle=False, stream_id="", ts_listen=None):
-        """Report a track play to Deezer (``log.listen``).
-
-        This is the same signal the web player sends; it feeds Deezer's
-        recommendation engine and Flow. ``listened`` is the number of seconds
-        actually played. Opt-in only — callers gate it behind a config flag.
-        Best-effort: returns the gateway result or raises on a hard error.
-        """
-        from time import time as _now
-        now = int(_now())
-        if ts_listen is None:
-            ts_listen = now - int(listened or 0)
-        ctxt = context or {}
-        body = {
-            "next_media": {"media": {"id": str(next_id or sng_id), "type": "song"}},
-            "params": {
-                "ts_listen": int(ts_listen),
-                "type": 0,
-                "stat": {"seek": 0, "pause": 0, "sync": 1},
-                "media": {"id": str(sng_id), "type": "song", "format": fmt},
-                "ctxt": {"id": str(ctxt.get("id", "")), "t": str(ctxt.get("t", ""))},
-                "dev": {"t": 0, "v": "web"},
-                "is_shuffle": bool(is_shuffle),
-                "ls": 0,
-                "lt": int(listened or 0),
-                "stream_id": str(stream_id or ""),
-                "timestamp": now,
-            },
-        }
-        return self.api_call("log.listen", body)
-
     # -- Flow / radio / mixes --------------------------------------------
-
-    def get_user_radio(self, user_id=None, config_id=None):
-        """The user's Flow: an endless personalized stream. ``data`` holds tracks.
-
-        ``config_id`` selects a specific flow configuration (the current web
-        app asks e.g. ``motivation``, ``genre-techno``, ``genre-danceedm``);
-        omitted, the gateway answers the account's default Flow.
-        """
-        params = {}
-        if user_id is not None:
-            params['user_id'] = user_id
-        if config_id:
-            params['config_id'] = config_id
-        return self.api_call('radio.getUserRadio', params)
 
     def get_track_mix(self, sng_id, start_with_input_track=True):
         """A radio/mix seeded from a single track (endless queue). ``data`` = tracks."""
@@ -637,33 +443,3 @@ class GW:
             return []
         body = self.api_call('episode.getListData', {'episode_ids': ids})
         return body.get('data', []) if isinstance(body, dict) else []
-
-    def add_show_to_favorites(self, show_id):
-        return self.api_call('show.addFavorite', {
-            'SHOW_ID': show_id,
-            'CTXT': {'id': str(show_id), 't': 'show_page'},
-        })
-
-    def remove_show_from_favorites(self, show_id):
-        return self.api_call('show.deleteFavorite', {
-            'SHOW_ID': show_id,
-            'CTXT': {'id': str(show_id), 't': 'show_page'},
-        })
-
-    def set_episode_bookmark(self, episode_id, offset, duration, is_heard=False):
-        """Sync an episode's playback position to Deezer (resume across devices)."""
-        return self.api_call('episode.bookmarkSet', {
-            'EPISODE_ID': episode_id,
-            'OFFSET': int(offset),
-            'DURATION': float(duration),
-            'ISHEARD': 1 if is_heard else 0,
-        })
-
-    def get_user_shows(self, user_id, limit=2000):
-        """The user's favorite podcasts (shows). Confirmed from a HAR capture:
-        ``deezer.pageProfile`` tab ``podcasts`` -> ``TAB.shows.data`` (each a show
-        object with SHOW_ID / SHOW_NAME / SHOW_ART_MD5 / SHOW_DESCRIPTION)."""
-        page = self.api_call('deezer.pageProfile', {
-            'user_id': user_id, 'tab': 'podcasts', 'nb': limit,
-        })
-        return page.get('TAB', {}).get('shows', {}).get('data', [])

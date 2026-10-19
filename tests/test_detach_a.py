@@ -184,7 +184,6 @@ class LocalCycleTestCase(_AppCase):
 
     def test_podcast_subscription_and_position_write_nothing(self):
         # The old switch is on; the routes must not read it.
-        self.assertEqual(self.client.post("/api/flow/clusters", json={"clusters": []}).status_code, 405)
         assert_no_deezer_writes(self, self.writes)
 
 

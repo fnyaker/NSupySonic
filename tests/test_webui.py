@@ -52,54 +52,15 @@ def raw_track(sid, title="T", art=("1", "Artist"), alb=("10", "Album"), pic="md5
 
 class MockGW:
     def __init__(self):
-        self.fav_added = []
-        self.fav_removed = []
-        self.album_fav = []
-        self.artist_fav = []
-        self.playlist_fav = []
-        self.created = []
-        self.deleted = []
-        self.songs_added = []
-        self.songs_removed = []
-        self.listens = []
-        self.fav_calls = 0
         # Which albums the archiver actually walked — how the artist-scope
         # tests tell "one release" from "the whole discography".
         self.taken_albums = []
         self.fav_checksum = "cs1"
 
-    def log_listen(self, sng_id, **kw):
-        self.listens.append((str(sng_id), kw))
-
-    def set_episode_bookmark(self, episode_id, offset, duration, is_heard=False):
-        self.episode_bookmarks = getattr(self, "episode_bookmarks", [])
-        self.episode_bookmarks.append((str(episode_id), offset, duration, is_heard))
-
-    def get_smart_tracklist(self, stl_id):
-        return {
-            "DATA": {"TITLE": "Nouveautés"},
-            "SONGS": {"data": [raw_track(1, "A"), raw_track(2, "B")]},
-        }
-
     # -- flow / mix / reco ----------------------------------------------
-
-    def get_user_radio(self, user_id=None, config_id=None):
-        return {"data": [raw_track(3, "Flow1"), raw_track(4, "Flow2")]}
 
     def get_track_mix(self, sng_id, start_with_input_track=True):
         return {"data": [raw_track(sng_id, "Seed"), raw_track(5, "Mix")]}
-
-    def get_recommended_tracks(self, limit=50):
-        return {"data": [raw_track(6, "Reco")]}
-
-    def get_recommended_albums(self, limit=50):
-        return {"data": [{"ALB_ID": "10", "ALB_TITLE": "Bar", "ALB_PICTURE": "cp"}]}
-
-    def get_recommended_artists(self, limit=50):
-        return {"data": [{"ART_ID": "9", "ART_NAME": "Foo", "ART_PICTURE": "ap"}]}
-
-    def get_recommended_playlists(self, limit=50):
-        return {"data": [{"PLAYLIST_ID": "77", "TITLE": "P", "PLAYLIST_PICTURE": "pp"}]}
 
     # -- lyrics / discography / playlist page ----------------------------
 
@@ -157,56 +118,7 @@ class MockGW:
     def get_user_favorite_ids(self, checksum=None, limit=10000, start=0):
         return {"data": [{"SNG_ID": "1"}, {"SNG_ID": "2"}], "checksum": self.fav_checksum}
 
-    def get_my_favorite_tracks(self, limit=25):
-        # Mirrors deezerpy.utils.map_user_track: artist/album are objects and
-        # covers are full URLs.
-        self.fav_calls += 1
-        return [
-            {"id": "1", "title": "A", "duration": 200, "time_add": 1700000000,
-             "artist": {"id": "1", "name": "Artist"},
-             "album": {"id": "10", "title": "Album",
-                       "cover_medium": "https://e-cdns-images.dzcdn.net/images/cover/md5c/250x250-000000-80-0-0.jpg"}}
-        ]
-
     # -- entity favorites / playlist CRUD --------------------------------
-
-    def add_album_to_favorites(self, alb_id):
-        self.album_fav.append(("add", str(alb_id)))
-
-    def remove_album_from_favorites(self, alb_id):
-        self.album_fav.append(("remove", str(alb_id)))
-
-    def add_artist_to_favorites(self, art_id):
-        self.artist_fav.append(("add", str(art_id)))
-
-    def remove_artist_from_favorites(self, art_id):
-        self.artist_fav.append(("remove", str(art_id)))
-
-    def add_playlist_to_favorites(self, playlist_id):
-        self.playlist_fav.append(("add", str(playlist_id)))
-
-    def remove_playlist_from_favorites(self, playlist_id):
-        self.playlist_fav.append(("remove", str(playlist_id)))
-
-    def create_playlist(self, title, status=0, description=None, songs=None):
-        self.created.append((title, description, list(songs or [])))
-        return 9999
-
-    def edit_playlist(self, playlist_id, title, status=None, description=None, songs=None):
-        self.created.append(("edit", str(playlist_id), title, description))
-        return True
-
-    def delete_playlist(self, playlist_id):
-        self.deleted.append(str(playlist_id))
-        return True
-
-    def add_songs_to_playlist(self, playlist_id, songs, offset=-1):
-        self.songs_added.append((str(playlist_id), list(songs)))
-        return True
-
-    def remove_songs_from_playlist(self, playlist_id, songs):
-        self.songs_removed.append((str(playlist_id), list(songs)))
-        return True
 
     def search(self, query, index=0, limit=10, **kw):
         return {
@@ -247,12 +159,6 @@ class MockGW:
         self.gain_batches = getattr(self, "gain_batches", [])
         self.gain_batches.append([str(i) for i in sng_ids])
         return [raw_track(i, f"T{i}") for i in sng_ids if str(i) != "999"]
-
-    def add_song_to_favorites(self, sng_id):
-        self.fav_added.append(str(sng_id))
-
-    def remove_song_from_favorites(self, sng_id):
-        self.fav_removed.append(str(sng_id))
 
 
 def api_track(i=1):
@@ -353,28 +259,6 @@ class MockApi:
         return {"data": [api_track(1), api_track(2)]}
 
 
-class MockGQL:
-    def get_flow_clusters(self, flow_config_id="default"):
-        return [
-            {
-                "isEnabled": True,
-                "cluster": {
-                    "id": "default-techno",
-                    "title": "Techno",
-                    "artists": [{"name": "A", "picture": {"medium": "https://img/x.jpg"}}],
-                },
-            },
-            {
-                "isEnabled": False,
-                "cluster": {"id": "default-rap", "title": "Rap", "artists": []},
-            },
-        ]
-
-    def update_flow_clusters(self, clusters, flow_config_id="default"):
-        self.updated = clusters
-        return {"updateFlowConfigClusters": {"__typename": "ok"}}
-
-
 class MockPrefetch:
     download_pending = 0
 
@@ -402,7 +286,6 @@ class MockDz:
     def __init__(self):
         self.gw = MockGW()
         self.api = MockApi()
-        self.gql = MockGQL()
         self.current_user = {"id": 42, "name": "tester"}
 
 
@@ -496,13 +379,6 @@ class WebUITestCase(unittest.TestCase):
             sorted(data), ["forgotten", "mixes", "popular", "recent"]
         )
 
-    def test_smarttracklist(self):
-        self._login()
-        data = self.client.get("/api/smarttracklist/new-releases").get_json()
-        self.assertEqual(data["playlist"]["title"], "Nouveautés")
-        self.assertEqual(len(data["tracks"]), 2)
-        self.assertEqual(data["tracks"][0]["title"], "A")
-
     def test_search(self):
         self._login()
         data = self.client.get("/api/search?q=foo").get_json()
@@ -526,7 +402,6 @@ class WebUITestCase(unittest.TestCase):
         self._login()
         rv = self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
         self.assertEqual(rv.status_code, 200)
-        self.assertEqual(self.app.deezer.dz.gw.fav_added, [])  # local only
 
         alice = User.get(name="alice")
         self.assertEqual(
@@ -534,7 +409,6 @@ class WebUITestCase(unittest.TestCase):
         )
 
         self.client.post("/api/favorite", json={"deezer_id": "1", "on": False})
-        self.assertEqual(self.app.deezer.dz.gw.fav_removed, [])
         self.assertEqual(
             StarredTrack.select().where(StarredTrack.user == alice).count(), 0
         )
@@ -551,20 +425,6 @@ class WebUITestCase(unittest.TestCase):
         data = self.client.get("/api/radio/track/3135556").get_json()
         self.assertEqual(data, {"tracks": []})  # unknown to the library
 
-    def test_flow_deezer_error_no_500(self):
-        # A Deezer outage on Flow must degrade to an empty list, not a 500 —
-        # the player polls this for autoplay continuation.
-        self._login()
-        prov = self.app.deezer
-        orig = prov.get_flow
-        prov.get_flow = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-        try:
-            rv = self.client.get("/api/flow")
-        finally:
-            prov.get_flow = orig
-        self.assertEqual(rv.status_code, 200)
-        self.assertEqual(rv.get_json()["tracks"], [])
-
     def test_track_radio_deezer_error_no_500(self):
         self._login()
         prov = self.app.deezer
@@ -576,13 +436,6 @@ class WebUITestCase(unittest.TestCase):
             prov.get_track_mix = orig
         self.assertEqual(rv.status_code, 200)
         self.assertEqual(rv.get_json()["tracks"], [])
-
-    def test_recommendations(self):
-        self._login()
-        data = self.client.get("/api/recommendations").get_json()
-        self.assertEqual(data["albums"][0]["title"], "Bar")
-        self.assertEqual(data["artists"][0]["name"], "Foo")
-        self.assertEqual(data["playlists"][0]["title"], "P")
 
     # -- credits ---------------------------------------------------------
 
@@ -913,20 +766,6 @@ class WebUITestCase(unittest.TestCase):
         self.client.post("/api/favorite", json={"deezer_id": "3", "on": True})
         ids = set(self.client.get("/api/me/favorite-ids").get_json()["ids"])
         self.assertEqual(ids, {"3"})  # Deezer's live favourites ("1", "2") are not read
-
-    def test_favorite_respects_push_to_deezer_off(self):
-        # With push_to_deezer off the admin's star stays local (never mirrored),
-        # yet is still recorded so the heart state is correct.
-        self._login()
-        self.app.config["DEEZER"]["push_to_deezer"] = False
-        try:
-            rv = self.client.post("/api/favorite", json={"deezer_id": "3", "on": True})
-        finally:
-            self.app.config["DEEZER"]["push_to_deezer"] = True
-        self.assertEqual(rv.status_code, 200)
-        self.assertNotIn("3", self.app.deezer.dz.gw.fav_added)  # not mirrored
-        ids = set(self.client.get("/api/me/favorite-ids").get_json()["ids"])
-        self.assertIn("3", ids)  # but still a local star
 
     # -- local (non-Deezer) tracks --------------------------------------------
 
@@ -1736,7 +1575,6 @@ class WebUITestCase(unittest.TestCase):
         self._login()
         self.assertTrue(self._delete("70")["ok"])
         self.assertIsNone(Track.get_or_none(Track.id == dead.id))
-        self.assertEqual((gw.songs_removed, gw.fav_removed), ([], []))
 
     def test_a_users_deletion_only_touches_their_own_lists(self):
         """Anyone may clear a dead track out of their own lists; the shared
@@ -1763,7 +1601,6 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(holders, {"On Deezer", "Here only"})
         stars = {s.user.name for s in StarredTrack.select().where(StarredTrack.starred == dead.id)}
         self.assertEqual(stars, {"alice"})
-        self.assertEqual((gw.songs_removed, gw.fav_removed), ([], []))
 
     def test_an_admins_replacement_stays_on_the_server(self):
         gw = self.app.deezer._dz.gw
@@ -1773,7 +1610,6 @@ class WebUITestCase(unittest.TestCase):
         rv = self.client.post("/api/replace", json={"from": "74", "to": "75"})
         self.assertEqual(rv.status_code, 200, rv.get_json())
         self.assertTrue(self._await_job(rv.get_json()["job"])["ok"])
-        self.assertEqual((gw.songs_removed, gw.songs_added), ([], []))
 
     def test_replace_rejects_nonsense(self):
         self._login()
@@ -2033,8 +1869,7 @@ class WebUITestCase(unittest.TestCase):
     def test_discovery_rows_go_quiet_instead_of_failing(self):
         self._login()
         self._deezer_login_fails()
-        for path in ("/api/recommendations", "/api/radio/artist/500",
-                     "/api/search/podcasts?q=x", "/api/home"):
+        for path in ("/api/radio/artist/500", "/api/search/podcasts?q=x", "/api/home"):
             rv = self.client.get(path)
             self.assertEqual(rv.status_code, 200, path)
 
@@ -2100,7 +1935,6 @@ class WebUITestCase(unittest.TestCase):
             "/api/playlist/123",
             "/api/artist/500",
             "/api/artist/500/tracks",
-            "/api/smarttracklist/new-releases",
         ):
             with self.subTest(path):
                 self._assert_unreachable(self.client.get(path))
@@ -2108,7 +1942,7 @@ class WebUITestCase(unittest.TestCase):
     def test_a_known_outage_answers_at_once_with_the_same_code(self):
         self._login()
         self._deezer_login_fails()
-        for path in ("/api/album/600", "/api/artist/500", "/api/smarttracklist/new-releases"):
+        for path in ("/api/album/600", "/api/artist/500"):
             with self.subTest(path):
                 rv = self.client.get(path)
                 self._assert_unreachable(rv)
@@ -2147,24 +1981,6 @@ class WebUITestCase(unittest.TestCase):
         data = rv.get_json()
         self.assertEqual(data["artist"]["name"], "Archived Artist")
         self.assertIn("600", [a["deezer_id"] for a in data["albums"]])
-
-    def test_mix_offline_from_db(self):
-        from supysonic.deezer import ids as dz_ids
-
-        self._login()
-        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
-        pl = Playlist.create(
-            id=dz_ids.playlist_uuid("smart:new-releases"),
-            user=User.get(name="alice"),
-            name="Deezer · Nouveautés",
-        )
-        pl.add(Track.get(Track.deezer_id == "1"))
-        self._deezer_down()
-        rv = self.client.get("/api/smarttracklist/new-releases")
-        self.assertEqual(rv.status_code, 200)
-        data = rv.get_json()
-        self.assertEqual(data["playlist"]["title"], "Nouveautés")
-        self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1"])
 
     def test_favorites_offline_from_db(self):
         self._login()
@@ -2583,45 +2399,20 @@ class WebUITestCase(unittest.TestCase):
         favs = self.client.get("/api/me/favorites").get_json()["tracks"]
         self.assertTrue(any(x.get("local") and x["deezer_id"] == str(t.id) for x in favs))
 
-    def test_listen_disabled_is_noop(self):
-        self._login()
-        self.app.config["DEEZER"]["report_listens"] = False
-        rv = self.client.post("/api/listen", json={"deezer_id": "1", "listened": 30})
-        self.assertEqual(rv.status_code, 204)
-        self.assertEqual(self.app.deezer._dz.gw.listens, [])
-
     def test_listen_never_reports_to_deezer(self):
         # Even with the old switch on, a play is counted here and goes nowhere.
         self._login()
-        self.app.config["DEEZER"]["report_listens"] = True
         rv = self.client.post(
             "/api/listen",
             json={"deezer_id": "1", "listened": 42, "next_id": "2",
                   "context": {"kind": "flow"}, "shuffle": True},
         )
         self.assertEqual(rv.status_code, 204)
-        self.assertEqual(self.app.deezer._dz.gw.listens, [])
 
     def test_listen_invalid_id(self):
         self._login()
-        self.app.config["DEEZER"]["report_listens"] = True
         rv = self.client.post("/api/listen", json={"deezer_id": "abc"})
         self.assertEqual(rv.status_code, 400)
-
-    def test_favorites_checksum_cache(self):
-        gw = self.app.deezer._dz.gw
-        # Same checksum -> heavy fetch happens once, then served from cache.
-        self.app.deezer.get_my_favorite_tracks()
-        self.app.deezer.get_my_favorite_tracks()
-        self.assertEqual(gw.fav_calls, 1)
-        # Invalidation (a star/unstar) forces a refetch.
-        self.app.deezer.invalidate_favorites_cache()
-        self.app.deezer.get_my_favorite_tracks()
-        self.assertEqual(gw.fav_calls, 2)
-        # A changed checksum also refetches.
-        gw.fav_checksum = "cs2"
-        self.app.deezer.get_my_favorite_tracks()
-        self.assertEqual(gw.fav_calls, 3)
 
     def test_search_playlists(self):
         self._login()
@@ -2637,7 +2428,6 @@ class WebUITestCase(unittest.TestCase):
             json={"deezer_id": "10", "on": True, "title": "Bar", "artist": "Foo"},
         )
         self.assertEqual(rv.status_code, 200)
-        self.assertEqual(self.app.deezer.dz.gw.album_fav, [])  # local only
         ids = self.client.get("/api/me/favorite-ids").get_json()
         self.assertEqual(ids["albums"], ["10"])
 
@@ -2648,7 +2438,6 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(self.client.get("/api/me/favorite-ids").get_json()["artists"], ["9"])
         self.client.post("/api/favorite/artist", json=dict(body, on=False))
         self.assertEqual(self.client.get("/api/me/favorite-ids").get_json()["artists"], [])
-        self.assertEqual(self.app.deezer.dz.gw.artist_fav, [])
 
     def test_favorite_unknown_kind(self):
         self._login()
@@ -2662,24 +2451,11 @@ class WebUITestCase(unittest.TestCase):
             "/api/playlists", json={"title": title, "tracks": tracks or []}
         ).get_json()
 
-    @staticmethod
-    def _pushed_song_ids(gw):
-        out = []
-        for _p, songs in gw.songs_added:
-            out += songs
-        for _p, songs in gw.songs_removed:
-            out += songs
-        for entry in gw.created:
-            if len(entry) == 3:  # (title, description, songs)
-                out += entry[2]
-        return out
-
     def test_create_playlist(self):
         self._login()
         body = self._create_playlist("New", ["1", "2"])
         self.assertIn("id", body)  # the Playlist UUID
         self.assertIsNone(body["deezer_id"])  # a local playlist
-        self.assertEqual(self.app.deezer.dz.gw.created, [])  # nothing on the account
         data = self.client.get("/api/playlist/" + body["id"]).get_json()
         self.assertEqual([t["deezer_id"] for t in data["tracks"]], ["1", "2"])
 
@@ -2896,8 +2672,6 @@ class WebUITestCase(unittest.TestCase):
         self.assertIn(str(loc.id), uids)  # local file present (uid == UUID)
         self.assertIn("1", uids)  # Deezer track present
         self.assertTrue(any(t.get("local") for t in data["tracks"]))
-        # the local file is never pushed to the Deezer account
-        self.assertNotIn(str(loc.id), self._pushed_song_ids(self.app.deezer.dz.gw))
 
     def test_reorder_playlist(self):
         self._login()
@@ -2955,29 +2729,11 @@ class WebUITestCase(unittest.TestCase):
         body = self._create_playlist("PL", ["1"])
         rv = self.client.delete(f"/api/playlist/{body['id']}")
         self.assertEqual(rv.status_code, 200)
-        self.assertEqual(self.app.deezer.dz.gw.deleted, [])
         from supysonic.db import Playlist
 
         self.assertEqual(Playlist.select().count(), 0)
 
     # -- Flow customization ---------------------------------------------
-
-    def test_flow_clusters(self):
-        self._login()
-        data = self.client.get("/api/flow/clusters").get_json()
-        self.assertTrue(data["available"])
-        self.assertEqual(data["clusters"][0]["title"], "Techno")
-        self.assertTrue(data["clusters"][0]["enabled"])
-        self.assertTrue(data["clusters"][0]["cover"].startswith("https://"))
-
-    def test_flow_clusters_cannot_be_written(self):
-        self._login()
-        rv = self.client.post(
-            "/api/flow/clusters",
-            json={"clusters": [{"id": "default-rap", "enabled": False}]},
-        )
-        self.assertEqual(rv.status_code, 405)
-        self.assertFalse(hasattr(self.app.deezer.dz.gql, "updated"))
 
     # -- download (pre-archive) -----------------------------------------
 
@@ -3033,7 +2789,6 @@ class WebUITestCase(unittest.TestCase):
         # Admin position mirrors into the legacy offset; nothing goes to Deezer.
         self.assertEqual(PodcastEpisode[ep.id].play_offset, 300)
         gw = self.app.deezer.dz.gw
-        self.assertFalse(hasattr(gw, "episode_bookmarks"))
 
         # A later save overwrites (upsert, no duplicate rows).
         self.client.post(
@@ -3583,7 +3338,6 @@ class WebUIGuestTestCase(unittest.TestCase):
         self.app.deezer_prefetch = MockPrefetch()
         self.app.config["DEEZER"]["archive_dir"] = self.archive
         # Telemetry enabled, to prove guests still never feed it.
-        self.app.config["DEEZER"]["report_listens"] = True
 
         self.client = self.app.test_client()
 
@@ -3609,11 +3363,6 @@ class WebUIGuestTestCase(unittest.TestCase):
             {"mixes": [], "recent": [], "popular": [], "forgotten": []},
         )
         self.assertEqual(self.client.get("/api/flow").get_json(), {"tracks": []})
-        self.assertEqual(
-            self.client.get("/api/recommendations").get_json(),
-            {"albums": [], "artists": [], "playlists": []},
-        )
-        self.assertFalse(self.client.get("/api/flow/clusters").get_json()["available"])
 
     def test_no_owner_playlists(self):
         self._login()
@@ -3625,13 +3374,11 @@ class WebUIGuestTestCase(unittest.TestCase):
         self._login()
         rv = self.client.post("/api/listen", json={"deezer_id": "1", "listened": 30})
         self.assertEqual(rv.status_code, 204)
-        self.assertEqual(self.app.deezer.dz.gw.listens, [])
 
     def test_favorite_is_local_only(self):
         self._login()
         rv = self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
         self.assertEqual(rv.status_code, 200)
-        self.assertEqual(self.app.deezer.dz.gw.fav_added, [])  # not mirrored to Deezer
 
         bob = User.get(name="bob")
         self.assertEqual(
@@ -3648,8 +3395,6 @@ class WebUIGuestTestCase(unittest.TestCase):
             self.client.post("/api/playlists", json={"title": "X"}).status_code, 403
         )
         # nothing reached the Deezer account
-        self.assertEqual(self.app.deezer.dz.gw.album_fav, [])
-        self.assertEqual(self.app.deezer.dz.gw.created, [])
 
     def test_a_guest_stars_an_album_for_themselves(self):
         self._login()
@@ -3659,7 +3404,6 @@ class WebUIGuestTestCase(unittest.TestCase):
         )
         self.assertEqual(rv.status_code, 200)
         self.assertEqual(self.client.get("/api/me/favorite-ids").get_json()["albums"], ["10"])
-        self.assertEqual(self.app.deezer.dz.gw.album_fav, [])
         # …and archives nothing: that is the admin's.
         self.assertEqual(self.app.deezer_prefetch.ids, [])
 

@@ -1,12 +1,10 @@
 <script>
   import { onMount } from "svelte";
-  import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { api } from "../lib/api.js";
-  import { player, recent, isAdmin } from "../lib/stores.js";
+  import { player, recent } from "../lib/stores.js";
   import Card from "../components/Card.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
-  import FlowTuner from "../components/FlowTuner.svelte";
 
   // The home is the library's own answer (/api/home): no call to Deezer, so
   // it opens as fast as the disk and reads the same offline.
@@ -14,7 +12,6 @@
   let shelves = { recent: [], popular: [], forgotten: [] };
   let flowLoading = false;
   let loading = true;
-  let tuner = false;
 
   // An album card opens /album/<id>; until the album screen reads a row's own
   // id, a Deezer album is addressed by its Deezer id and only one without
@@ -89,17 +86,8 @@
     <button class="pill" on:click={playFlow} disabled={flowLoading}>
       <Icon name="play" size={18} /> Lancer mon Flow
     </button>
-    {#if $isAdmin && CAN_KEEP}
-      <button class="pill ghost" on:click={() => (tuner = true)}>
-        <Icon name="sliders" size={16} /> Personnaliser
-      </button>
-    {/if}
   </div>
 </div>
-
-{#if tuner && $isAdmin && CAN_KEEP}
-  <FlowTuner onClose={() => (tuner = false)} />
-{/if}
 
 {#if loading}
   <Skeleton kind="shelf" />

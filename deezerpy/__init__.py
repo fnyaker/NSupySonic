@@ -4,7 +4,6 @@ import json
 from urllib.parse import urlsplit
 from deezerpy.gw import GW
 from deezerpy.api import API
-from deezerpy.graphql import GraphQL
 from deezerpy._circuit import breaker
 from deezerpy.errors import (
     DeezerError,
@@ -129,7 +128,6 @@ class Deezer:
 
         self.api = API(self.session, self.http_headers)
         self.gw = GW(self.session, self.http_headers)
-        self.gql = GraphQL(self.session, self.http_headers)
 
     def close(self):
         """Release this client's sockets. A re-login builds a whole new client,
@@ -154,7 +152,7 @@ class Deezer:
         old, self.session = self.session, _Session()
         _close_quietly(old)
         self.session.cookies.update(data['cookies'])
-        self.api.session = self.gw.session = self.gql.session = self.session
+        self.api.session = self.gw.session = self.session
 
     def login(self, email, password, re_captcha_token, child=0):
         if child: child = int(child)
