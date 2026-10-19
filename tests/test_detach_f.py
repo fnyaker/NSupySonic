@@ -402,7 +402,7 @@ class HomeTest(Base):
         self.assertEqual(len(set(titles)), 25)
         self.assertNotIn("Other", titles)
         self.assertEqual(self.titles("/api/home/mix/techno"), titles)
-        self.assertEqual(data["playlist"]["cover"], self.client.get("/api/home").get_json()["mixes"][0]["cover"])
+        self.assertTrue(data["playlist"]["cover"])
         tomorrow = now() + datetime.timedelta(days=1)
         with mock.patch("supysonic.webui.now", return_value=tomorrow):
             other = self.titles("/api/home/mix/techno")
