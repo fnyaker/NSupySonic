@@ -2184,153 +2184,6 @@ def recommendations():
     )
 
 
-# -- explore ----------------------------------------------------------------
-# Deezer's own shop window: what is charting, by genre and by country, and the
-# editorial releases. Public API only (stable, typed). The answer is the same
-# for everyone and moves slowly, so it is kept for a few minutes: opening the
-# screen twice, or a phone and a laptop, costs Deezer one visit.
-_EXPLORE_TTL = 600
-_explore_cache = {}
-_explore_lock = threading.Lock()
-
-
-def _explore_cached(key, build):
-    now = time.monotonic()
-    with _explore_lock:
-        hit = _explore_cache.get(key)
-        if hit and hit[0] > now:
-            return hit[1]
-    value = build()
-    # An empty part is a Deezer call that did not answer (`_data` swallows the
-    # error): caching an answer with a hole in it would keep the hole for ten
-    # minutes, so only a complete one is kept.
-    if value and all(value.values()):
-        with _explore_lock:
-            if len(_explore_cache) > 64:
-                _explore_cache.clear()
-            _explore_cache[key] = (now + _EXPLORE_TTL, value)
-    return value
-
-
-def _explore_fetch(calls):
-    """Run several public-API calls side by side: a screen is six of them, and
-    one after the other that is the sum of six round trips."""
-    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
-        futures = {name: pool.submit(_data, fn) for name, fn in calls.items()}
-        return {name: f.result() for name, f in futures.items()}
-
-
-def _genre_api(g):
-    if not g or not g.get("id"):
-        return None
-    return {
-        "deezer_id": str(g["id"]),
-        "name": g.get("name", ""),
-        "picture": _pic(g, "picture_medium", "picture_big", "picture"),
-    }
-
-
-def _explore_charts(dzapi, gid):
-    got = _explore_fetch(
-        {
-            "tracks": lambda: dzapi.get_chart_tracks(gid, limit=50),
-            "albums": lambda: dzapi.get_chart_albums(gid, limit=25),
-            "artists": lambda: dzapi.get_chart_artists(gid, limit=25),
-            "playlists": lambda: dzapi.get_chart_playlists(gid, limit=25),
-        }
-    )
-    return {
-        "tracks": [x for x in map(_track_api, got["tracks"]) if x],
-        "albums": [x for x in map(_album_api, got["albums"]) if x],
-        "artists": [x for x in map(_artist_api, got["artists"]) if x],
-        "playlists": [x for x in map(_playlist_api, got["playlists"]) if x],
-    }
-
-
-_EMPTY_EXPLORE = {"genres": [], "tracks": [], "albums": [], "artists": [], "playlists": [], "releases": []}
-
-
-@webapi.route("/explore")
-@login_required
-def explore():
-    """The front page of Explore: genres, and what is charting worldwide."""
-    if not _is_admin():
-        return jsonify(_EMPTY_EXPLORE)
-    provider, err = _need_provider()
-    if err:
-        return err
-    dzapi = _dz_api()
-    if dzapi is None:
-        return jsonify(_EMPTY_EXPLORE)
-
-    def build():
-        got = _explore_fetch(
-            {
-                "genres": lambda: dzapi.get_genres(limit=100),
-                "releases": lambda: dzapi.get_editorial_releases(limit=25),
-            }
-        )
-        out = _explore_charts(dzapi, 0)
-        # Genre 0 is "everything": not a place to go, the page itself is that.
-        out["genres"] = [x for x in map(_genre_api, got["genres"]) if x and x["deezer_id"] != "0"]
-        out["releases"] = [x for x in map(_album_api, got["releases"]) if x]
-        return out
-
-    return jsonify(_explore_cached("home", build) or _EMPTY_EXPLORE)
-
-
-@webapi.route("/explore/genre/<gid>")
-@login_required
-def explore_genre(gid):
-    """One genre: its charts (tracks, albums, artists, playlists)."""
-    if not _valid_id(gid):
-        return jsonify({"error": "invalid id"}), 400
-    if not _is_admin():
-        return jsonify({"genre": None, **{k: [] for k in _EMPTY_EXPLORE if k != "genres"}})
-    provider, err = _need_provider()
-    if err:
-        return err
-    dzapi = _dz_api()
-    if dzapi is None:
-        return jsonify({"genre": None, **{k: [] for k in _EMPTY_EXPLORE if k != "genres"}})
-
-    def build():
-        try:
-            genre = _genre_api(dzapi.get_genre(gid))
-        except Exception:
-            _log_deezer_failure("Deezer genre lookup failed")
-            genre = None
-        out = _explore_charts(dzapi, gid)
-        out["genre"] = genre
-        return out
-
-    return jsonify(_explore_cached("genre:" + gid, build) or {"genre": None, "tracks": [], "albums": [], "artists": [], "playlists": []})
-
-
-@webapi.route("/explore/countries")
-@login_required
-def explore_countries():
-    """Deezer's per-country charts, as playlists (\"Top France\", \"Top Japan\"…)."""
-    if not _is_admin():
-        return jsonify({"playlists": []})
-    provider, err = _need_provider()
-    if err:
-        return err
-    dzapi = _dz_api()
-    if dzapi is None:
-        return jsonify({"playlists": []})
-
-    def build():
-        try:
-            lists = dzapi.get_countries_charts()
-        except Exception:
-            _log_deezer_failure("Deezer country charts failed")
-            lists = []
-        return {"playlists": [x for x in map(_playlist_api, lists) if x]}
-
-    return jsonify(_explore_cached("countries", build) or {"playlists": []})
-
-
 # -- my library -------------------------------------------------------------
 
 
@@ -2451,38 +2304,8 @@ def my_local():
 @webapi.route("/me/favorites")
 @login_required
 def my_favorites():
-    # Guests: their own private stars only (no Deezer-account favorites).
-    if not _is_admin():
-        return jsonify({"tracks": _db_tracks(_user_starred_query())})
-    # Prefer the live Deezer favorites (they carry the "added" date and any
-    # brand-new stars not yet synced), but never let a Deezer outage 500 the
-    # route — fall back to the favorites already mirrored into the DB. While an
-    # outage is known, go straight there: the answer is the same and this is
-    # polled, so it would otherwise be a failed call (and a log line) per view.
-    provider = _dz_live()
-    if provider is not None:
-        try:
-            tracks = [_local_track(t) for t in _local_starred()]
-            # ``get_my_favorite_tracks`` returns public-API-shaped dicts, so reuse
-            # ``_track_api``.
-            have = set()
-            for t in provider.get_my_favorite_tracks():
-                tr = _track_api(t)
-                if not tr:
-                    continue
-                tr["added"] = int(t.get("time_add") or t.get("DATE_ADD") or 0)
-                tracks.append(tr)
-                have.add(tr["deezer_id"])
-            # Include the admin's DB Deezer stars that AREN'T in the live list —
-            # e.g. starred with push_to_deezer off, or whose push failed. Without
-            # this they vanished from the library while still showing a full heart.
-            # As tuples: hydrating three models per star to compare one id was
-            # the slow half of this route on a big library.
-            tracks.extend(t for t in _db_tracks(_deezer_starred()) if t["deezer_id"] not in have)
-            return jsonify({"tracks": tracks})
-        except Exception:
-            _log_deezer_failure("Deezer favorites fetch failed; serving from DB")
-    # Deezer disabled or unreachable: every star from the DB (local + synced).
+    # The database is the library: every star, local or imported, in one query.
+    # Deezer is never asked (importing the account is a separate, one-off action).
     return jsonify({"tracks": _db_tracks(_user_starred_query())})
 
 
@@ -3426,6 +3249,67 @@ def trigger_sync():
         )
         _sync_thread.start()
     return jsonify({"ok": True, "running": True})
+
+
+_import_job: dict = {"running": False}
+_import_lock = threading.Lock()
+
+
+def _import_account_worker(app, user_name):
+    from ..db import close_connection, open_connection
+    from ..deezer.importer import DeezerImporter
+
+    job = _import_job
+    try:
+        open_connection(reuse=True)
+
+        def progress(msg):
+            job["message"] = msg
+
+        res = DeezerImporter(app.deezer, user_name, progress=progress).import_account()
+        job.update(res)
+    except Exception as exc:
+        logger.warning("Deezer account import failed: %s", exc)
+        job["failed"] = [str(exc)]
+    finally:
+        try:
+            close_connection()
+        except Exception:
+            pass
+        job["running"] = False
+
+
+@webapi.route("/deezer/import-account", methods=["POST"])
+@login_required
+@admin_required
+def import_account():
+    provider, err = _need_provider()
+    if err:
+        return err
+    if _dz_live() is None:
+        return _deezer_unreachable()
+    with _import_lock:
+        if _import_job.get("running"):
+            return jsonify({"ok": True, **_import_job})
+        _import_job.clear()
+        _import_job.update(
+            running=True, message="", playlists=0, favorites=0, failed=[]
+        )
+        app = current_app._get_current_object()
+        threading.Thread(
+            target=_import_account_worker,
+            args=(app, request.webuser.name),
+            name="deezer-import-account",
+            daemon=True,
+        ).start()
+    return jsonify({"ok": True, **_import_job})
+
+
+@webapi.route("/deezer/import-account")
+@login_required
+@admin_required
+def import_account_status():
+    return jsonify(dict(_import_job))
 
 
 @webapi.route("/sync/status")

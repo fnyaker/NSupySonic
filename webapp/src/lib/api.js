@@ -246,9 +246,6 @@ export const api = {
   flow: () => req("/flow"),
   flowClusters: () => req("/flow/clusters"),
   recommendations: () => req("/recommendations"),
-  explore: () => req("/explore"),
-  exploreGenre: (id) => req("/explore/genre/" + id),
-  exploreCountries: () => req("/explore/countries"),
   search: (q) => req("/search?q=" + encodeURIComponent(q)),
 
   // entities
@@ -489,6 +486,8 @@ export const api = {
   // manual Deezer refresh (admin) — kicks off a background sync, then poll status
   sync: () => req("/sync", { method: "POST" }),
   syncStatus: () => req("/sync/status"),
+  importAccount: () => req("/deezer/import-account", { method: "POST" }),
+  importAccountStatus: () => req("/deezer/import-account"),
 
   // upload local audio files into the archive (multipart; let the browser set
   // the Content-Type/boundary, so this bypasses the JSON `req` helper).

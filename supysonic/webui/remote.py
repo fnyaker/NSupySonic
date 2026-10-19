@@ -165,9 +165,6 @@ POLICY = {
     "track_radio": "read",
     "artist_radio": "read",
     "recommendations": "read",
-    "explore": "read",
-    "explore_genre": "read",
-    "explore_countries": "read",
     "my_playlists": "read",
     "my_favorite_ids": "read",
     "my_local": "read",
@@ -233,6 +230,8 @@ POLICY = {
     # administration
     "trigger_sync": "admin",
     "sync_status": "admin",
+    "import_account": "admin",
+    "import_account_status": "admin",
     "get_settings": "admin",
     "youtube_settings": "admin",
     "set_settings": "admin",

@@ -23,6 +23,8 @@ import re
 from datetime import timedelta
 from uuid import uuid4
 
+from peewee import fn
+
 from ..db import (
     Playlist,
     PlaylistTrack,
@@ -100,14 +102,24 @@ class DeezerImporter:
             )
         return out
 
-    def _materialize_playlist(self, local_id, name, deezer_id, raw_tracks, comment=None):
+    def _materialize_playlist(
+        self, local_id, name, deezer_id, raw_tracks, comment=None, merge=False
+    ):
         """Create/refresh a supysonic Playlist mirroring an ordered track list.
 
         Done in a single transaction with a bulk PlaylistTrack insert, so a
         thousand-track playlist is one commit instead of thousands of fsyncs.
+
+        ``merge`` keeps an existing local playlist as it is (name, comment and
+        every track in place) and only appends the tracks it does not hold yet:
+        once the account is imported, the local playlist is the one that counts.
         """
         dz = str(deezer_id) if deezer_id else None
         with db.atomic():
+            if merge:
+                existing = Playlist.get_or_none(Playlist.id == local_id)
+                if existing is not None:
+                    return self._merge_playlist(existing, raw_tracks)
             # Collapse split-brain duplicates: stray rows pointing at the same
             # Deezer playlist under a different (e.g. client-generated) id, from
             # before client-created playlists adopted the canonical uuid5 id.
@@ -175,6 +187,34 @@ class DeezerImporter:
                 PlaylistTrack.insert_many(rows).execute()
         return playlist, len(final)
 
+    def _merge_playlist(self, playlist, raw_tracks):
+        """Append the tracks ``playlist`` lacks, in Deezer's order; touch nothing else."""
+        tracks = self._upsert_tracks(raw_tracks)
+        have = {
+            r.track_id
+            for r in PlaylistTrack.select(PlaylistTrack.track).where(
+                PlaylistTrack.playlist == playlist.id
+            )
+        }
+        last = (
+            PlaylistTrack.select(fn.MAX(PlaylistTrack.index))
+            .where(PlaylistTrack.playlist == playlist.id)
+            .scalar()
+        )
+        index = -1 if last is None else last
+        rows = []
+        for t in tracks:
+            if t.id in have:
+                continue
+            have.add(t.id)
+            index += 1
+            rows.append(
+                {"id": uuid4(), "playlist": playlist.id, "track": t.id, "index": index}
+            )
+        if rows:
+            PlaylistTrack.insert_many(rows).execute()
+        return playlist, len(have)
+
     # -- playlists -------------------------------------------------------
 
     def sync_playlists(self) -> int:
@@ -194,6 +234,7 @@ class DeezerImporter:
                     did,
                     raw,
                     comment=pl.get("description") or None,
+                    merge=True,
                 )
                 self._progress(f"  • {pl.get('title', 'Playlist')} ({n} tracks)")
                 count += 1
@@ -204,7 +245,7 @@ class DeezerImporter:
 
     # -- favorites -------------------------------------------------------
 
-    def sync_favorites(self) -> int:
+    def sync_favorites(self, prune=False) -> int:
         self._progress("Fetching your Deezer favorites...")
         raw_ids = self.provider.dz.gw.get_user_favorite_ids(limit=100000)
         sng_ids = [x["SNG_ID"] for x in raw_ids.get("data", [])]
@@ -233,8 +274,9 @@ class DeezerImporter:
             if new_rows:
                 StarredTrack.insert_many(new_rows).execute()
 
-            # Drop stars on Deezer tracks that are no longer loved.
-            deezer_starred = {
+            # Drop stars on Deezer tracks that are no longer loved (only when
+            # asked: an import never removes anything we already hold).
+            deezer_starred = set() if not prune else {
                 s.starred_id
                 for s in StarredTrack.select(StarredTrack.starred)
                 .join(Track, on=(StarredTrack.starred == Track.id))
@@ -363,11 +405,8 @@ class DeezerImporter:
     def sync_podcasts(self, episode_limit=30) -> int:
         """Import/refresh subscribed podcasts + their recent episodes.
 
-        Subscriptions come from two places, merged and de-duplicated:
-          * local PodcastChannel rows (added via createPodcastChannel / CLI /
-            web UI) — the source of truth going forward, and
-          * the account's favorite shows on Deezer (``pageProfile`` podcasts tab),
-            so shows you favorited in the Deezer app show up here too.
+        Subscriptions are the local PodcastChannel rows only (added via
+        createPodcastChannel / CLI / web UI); the Deezer account is not read.
         Audio is still fetched on demand.
         """
         from .archive import import_show
@@ -390,11 +429,6 @@ class DeezerImporter:
             if channel.gone is not None and (now() - channel.gone) < GONE_RECHECK:
                 continue
             _add(channel.deezer_id)
-        try:
-            for s in self.provider.get_user_shows():
-                _add(s.get("SHOW_ID"))
-        except Exception as exc:
-            logger.warning("Could not list Deezer favorite shows: %s", exc)
 
         if show_ids:
             self._progress(f"Refreshing {len(show_ids)} podcast(s)...")
@@ -430,18 +464,24 @@ class DeezerImporter:
 
     # -- orchestration ---------------------------------------------------
 
+    def import_account(self) -> dict:
+        """One-off import of the Deezer account: playlists and favourites are
+        added to what we hold, never removed from it."""
+        out = {"playlists": 0, "favorites": 0, "failed": []}
+        for key, fn_ in (
+            ("playlists", self.sync_playlists),
+            ("favorites", lambda: self.sync_favorites(prune=False)),
+        ):
+            try:
+                out[key] = fn_()
+            except Exception as exc:
+                logger.warning("Deezer account import (%s) failed: %s", key, exc)
+                out["failed"].append(f"{key}: {exc}")
+        return out
+
     def sync(self, cfg: dict) -> dict:
+        """The scheduled refresh: subscribed podcasts only."""
         out = {}
-        if cfg.get("sync_playlists"):
-            out["playlists"] = self.sync_playlists()
-        if cfg.get("sync_favorites"):
-            out["favorites"] = self.sync_favorites()
         if cfg.get("sync_podcasts"):
             out["podcasts"] = self.sync_podcasts(int(cfg.get("podcast_episodes") or 30))
-        if cfg.get("import_new_releases") or cfg.get("import_flow") or cfg.get("import_new_albums"):
-            out["recommendations"] = self.sync_recommendations(
-                smart_ids=smart_ids_from_config(cfg) if cfg.get("import_new_releases") else None,
-                flow=cfg.get("import_flow", False),
-                new_albums=cfg.get("import_new_albums", False),
-            )
         return out

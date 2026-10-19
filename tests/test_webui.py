@@ -716,76 +716,6 @@ class WebUITestCase(unittest.TestCase):
         self._credits_setup()
         self.assertEqual(self.client.get("/api/track/3135556/credits").status_code, 401)
 
-    # -- explore ---------------------------------------------------------
-
-    def _explore_reset(self):
-        from supysonic import webui
-
-        MockApi.calls.clear()
-        MockApi.fail = False
-        with webui._explore_lock:
-            webui._explore_cache.clear()
-        self.addCleanup(setattr, MockApi, "fail", False)
-
-    def test_explore_home(self):
-        self._explore_reset()
-        self._login()
-        data = self.client.get("/api/explore").get_json()
-        self.assertEqual([g["name"] for g in data["genres"]], ["Pop", "Rap/Hip Hop"], "\"All\" is the page itself")
-        self.assertEqual(data["genres"][0]["deezer_id"], "132")
-        self.assertEqual(len(data["tracks"]), 3)
-        self.assertEqual(data["tracks"][0]["album"]["title"], api_track(1)["album"]["title"])
-        self.assertEqual(data["albums"][0]["title"], "Bar")
-        self.assertEqual(data["artists"][0]["name"], "Foo")
-        self.assertEqual(data["playlists"][0]["title"], "P")
-        self.assertEqual(data["releases"][0]["title"], "Bar")
-
-    def test_explore_is_kept_for_a_while_but_never_an_outage(self):
-        self._explore_reset()
-        self._login()
-        self.client.get("/api/explore")
-        asked = len(MockApi.calls)
-        self.assertGreater(asked, 0)
-        self.client.get("/api/explore")
-        self.assertEqual(len(MockApi.calls), asked, "the second visit costs Deezer nothing")
-        # A Deezer that does not answer gives an empty screen — which must not be
-        # remembered, or the screen stays empty for the length of the cache.
-        self._explore_reset()
-        MockApi.fail = True
-        empty = self.client.get("/api/explore").get_json()
-        self.assertEqual(empty["tracks"], [])
-        self.assertEqual(self.client.get("/api/explore").status_code, 200)
-        MockApi.fail = False
-        self.assertEqual(len(self.client.get("/api/explore").get_json()["tracks"]), 3)
-
-    def test_explore_genre(self):
-        self._explore_reset()
-        self._login()
-        data = self.client.get("/api/explore/genre/132").get_json()
-        self.assertEqual(data["genre"]["name"], "Pop")
-        self.assertEqual(len(data["tracks"]), 3)
-        self.assertIn(("tracks", (132,), ("limit",)) if False else "tracks", [c[0] for c in MockApi.calls])
-        asked = {c[1] for c in MockApi.calls if c[0] == "tracks"}
-        self.assertEqual(asked, {("132",)}, "the genre id reaches the chart call")
-
-    def test_explore_genre_refuses_what_is_not_an_id(self):
-        self._explore_reset()
-        self._login()
-        for bad in ("abc", "12a", "%D9%A1%D9%A2", "-5", "9" * 30):
-            self.assertEqual(self.client.get("/api/explore/genre/" + bad).status_code, 400, bad)
-        self.assertEqual(MockApi.calls, [], "and nothing was asked of Deezer")
-
-    def test_explore_countries(self):
-        self._explore_reset()
-        self._login()
-        data = self.client.get("/api/explore/countries").get_json()
-        self.assertEqual(data["playlists"][0]["title"], "Top France")
-
-    def test_explore_needs_a_login(self):
-        self._explore_reset()
-        for path in ("/api/explore", "/api/explore/genre/132", "/api/explore/countries"):
-            self.assertEqual(self.client.get(path).status_code, 401, path)
-
     # -- lyrics / playlist / discography --------------------------------
 
     def test_lyrics(self):
@@ -942,14 +872,16 @@ class WebUITestCase(unittest.TestCase):
         self.assertTrue(all("id" in p for p in data["playlists"]))
 
     def test_my_favorites(self):
+        # The list is the database's: a star is read back without asking Deezer.
         self._login()
+        self._make_deezer_track(sng_id="1", title="Archived Song", archived=True)
+        self.client.post("/api/favorite", json={"deezer_id": "1", "on": True})
+        MockApi.calls.clear()
         data = self.client.get("/api/me/favorites").get_json()
         t = data["tracks"][0]
         self.assertEqual(t["deezer_id"], "1")
-        self.assertEqual(t["artist"]["name"], "Artist")
-        self.assertEqual(t["album"]["title"], "Album")
-        self.assertTrue(t["album"]["cover"].startswith("https://"))
-        self.assertEqual(t["added"], 1700000000)
+        self.assertEqual(t["title"], "Archived Song")
+        self.assertEqual(MockApi.calls, [], "no public-API call")
 
     def test_favorite_ids(self):
         self._login()
