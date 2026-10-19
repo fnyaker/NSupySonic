@@ -1,4 +1,5 @@
 <script>
+  import { entityKey } from "../lib/entity.js";
   import { api } from "../lib/api.js";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { player, isAdmin, openGenreBulk } from "../lib/stores.js";
@@ -200,7 +201,7 @@
     {:else}
     {#if latest.length}
       <h2>Dernières sorties</h2>
-      <div class="shelf">{#each latest as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+      <div class="shelf">{#each latest as a (entityKey(a, "album"))}<Card item={a} kind="album" />{/each}</div>
     {/if}
 
     {#if data.top?.length}
@@ -210,7 +211,7 @@
 
     {#if albums.length}
       <h2>Albums</h2>
-      <div class="grid">{#each albums as a (a.id || a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+      <div class="grid">{#each albums as a (entityKey(a, "album"))}<Card item={a} kind="album" />{/each}</div>
     {/if}
 
     {#if data.library && onDeezer === null}
@@ -218,24 +219,24 @@
       <Skeleton kind="shelf" count={5} />
     {:else if onDeezer?.length}
       <h2>Disponible sur Deezer</h2>
-      <div class="grid">{#each onDeezer as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+      <div class="grid">{#each onDeezer as a (entityKey(a, "album"))}<Card item={a} kind="album" />{/each}</div>
     {:else if deezerDown}
       <p class="muted down">Deezer est injoignable : le reste du catalogue n'est pas affiché.</p>
     {/if}
 
     {#if singles.length}
       <h2>Singles &amp; EP</h2>
-      <div class="grid">{#each singles as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+      <div class="grid">{#each singles as a (entityKey(a, "album"))}<Card item={a} kind="album" />{/each}</div>
     {/if}
 
     {#if featured.length}
       <h2>Apparaît dans</h2>
-      <div class="grid">{#each featured as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+      <div class="grid">{#each featured as a (entityKey(a, "album"))}<Card item={a} kind="album" />{/each}</div>
     {/if}
 
     {#if data.related?.length}
       <h2>Artistes similaires</h2>
-      <div class="shelf">{#each data.related as a (a.id || a.deezer_id)}<Card item={a} kind="artist" />{/each}</div>
+      <div class="shelf">{#each data.related as a (entityKey(a, "artist"))}<Card item={a} kind="artist" />{/each}</div>
     {/if}
 
     {#if data.bio}

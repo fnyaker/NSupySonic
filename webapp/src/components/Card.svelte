@@ -4,6 +4,7 @@
   import { playEntity, buildEntityMenu } from "../lib/actions.js";
   import Cover from "./Cover.svelte";
   import { isLocalId } from "../lib/format.js";
+  import { entityRef } from "../lib/entity.js";
   import Icon from "./Icon.svelte";
 
   // item: {deezer_id, title|name, cover|picture}, kind: album|artist|playlist|mix
@@ -22,9 +23,9 @@
           ? "Mix"
           : item.owner || "Playlist");
 
-  // User playlists are addressed by their UUID (`id`); recommendation cards only
-  // have a Deezer numeric id.
-  $: routeId = item.id || item.deezer_id;
+  // Opened by the provider's id when it has one (the same address in the catalogue
+  // and in the library), by the UUID otherwise: a user playlist, an upload.
+  $: routeId = entityRef(item);
 
   function open() {
     push((kind === "mix" ? "/mix/" : "/" + kind + "/") + routeId);

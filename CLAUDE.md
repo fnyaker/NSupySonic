@@ -675,6 +675,17 @@ plays it unchanged). Sharing goes through `components/ShareSheet.svelte` (global
 (peaks from `/api/share/waveform`), cut server-side by `/api/share/clip` and handed to the Web Share
 API (download fallback). Podcast markers live in `lib/markers.js`.
 
+**An album, an artist, a playlist and a show have ONE identity too** (`webapp/src/lib/entity.js`, the
+twin of `trackkey.js`; `webui._entity_uuid`). Every card carries `id`: the row's UUID, or — for a catalogue
+card with no row yet — the UUID its row will have (`ids.*_uuid` is a uuid5 of the provider's id, hashed
+the same in JS; `test/multi-d.test.mjs` and `tests/test_multi_d.py` share a literal table). Two verbs:
+`entityKey(x, kind)` is what lists, stores and caches are keyed on; `entityRef(x)` is what a ROUTE or
+request names it by — the provider's id when there is one, else the UUID, because a UUID cannot be
+inverted into the id it was hashed from, so a card with no row can only be opened by the id it was listed
+under (the pages take both forms, `/podcast/<id>` included). The offline API cache keys `/album|artist|
+playlist/<provider id>…` as the UUID (`canonicalPath`; a record an older build kept under the raw path
+still reads). Adding an `id` costs no statement (`tests/test_multi_d.py` pins the counts).
+
 **Export to another service** (`supysonic/services/`, `supysonic/webui/services.py`, the *Service* and *Liste*
 tabs of `components/ExportSheet.svelte`, Réglages → Compte → *Services de streaming*; survey in
 `docs/playlist-export.md`). Spotify (the operator's own app, PKCE, `POST /me/playlists` + `/items` — the

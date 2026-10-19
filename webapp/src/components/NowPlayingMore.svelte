@@ -1,4 +1,5 @@
 <script>
+  import { entityKey } from "../lib/entity.js";
   // What lives under the full-screen player: the credits of the track, the
   // artist behind it and — last, because it is the long one — tracks that sound
   // like it. On the phone it is what a swipe up from
@@ -183,7 +184,7 @@
     {/if}
     {#if related.length}
       <h4>Artistes similaires</h4>
-      <div class="shelf">{#each related as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}</div>
+      <div class="shelf">{#each related as a (entityKey(a, "artist"))}<Card item={a} kind="artist" />{/each}</div>
     {/if}
   {/if}
 

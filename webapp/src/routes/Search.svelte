@@ -1,4 +1,5 @@
 <script>
+  import { entityKey } from "../lib/entity.js";
   import { onDestroy } from "svelte";
   import { api } from "../lib/api.js";
   import { isAdmin } from "../lib/stores.js";
@@ -263,7 +264,7 @@
       {/if}
     </div>
     <div class={tab === "albums" ? "grid" : "shelf"}>
-      {#each results.albums as a (a.deezer_id)}<Card item={a} kind="album" />{/each}
+      {#each results.albums as a (entityKey(a, "album"))}<Card item={a} kind="album" />{/each}
     </div>
   {/if}
 
@@ -275,7 +276,7 @@
       {/if}
     </div>
     <div class={tab === "artists" ? "grid" : "shelf"}>
-      {#each results.artists as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}
+      {#each results.artists as a (entityKey(a, "artist"))}<Card item={a} kind="artist" />{/each}
     </div>
   {/if}
 
@@ -287,7 +288,7 @@
       {/if}
     </div>
     <div class={tab === "playlists" ? "grid" : "shelf"}>
-      {#each results.playlists as p (p.deezer_id)}<Card item={p} kind="playlist" />{/each}
+      {#each results.playlists as p (entityKey(p, "playlist"))}<Card item={p} kind="playlist" />{/each}
     </div>
   {/if}
 
@@ -299,7 +300,7 @@
       {/if}
     </div>
     <div class={tab === "podcasts" ? "grid" : "shelf"}>
-      {#each results.podcasts as p (p.deezer_id)}<PodcastCard item={p} />{/each}
+      {#each results.podcasts as p (entityKey(p, "show"))}<PodcastCard item={p} />{/each}
     </div>
   {/if}
 {/if}

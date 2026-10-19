@@ -6,6 +6,7 @@
 // quota-safe) rather than localStorage — track lists can be big.
 
 import { REMOTE } from "./remote/mode.js";
+import { canonicalPath } from "./entity.js";
 
 const DB_NAME = "nsupy-apicache";
 const DB_VERSION = 1;
@@ -76,9 +77,11 @@ export function decode(rec) {
 export async function cacheGet(path) {
   try {
     const db = await openDB();
-    const rec = await reqp(
-      db.transaction("responses", "readonly").objectStore("responses").get(path)
-    );
+    const store = db.transaction("responses", "readonly").objectStore("responses");
+    const key = canonicalPath(path);
+    let rec = await reqp(store.get(key));
+    // A page an older build kept under the provider's id: still good offline.
+    if (!rec && key !== path) rec = await reqp(store.get(path));
     return decode(rec);
   } catch {
     return null;
@@ -90,9 +93,10 @@ export async function cacheGet(path) {
 export async function cacheAge(path) {
   try {
     const db = await openDB();
-    const rec = await reqp(
-      db.transaction("responses", "readonly").objectStore("responses").get(path)
-    );
+    const store = db.transaction("responses", "readonly").objectStore("responses");
+    const key = canonicalPath(path);
+    let rec = await reqp(store.get(key));
+    if (!rec && key !== path) rec = await reqp(store.get(path));
     return rec && rec.ts ? Date.now() - rec.ts : Infinity;
   } catch {
     return Infinity;
@@ -110,7 +114,8 @@ export async function cachePut(path, data, text = null) {
     const db = await openDB();
     const t = db.transaction("responses", "readwrite");
     const body = typeof text === "string" ? text : JSON.stringify(data ?? null);
-    t.objectStore("responses").put({ path, text: body, ts: Date.now() });
+    // One entry per entity whichever id the page was asked by (lib/entity.js).
+    t.objectStore("responses").put({ path: canonicalPath(path), text: body, ts: Date.now() });
     await new Promise((resolve, reject) => {
       t.oncomplete = resolve;
       t.onerror = () => reject(t.error);

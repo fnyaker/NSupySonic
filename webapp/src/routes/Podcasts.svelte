@@ -1,4 +1,5 @@
 <script>
+  import { entityKey } from "../lib/entity.js";
   import { push } from "svelte-spa-router";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import { onMount, onDestroy } from "svelte";
@@ -94,7 +95,7 @@
       {:else if searchResults.length}
         <h2>Résultats</h2>
         <div class="grid">
-          {#each searchResults as p (p.deezer_id)}
+          {#each searchResults as p (entityKey(p, "show"))}
             <PodcastCard item={p} />
           {/each}
         </div>

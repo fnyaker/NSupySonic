@@ -1,4 +1,5 @@
 <script>
+  import { entityKey } from "../lib/entity.js";
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { player, recent } from "../lib/stores.js";
@@ -13,12 +14,9 @@
   let flowLoading = false;
   let loading = true;
 
-  // An album card opens /album/<id>; until the album screen reads a row's own
-  // id, a Deezer album is addressed by its Deezer id and only one without
-  // keeps the UUID.
-  const cards = (list) =>
-    (list || []).map((a) => (a.deezer_id ? { ...a, id: undefined } : a));
-  const cardKey = (a) => a.id || a.deezer_id;
+  // Cards are keyed on the entity's UUID; a Deezer album still opens by its Deezer
+  // id (Card.svelte), the same address as in the catalogue.
+  const cardKey = (a) => entityKey(a, "album");
 
   $: greeting = (() => {
     const h = new Date().getHours();
@@ -45,9 +43,9 @@
   function take(d) {
     mixes = d.mixes || [];
     shelves = {
-      recent: cards(d.recent),
-      popular: cards(d.popular),
-      forgotten: cards(d.forgotten),
+      recent: d.recent || [],
+      popular: d.popular || [],
+      forgotten: d.forgotten || [],
     };
     loading = false;
   }
@@ -110,7 +108,7 @@
   {#if recentAlbums.length}
     <h2>Écoutés récemment</h2>
     <div class="shelf">
-      {#each recentAlbums as a (a.deezer_id)}<Card item={a} kind="album" />{/each}
+      {#each recentAlbums as a (entityKey(a, "album"))}<Card item={a} kind="album" />{/each}
     </div>
   {/if}
 

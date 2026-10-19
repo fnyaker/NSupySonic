@@ -2,6 +2,7 @@
 // Kept separate from api.js to avoid an import cycle (api.js imports stores).
 
 import { migrateKey, trackKey, trackRef } from "./trackkey.js";
+import { entityRef } from "./entity.js";
 import { get } from "svelte/store";
 
 import { REMOTE, CAN_KEEP } from "./remote/mode.js";
@@ -474,7 +475,7 @@ export function entityMeta(kind, item) {
 // Context menu for an album/artist/playlist/mix card.
 export function buildEntityMenu(kind, item, nav) {
   const route = kind === "mix" ? "/mix/" : "/" + kind + "/";
-  const routeId = item.id || item.deezer_id;
+  const routeId = entityRef(item);
   const items = [
     { label: "Lire", icon: "play", action: () => playEntity(kind, routeId) },
     { label: "Ouvrir", icon: "open", action: () => nav(route + routeId) },

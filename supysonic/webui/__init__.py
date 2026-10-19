@@ -266,6 +266,7 @@ def _album(a):
     if not a:
         return None
     return {
+        "id": _entity_uuid("album", a.get("ALB_ID")),
         "deezer_id": str(a.get("ALB_ID")),
         "title": a.get("ALB_TITLE") or a.get("TITLE", ""),
         "cover": _image("cover", a.get("ALB_PICTURE")),
@@ -283,6 +284,7 @@ def _artist(ar):
     if not ar:
         return None
     return {
+        "id": _entity_uuid("artist", ar.get("ART_ID")),
         "deezer_id": str(ar.get("ART_ID")),
         "name": ar.get("ART_NAME", ""),
         "picture": _image("artist", ar.get("ART_PICTURE")),
@@ -332,6 +334,7 @@ def _playlist(p):
         return None
     kind = (p.get("PICTURE_TYPE") or "playlist").lower()
     return {
+        "id": _entity_uuid("playlist", pid),
         "deezer_id": str(pid),
         "title": p.get("TITLE", ""),
         "description": p.get("DESCRIPTION") or "",
@@ -394,11 +397,23 @@ def _track_api(t):
     }
 
 
+def _entity_uuid(kind, raw):
+    """The UUID a Deezer entity's library row has (or will have): ``ids.*_uuid``
+    is deterministic, so a catalogue card that is not in the library yet carries
+    the same ``id`` before and after it enters. None for an id that is not one."""
+    from ..deezer import ids as dz_ids
+
+    if raw is None or not _valid_id(str(raw)):
+        return None
+    return str(getattr(dz_ids, kind + "_uuid")(str(raw)))
+
+
 def _album_api(a):
     if not a or not a.get("id"):
         return None
     art = a.get("artist") or {}
     return {
+        "id": _entity_uuid("album", a.get("id")),
         "deezer_id": str(a.get("id")),
         "title": a.get("title", ""),
         "cover": _pic(a, "cover_medium", "cover_big", "cover"),
@@ -412,6 +427,7 @@ def _artist_api(a):
     if not a or not a.get("id"):
         return None
     return {
+        "id": _entity_uuid("artist", a.get("id")),
         "deezer_id": str(a.get("id")),
         "name": a.get("name", ""),
         "picture": _pic(a, "picture_medium", "picture_big", "picture"),
@@ -424,6 +440,7 @@ def _playlist_api(p):
         return None
     user = p.get("user") or {}
     return {
+        "id": _entity_uuid("playlist", p.get("id")),
         "deezer_id": str(p.get("id")),
         "title": p.get("title", ""),
         "description": p.get("description") or "",
@@ -1287,6 +1304,7 @@ def _db_artist_response(ar: Artist) -> dict:
     )
     return {
         "artist": {
+            "id": str(ar.id),
             "deezer_id": str(ar.deezer_id or ""),
             "name": ar.name,
             # Deezer's picture is fetched (and kept) by the cover route; an
@@ -1748,6 +1766,7 @@ def _podcast_card(p):
     if not p or not p.get("id"):
         return None
     return {
+        "id": _entity_uuid("show", p.get("id")),
         "deezer_id": str(p.get("id")),
         "title": p.get("title", "") or "",
         "description": p.get("description", "") or "",
@@ -2127,6 +2146,7 @@ def discography(artist_id):
     for tab, releases in (tabs or {}).items():
         items = [
             {
+                "id": _entity_uuid("album", r.get("id")),
                 "deezer_id": str(r.get("id")),
                 "title": r.get("title", ""),
                 "cover": _image("cover", r.get("md5_image")),
@@ -2609,9 +2629,15 @@ def podcasts():
 @webapi.route("/podcast/<pid>")
 @login_required
 def podcast(pid):
+    # The channel's UUID, or the Deezer id of the show it was subscribed from
+    # (what a search card carries), like the album / artist / playlist pages.
     try:
         c = PodcastChannel[uuid.UUID(str(pid))]
-    except (ValueError, PodcastChannel.DoesNotExist):
+    except ValueError:
+        c = PodcastChannel.get_or_none(PodcastChannel.deezer_id == str(pid)) if _valid_id(pid) else None
+        if c is None:
+            return jsonify({"error": "not found"}), 404
+    except PodcastChannel.DoesNotExist:
         return jsonify({"error": "not found"}), 404
     return jsonify(_channel(c, with_episodes=True))
 
