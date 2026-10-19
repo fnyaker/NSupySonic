@@ -327,6 +327,59 @@ Chaque lot qui touche au schéma ou à la configuration le teste :
    Bandcamp ou un autre serveur Subsonic suivent le même gabarit ; **le choix du suivant est à la
    personne**, pas à ce plan.
 
+## 11. Une vraie hiérarchie de genres
+
+Demande du propriétaire (19/10/2026) : les genres ne forment pas une liste de tags à plat, mais un
+**arbre** : le frenchcore est un sous-genre du hardcore, qui est plus ou moins un sous-genre de la
+techno.
+
+**Ce qui existe déjà et que le lot réutilise, sans le dupliquer.** `GenreTag` (nom, couleur,
+archétype : le vocabulaire du studio, ~54 familles du classifieur plus ~170 sous-genres
+`EXTRA_GENRES`, `analysis.known_genres()`), `TrackTag` (un tag par titre), la tête entraînée dans le
+navigateur (`metrics.families`), `genre.decide` (quand la tête hésite entre frères, elle sert
+**leur famille**), `style.js#genreOf` (nom → famille, bande de tempo, groove) et `skins.js`
+(`ALIASES`). Aujourd'hui la « famille » est donc un seul niveau figé dans du code ; la hiérarchie
+la généralise : **la famille devient l'ancêtre le plus proche qui est une famille du moteur**.
+
+- **Le modèle** : `genre_parent` (`child` FK `GenreTag`, `parent` FK `GenreTag`, `weight` FLOAT 0 à 1,
+  PK `(child, parent)`). Un genre peut avoir **plusieurs parents** (le hardtekk est sous le hardcore
+  et sous le tekno) et un parent peut être « plus ou moins » (`weight` : 1 = sous-genre franc,
+  0,5 = lié) ; les cycles sont refusés à l'écriture. Pas de colonne `parent_id` : un arbre strict
+  ne dit pas « plus ou moins ». `genre_alias` (`name` replié, `genre` FK) rattache les noms venus
+  d'ailleurs (genre Deezer, étiquettes d'un fournisseur, MusicBrainz) à un nœud, pour que ces
+  données non fiables tombent dans l'arbre au lieu de créer un tag de plus.
+- **L'arbre par défaut** : un fichier de données (`supysonic/deezer/genre_tree.py`), écrit à la main
+  à partir de ce que `FAMILIES`, `EXTRA_GENRES` et les listes de références disent déjà, semé
+  **additivement** et par version (comme le vocabulaire : un nœud que la personne a déplacé ou
+  supprimé n'est pas remis ; « Rétablir l'arbre par défaut » existe). Un test exige que chaque
+  libellé de `known_genres()` ait au moins un parent ou soit une racine déclarée, et que le moteur
+  d'animation retrouve une famille pour chacun.
+- **Une seule lecture, en mémoire** : l'arbre fait quelques centaines de nœuds. `supysonic/genretree.py`
+  le charge **une fois** (invalidé par un numéro de version dans `Meta`) et répond sans SQL :
+  `ancestors(g)`, `descendants(g)` (le filtre « Techno » inclut le frenchcore), `family_of(g)`,
+  `lca(a, b)`, `distance(a, b)` (plus court chemin pondéré, 0 à 1). Les listes et la recherche ne
+  font aucune requête de plus par ligne ; les tests comptent les instructions.
+- **Ce qu'il change, et rien d'autre.** (1) *La décision* : quand la tête hésite, elle sert le
+  **plus petit ancêtre commun** des genres en lice au lieu d'une famille codée (`genre.decide`,
+  `styleLevel: "family"` devient `"ancestor"`) ; un parent est prédit **sans aucun tag direct**,
+  par la somme des probabilités de ses descendants. (2) *Le classement des propositions* du studio
+  (`rank_scores`) : les frères et le parent du dernier genre choisi montent. (3) *Le moteur
+  d'animation* : un genre sans peau propre prend celle de son plus proche ancêtre qui en a une, à la
+  place de la devinette mot à mot (`ALIASES`) ; l'arbre est servi par `GET /api/genre/tree` (version
+  dans l'en-tête), et le tableau statique reste le repli hors ligne. (4) *La découverte* (§12) :
+  les crans « Exploration » et « Aventure » mesurent l'éloignement par `distance` dans cet arbre.
+  (5) *Les doublons et l'import* : un genre d'un fournisseur passe par `genre_alias`.
+- **Modifiable depuis la web UI** (admin) : l'onglet Genres du studio gagne une vue en arbre :
+  créer, renommer, supprimer (les enfants remontent), glisser un genre sous un autre, ajouter un
+  second parent avec son poids, annuler le dernier changement. Chaque écriture augmente la version
+  de l'arbre, redécide les verdicts sur un worker (`start_relabel`) et prévient les appareils
+  (`genre._tell_devices`), exactement comme un tag ou une tête. Un tag existant n'est jamais perdu :
+  les tags que la personne a créés sans place deviennent des racines, rangeables ensuite.
+- **Mise à jour d'un serveur existant** : migration additive (nouvelle table, rien n'est modifié) ;
+  avec l'arbre par défaut et aucune modification, **chaque verdict servi est identique à celui
+  d'avant** (le test le compare sur la bibliothèque synthétique) ; une tête déjà enregistrée garde
+  ses `families` jusqu'à la prochaine formation.
+
 ## 12. Abonnements aux artistes, nouveautés, artistes proches
 
 Demande du propriétaire (19/10/2026) : importer depuis chaque fournisseur **les abonnements aux
@@ -362,11 +415,11 @@ nommés et une valeur continue 0 à 1, mémorisés par personne) :
 |---|---|---|
 | 1 Proche | 0 à 0,25 | titres voisins par embeddings (`track_neighbor`) des écoutes et favoris récents ; autres titres des mêmes artistes |
 | 2 Voisin | 0,25 à 0,5 | artistes proches (`artist_link`) des artistes écoutés ou suivis, leurs titres les plus écoutés / leurs nouveautés |
-| 3 Exploration | 0,5 à 0,75 | artistes à deux pas dans le graphe, familles de genre voisines (`style.js#genreOf`), même plage de tempo |
-| 4 Aventure | 0,75 à 1 | familles de genre éloignées, à l'écart des habitudes, une part de hasard graduée |
+| 3 Exploration | 0,5 à 0,75 | artistes à deux pas dans le graphe, genres voisins dans l'arbre (§11), même plage de tempo |
+| 4 Aventure | 0,75 à 1 | genres éloignés dans l'arbre (§11), à l'écart des habitudes, une part de hasard graduée |
 
 Le curseur règle ensemble le nombre de pas dans le graphe d'artistes, la bande de distance entre
-embeddings, les familles de genre admises, et la part de connu (de 80 % à 20 %). Exclusions
+embeddings, la distance de genre admise (arbre, §11), et la part de connu (de 80 % à 20 %). Exclusions
 réglables : déjà écouté, déjà possédé, artistes ignorés (`artist_mute`). Tout est calculé sur des
 **données locales précalculées** (`track_neighbor`, `artist_link`, historique) : une requête indexée par
 rangée ; les candidats non archivés se jouent par `sources.pick` et ne sont **jamais téléchargés pour
