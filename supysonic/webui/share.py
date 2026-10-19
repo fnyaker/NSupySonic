@@ -137,6 +137,9 @@ def _media_file(mid):
     """
     from ..deezer import archive
 
+    from .refs import canonical
+
+    mid = canonical(mid)
     track, episode = _resolve_media(mid)
 
     if episode is not None:

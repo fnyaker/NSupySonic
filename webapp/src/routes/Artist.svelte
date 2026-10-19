@@ -17,6 +17,10 @@
   let id = null;
   let data = null;
   let disco = null;
+  // Albums Deezer has and the library does not: null = loading, [] = none (or
+  // Deezer unreachable — the library page above is complete on its own).
+  let onDeezer = null;
+  let deezerDown = false;
   let fav = false;
   let loading = true;
   let loadError = null; // why there is nothing to show (components/LoadFailed)
@@ -64,6 +68,8 @@
     loadError = null;
     data = null;
     disco = null;
+    onDeezer = null;
+    deezerDown = false;
     fav = false;
     tab = restoredTab || "overview";
     restoredTab = null;
@@ -77,6 +83,8 @@
         fav = !!r.artist?.is_favorite; // correct when the source reports it
         loading = false;
       });
+      // After the page is on screen: what only Deezer has.
+      if (mine === loadSeq && data?.library) loadOnDeezer(artistId, mine);
     } catch (e) {
       if (mine === loadSeq && !data) {
         data = null;
@@ -91,6 +99,19 @@
       })
       .catch(() => {
         if (mine === loadSeq) disco = null;
+      });
+  }
+
+  function loadOnDeezer(artistId, mine) {
+    api
+      .artistOnDeezer(artistId)
+      .then((r) => {
+        if (mine === loadSeq) onDeezer = r.albums || [];
+      })
+      .catch(() => {
+        if (mine !== loadSeq) return;
+        onDeezer = [];
+        deezerDown = true;
       });
   }
 
@@ -189,7 +210,17 @@
 
     {#if albums.length}
       <h2>Albums</h2>
-      <div class="grid">{#each albums as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+      <div class="grid">{#each albums as a (a.id || a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+    {/if}
+
+    {#if data.library && onDeezer === null}
+      <h2>Disponible sur Deezer</h2>
+      <Skeleton kind="shelf" count={5} />
+    {:else if onDeezer?.length}
+      <h2>Disponible sur Deezer</h2>
+      <div class="grid">{#each onDeezer as a (a.deezer_id)}<Card item={a} kind="album" />{/each}</div>
+    {:else if deezerDown}
+      <p class="muted down">Deezer est injoignable : le reste du catalogue n'est pas affiché.</p>
     {/if}
 
     {#if singles.length}
@@ -269,6 +300,10 @@
   }
   .icon-btn.on {
     color: var(--accent-2);
+  }
+  .down {
+    margin: 18px 0 0;
+    font-size: 0.9rem;
   }
   .bio {
     line-height: 1.6;

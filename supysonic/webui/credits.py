@@ -213,6 +213,9 @@ def _live(tid: str) -> dict | None:
 @login_required
 def track_credits(track_id):
     """Everyone credited on a track, and its release details."""
+    from .refs import canonical
+
+    track_id = canonical(track_id)
     numeric = _valid_id(track_id)
     track = _resolve_local(track_id)
     if track is not None and not _may_access_track(track):
