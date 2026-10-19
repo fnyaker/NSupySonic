@@ -1,0 +1,485 @@
+# This file is part of Supysonic.
+# Supysonic is a Python implementation of the Subsonic server API.
+#
+# Distributed under terms of the GNU AGPLv3 license.
+
+"""Deezer behind the provider interface.
+
+The adapter WRAPS ``DeezerProvider`` (login, stream decryption, the gateway and
+the public API stay where they are, with their resilience rules) and only
+translates: Deezer's dicts into the normalised hits, its exceptions into the
+provider errors. ``app.deezer`` is untouched and is what the adapter reads on
+every call, so a new ARL saved by the admin (``setup_deezer`` swaps the object)
+reaches it with no re-registration.
+
+The rule of the translation is CLAUDE.md's: a failure to reach Deezer is never a
+verdict. ``Gone`` is raised only from ``TrackUnavailable`` / ``ShowUnavailable``,
+which Deezer raises only when it ANSWERED; transport trouble (walking the cause
+chain, as ``is_transport_failure`` does) is ``ProviderUnavailable``, a dead
+ARL is ``ProviderAuth`` and anything else Deezer said is a plain
+``ProviderError``, which condemns nothing.
+"""
+
+import contextlib
+import re
+from pathlib import Path
+
+from deezerpy.errors import DeezerError as DeezerPyError
+from deezerpy.errors import is_transport_failure
+
+from ..deezer import library
+from ..deezer.provider import (
+    COVER_URL,
+    DeezerError,
+    DeezerProvider,
+    ShowUnavailable,
+    TrackUnavailable,
+)
+from . import base, http, quality
+from .errors import Gone, ProviderAuth, ProviderError, ProviderUnavailable
+
+ID = "deezer"
+HOSTS = DeezerProvider._CORE_HOSTS + ("e-cdns-images.dzcdn.net",)
+
+# Deezer's ids are numbers (a playlist's too); a ref comes from a client or a
+# link, so it is checked before it reaches a request path.
+_NUM = re.compile(r"\A\d{1,20}\Z")
+_LINK = re.compile(
+    r"\A/(?:[a-z]{2}(?:-[a-z]{2})?/)?(track|album|artist|playlist|show)/(\d{1,20})/?\Z", re.I
+)
+_LINK_HOSTS = {"deezer.com", "www.deezer.com"}
+
+# What a stream of each format is, for the quality scale.
+_FORMATS = (
+    # (gateway FILESIZE key, Deezer format name, offer)
+    ("FILESIZE_FLAC", "FLAC", {"fmt": "flac", "bitrate": 1000, "lossless": True,
+                                "bit_depth": 16, "sample_rate": 44100}),
+    ("FILESIZE_MP3_320", "MP3_320", {"fmt": "mp3", "bitrate": 320, "lossless": False}),
+    ("FILESIZE_MP3_128", "MP3_128", {"fmt": "mp3", "bitrate": 128, "lossless": False}),
+)
+_QUALITY_OF_FMT = {"flac": "FLAC", "mp3": "MP3_320"}
+
+
+def _ref(value):
+    value = str(value if value is not None else "").strip()
+    if not _NUM.match(value):
+        raise ProviderError(f"not a Deezer id: {value[:40]!r}", provider=ID)
+    return value
+
+
+def _named(ref, name):
+    return {"ref": str(ref) if ref not in (None, "") else "", "name": str(name or "")}
+
+
+def cover_url(md5, size=1000):
+    return COVER_URL.format(md5=md5, w=size) if md5 else None
+
+
+def hit_from_gw(t: dict) -> dict:
+    """A gateway track (song.getData, a playlist or album list) as a TrackHit."""
+    norm = library.normalize_track(t)
+    artists = [_named(c[0], c[1]) for c in norm["credits"]] or [
+        _named(norm["art_id"] if t.get("ART_ID") else "", t.get("ART_NAME"))
+    ]
+    hit = {
+        "ref": norm["sng_id"],
+        "title": norm["title"],
+        "artists": artists,
+        "album": _named(norm["alb_id"] if t.get("ALB_ID") else "", t.get("ALB_TITLE")),
+        "duration": norm["duration"],
+        "number": norm["number"],
+        "disc": norm["disc"],
+        "explicit": str(t.get("EXPLICIT_LYRICS") or "0") == "1",
+    }
+    if t.get("ISRC"):
+        hit["isrc"] = str(t["ISRC"])
+    if norm["release_date"]:
+        hit["release_date"] = norm["release_date"]
+    url = cover_url(norm["cover_md5"])
+    if url:
+        hit["cover_url"] = url
+    return hit
+
+
+def hit_from_api(t: dict) -> dict:
+    """A public-API track (search, charts, top tracks) as a TrackHit."""
+    artist = t.get("artist") or {}
+    album = t.get("album") or {}
+    hit = {
+        "ref": str(t.get("id")),
+        "title": str(t.get("title") or ""),
+        "artists": [_named(artist.get("id"), artist.get("name"))],
+        "album": _named(album.get("id"), album.get("title")),
+        "duration": int(t.get("duration") or 0),
+        "explicit": bool(t.get("explicit_lyrics")),
+    }
+    if t.get("isrc"):
+        hit["isrc"] = str(t["isrc"])
+    url = album.get("cover_xl") or album.get("cover_big") or album.get("cover")
+    if url:
+        hit["cover_url"] = url
+    return hit
+
+
+def _album_from_api(a: dict) -> dict:
+    artist = a.get("artist") or {}
+    return {
+        "ref": str(a.get("id")),
+        "title": str(a.get("title") or ""),
+        "artists": [_named(artist.get("id"), artist.get("name"))],
+        "cover_url": a.get("cover_xl") or a.get("cover_big") or a.get("cover"),
+        "tracks_count": int(a.get("nb_tracks") or 0),
+    }
+
+
+def _artist_from_api(a: dict) -> dict:
+    return {
+        "ref": str(a.get("id")),
+        "name": str(a.get("name") or ""),
+        "cover_url": a.get("picture_xl") or a.get("picture_big") or a.get("picture"),
+        "fans": int(a.get("nb_fan") or 0),
+    }
+
+
+def _playlist_from_api(p: dict) -> dict:
+    return {
+        "ref": str(p.get("id")),
+        "title": str(p.get("title") or ""),
+        "cover_url": p.get("picture_xl") or p.get("picture_big") or p.get("picture"),
+        "tracks_count": int(p.get("nb_tracks") or 0),
+        "owner": str((p.get("user") or {}).get("name") or ""),
+    }
+
+
+class DeezerAdapter(base.Provider):
+    id = ID
+    name = "Deezer"
+    role = base.MAIN
+    capabilities = frozenset(
+        {base.SEARCH, base.AUDIO, base.CATALOG, base.ACCOUNT, base.LINKS, base.PODCASTS}
+    )
+    requires_credentials = True
+    # Deezer's own facts are exact (dates, ISRC, ids); its genre and BPM are not
+    # believed over what is measured (plan §6).
+    trust = {"date": 3, "isrc": 3, "artist": 3, "bpm": 1}
+
+    def __init__(self, get_provider):
+        """``get_provider()`` returns the live ``DeezerProvider`` or None (the
+        proxy is off or has no ARL). Called on every use, never cached."""
+        self._get = get_provider
+        http.register_hosts(ID, HOSTS)
+
+    # -- plumbing ---------------------------------------------------------------
+
+    def _p(self) -> DeezerProvider:
+        provider = self._get()
+        if provider is None:
+            raise ProviderUnavailable("Deezer is not configured", provider=ID)
+        return provider
+
+    @contextlib.contextmanager
+    def _translated(self, ref=None):
+        """Run a block of Deezer calls; whatever it raises becomes a provider
+        error that says exactly as much as Deezer did."""
+        try:
+            yield
+        except ProviderError:
+            raise
+        except Exception as exc:
+            if is_transport_failure(exc):
+                raise ProviderUnavailable(
+                    str(exc), provider=ID, retry_in=http.retry_in(ID) or None
+                ) from exc
+            if isinstance(exc, (TrackUnavailable, ShowUnavailable)):
+                raise Gone(ref or "", provider=ID) from exc
+            if isinstance(exc, (DeezerError, DeezerPyError)):
+                provider = self._get()
+                login = getattr(provider, "_login_error", None)
+                if login and login[0] == "arl":
+                    raise ProviderAuth(login[1], provider=ID) from exc
+                raise ProviderError(str(exc), provider=ID) from exc
+            raise
+
+    # -- common -----------------------------------------------------------------
+
+    def configured(self):
+        return self._get() is not None
+
+    def available(self):
+        provider = self._get()
+        return provider is not None and provider.available()
+
+    def health(self, force=False):
+        provider = self._get()
+        if provider is None:
+            return base.health(base.HEALTH_AUTH, detail="no ARL")
+        result = provider.check_login(force=force)
+        if result.get("ok"):
+            return base.health()
+        if result.get("reason") == "arl":
+            return base.health(base.HEALTH_AUTH, detail=result.get("detail"))
+        outage = provider.outage() or {}
+        return base.health(
+            base.HEALTH_NETWORK, retry_in=outage.get("retry_in"), detail=result.get("detail")
+        )
+
+    def config_schema(self):
+        return [
+            {
+                "key": "arl",
+                "type": "arl-cookie",
+                "masked": True,
+                "help": "Le cookie arl de votre compte Deezer (jamais renvoyé).",
+            }
+        ]
+
+    # -- SEARCH -----------------------------------------------------------------
+
+    def search(self, query, kinds=("track",), limit=20):
+        out = {"tracks": [], "albums": [], "artists": [], "playlists": []}
+        with self._translated():
+            api = self._p().dz.api
+            if "track" in kinds:
+                rows = (api.search_track(query, limit=limit) or {}).get("data") or []
+                out["tracks"] = [hit_from_api(t) for t in rows if t.get("id")]
+            if "album" in kinds:
+                rows = (api.search_album(query, limit=limit) or {}).get("data") or []
+                out["albums"] = [_album_from_api(a) for a in rows if a.get("id")]
+            if "artist" in kinds:
+                rows = (api.search_artist(query, limit=limit) or {}).get("data") or []
+                out["artists"] = [_artist_from_api(a) for a in rows if a.get("id")]
+            if "playlist" in kinds:
+                rows = (api.search_playlist(query, limit=limit) or {}).get("data") or []
+                out["playlists"] = [_playlist_from_api(p) for p in rows if p.get("id")]
+        return out
+
+    # -- AUDIO ------------------------------------------------------------------
+
+    def offers(self, ref):
+        ref = _ref(ref)
+        with self._translated(ref):
+            provider = self._p()
+            info = provider.get_track_info(ref)
+            lossless = provider.can_lossless
+        offers = []
+        for key, _fmt, template in _FORMATS:
+            if not template["lossless"] or lossless:
+                try:
+                    present = int(info.get(key) or 0) > 0
+                except (TypeError, ValueError):
+                    present = False
+                if present:
+                    offers.append(self._offer(template))
+        if not offers:
+            # Deezer lists no file size for this track: what the account may
+            # stream is the honest answer (the stream request has the last word).
+            nominal = _FORMATS if lossless else _FORMATS[1:]
+            offers = [self._offer(t) for _k, _f, t in nominal]
+        return offers
+
+    @staticmethod
+    def _offer(template):
+        offer = dict(template)
+        offer["quality"] = quality.from_offer(offer).cls
+        return offer
+
+    def _resolve(self, ref, offer):
+        wanted = _QUALITY_OF_FMT.get(str((offer or {}).get("fmt") or "").lower(), "FLAC")
+        if wanted == "MP3_320" and int((offer or {}).get("bitrate") or 320) <= 128:
+            wanted = "MP3_128"
+        url, _fmt, _info, used = self._p().resolve(ref, wanted)
+        return url, used
+
+    def fetch(self, ref, offer, dest):
+        ref = _ref(ref)
+        with self._translated(ref):
+            provider = self._p()
+            url, used = self._resolve(ref, offer)
+            provider.download_to(url, used, Path(dest))
+
+    def open_stream(self, ref, offer):
+        ref = _ref(ref)
+        with self._translated(ref):
+            provider = self._p()
+            url, used = self._resolve(ref, offer)
+            first = provider.iter_decrypted(url, used)
+            head = next(first, b"")
+        return self._chain(head, first, ref)
+
+    def _chain(self, head, rest, ref):
+        if head:
+            yield head
+        with self._translated(ref):
+            yield from rest
+
+    def fetch_cover(self, ref, size=1000):
+        ref = _ref(ref)
+        with self._translated(ref):
+            provider = self._p()
+            md5 = provider.get_track_info(ref).get("ALB_PICTURE")
+            data = provider.fetch_cover(md5, size) if md5 else None
+        if not data:
+            raise ProviderError(f"no cover for {ref}", provider=ID)
+        return data
+
+    # -- CATALOG ----------------------------------------------------------------
+
+    def get_track(self, ref):
+        ref = _ref(ref)
+        with self._translated(ref):
+            return hit_from_gw(self._p().get_track_info(ref))
+
+    def get_album(self, ref):
+        ref = _ref(ref)
+        with self._translated(ref):
+            provider = self._p()
+            data = (provider.get_album_page(ref) or {}).get("DATA") or {}
+            tracks = provider.get_album_tracks(ref)  # the FULL list, never the page's
+        return {
+            "ref": ref,
+            "title": str(data.get("ALB_TITLE") or ""),
+            "artists": [_named(data.get("ART_ID"), data.get("ART_NAME"))],
+            "cover_url": cover_url(data.get("ALB_PICTURE")),
+            "release_date": library.release_date_of(data),
+            "tracks": [hit_from_gw(t) for t in tracks],
+        }
+
+    def get_artist(self, ref):
+        ref = _ref(ref)
+        with self._translated(ref):
+            data = self._p().get_artist(ref) or {}
+        return {
+            "ref": ref,
+            "name": str(data.get("ART_NAME") or ""),
+            "cover_url": (
+                f"https://e-cdns-images.dzcdn.net/images/artist/{data['ART_PICTURE']}/1000x1000-000000-80-0-0.jpg"
+                if data.get("ART_PICTURE")
+                else None
+            ),
+            "fans": int(data.get("NB_FAN") or 0),
+        }
+
+    def get_artist_albums(self, ref):
+        ref = _ref(ref)
+        with self._translated(ref):
+            tabs = self._p().get_artist_discography(ref) or {}
+        out = []
+        for a in tabs.get("all") or []:
+            if not a.get("ALB_ID"):
+                continue
+            out.append(
+                {
+                    "ref": str(a["ALB_ID"]),
+                    "title": str(a.get("ALB_TITLE") or ""),
+                    "artists": [_named(a.get("ART_ID") or ref, a.get("ART_NAME"))],
+                    "cover_url": cover_url(a.get("ALB_PICTURE")),
+                    "release_date": library.release_date_of(a),
+                }
+            )
+        return out
+
+    def get_playlist(self, ref):
+        ref = _ref(ref)
+        with self._translated(ref):
+            provider = self._p()
+            data = (provider.get_playlist_page(ref) or {}).get("DATA") or {}
+            tracks = provider.get_playlist_tracks(ref)  # the FULL list
+        return {
+            "ref": ref,
+            "title": str(data.get("TITLE") or ""),
+            "description": str(data.get("DESCRIPTION") or ""),
+            "owner": str(data.get("PARENT_USERNAME") or ""),
+            "tracks": [hit_from_gw(t) for t in tracks],
+        }
+
+    # -- ACCOUNT (read only) ----------------------------------------------------
+
+    def account(self):
+        provider = self._get()
+        if provider is None:
+            return {"name": None, "status": base.HEALTH_AUTH}
+        result = provider.check_login()
+        status = (
+            base.HEALTH_OK
+            if result.get("ok")
+            else base.HEALTH_AUTH if result.get("reason") == "arl" else base.HEALTH_NETWORK
+        )
+        return {"name": result.get("account"), "status": status}
+
+    def import_account(self):
+        """The account's playlists then its favourites, read and never written:
+        the very calls of the one-off import (the guard test lists them)."""
+        with self._translated():
+            provider = self._p()
+            gw = provider.dz.gw
+            playlists = gw.get_user_playlists(provider.user_id, limit=1000)
+        for pl in playlists:
+            with self._translated(str(pl.get("id"))):
+                raw = gw.get_playlist_tracks(pl["id"])
+            yield {
+                "kind": "playlist",
+                "ref": str(pl["id"]),
+                "title": str(pl.get("title") or "Playlist"),
+                "description": str(pl.get("description") or ""),
+                "tracks": [hit_from_gw(t) for t in raw],
+            }
+        with self._translated():
+            raw_ids = gw.get_user_favorite_ids(limit=100000)
+            sng_ids = [x["SNG_ID"] for x in raw_ids.get("data", [])]
+            tracks = []
+            for i in range(0, len(sng_ids), 200):
+                tracks.extend(gw.get_tracks(sng_ids[i : i + 200]))
+        yield {"kind": "favorites", "tracks": [hit_from_gw(t) for t in tracks]}
+
+    # -- LINKS ------------------------------------------------------------------
+
+    def parse_link(self, url):
+        from urllib.parse import urlsplit
+
+        try:
+            parts = urlsplit(str(url or "").strip())
+        except ValueError:
+            return None
+        if parts.scheme.lower() not in ("http", "https") or (parts.hostname or "").lower() not in _LINK_HOSTS:
+            return None
+        m = _LINK.match(parts.path or "/")
+        if not m:
+            return None
+        return {"provider": ID, "kind": m.group(1).lower(), "ref": m.group(2)}
+
+    # -- PODCASTS ---------------------------------------------------------------
+
+    def search_shows(self, query, limit=20):
+        with self._translated():
+            rows = self._p().search_podcasts(query, limit=limit)
+        return [
+            {
+                "ref": str(r.get("id")),
+                "title": str(r.get("title") or ""),
+                "cover_url": r.get("picture_xl") or r.get("picture_big") or r.get("picture"),
+            }
+            for r in rows
+            if r.get("id")
+        ]
+
+    def get_show(self, ref):
+        ref = _ref(ref)
+        with self._translated(ref):
+            page = self._p().get_show_page(ref)
+        data = page.get("DATA") or {}
+        return {
+            "ref": ref,
+            "title": str(data.get("SHOW_NAME") or ""),
+            "description": str(data.get("SHOW_DESCRIPTION") or ""),
+        }
+
+    def get_episodes(self, ref):
+        ref = _ref(ref)
+        with self._translated(ref):
+            rows = self._p().get_show_episodes(ref)
+        return [
+            {"ref": str(e.get("EPISODE_ID")), "title": str(e.get("EPISODE_TITLE") or ""),
+             "duration": int(e.get("DURATION") or 0)}
+            for e in rows or []
+            if e.get("EPISODE_ID")
+        ]

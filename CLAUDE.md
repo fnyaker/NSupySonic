@@ -685,6 +685,8 @@ plays it unchanged). Sharing goes through `components/ShareSheet.svelte` (global
 (peaks from `/api/share/waveform`), cut server-side by `/api/share/clip` and handed to the Web Share
 API (download fallback). Podcast markers live in `lib/markers.js`.
 
+**A show opens by its UUID or by Deezer's id** (`/api/podcast/<x>`, lot D): a catalogue card has no row, and a UUID cannot be turned back into the provider's id, so the page takes both forms; anything else is a 404 (`tests/test_multi_d.py`).
+
 **Export to another service** (`supysonic/services/`, `supysonic/webui/services.py`, the *Service* and *Liste*
 tabs of `components/ExportSheet.svelte`, Réglages → Compte → *Services de streaming*; survey in
 `docs/playlist-export.md`). Spotify (the operator's own app, PKCE, `POST /me/playlists` + `/items` — the
@@ -2658,6 +2660,28 @@ wires nothing to the hot paths yet:
   (pinned by literals) and `uuid5(NS_PROVIDER, "<p>:<kind>:<ref>")` to anyone else;
   `webui/refs.resolve_ref` prefers what `track_source`/`entity_ref` know, and `resolve_tracks` accepts
   `<provider>:<ref>` beside UUIDs and Deezer ids in at most two statements.
+
+**Providers, lot B: the three built-in adapters** (`providers/{deezer,youtube,local,builtin,http}.py`). They WRAP
+what exists; nothing moved and no route reads them yet (lot E wires `/stream`).
+
+- `DeezerAdapter(get_provider)` calls `app.deezer` through a getter on EVERY use (an admin saving a new ARL swaps the
+  object; nothing is re-registered). Translation rule: transport failure (cause chain, `is_transport_failure`) is
+  `ProviderUnavailable`, a dead ARL `ProviderAuth`, `TrackUnavailable` / `ShowUnavailable` (Deezer ANSWERED) `Gone`, any
+  other Deezer answer a plain `ProviderError` that condemns nothing. Refs are checked numeric before any request.
+  `get_album` / `get_playlist` return the FULL tracklist; `import_account` is a read-only generator (the import's own
+  four calls). `offers` come from the gateway's `FILESIZE_*` and the licence. Reads: `[deezer] arl`, `DEEZER_ARL` and the
+  ARL in `Meta` unchanged.
+- `YoutubeAdapter` (role `fallback`) adds no request: `search` is `youtube.search`, `offers` asks nobody (Opus ~133k),
+  `fetch` / `open_stream` download on a play (`download_audio`), a hold becomes `ProviderHeld`. Only
+  `YoutubeUnavailable` is `Gone`. `LocalProvider` is AUDIO only, ref = the Track's UUID, path read from the database.
+- **`Provider.configured()` is not `available()`**: "has what it needs" versus "reachable now". A provider nobody ever
+  switched is on iff `configured()`, so an outage never reads as a provider that was never set up. **A provider's own
+  switch** (`switch()` / `toggle(on)`, YouTube's `yt.enabled`) commands `enabled()` and `set_enabled()` writes it, so the
+  Réglages switch and the registry cannot disagree.
+- `providers/http.session(provider_id, hosts)` is the shared HTTP (timeout + per-host breaker); `reachable` / `retry_in`
+  read the breaker with no request. The built-ins are registered outside tests only (`web.py`); tests call
+  `register_builtin(registry, getter)`. `tests/test_detach_guard.py` has a list of allowed calls per provider and
+  fails if the interface grows a write verb.
 
 ## Database / schema
 
