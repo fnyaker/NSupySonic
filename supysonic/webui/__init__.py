@@ -2649,7 +2649,17 @@ def podcasts():
 def podcast(pid):
     try:
         c = PodcastChannel[uuid.UUID(str(pid))]
-    except (ValueError, PodcastChannel.DoesNotExist):
+    except ValueError:
+        # A catalogue card names its show by Deezer's id; a UUID cannot be
+        # turned back into one, so the page opens by either form.
+        c = (
+            PodcastChannel.get_or_none(PodcastChannel.deezer_id == str(pid))
+            if _valid_id(str(pid))
+            else None
+        )
+        if c is None:
+            return jsonify({"error": "not found"}), 404
+    except PodcastChannel.DoesNotExist:
         return jsonify({"error": "not found"}), 404
     return jsonify(_channel(c, with_episodes=True))
 

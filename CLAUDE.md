@@ -685,6 +685,8 @@ plays it unchanged). Sharing goes through `components/ShareSheet.svelte` (global
 (peaks from `/api/share/waveform`), cut server-side by `/api/share/clip` and handed to the Web Share
 API (download fallback). Podcast markers live in `lib/markers.js`.
 
+**A show opens by its UUID or by Deezer's id** (`/api/podcast/<x>`, lot D): a catalogue card has no row, and a UUID cannot be turned back into the provider's id, so the page takes both forms; anything else is a 404 (`tests/test_multi_d.py`).
+
 **Export to another service** (`supysonic/services/`, `supysonic/webui/services.py`, the *Service* and *Liste*
 tabs of `components/ExportSheet.svelte`, Réglages → Compte → *Services de streaming*; survey in
 `docs/playlist-export.md`). Spotify (the operator's own app, PKCE, `POST /me/playlists` + `/items` — the
