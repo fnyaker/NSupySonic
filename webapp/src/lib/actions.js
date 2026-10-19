@@ -24,6 +24,7 @@ import {
 import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
 import { addMarkerAt } from "./markers.js";
 import { credits } from "./format.js";
+import { entityRef, trackEntityRef } from "./entity.js";
 import { reconcileList } from "./reconcile.js";
 import { cacheAge } from "./apicache.js";
 import { online } from "./net.js";
@@ -474,7 +475,7 @@ export function entityMeta(kind, item) {
 // Context menu for an album/artist/playlist/mix card.
 export function buildEntityMenu(kind, item, nav) {
   const route = kind === "mix" ? "/mix/" : "/" + kind + "/";
-  const routeId = item.id || item.deezer_id;
+  const routeId = entityRef(item);
   const items = [
     { label: "Lire", icon: "play", action: () => playEntity(kind, routeId) },
     { label: "Ouvrir", icon: "open", action: () => nav(route + routeId) },
@@ -493,13 +494,13 @@ export function buildEntityMenu(kind, item, nav) {
       items.push({
         label: "Ajouter aux favoris",
         icon: "heart",
-        action: () => toggleEntityFavorite(kind, item.deezer_id, true, meta),
+        action: () => toggleEntityFavorite(kind, routeId, true, meta),
       });
-    if (kind === "artist" && item.deezer_id)
+    if (kind === "artist" && routeId)
       items.push({
         label: "Suivre",
         icon: "heart",
-        action: () => toggleEntityFavorite("artist", item.deezer_id, true, meta),
+        action: () => toggleEntityFavorite("artist", routeId, true, meta),
       });
   }
   return items;
@@ -630,12 +631,12 @@ export function buildTrackMenu(track, nav) {
   // One entry per credited artist. A single credit stays a plain item (the
   // common case shouldn't grow a submenu for nothing); a feat. track opens a
   // submenu so the guest is reachable too.
-  const people = credits(track).filter((a) => a.deezer_id);
+  const people = credits(track).filter((a) => entityRef(a));
   if (people.length === 1)
     items.push({
       label: "Aller à l'artiste",
       icon: "user",
-      action: () => nav("/artist/" + people[0].deezer_id),
+      action: () => nav("/artist/" + trackEntityRef(track, "artist", people[0])),
     });
   else if (people.length > 1)
     items.push({
@@ -644,14 +645,14 @@ export function buildTrackMenu(track, nav) {
       sub: people.map((a) => ({
         label: a.name,
         icon: "user",
-        action: () => nav("/artist/" + a.deezer_id),
+        action: () => nav("/artist/" + trackEntityRef(track, "artist", a)),
       })),
     });
-  if (track.album?.deezer_id)
+  if (entityRef(track.album))
     items.push({
       label: "Aller à l'album",
       icon: "disc",
-      action: () => nav("/album/" + track.album.deezer_id),
+      action: () => nav("/album/" + trackEntityRef(track, "album", track.album)),
     });
   return items;
 }

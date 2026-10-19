@@ -1,4 +1,5 @@
 <script>
+  import { entityRef, trackEntityRef } from "../lib/entity.js";
   import { trackKey, trackRef } from "../lib/trackkey.js";
   import { push } from "svelte-spa-router";
   import { slide } from "svelte/transition";
@@ -38,7 +39,7 @@
     </div>
     <div class="meta">
       <div class="info">
-        <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>
+        <button class="t" on:click={() => trackEntityRef($current, "album", $current.album) && go("/album/" + trackEntityRef($current, "album", $current.album))}>
           {$current.title}
         </button>
         <span class="a muted"><ArtistLine track={$current} navigate={go} /></span>

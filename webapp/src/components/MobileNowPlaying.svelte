@@ -1,4 +1,5 @@
 <script>
+  import { entityRef, trackEntityRef } from "../lib/entity.js";
   // Mobile now-playing. The cover carousel is a native CSS scroll-snap strip
   // (smooth, momentum, no transform math): three slots [prev, current, next],
   // current centred, neighbours peeking. When the user settles on a neighbour we
@@ -877,7 +878,7 @@
 
     <div class="info">
       <div class="txt">
-        <button class="t" on:click={() => $current.album && go("/album/" + $current.album.deezer_id)}>{$current.title}</button>
+        <button class="t" on:click={() => trackEntityRef($current, "album", $current.album) && go("/album/" + trackEntityRef($current, "album", $current.album))}>{$current.title}</button>
         <span class="a" class:status={$playbackLabel}>{#if $playbackLabel}{$playbackLabel}{:else}<ArtistLine track={$current} navigate={go} />{/if}</span>
       </div>
       {#if CAN_KEEP}

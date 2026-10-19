@@ -78,16 +78,16 @@ function slimTrack(t) {
     local: !!t.local,
     // Keep the ReplayGain so volume normalization still works offline.
     gain: typeof t.gain === "number" ? t.gain : null,
-    artist: t.artist ? { deezer_id: t.artist.deezer_id, name: t.artist.name } : null,
+    artist: t.artist ? { id: t.artist.id, deezer_id: t.artist.deezer_id, name: t.artist.name } : null,
     // The full credit list, so a downloaded track still reads "A feat. B" in
     // airplane mode. Trimmed to the three fields the UI renders; records saved
     // before this existed simply fall back to `artist` (see format.js/credits).
     artists: Array.isArray(t.artists)
-      ? t.artists.map((a) => ({ deezer_id: a.deezer_id, name: a.name, role: a.role }))
+      ? t.artists.map((a) => ({ id: a.id, deezer_id: a.deezer_id, name: a.name, role: a.role }))
       : null,
     display_artist: t.display_artist || null,
     album: t.album
-      ? { deezer_id: t.album.deezer_id, title: t.album.title, cover: t.album.cover }
+      ? { id: t.album.id, deezer_id: t.album.deezer_id, title: t.album.title, cover: t.album.cover }
       : null,
   };
 }

@@ -105,12 +105,36 @@ export async function cacheAge(path) {
 // 4000 nested objects — 17-24 ms of cloning on every visit to the favourites
 // or a big playlist, measured, against a single string copy. Reading pays one
 // JSON.parse instead of the clone it replaces.
+//
+// A page of the library read under a provider id (`/album/2000000`: an older
+// build's link, a catalogue card) is also kept under its row's own id, which is
+// what every link opens it by now — so what was browsed before still opens
+// offline.
+const BY_PROVIDER_ID = /^\/(album|artist)\/[0-9]+$/;
+export function aliasPath(path, body) {
+  const m = BY_PROVIDER_ID.exec(String(path).split("?")[0]);
+  if (!m) return null;
+  let data = body;
+  if (typeof body === "string") {
+    try {
+      data = JSON.parse(body);
+    } catch {
+      return null;
+    }
+  }
+  const id = data && data[m[1]] && data[m[1]].id;
+  return id ? `/${m[1]}/${id}` : null;
+}
+
 export async function cachePut(path, data, text = null) {
   try {
     const db = await openDB();
     const t = db.transaction("responses", "readwrite");
     const body = typeof text === "string" ? text : JSON.stringify(data ?? null);
-    t.objectStore("responses").put({ path, text: body, ts: Date.now() });
+    const ts = Date.now();
+    t.objectStore("responses").put({ path, text: body, ts });
+    const alias = aliasPath(path, body);
+    if (alias) t.objectStore("responses").put({ path: alias, text: body, ts });
     await new Promise((resolve, reject) => {
       t.oncomplete = resolve;
       t.onerror = () => reject(t.error);

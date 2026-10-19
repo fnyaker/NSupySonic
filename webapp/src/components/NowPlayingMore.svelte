@@ -1,4 +1,5 @@
 <script>
+  import { entityRef, trackEntityRef } from "../lib/entity.js";
   // What lives under the full-screen player: the credits of the track, the
   // artist behind it and — last, because it is the long one — tracks that sound
   // like it. On the phone it is what a swipe up from
@@ -23,8 +24,7 @@
   // What the mix and the credits are asked by: the row's id (a request names a
   // track by trackRef). An episode has neither.
   $: id = track && !track.podcast ? trackRef(track) : null;
-  $: artistId =
-    track && track.artist && /^[0-9]+$/.test(String(track.artist.deezer_id)) ? String(track.artist.deezer_id) : null;
+  $: artistId = track && !track.podcast ? trackEntityRef(track, "artist", track.artist) || null : null;
 
   let similar = null; // null = loading
   let similarFailed = false;
@@ -152,7 +152,7 @@
         <div class="crow">
           <dt>{c.label}</dt>
           <dd>
-            {#each c.people as p, k}{#if k}<span class="sep">,</span>{/if}{#if p.deezer_id && /^[0-9]+$/.test(p.deezer_id)}<a href={"#/artist/" + p.deezer_id}>{p.name}</a>{:else}{p.name}{/if}{/each}
+            {#each c.people as p, k}{#if k}<span class="sep">,</span>{/if}{#if entityRef(p)}<a href={"#/artist/" + entityRef(p)}>{p.name}</a>{:else}{p.name}{/if}{/each}
           </dd>
         </div>
       {/each}
@@ -169,7 +169,7 @@
 
   {#if about && about.artist}
     <h3 class="sec">À propos de l'artiste</h3>
-    <button class="artist" on:click={() => push("/artist/" + about.artist.deezer_id)}>
+    <button class="artist" on:click={() => push("/artist/" + entityRef(about.artist))}>
       <span class="pic"><Cover src={about.artist.picture} alt={about.artist.name} kind="artist" round /></span>
       <span class="ameta">
         <span class="aname">{about.artist.name}</span>
@@ -179,11 +179,11 @@
     </button>
     {#if top.length}
       <h4>Titres populaires</h4>
-      <TrackList tracks={top} numbered showAlbum={false} context={{ kind: "artist", id: about.artist.deezer_id }} />
+      <TrackList tracks={top} numbered showAlbum={false} context={{ kind: "artist", id: entityRef(about.artist) }} />
     {/if}
     {#if related.length}
       <h4>Artistes similaires</h4>
-      <div class="shelf">{#each related as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}</div>
+      <div class="shelf">{#each related as a (entityRef(a))}<Card item={a} kind="artist" />{/each}</div>
     {/if}
   {/if}
 

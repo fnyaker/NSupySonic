@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 import unittest
 
+from deezerpy._circuit import breaker
 from supysonic.config import DefaultConfig
 from supysonic.db import (
     Album,
@@ -51,6 +52,10 @@ class Untouched:
 
 class _Case(unittest.TestCase):
     def setUp(self):
+        # The breaker is a process-wide singleton: a cold stream above would
+        # leave a host open for whatever test runs next in this process.
+        breaker.reset()
+        self.addCleanup(breaker.reset)
         self._db = tempfile.mkstemp()
         self._dir = tempfile.mkdtemp()
         self.archive = tempfile.mkdtemp()

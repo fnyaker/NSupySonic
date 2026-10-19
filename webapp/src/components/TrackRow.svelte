@@ -1,4 +1,5 @@
 <script>
+  import { entityRef, trackEntityRef } from "../lib/entity.js";
   import { trackKey, trackRef } from "../lib/trackkey.js";
   import { push } from "svelte-spa-router";
   import {
@@ -234,8 +235,8 @@
     </div>
 
     {#if showAlbum && track.album}
-      {#if track.album.deezer_id}
-        <button class="alb muted" on:click|stopPropagation={() => push("/album/" + track.album.deezer_id)}>
+      {#if entityRef(track.album)}
+        <button class="alb muted" on:click|stopPropagation={() => push("/album/" + trackEntityRef(track, "album", track.album))}>
           {track.album.title}
         </button>
       {:else}
