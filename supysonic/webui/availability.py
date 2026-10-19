@@ -19,7 +19,6 @@ good.
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import uuid as uuidlib
 from datetime import timedelta
@@ -37,6 +36,7 @@ from ..db import (
     now,
 )
 from ..deezer.provider import DeezerError, TrackUnavailable
+from ..matching import PLAUSIBLE, _artist_names, _core_title, _fold, closeness, match_score  # noqa: F401
 from . import (
     _CDN,
     _is_admin,
@@ -246,129 +246,8 @@ def _archived_track_api(t: Track) -> dict:
     }
 
 
-def _fold(text) -> str:
-    """Case, accents and punctuation dropped: "Beyoncé - Halo!" → "beyonce halo"."""
-    import unicodedata
-
-    s = unicodedata.normalize("NFKD", str(text or "")).lower()
-    s = "".join(ch if ch.isalnum() else " " for ch in s if not unicodedata.combining(ch))
-    return " ".join(s.split())
-
-
-_BRACKETS_RE = re.compile(r"[\(\[][^\)\]]*[\)\]]")
-# A word that makes a recording a DIFFERENT recording of the song. A swap to one
-# of those is a decision for somebody who listened, not a one-click default.
-_VERSION_WORDS = frozenset(
-    "remix live edit acoustic instrumental karaoke cover demo rework bootleg "
-    "vip extended club dub sped slowed nightcore reprise orchestral unplugged "
-    "cappella acapella".split()
-)
-# …of which these only name a CUT of the same recording, and a label is not
-# always right about it: YouTube Music calls Stromae's 3:27 album take "Alors on
-# danse (Radio Edit)". Tolerated when the length agrees to SOFT_EDIT_DELTA,
-# which a remix, a live take or an extended mix never does.
-_SOFT_VERSION_WORDS = frozenset("edit extended club dub".split())
-SOFT_EDIT_DELTA = 3
-
-
-def _title_parts(title):
-    """``(core, version words)`` of a title."""
-    raw = str(title or "")
-    extras = " ".join(_BRACKETS_RE.findall(raw))
-    core = _BRACKETS_RE.sub(" ", raw)
-    if " - " in core:
-        core, tail = core.split(" - ", 1)
-        extras += " " + tail
-    words = set(_fold(extras).split())
-    # "Remastered", "Radio", "Album version"… name a pressing, not another
-    # recording: only the words above count.
-    versions = words & _VERSION_WORDS
-    return _fold(core), versions
-
-
-_CREDIT_SPLIT_RE = re.compile(r",|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b", re.IGNORECASE)
-
-
-def _artist_names(c) -> set:
-    """Every credited name of a candidate, one by one, folded."""
-    names = {_fold(a.get("name")) for a in (c.get("artists") or []) if isinstance(a, dict)}
-    if isinstance(c.get("artist"), dict):
-        names.add(_fold(c["artist"].get("name")))
-    for part in _CREDIT_SPLIT_RE.split(str(c.get("display_artist") or "")):
-        names.add(_fold(part))
-    names.discard("")
-    return names
-
-
-def match_score(track, c):
-    """How safely ``c`` stands in for ``track``; None when it must not be offered.
-
-    Required: the same title once versions are set aside, the same main artist,
-    no version marker the dead track did not have, and a length within 15 s
-    when both are known. Then closer is better, and a file on disk (which can
-    never vanish again) wins a tie. A YouTube hit is judged the same way; the
-    route only asks YouTube when nothing from Deezer or the disk is safe.
-    """
-    core, versions = _title_parts(track.title)
-    c_core, c_versions = _title_parts(c.get("title"))
-    d0, d1 = track.duration or 0, c.get("duration") or 0
-    extra = c_versions - versions
-    if extra and extra <= _SOFT_VERSION_WORDS and d0 and d1 and abs(d0 - d1) <= SOFT_EDIT_DELTA:
-        extra = set()
-    if not core or core != c_core or extra:
-        return None
-    artist = _fold(track.artist.name if track.artist else "")
-    if not artist or artist not in _artist_names(c):
-        return None  # another artist's take is a cover: not a one-click swap
-    score = 10.0
-    if versions == c_versions:
-        score += 2
-    if _fold(c.get("title")) == _fold(track.title):
-        score += 1
-    if d0 and d1:
-        delta = abs(d0 - d1)
-        if delta > 15:
-            return None
-        score += 3 - delta / 5
-    if c.get("local"):
-        score += 0.5
-    return score
-
-
 YOUTUBE_SHOWN = 5
 QUERY_MAX = 200
-
-
-def _core_title(title) -> str:
-    """The title without "(Remastered 2011)", "[Live]", " - Radio Edit" (unfolded)."""
-    t = _BRACKETS_RE.sub(" ", str(title or ""))
-    if " - " in t:
-        t = t.split(" - ", 1)[0]
-    return " ".join(t.split())
-
-
-def closeness(track, c) -> float:
-    """0..1: how close a candidate LOOKS to the dead track, to rank a search.
-
-    Softer than ``match_score`` on purpose — it orders what a person will
-    look at, it does not decide anything: the title's resemblance (the most
-    of it), the artist, then the length.
-    """
-    from difflib import SequenceMatcher
-
-    a, b = _fold(_core_title(track.title)), _fold(_core_title(c.get("title")))
-    title = SequenceMatcher(None, a, b).ratio() if a and b else 0.0
-    artist = _fold(track.artist.name if track.artist else "")
-    credited = 1.0 if artist and artist in _artist_names(c) else 0.0
-    d0, d1 = track.duration or 0, c.get("duration") or 0
-    length = max(0.0, 1.0 - abs(d0 - d1) / 60.0) if d0 and d1 else 0.5
-    return 0.6 * title + 0.3 * credited + 0.1 * length
-
-
-# What "Deezer found something" means for asking YouTube on its own: a result
-# that LOOKS like the song (its title and its artist), not any result at all —
-# the artist's other songs come back for any query naming them.
-PLAUSIBLE = 0.8
 
 
 def _youtube_closest(track, query, seen, n=YOUTUBE_SHOWN, ranked=True) -> list:
