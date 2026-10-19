@@ -120,6 +120,8 @@ cd webapp && node test/repeat/run.mjs               # repeat one / all on a 4 s 
 cd webapp && node test/skip/run.mjs                 # a crossfaded skip in a HIDDEN page whose timers are throttled (the phone behind a car
                                                      # radio): the next track must be heard at once, graph and direct paths
 cd webapp && node test/import/run.mjs [--phone]       # a shared playlist link: pasted into the search, read, played, kept
+cd webapp && node test/requests/run.mjs             # what playing costs in requests: a track the server refuses (Deezer off) is
+                                                     # retried at a human pace, not 70 times a second; a missing cover is asked once
 cd webapp && node test/fullscreen/run.mjs           # the desktop full-screen player from 700x900 to 1920x1080: every control on screen,
                                                      # inside its column and the element a click at its centre lands on
                                                      # (the four browser tests above start tools/perf_api.py --serve; PYTHON=<venv python>, SHOTS=<dir> keeps pictures)

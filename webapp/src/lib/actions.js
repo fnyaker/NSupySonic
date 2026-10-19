@@ -207,17 +207,30 @@ export async function warmPlaylists(list) {
 }
 
 let favoritesLoaded = false;
+// Two screens mounting at launch both asked, and since `favoritesLoaded` is only
+// set once the answer is in, both went to the server: the same 40 kB list twice
+// on every launch. A caller arriving while it is on its way shares it.
+let favoritesInFlight = null;
 
-export async function loadFavorites(force = false) {
-  if (favoritesLoaded && !force) return;
-  try {
-    const r = await api.favoriteIds();
-    // The server may still name a track by its Deezer id: a key is a key.
-    favorites.set(new Set((r.ids || []).map(migrateKey)));
-    favoritesLoaded = true;
-  } catch {
-    /* ignore */
-  }
+export function loadFavorites(force = false) {
+  if (favoritesLoaded && !force) return Promise.resolve();
+  // A forced reload follows a change: it must not be handed an answer that
+  // left before it.
+  if (favoritesInFlight && !force) return favoritesInFlight;
+  const mine = (async () => {
+    try {
+      const r = await api.favoriteIds();
+      // The server may still name a track by its Deezer id: a key is a key.
+      favorites.set(new Set((r.ids || []).map(migrateKey)));
+      favoritesLoaded = true;
+    } catch {
+      /* ignore */
+    } finally {
+      if (favoritesInFlight === mine) favoritesInFlight = null;
+    }
+  })();
+  favoritesInFlight = mine;
+  return mine;
 }
 
 export function isFavorite(id) {

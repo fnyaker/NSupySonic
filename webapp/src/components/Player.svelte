@@ -553,7 +553,8 @@
     // spent the next call skips the track (or parks it if offline).
     const onErr = () => {
       cleanup();
-      const delay = Math.min(800 * recoverAttempts, 4000);
+      // Never 0: whatever reset the budget, a retry is never a tight loop.
+      const delay = Math.min(800 * Math.max(1, recoverAttempts), 4000);
       setTimeout(() => {
         if (get(player).playing && recoverId === curId) recoverPlayback();
       }, delay);
@@ -1741,8 +1742,13 @@
     // resumeAudio() is a no-op unless the context is actually suspended.
     resumeAudio();
     // Healthy progress: clear the recovery budget so a later, unrelated stall
-    // gets its full retry allowance again.
-    if (recoverAttempts && audio.currentTime > lastPos) recoverAttempts = 0;
+    // gets its full retry allowance again. PROGRESS, not a position: a reload
+    // that fails at once still fires a timeupdate at 0, and 0 > -1 (lastPos
+    // before the track ever played) cleared the budget on every attempt — with
+    // the retry delay scaled by that budget, a track the server refused (Deezer
+    // switched off or unreachable, never archived) was reloaded every 15 ms,
+    // 70 requests a second, for as long as it stayed on screen.
+    if (recoverAttempts && audio.currentTime > Math.max(lastPos, 0)) recoverAttempts = 0;
     // A live, on-the-fly transcoded stream (e.g. Opus/ogg piped from ffmpeg)
     // has no Content-Length, so audio.duration is Infinity/NaN. Fall back to
     // the duration we already know from the track metadata.

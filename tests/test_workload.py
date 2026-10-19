@@ -268,5 +268,42 @@ class DownloadQueueTestCase(unittest.TestCase):
         self.assertEqual(pf.download_episode_ids(["x"]), 0)
 
 
+class AnalysisThreadNiceTest(unittest.TestCase):
+    """The per-track measurement queued at the end of a FIRST PLAY runs ffmpeg
+    and the beat tracker while the same box transcodes that play: it has to
+    run behind it, like every other background job (it was the one that did
+    not)."""
+
+    def test_the_measurement_thread_is_reniced_before_it_works(self):
+        import threading
+        import uuid as _uuid
+
+        from supysonic.deezer import analysis, workload
+
+        order = []
+        done = threading.Event()
+
+        def fake_analyze(track, provider=None):
+            order.append(("analyze", threading.get_ident()))
+            done.set()
+
+        def fake_renice(delta=10):
+            order.append(("renice", threading.get_ident(), delta))
+
+        track = mock.Mock(id=_uuid.uuid4())
+        with mock.patch.object(analysis, "_under_test", lambda: False), mock.patch.object(
+            analysis, "ffmpeg_available", lambda: True
+        ), mock.patch.object(analysis, "analyze_track", fake_analyze), mock.patch.object(
+            workload, "renice", fake_renice
+        ):
+            analysis.queue_analysis(track)
+            self.assertTrue(done.wait(5))
+        self.assertEqual(order[0][0], "renice")
+        self.assertEqual(order[0][2], 12)
+        # On the worker thread, never the request thread that queued it.
+        self.assertNotEqual(order[0][1], threading.get_ident())
+        self.assertEqual(order[0][1], order[1][1])
+
+
 if __name__ == "__main__":
     unittest.main()

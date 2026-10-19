@@ -30,6 +30,7 @@ import logging
 import os
 import os.path
 import re
+import threading
 import time
 
 import requests
@@ -212,6 +213,53 @@ def _fetch(title, artist, album, duration, session=None, timeout=None):
     return _lrclib_to_lyrics(data), True
 
 
+# -- a first play's answer, kept for its archive ----------------------------
+# A track heard for the first time has no file yet, so its lyrics view asks
+# LRCLIB inside the request (the only moment there is somebody reading). That
+# answer used to be thrown away: the archive finished a minute later read no
+# sidecar, and the next view asked LRCLIB the same question again, in the
+# background. Kept here — only an ANSWER, a miss included, never a transport
+# failure — the archive writes it to disk and nobody asks twice.
+
+COLD_TTL = 6 * 3600
+COLD_MAX = 512
+_cold: dict = {}
+_cold_lock = threading.Lock()
+
+
+def remember_cold(track_id, lyrics: dict | None) -> None:
+    with _cold_lock:
+        if len(_cold) >= COLD_MAX:
+            # Oldest first: a dict keeps insertion order.
+            for key in list(_cold)[: COLD_MAX // 4]:
+                del _cold[key]
+        _cold[str(track_id)] = (lyrics, time.monotonic())
+
+
+def recall_cold(track_id):
+    """``(known, lyrics)``: whether LRCLIB answered about this track lately."""
+    with _cold_lock:
+        hit = _cold.get(str(track_id))
+        if hit is None:
+            return False, None
+        if time.monotonic() - hit[1] > COLD_TTL:
+            del _cold[str(track_id)]
+            return False, None
+        return True, hit[0]
+
+
+def fetch_cold(track, artist, album, timeout=None) -> dict | None:
+    """LRCLIB for a track with no file yet, once per track: a repeated view
+    (another device, a reload, the panel reopened) is answered from memory."""
+    known, lyr = recall_cold(track.id)
+    if known:
+        return lyr
+    found, answered = _fetch(track.title, artist, album, track.duration, None, timeout)
+    if answered:
+        remember_cold(track.id, found)
+    return found
+
+
 # -- sidecar storage --------------------------------------------------------
 
 
@@ -300,12 +348,17 @@ def ensure_lyrics(
     existing = None if overwrite else read_sidecar(track)
     if existing and existing.get("synced"):
         return existing
-    if not allow_lrclib or (existing and lyrics_tried(track)):
-        return existing
-
-    artist = _safe_name(lambda: track.artist.name)
-    album = _safe_name(lambda: track.album.name)
-    found, answered = _fetch(track.title, artist, album, track.duration, session)
+    # The answer a first play's view already got (see remember_cold): written
+    # out now, so the archive never asks LRCLIB the same question again.
+    known, cold = (False, None) if overwrite else recall_cold(track.id)
+    if known:
+        found, answered = cold, True
+    else:
+        if not allow_lrclib or (existing and lyrics_tried(track)):
+            return existing
+        artist = _safe_name(lambda: track.artist.name)
+        album = _safe_name(lambda: track.album.name)
+        found, answered = _fetch(track.title, artist, album, track.duration, session)
     if answered and track.path:
         from . import library
 

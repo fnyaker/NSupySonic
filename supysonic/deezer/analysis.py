@@ -2168,6 +2168,13 @@ def queue_analysis(track: Track, provider=None):
         _inflight.add(key)
 
     def run():
+        # Behind everything else, for the life of this thread — and so for the
+        # ffmpeg it forks, which inherits the thread's niceness. It is queued at
+        # the end of a FIRST PLAY, which is exactly when the same box is
+        # transcoding that play (and the next one's prefetch) for a listener.
+        from .workload import renice
+
+        renice(12)
         try:
             with _slot:
                 analyze_track(track, provider)
