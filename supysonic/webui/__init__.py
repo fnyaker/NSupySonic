@@ -4396,3 +4396,4 @@ from . import remote  # noqa: E402,F401  isort:skip
 from . import youtube  # noqa: E402,F401  isort:skip
 from . import services  # noqa: E402,F401  isort:skip
 from . import playlist_import  # noqa: E402,F401  isort:skip
+from . import androidapk  # noqa: E402,F401  isort:skip

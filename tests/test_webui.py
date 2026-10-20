@@ -2346,6 +2346,95 @@ class WebUITestCase(unittest.TestCase):
         # A non-http(s) link never reaches the client (it lands in an <a>).
         self.assertTrue(body["android"]["url"].startswith("https://"))
 
+    def test_android_apk(self):
+        import zipfile
+        from unittest import mock
+
+        from supysonic.webui import androidapk
+
+        cfg = self.app.config["WEBAPP"]
+        self.assertEqual(self.client.get("/api/android/apk").status_code, 401)
+        self._login()
+        # Nothing declared: no update, and nothing is fetched.
+        with mock.patch.object(androidapk.requests, "get") as get:
+            self.assertEqual(self.client.get("/api/android/apk").status_code, 404)
+            get.assert_not_called()
+        self.assertFalse(self.client.get("/api/version").get_json()["android"]["apk"])
+
+        apk = os.path.join(cfg["cache_dir"], "t.apk")
+        with zipfile.ZipFile(apk, "w") as z:
+            z.writestr("AndroidManifest.xml", b"x")
+        with open(apk, "rb") as fh:
+            body = fh.read()
+
+        class Resp:
+            def __init__(self, url, data, code=200):
+                self.url, self._data, self.status_code = url, data, code
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise androidapk.requests.HTTPError(str(self.status_code))
+
+            def iter_content(self, n):
+                yield self._data
+
+        cfg["android_version"] = "v1.4.0"
+        cfg["android_url"] = None
+        self.assertTrue(self.client.get("/api/version").get_json()["android"]["apk"])
+        asset = "https://objects.githubusercontent.com/x"
+        try:
+            # A GitHub error page is not an APK: refused, nothing kept.
+            with mock.patch.object(androidapk.requests, "get",
+                                   return_value=Resp(asset, b"<html>")) as get:
+                self.assertEqual(self.client.get("/api/android/apk").status_code, 502)
+            self.assertEqual(
+                get.call_args[0][0],
+                "https://github.com/fnyaker/NSupySonic/releases/download/v1.4.0/nsupysonic.apk",
+            )
+            # A redirect off GitHub is refused too.
+            with mock.patch.object(androidapk.requests, "get",
+                                   return_value=Resp("https://evil.example/a", body)):
+                self.assertEqual(self.client.get("/api/android/apk").status_code, 502)
+            # The real thing: fetched once, then served from the cache.
+            with mock.patch.object(androidapk.requests, "get",
+                                   return_value=Resp(asset, body)) as get:
+                for _ in range(2):
+                    rv = self.client.get("/api/android/apk")
+                    self.assertEqual(rv.status_code, 200)
+                    self.assertEqual(rv.data, body)
+                    self.assertEqual(rv.mimetype, androidapk.APK_MIME)
+                    self.assertEqual(rv.headers["X-NS-Version"], "v1.4.0")
+                    rv.close()
+                self.assertEqual(get.call_count, 1)
+            # A fork's release link names its own repository; anything else none.
+            cfg["android_url"] = "https://github.com/someone/fork/releases/latest"
+            self.assertIn("/someone/fork/", androidapk.apk_source(cfg)[1])
+            cfg["android_url"] = "https://example.com/app.apk"
+            self.assertIsNone(androidapk.apk_source(cfg))
+            # A version that is not a tag never reaches a URL.
+            cfg["android_url"] = None
+            cfg["android_version"] = "../../x"
+            self.assertIsNone(androidapk.apk_source(cfg))
+            # An operator's own build is served as is, without asking anyone.
+            cfg["android_version"] = "v1.4.0"
+            cfg["android_apk"] = apk
+            with mock.patch.object(androidapk.requests, "get") as get:
+                rv = self.client.get("/api/android/apk")
+                self.assertEqual(rv.data, body)
+                rv.close()
+                get.assert_not_called()
+        finally:
+            cfg["android_version"] = None
+            cfg["android_url"] = None
+            cfg["android_apk"] = None
+            os.remove(apk)
+
     def test_upload_quota_blocks_guest(self):
         # ~250 byte budget for non-admins.
         self._login()

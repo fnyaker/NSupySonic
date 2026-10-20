@@ -256,13 +256,79 @@ export async function checkAndroidUpdate() {
   const android = (info && info.android) || {};
   if (!android.version) return; // the server doesn't publish one: claim nothing
   if (compareVersions(android.version, installed) <= 0) return;
+  const inPlace = android.apk && bridgeVersion() >= 2;
   notices.push({
     id: "android-update",
     kind: "info",
     message: `Une nouvelle version de l'application Android (${android.version}) est disponible — vous utilisez la ${installed}.`,
-    actionLabel: "Télécharger",
-    action: () => openExternal(android.url),
+    actionLabel: inPlace ? "Installer" : "Télécharger",
+    action: inPlace
+      ? () => installInPlace(android.version, android.url)
+      : () => openExternal(android.url),
   });
+}
+
+// What the APK's bridge can do (MainActivity.BRIDGE_VERSION). An APK from
+// before bridgeVersion existed answers nothing: 1, i.e. only what it had then.
+export function bridgeVersion() {
+  try {
+    const v = window.NSNative && window.NSNative.bridgeVersion;
+    return typeof v === "function" ? Number(v.call(window.NSNative)) || 0 : 1;
+  } catch {
+    return 1;
+  }
+}
+
+const UPDATE_ERRORS = {
+  network: "Le téléchargement de la mise à jour a échoué.",
+  invalid: "Le fichier reçu n'est pas une application valide.",
+  package: "Le fichier reçu n'est pas cette application.",
+  signature:
+    "Cette mise à jour n'est pas signée avec la même clé que l'application installée : Android refusera de l'installer par-dessus. Désinstallez l'application puis installez la nouvelle version.",
+  permission:
+    "L'installation n'a pas été autorisée. Autorisez « Installer des applis inconnues » pour NSupySonic puis réessayez.",
+};
+
+// The notice that tells where the update stands, from one Updater message
+// ({state, reason?, progress?}). Pure, so the test reads it directly.
+export function updateNotice(msg, version, url, retry) {
+  const base = { id: "android-update", kind: "info", dismissible: true };
+  const state = msg && msg.state;
+  if (state === "download") {
+    const pct = Math.round(Math.max(0, Math.min(1, Number(msg.progress) || 0)) * 100);
+    return { ...base, dismissible: false, message: `Téléchargement de la version ${version}… ${pct} %` };
+  }
+  if (state === "install")
+    return { ...base, message: `Version ${version} prête : confirmez l'installation.` };
+  if (state === "permission")
+    return {
+      ...base,
+      message: "Autorisez NSupySonic à installer des applications, puis revenez : l'installation reprendra.",
+    };
+  if (state === "uptodate") return null;
+  const why = UPDATE_ERRORS[msg && msg.reason] || UPDATE_ERRORS.network;
+  return {
+    ...base,
+    kind: "warn",
+    message: why,
+    actionLabel: msg && msg.reason === "signature" ? "Télécharger" : "Réessayer",
+    action: msg && msg.reason === "signature" ? () => openExternal(url) : retry,
+  };
+}
+
+function installInPlace(version, url) {
+  const retry = () => installInPlace(version, url);
+  window.__nsUpdate = (msg) => {
+    const n = updateNotice(msg, version, url, retry);
+    if (n) notices.push(n);
+    else notices.dismiss("android-update");
+  };
+  notices.push(updateNotice({ state: "download", progress: 0 }, version, url, retry));
+  try {
+    window.NSNative.installUpdate();
+  } catch {
+    openExternal(url);
+  }
 }
 
 // Open a link outside the app. In the Android shell `window.open` is a no-op

@@ -83,4 +83,9 @@ def android_release(webapp_config: dict) -> dict:
     # Only ever hand the client an http(s) link: this ends up in an anchor.
     if not url.startswith(("http://", "https://")):
         url = DEFAULT_ANDROID_URL
-    return {"version": version, "url": url}
+    from .androidapk import apk_source
+
+    # ``apk``: the app can fetch the update from this server (/api/android/apk)
+    # and install it in place, instead of sending the user to ``url``.
+    apk = version is not None and apk_source(webapp_config) is not None
+    return {"version": version, "url": url, "apk": apk}
