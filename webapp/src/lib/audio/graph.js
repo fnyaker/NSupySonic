@@ -1285,9 +1285,21 @@ function captureElement(el) {
 
 function refreshCapture(el, cap) {
   if (captures.get(el) !== cap || !ctx || !analysisBus) return;
+  // The NEWEST live track. Chromium adds a track when the element's source
+  // changes and leaves the previous one "live" for good — silent, since nothing
+  // feeds it any more. Taking the first live one kept the analysis on that dead
+  // track after every change of track: the animations fell flat while the music
+  // played on (measured: -Infinity dB on the copy from the first skip on). The
+  // older ones are ended, so the stream holds one copy, not one per track.
   let track = null;
   try {
-    track = cap.stream.getAudioTracks().find((t) => t.readyState === "live") || null;
+    const live = cap.stream.getAudioTracks().filter((t) => t.readyState === "live");
+    track = live.length ? live[live.length - 1] : null;
+    for (const t of cap.stream.getAudioTracks())
+      if (t !== track) {
+        t.stop();
+        cap.stream.removeTrack(t);
+      }
   } catch {
     track = null;
   }
@@ -1465,6 +1477,13 @@ export function pathState(el) {
     routed: strips.size,
     steered: vols.size,
     capturing: captures.size,
+    // Per copy: is it the playing element's, and which tracks its stream holds
+    // (one live one when it is healthy).
+    copies: [...captures].map(([e, c]) => ({
+      current: e === currentEl,
+      node: !!c.node,
+      tracks: c.stream.getAudioTracks().map((t) => t.readyState),
+    })),
     captureOff,
     context: ctx ? ctx.state : null,
     serial: ctxSerial,
