@@ -196,7 +196,7 @@
   </div>
 {/if}
 
-<div class="tabs">
+<div class="tabs bleed-x">
   <button class:active={tab === "favorites"} on:click={() => (tab = "favorites")}>Titres favoris</button>
   {#if $isAdmin}
     <button class:active={tab === "playlists"} on:click={() => (tab = "playlists")}>Mes playlists</button>
@@ -374,15 +374,13 @@
   .tabs {
     display: flex;
     gap: 8px;
-    margin: 16px 0 20px;
+    margin-block: 16px 20px;
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
     scroll-snap-type: x proximity;
-    padding: 2px 20px 2px 0;
-    margin-left: -20px;
-    padding-left: 20px;
+    padding-block: 2px;
   }
   .tabs::-webkit-scrollbar {
     display: none;
@@ -403,7 +401,11 @@
   }
   .fav-head {
     margin-bottom: 14px;
-    gap: 16px;
+    gap: 12px 16px;
+    flex-wrap: wrap;
+  }
+  .fav-head > * {
+    white-space: nowrap;
   }
   /* -- unavailable tracks ---------------------------------------------- */
   .badge {

@@ -119,6 +119,11 @@ cd webapp && node test/repeat/run.mjs               # repeat one / all on a 4 s 
                                                      # every pass reaches its end, none jumps back from the middle, no dead air
 cd webapp && node test/skip/run.mjs                 # a crossfaded skip in a HIDDEN page whose timers are throttled (the phone behind a car
                                                      # radio): the next track must be heard at once, graph and direct paths
+cd webapp && node test/clicks/run.mjs               # what a click costs before the screen answers (Event Timing, 4x CPU throttle): the
+                                                     # nav, opening and closing the full-screen player; PHONE=1, PROFILE="<action>" for
+                                                     # its heaviest functions (build with `npx vite build --minify false` to read them)
+cd webapp && node test/vizdirect/run.mjs [FADE=1]   # the animations on the DIRECT output through pauses, skips and a reopening: they
+                                                     # must still hear the music (the copy's dead-track bug)
 cd webapp && node test/import/run.mjs [--phone]       # a shared playlist link: pasted into the search, read, played, kept
 cd webapp && node test/requests/run.mjs             # what playing costs in requests: a track the server refuses (Deezer off) is
                                                      # retried at a human pace, not 70 times a second; a missing cover is asked once

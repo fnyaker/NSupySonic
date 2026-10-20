@@ -1,3 +1,19 @@
+<script context="module">
+  // WebGL canvases kept from views that went away, each with its renderer
+  // (context, compiled programs, render targets). Creating a WebGL2 context is
+  // the single most expensive thing opening the full-screen player did — 344 ms
+  // of the 500 before its first frame under a 4x CPU throttle, and the shaders
+  // compiled again behind it — and tearing it down was the hitch on closing.
+  // So a closing view hands its canvas back here and the next one adopts it:
+  // the same context, its programs already compiled. Bounded, because a browser
+  // caps live contexts (Chromium: 16) and drops the oldest past that.
+  const glPool = [];
+  const GL_POOL_MAX = 3;
+  // The 2D post pass's grain tile. Built once per SESSION as its comment always
+  // said, rather than once per view (200 ms on every opening, measured).
+  let grainCache = "";
+</script>
+
 <script>
   // Canvas host for the animation scenes.
   //
@@ -71,7 +87,11 @@
   export let flash = "soft";
 
   let canvas; // 2D
-  let glCanvas; // WebGL2
+  let glSlot; // the WebGL2 canvas in the template, replaced by a pooled one
+  let glCanvas = null; // the WebGL2 canvas in use
+  // The renderer's lifecycle callbacks go through this object, so a pooled
+  // renderer answers to whichever view holds it now.
+  let glHooks = { onRestored: null };
   let box;
   let g = null;
   let bloomCanvas;
@@ -80,7 +100,10 @@
   let posting = false;
   let renderer = null;
   let glFailed = false;
-  let kind = "2d";
+  // Which canvas the scene draws on; "none" until a scene has arrived, so a
+  // view whose GL scene is still loading does not size (and allocate) the 2D
+  // canvas it will never use.
+  let kind = "none";
   // The 2D pass can decide on its own that this device cannot afford it (see
   // post.js): that drops the two layers and leaves the scene exactly as it was,
   // rather than stepping the whole tier down and taking the particles with it.
@@ -127,14 +150,8 @@
   // the engine stays in the scene's chunk (see scenes/gl.js#makeRenderer).
   function ensureRenderer(built) {
     if (renderer || glFailed || !glCanvas) return renderer;
-    renderer = built.makeRenderer(glCanvas, {
-      // A lost context draws nothing until it is restored; the scene keeps
-      // reading the music meanwhile and resumes on the restored one.
-      onRestored: () => {
-        sizeCanvas();
-        if (scene?.kind === "gl") scene.attach(renderer);
-      },
-    });
+    const hooks = glHooks;
+    renderer = built.makeRenderer(glCanvas, { onRestored: () => hooks.onRestored?.() });
     if (!renderer) glFailed = true;
     glAvailable.set(!!renderer);
     return renderer;
@@ -192,7 +209,7 @@
   function replaceScene(next) {
     if (scene && scene !== next) scene.dispose?.();
     scene = next;
-    kind = next?.kind === "gl" ? "gl" : "2d";
+    kind = next ? (next.kind === "gl" ? "gl" : "2d") : "none";
     if (!next) return;
     sizeCanvas();
     next.setOptions?.(sceneOptions());
@@ -230,6 +247,7 @@
     const px = w * h * dpr * dpr;
     if (px > MAX_PIXELS) dpr = Math.max(0.6, Math.sqrt(MAX_PIXELS / (w * h)));
     geometry.set(w, h, measureOccluder());
+    if (kind === "none") return;
     if (kind === "gl") {
       // The GL scene sizes its own canvas (and its render targets, at whatever
       // scale the dynamic-resolution governor has settled on).
@@ -259,7 +277,8 @@
   function ensureGrain() {
     if (grainUrl || !posting || !POST[tier]?.grain) return;
     try {
-      grainUrl = grainDataUrl();
+      grainCache = grainCache || grainDataUrl();
+      grainUrl = grainCache;
     } catch {
       grainUrl = "";
     }
@@ -368,6 +387,22 @@
       scene?.setOptions?.(sceneOptions());
     };
     mq.addEventListener("change", onMq);
+    const pooled = glPool.pop();
+    if (pooled && !pooled.renderer.lost) {
+      glSlot.replaceWith(pooled.canvas);
+      glCanvas = pooled.canvas;
+      renderer = pooled.renderer;
+      glHooks = pooled.hooks;
+    } else {
+      pooled?.renderer.dispose();
+      glCanvas = glSlot;
+    }
+    // A lost context draws nothing until it is restored; the scene keeps
+    // reading the music meanwhile and resumes on the restored one.
+    glHooks.onRestored = () => {
+      sizeCanvas();
+      if (scene?.kind === "gl") scene.attach(renderer);
+    };
     governor = createGovernor(tier, onTier);
     buildScene();
     sizeCanvas();
@@ -389,8 +424,16 @@
     sceneToken++;
     scene?.dispose?.();
     scene = null;
-    renderer?.dispose();
+    if (renderer && !renderer.lost && glCanvas && glPool.length < GL_POOL_MAX) {
+      // Kept for the next view (see glPool): blank, out of the document, and
+      // answering to nobody until it is adopted.
+      renderer.clear();
+      glHooks.onRestored = null;
+      glCanvas.remove();
+      glPool.push({ canvas: glCanvas, renderer, hooks: glHooks });
+    } else renderer?.dispose();
     renderer = null;
+    glCanvas = null;
   });
 
   // Rebuild only for the things that change a scene's SHAPE. Intensity, the
@@ -441,6 +484,10 @@
   function applyOptions() {
     scene?.setOptions?.(sceneOptions());
   }
+  $: if (glCanvas) {
+    glCanvas.classList.toggle("dim", dimmed);
+    glCanvas.classList.toggle("off", kind !== "gl");
+  }
   $: pal.setMode(palette);
   $: applyPaused(paused, active);
 
@@ -484,7 +531,8 @@
 
 <div class="viz-host" bind:this={box} class:hidden={mode === "off"}>
   <canvas bind:this={canvas} class:dim={dimmed} class:off={kind !== "2d"} aria-hidden="true"></canvas>
-  <canvas bind:this={glCanvas} class:dim={dimmed} class:off={kind !== "gl"} aria-hidden="true"></canvas>
+  <!-- Its classes are set from the script: the element may be a pooled one. -->
+  <canvas bind:this={glSlot} class="off" aria-hidden="true"></canvas>
   <!-- The 2D scenes' bloom, drawn at a fifth of the size and stretched by the
        compositor. The GL scenes do their own, on the GPU. -->
   <canvas
