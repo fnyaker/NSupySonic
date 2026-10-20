@@ -115,8 +115,8 @@ def discover_prefs_set():
     data = request.get_json(silent=True) or {}
     try:
         level = discover.set_level(request.webuser, data.get("level"))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except ValueError:
+        return jsonify({"error": "invalid level"}), 400
     return jsonify({"level": level, "step": discover.step_name(level)})
 
 
@@ -130,8 +130,8 @@ def flow():
     love, the rest at the distance the slider asks for."""
     try:
         level = _level_arg()
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except ValueError:
+        return jsonify({"error": "invalid level"}), 400
     seed = _seed_arg() or secrets.token_hex(4)
     picked = discover.flow(request.webuser, level, FLOW_SIZE, seed=seed)
     return jsonify({"tracks": _serialise_tracks(picked)})
@@ -216,8 +216,8 @@ def recommend():
     distance. Kept five minutes per (person, level, seed)."""
     try:
         level = _level_arg()
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except ValueError:
+        return jsonify({"error": "invalid level"}), 400
     seed = _seed_arg() or now().date().isoformat()
     user = request.webuser
     key = (user.id, round(level, 2), seed)
@@ -358,8 +358,8 @@ def releases_settings_set():
     data = request.get_json(silent=True) or {}
     try:
         releases.save_settings(data)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except ValueError:
+        return jsonify({"error": "invalid settings"}), 400
     return jsonify(releases.status())
 
 
