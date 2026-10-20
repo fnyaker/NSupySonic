@@ -221,7 +221,13 @@ check(files[key] && files[key].hash === before.audio[0].hash && files[key].size 
 check(after.audio.length === 0 && after.metas.length === 1 && after.metas[0].native,
   "and leaves IndexedDB: the record stays, marked as the app's", JSON.stringify(after.metas));
 
-// 2. Played from the app's file, never from the server.
+// 2. Played from the app's file, never from the server. Next launch: the page
+//    that did the move may still hold the Blob it had resolved before it.
+seen.stream.length = 0;
+seen.offline.length = 0;
+await page.reload();
+await page.waitForFunction(() => document.querySelector("footer.player .pp"), null, { timeout: 30000 });
+await page.waitForTimeout(500);
 await page.locator("footer.player .pp").click();
 await page.waitForTimeout(2500);
 const t = await page.evaluate(() => window.__nsAudioPath().t);
