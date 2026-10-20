@@ -26,7 +26,7 @@
 // native storage, those play the way they always did.
 
 import { derived } from "svelte/store";
-import { nativePlayer } from "../stores.js";
+import { nativePlayer, eqEnabled, eqBands, bassBoost } from "../stores.js";
 
 // ExoPlayer's playback states, as the native side reports them.
 export const ST_IDLE = 1;
@@ -87,11 +87,72 @@ export function nativeAudioAvailable() {
   return availability;
 }
 
+// The app's players run the Rust chain (the EQ, the bass lift) and the rhythm
+// analyser on their own sound from bridge version 6 (NativeAnalysis.kt).
+export const NATIVE_DSP_BRIDGE = 6;
+let dsp = null;
+/** Whether the app's players apply the EQ and the bass lift, and analyse what they play. */
+export function nativeDspAvailable() {
+  if (dsp !== null) return dsp;
+  const b = bridge();
+  try {
+    dsp = !!(
+      nativeAudioAvailable() &&
+      b.bridgeVersion() >= NATIVE_DSP_BRIDGE &&
+      typeof b.naFx === "function" &&
+      typeof b.naAnalysis === "function" &&
+      typeof b.naAnalysisAvailable === "function" &&
+      b.naAnalysisAvailable()
+    );
+  } catch {
+    dsp = false;
+  }
+  return dsp;
+}
+
+/** The native element player `id` (the analysis frames name their player). */
+export function nativeElementById(id) {
+  return registry.get(id) || null;
+}
+
 /** For the tests: forget the cached answer. */
 export function resetNativeAudio() {
   availability = null;
+  dsp = null;
+  fxSent = "";
   registry.clear();
 }
+
+// The effects go to the app as they change, the way graph.js applies them to
+// its nodes: the app's players all share one setting.
+let fxState = { on: false, bands: [], bass: 0 };
+let fxSent = "";
+function sendFx() {
+  if (!nativeDspAvailable()) return;
+  const msg = JSON.stringify({
+    eq: fxState.on ? fxState.bands.slice(0, 10).map((v) => +v || 0) : [],
+    bass: Math.max(0, Math.min(1, +fxState.bass || 0)),
+  });
+  if (msg === fxSent) return;
+  fxSent = msg;
+  try {
+    bridge().naFx(msg);
+  } catch {
+    fxSent = "";
+  }
+}
+eqEnabled.subscribe((v) => {
+  fxState = { ...fxState, on: !!v };
+  sendFx();
+});
+eqBands.subscribe((v) => {
+  fxState = { ...fxState, bands: Array.isArray(v) ? v : [] };
+  sendFx();
+});
+bassBoost.subscribe((v) => {
+  fxState = { ...fxState, bass: v };
+  sendFx();
+});
 
 /** true while the player must play through the app's own player. */
 export const nativeAudioWanted = derived(nativePlayer, (on) => !!on && nativeAudioAvailable());

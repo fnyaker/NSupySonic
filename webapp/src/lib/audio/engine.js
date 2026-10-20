@@ -36,6 +36,14 @@
 //    the server's whole-track verdict is adopted the moment it is in hand: its
 //    tempo range and its BPM go to the analyser, which starts the grid on them.
 //
+// THE ANDROID APP'S OWN PLAYER IS ANALYSED IN THE APP (NativeAnalysis.kt, lot
+// N5). Its sound never enters this page, so nothing here can tap it: the same
+// Rust crate reads the PCM ExoPlayer plays, after the EQ, and its frames arrive
+// in batches through `window.__nsFrames`, each stamped with the MEDIA time its
+// audio starts at. They wait for the element's own clock (whose position the
+// app reports net of the output path) instead of the context's, and everything
+// after that — the decoding, the verdict, the subscribers — is the same.
+//
 // If the worklet or the WebAssembly cannot start (a browser without either, a
 // module that failed to load offline), the engine falls back to the spectrum
 // alone, read from the graph's AnalyserNodes: the bars keep drawing, and the
@@ -91,6 +99,7 @@ import {
   LOOK_KEYS,
 } from "./style.js";
 import { parseLayout } from "./rhythm-core.js";
+import { nativeAudioWanted, nativeDspAvailable, nativeElementById } from "./nativeplayer.js";
 import { ConstructionMeter } from "../genre/construction.js";
 import { api } from "../api.js";
 
@@ -461,7 +470,7 @@ onAnalysis((id, v) => {
 // --- the analyser ----------------------------------------------------------------
 
 // The rhythm node and what its "ready" message said about the frames.
-let rh = null; // { node, ready, I (offsets), hop, lookahead, sampleRate }
+let rh = null; // { node, ready, I (offsets), hop, lookahead, sampleRate, native?, el? }
 let rhStarting = false;
 let rhFailed = false;
 let gen = 0;
@@ -486,8 +495,13 @@ function loadAssets() {
 
 const addedTo = new WeakMap(); // AudioContext -> addModule promise
 
+// The app's player is playing and can analyse itself.
+function nativeMode() {
+  return get(nativeAudioWanted) && nativeDspAvailable();
+}
+
 async function startRhythm() {
-  if (rh || rhStarting || rhFailed) return;
+  if (rh || rhStarting || rhFailed || nativeMode()) return;
   const ctx = getContext();
   if (!ctx || !ctx.audioWorklet || typeof WebAssembly === "undefined") {
     if (ctx) rhFailed = true;
@@ -554,6 +568,7 @@ async function startRhythm() {
 // new analysers at once, and starts the analyser on the new context as soon as
 // there is one.
 onContextReset(() => {
+  if (rh && rh.native) return; // the app's analyser lives in no context
   if (rh) {
     try {
       rh.node.port.postMessage({ t: "close" });
@@ -565,6 +580,95 @@ onContextReset(() => {
   rhFailed = false;
   pending.length = 0; // their buffers belonged to the node that just went
   if (running) startFallback();
+});
+
+// --- the app's analyser -------------------------------------------------------------
+
+const NAT_POOL_MAX = 48;
+const natPool = [];
+
+function natPost(m) {
+  if (m.t === "recycle") {
+    if (m.buf && natPool.length < NAT_POOL_MAX) natPool.push(m.buf);
+    return;
+  }
+  try {
+    window.NSNative.naAnalysis(JSON.stringify(m));
+  } catch {
+    /* the activity is going away */
+  }
+}
+
+function startNative() {
+  if (rh) return;
+  const r = { native: true, node: { port: { postMessage: natPost } }, ready: false, I: null, hop: 512, lookahead: 4, sampleRate: 44100, frameLen: 0, el: 0 };
+  rh = r;
+  window.__nsFrames = (m) => onNativeMessage(r, m);
+  natPost({ t: "start", level: analysisLevel, gen, families: Array.from(familyTable()) });
+}
+
+function decodeFrames(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Float32Array(bytes.buffer, 0, bytes.length >> 2);
+}
+
+function onNativeMessage(r, m) {
+  if (!m || rh !== r) return;
+  if (m.t === "ready") {
+    r.frameLen = m.frameLen | 0;
+    onRhythmMessage(r, m);
+    return;
+  }
+  if (m.t !== "f" || !r.ready || m.gen !== gen || !r.frameLen) return;
+  let all;
+  try {
+    all = decodeFrames(m.b);
+  } catch {
+    return;
+  }
+  const L = r.frameLen;
+  const n = Math.min(m.n | 0, Math.floor(all.length / L), Array.isArray(m.mt) ? m.mt.length : 0);
+  for (let i = 0; i < n; i++) {
+    let buf = natPool.pop();
+    if (!buf || buf.length !== L) buf = new Float32Array(L);
+    buf.set(all.subarray(i * L, (i + 1) * L));
+    pending.push({ buf, ctxT: +m.mt[i] });
+  }
+  r.el = m.el | 0;
+  pump();
+}
+
+// Either analyser out, so the right one starts for the player now playing.
+function dropSource() {
+  if (!rh) return;
+  try {
+    rh.node.port.postMessage({ t: "close" });
+  } catch {
+    /* its context is closed */
+  }
+  if (!rh.native) untapRhythm();
+  for (const q of pending) recycle(q.buf);
+  pending.length = 0;
+  rh = null;
+  rhFailed = false;
+}
+
+let wasNative = null;
+nativeAudioWanted.subscribe(() => {
+  const now = nativeMode();
+  if (wasNative === null) {
+    wasNative = now;
+    return;
+  }
+  if (now === wasNative) return;
+  wasNative = now;
+  dropSource();
+  if (running) {
+    stop();
+    start();
+  }
 });
 
 function failRhythm(r) {
@@ -641,9 +745,18 @@ function onRhythmMessage(r, m) {
 // it the mapping is wrong (a context that just resumed, a timestamp not valid
 // yet), not the latency.
 const HOLD_SLACK = 0.8;
+// The app's player: how far ahead of its clock a frame may be, and how far
+// behind, before it belongs to another position (a seek).
+const NATIVE_HOLD = 3;
+const NATIVE_STALE = 1;
 
 // The analysis-side context time the listener is hearing right now.
 function heardCtxNow(nowMs) {
+  if (rh && rh.native) {
+    // The app's player: its own clock, net of the output path already.
+    const el = nativeElementById(rh.el);
+    return el ? el.currentTime - trimSeconds() : null;
+  }
   const t = heardContextTime(nowMs);
   return t == null ? null : t - lookaheadSeconds() - trimSeconds();
 }
@@ -673,9 +786,18 @@ function pump() {
   if (!pending.length) return;
   const nowMs = performance.now();
   const heard = heardCtxNow(nowMs);
-  const cap = HOLD_SLACK + lookaheadSeconds() + Math.max(0, trimSeconds());
+  const native = !!(rh && rh.native);
+  // The app's frames run ahead by its audio sink's buffer (up to ~0.75 s).
+  const cap = native ? NATIVE_HOLD : HOLD_SLACK + lookaheadSeconds() + Math.max(0, trimSeconds());
   while (pending.length) {
     const q = pending[0];
+    // A seek on the app's player leaves frames of the position it left: too
+    // far ahead of the clock, or behind it, they are not this audio's.
+    if (native && heard != null && (q.ctxT - heard >= cap || heard - q.ctxT > NATIVE_STALE)) {
+      pending.shift();
+      recycle(q.buf);
+      continue;
+    }
     if (heard != null && q.ctxT > heard + 0.001 && q.ctxT - heard < cap) {
       armPump(nowMs + (q.ctxT - heard) * 1000);
       break;
@@ -833,7 +955,7 @@ function deliver(q, nowMs, heard) {
   // Two more memcpys out of the scope's ring buffers, and only when a scope is
   // on screen. Null the rest of the time so a scene can tell "nobody is
   // tapping" from "the tap read silence".
-  frame.wave = waveWant ? readScope() : null;
+  frame.wave = waveWant && !rh.native ? readScope() : null;
 
   if (analysisLevel >= LEVEL.RHYTHM) {
     const b = rawBeat;
@@ -1173,10 +1295,21 @@ function retryStart() {
   if (!rhStarting && getContext()) startRhythm();
 }
 
+let analyserHeld = false;
+
 function start() {
   if (running) return;
   running = true;
+  lastCtxT = 0;
+  if (nativeMode()) {
+    // No graph, no context: the app analyses what it plays.
+    if (rh) sleepRhythm(false);
+    else startNative();
+    if (!rafId && typeof requestAnimationFrame === "function") rafId = requestAnimationFrame(rafPump);
+    return;
+  }
   if (!retryTimer && typeof setInterval === "function") retryTimer = setInterval(retryStart, 1000);
+  analyserHeld = true;
   requestAnalyser();
   resumeAudio();
   lastCtxT = 0;
@@ -1200,7 +1333,8 @@ function stop() {
   sleepRhythm(true);
   // On the direct path this lets the copies go and suspends the context: a
   // phone with its screen off keeps one audio stream open, the music's.
-  releaseAnalyser();
+  if (analyserHeld) releaseAnalyser();
+  analyserHeld = false;
   for (const q of pending) recycle(q.buf);
   pending.length = 0;
   if (pumpTimer) clearTimeout(pumpTimer);

@@ -236,7 +236,7 @@ This is the delivery channel for the native audio work (study: `/mnt/project-fil
 **The native audio core** (`android/nscore`, Rust, `NsCore.kt`; lot N2 of the native-audio plan). The `rhythm`
 crate — the analyser the web app runs in its AudioWorklet — compiled for the device, plus `dsp.rs`: the output chain
 graph.js builds from Web Audio nodes (ReplayGain ramped, the equal-power fade on its quarter circle, the ten peaking
-bands at Q 1.1 and the 120 Hz low shelf, the BiquadFilterNode formulas; the bass lift's compressors are not in yet).
+bands at Q 1.1 and the 120 Hz low shelf, the BiquadFilterNode formulas, and the bass lift's two DynamicsCompressorNodes — its compressor and the limiter after it — on Web Audio's soft-knee curve with its makeup gain, linked across channels; a chain with nothing on multiplies by the gain and nothing else).
 Reached over JNI written against the C ABI (`jni.rs`: NewStringUTF and NewDirectByteBuffer at their jni.h slots, every
 other argument a primitive); each object is a handle whose buffers are handed to Kotlin ONCE as direct ByteBuffers, and
 0 is a no-op everywhere. `node test/compare.mjs` (after `cargo build --release`) drives the host build through those
@@ -259,7 +259,19 @@ a state that has seen the last command that could change it (a tick in flight mu
 URLs only, fetched by `ServerDataSource` through `Net` (Range, cookie, pin); one audio focus request for every player (a
 crossfade plays two); players belong to the document that made them (a new token releases the old document's,
 `pagehide` and the WebView's death release them). A `blob:` source (an IndexedDB download, until N4) plays on a real
-`<audio>` inside the element. Not yet: the EQ, the bass lift and the animations' copy of the sound (N5).
+`<audio>` inside the element.
+
+**Effects and animations on the native player** (`NativeAnalysis.kt`, lot N5, bridge version 6). Each player's PCM
+goes through `NsProcessor`, a Media3 `BaseAudioProcessor` in its `DefaultAudioSink` (16-bit, before Sonic): the Rust
+chain with the EQ and the bass lift (`NSNative.naFx`, sent by `nativeplayer.js#sendFx` on every change of the three
+stores), then a copy to ONE rhythm analyser — the player told to play last. Its frames go to the page in batches
+(≤ 16 or 40 ms, base64) through `window.__nsFrames`, each stamped with the MEDIA time its audio starts at;
+`engine.js` (`startNative`, `rh.native`) drives it with the worklet's own messages through `NSNative.naAnalysis` and
+holds each frame until the element's `currentTime` (minus the trim) reaches it — ExoPlayer's position already counts
+the output path. A frame 3 s ahead of the clock or 1 s behind it is a seek's leftover and dropped. Nothing passes
+through the chain while there is no effect and no view (a copy, bit for bit). The normalization still rides on the
+element's volume; the oscilloscope has no waveform on this path. `test/nativeanalysis.test.mjs` plays the app with
+the shipped rhythm.wasm on an arranged record.
 
 **Downloads in the app's storage** (`OfflineStore.kt`, `lib/nativeoffline.js`, `lib/offline.js`; lot N4, bridge
 version 5). On an APK that has it, a download's AUDIO is a file in `filesDir/offline`, fetched by the app itself

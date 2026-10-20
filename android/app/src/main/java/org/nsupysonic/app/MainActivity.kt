@@ -65,9 +65,12 @@ class MainActivity : AppCompatActivity() {
         /**
          * Bridge.bridgeVersion: what the page may ask of this APK (2 installUpdate,
          * 3 nativeCore, 4 the native player: nativeAudio / naCreate / naCmd,
-         * 5 downloads in the app's storage: off*).
+         * 5 downloads in the app's storage: off*, 6 the native player's
+         * analysis and effects: naAnalysis / naFx).
          */
-        private const val BRIDGE_VERSION = 5
+        private const val BRIDGE_VERSION = 6
+        /** Upper bound on one analyser command (the family table is ~16 kB). */
+        private const val MAX_ANALYSIS_CMD = 64 * 1024
         /** Upper bound on one piece of a download moved into the app (base64 chars). */
         private const val MAX_OFF_PIECE = 2 * 1024 * 1024
         /** Upper bound on one native player command (they are a few dozen bytes). */
@@ -183,6 +186,7 @@ class MainActivity : AppCompatActivity() {
             },
             emit = { id, json -> pushNativeAudio(id, json) },
             localFile = { url -> store.fileFor(url)?.first },
+            emitFrames = { json -> pushFrames(json) },
         )
         if (!prefs.configured) {
             startActivity(Intent(this, SetupActivity::class.java))
@@ -884,6 +888,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Analysis frames of the native players (NativeAnalysis), for lib/audio/engine.js. */
+    private fun pushFrames(json: String) {
+        runOnUiThread {
+            if (webViewDead || !::webView.isInitialized || !onServerPage) return@runOnUiThread
+            try {
+                webView.evaluateJavascript("window.__nsFrames && window.__nsFrames($json)", null)
+            } catch (_: Exception) {
+                /* WebView torn down under us */
+            }
+        }
+    }
+
     /** Updater's progress and outcome, for lib/appversion.js. [json] is JSONObject's output. */
     private fun pushUpdate(json: String) {
         if (webViewDead || !::webView.isInitialized) return
@@ -1003,6 +1019,24 @@ class MainActivity : AppCompatActivity() {
         fun naCmd(id: Int, json: String) {
             if (!allowed() || json.length > MAX_AUDIO_CMD) return
             this@MainActivity.nativeAudio?.command(id, json)
+        }
+
+        /** Whether the native players' sound can be analysed here (NativeAnalysis). */
+        @JavascriptInterface
+        fun naAnalysisAvailable(): Boolean = allowed() && this@MainActivity.nativeAudio?.analysis != null
+
+        /** A command for the analyser (the worklet's messages, as JSON). */
+        @JavascriptInterface
+        fun naAnalysis(json: String) {
+            if (!allowed() || json.length > MAX_ANALYSIS_CMD) return
+            this@MainActivity.nativeAudio?.analyse(json)
+        }
+
+        /** The EQ and the bass lift for the native players: `{eq: [10], bass: 0..1}`. */
+        @JavascriptInterface
+        fun naFx(json: String) {
+            if (!allowed() || json.length > MAX_AUDIO_CMD) return
+            this@MainActivity.nativeAudio?.setFx(json)
         }
 
         /** Whether downloads may go to the app's storage (OfflineStore). */
