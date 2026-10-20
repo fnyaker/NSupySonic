@@ -89,7 +89,7 @@ class _DbCase(unittest.TestCase):
 
 class SchemaTestCase(_DbCase):
     def test_the_new_tables_are_in_a_fresh_database(self):
-        self.assertEqual(Meta["schema_version"].value, "20261021")
+        self.assertEqual(Meta["schema_version"].value, dbmod.SCHEMA_VERSION)
         self.assertEqual(TrackSource.select().count(), 0)
         self.assertEqual(EntityRef.select().count(), 0)
         self.assertEqual(ProviderAccount.select().count(), 0)
@@ -153,7 +153,7 @@ class UpgradeTestCase(_DbCase):
         ids_before = {t: str(t) for t in (dz.id, dz2.id, yt.id, up.id)}
 
         init_database(self.uri)
-        self.assertEqual(Meta["schema_version"].value, "20261021")
+        self.assertEqual(Meta["schema_version"].value, dbmod.SCHEMA_VERSION)
         self.assertEqual(self.snapshot(), before)  # not one existing row touched
         got = {(s.provider, s.ref): s.track_id for s in TrackSource.select()}
         self.assertEqual(

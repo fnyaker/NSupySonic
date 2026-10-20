@@ -156,7 +156,8 @@ class DeezerAdapter(base.Provider):
     name = "Deezer"
     role = base.MAIN
     capabilities = frozenset(
-        {base.SEARCH, base.AUDIO, base.CATALOG, base.ACCOUNT, base.LINKS, base.PODCASTS}
+        {base.SEARCH, base.AUDIO, base.CATALOG, base.ACCOUNT, base.LINKS, base.PODCASTS,
+         base.RELATED}
     )
     requires_credentials = True
     # Deezer's own facts are exact (dates, ISRC, ids); its genre and BPM are not
@@ -483,3 +484,39 @@ class DeezerAdapter(base.Provider):
             for e in rows or []
             if e.get("EPISODE_ID")
         ]
+
+    # -- RELATED (catalogue facts, read by the background job only) -------------
+
+    def artist_releases(self, ref, limit=50):
+        ref = _ref(ref)
+        with self._translated(ref):
+            rows = self._p().get_artist_releases(ref, limit=max(limit, 100))
+        out = []
+        for a in rows:
+            if not isinstance(a, dict) or not a.get("id"):
+                continue
+            date = str(a.get("release_date") or "")[:10]
+            out.append(
+                {
+                    "ref": str(a["id"]),
+                    "title": str(a.get("title") or ""),
+                    "cover_url": a.get("cover_xl") or a.get("cover_big") or a.get("cover"),
+                    "release_date": date if len(date) == 10 else None,
+                    "kind": str(a.get("record_type") or "album")[:12],
+                    "tracks_count": int(a.get("nb_tracks") or 0) or None,
+                }
+            )
+        out.sort(key=lambda r: r["release_date"] or "", reverse=True)
+        return out[:limit]
+
+    def similar_artists(self, ref, limit=20):
+        ref = _ref(ref)
+        with self._translated(ref):
+            rows = self._p().get_artist_related(ref, limit=limit)
+        return [_artist_from_api(a) for a in rows if isinstance(a, dict) and a.get("id")][:limit]
+
+    def artist_top(self, ref, limit=5):
+        ref = _ref(ref)
+        with self._translated(ref):
+            rows = self._p().get_artist_top(ref, limit=limit)
+        return [hit_from_api(t) for t in rows if isinstance(t, dict) and t.get("id")][:limit]

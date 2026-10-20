@@ -315,9 +315,13 @@ class RouteTest(Base):
         similar.rebuild_job().run()
         similar.drop_index()
         self._login()
-        titles = self.titles("/api/flow")
-        self.assertEqual(set(titles[:4]), {"A2", "A3", "A4", "A5"})
-        self.assertNotIn("A1", titles)
+        # At the closest discovery level the new titles the Flow offers are
+        # the neighbours of what was just played; the played ones come back as
+        # the Flow's share of known titles (supysonic/discover.py).
+        titles = self.titles("/api/flow?d=0&seed=1")
+        new = [t for t in titles if t not in ("A0", "A1")]
+        self.assertLessEqual(set(new[:2]), {"A2", "A3", "A4", "A5"})
+        self.assertLessEqual({"A0", "A1"}, set(titles))
         del a1
 
     def test_flow_with_no_history_offers_the_most_played(self):

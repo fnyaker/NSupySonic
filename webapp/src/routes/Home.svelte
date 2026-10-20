@@ -6,6 +6,10 @@
   import Card from "../components/Card.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
+  import TrackList from "../components/TrackList.svelte";
+  import DiscoverySlider from "../components/DiscoverySlider.svelte";
+  import { discoveryLevel, loadDiscovery, onDiscoverySettled } from "../lib/discovery.js";
+  import { get } from "svelte/store";
 
   // The home is the library's own answer (/api/home): no call to Deezer, so
   // it opens as fast as the disk and reads the same offline.
@@ -51,20 +55,53 @@
     loading = false;
   }
 
-  onMount(async () => {
+  // "Pour vous": titles, albums and artists at the person's discovery level,
+  // and the releases of their favourite artists (and of a few very close to
+  // them). Both are the server's reading of the database: no provider is asked.
+  let reco = null;
+  let recoLoading = false;
+  let seed = "";
+  let releases = [];
+  let unseen = 0;
+
+  async function loadReco(level) {
+    recoLoading = true;
+    try {
+      reco = await api.recommend(level, seed);
+    } catch {
+      /* the rows simply stay as they were */
+    } finally {
+      recoLoading = false;
+    }
+  }
+
+  function refreshReco() {
+    seed = String(Date.now() % 1e9);
+    loadReco(get(discoveryLevel));
+  }
+
+  onMount(() => {
     // Stale-while-revalidate: the shelves paint from the last-seen copy right
     // away and quietly correct themselves.
-    try {
-      take(await api.swr("/home", take));
-    } catch {
-      loading = false;
-    }
+    api
+      .swr("/home", take)
+      .then(take)
+      .catch(() => (loading = false));
+    loadDiscovery().then((lv) => loadReco(lv));
+    api
+      .swr("/releases", (d) => ((releases = d.releases || []), (unseen = d.unseen || 0)))
+      .then((d) => {
+        releases = d.releases || [];
+        unseen = d.unseen || 0;
+      })
+      .catch(() => {});
+    return onDiscoverySettled((lv) => loadReco(lv));
   });
 
   async function playFlow() {
     flowLoading = true;
     try {
-      const r = await api.flow();
+      const r = await api.flow(get(discoveryLevel));
       player.playQueue(r.tracks, 0, { kind: "flow" });
     } catch {
       /* ignore */
@@ -87,6 +124,49 @@
     </button>
   </div>
 </div>
+<div class="flow-tune">
+  <DiscoverySlider />
+</div>
+
+{#if releases.length}
+  <div class="row-head">
+    <h2>
+      Nouveautés
+      {#if unseen}<span class="badge" aria-label="{unseen} nouvelles sorties">{unseen}</span>{/if}
+    </h2>
+    <a class="more" href="#/releases">Tout afficher</a>
+  </div>
+  <div class="shelf">
+    {#each releases.slice(0, 12) as a (a.deezer_id)}<Card item={a} kind="album" />{/each}
+  </div>
+{/if}
+
+{#if reco && (reco.tracks?.length || reco.albums?.length || reco.artists?.length)}
+  <div class="row-head">
+    <h2>Pour vous</h2>
+    <button class="ghost-btn" on:click={refreshReco} disabled={recoLoading} aria-label="Autres suggestions">
+      <Icon name="refresh" size={16} /> Autres suggestions
+    </button>
+  </div>
+  <div class="reco" class:dim={recoLoading}>
+    {#if reco.tracks?.length}
+      <h3>Titres à découvrir</h3>
+      <TrackList tracks={reco.tracks.slice(0, 8)} context={{ kind: "reco" }} />
+    {/if}
+    {#if reco.albums?.length}
+      <h3>Albums pour vous</h3>
+      <div class="shelf">
+        {#each reco.albums as a (entityRef(a))}<Card item={a} kind="album" />{/each}
+      </div>
+    {/if}
+    {#if reco.artists?.length}
+      <h3>Artistes à découvrir</h3>
+      <div class="shelf">
+        {#each reco.artists as a (entityRef(a))}<Card item={a} kind="artist" />{/each}
+      </div>
+    {/if}
+  </div>
+{/if}
 
 {#if loading}
   <Skeleton kind="shelf" />
@@ -150,6 +230,69 @@
     display: flex;
     gap: 10px;
     flex: none;
+  }
+  .flow-tune {
+    margin: 18px 0 8px;
+  }
+  .row-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .row-head h2 {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .badge {
+    min-width: 22px;
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.75rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .more {
+    color: var(--text-dim);
+    font-size: 0.88rem;
+    font-weight: 600;
+    padding: 10px 4px;
+  }
+  .more:hover {
+    color: var(--text);
+  }
+  .ghost-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 40px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text);
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .ghost-btn:disabled {
+    opacity: 0.6;
+  }
+  .reco h3 {
+    margin: 18px 0 8px;
+    font-size: 1rem;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .reco {
+    transition: opacity 0.2s ease;
+  }
+  .reco.dim {
+    opacity: 0.55;
   }
   .guest-hint {
     margin-top: 28px;

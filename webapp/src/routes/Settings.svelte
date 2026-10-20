@@ -37,6 +37,7 @@
   import AudioEffects from "../components/AudioEffects.svelte";
   import VisualizerSettings from "../components/VisualizerSettings.svelte";
   import ServicesSettings from "../components/ServicesSettings.svelte";
+  import DiscoverySlider from "../components/DiscoverySlider.svelte";
 
   const QUALITIES = [
     { id: "FLAC", label: "FLAC", hint: "Sans perte — lourd" },
@@ -162,6 +163,7 @@
       /* leave the card hidden if it can't load */
     }
     refreshDeezerStatus();
+    loadReleases();
     loadStorage();
     loadRules();
     loadCleanup();
@@ -180,6 +182,43 @@
       /* ignore */
     }
   });
+
+  // Admin: the releases check (supysonic/releases.py) — how often, how many
+  // close artists, how far back — and a button to run it now.
+  let rel = null;
+  let relSaving = false;
+  let relPoll = null;
+  async function loadReleases() {
+    try {
+      rel = await api.releasesSettings();
+    } catch {
+      rel = null;
+    }
+  }
+  async function saveReleases(key, value) {
+    relSaving = true;
+    try {
+      rel = await api.saveReleasesSettings({ [key]: value });
+    } catch {
+      toasts.push("Réglage refusé");
+      await loadReleases();
+    } finally {
+      relSaving = false;
+    }
+  }
+  async function checkReleases() {
+    try {
+      rel = await api.releasesCheck();
+    } catch {
+      return;
+    }
+    clearInterval(relPoll);
+    relPoll = setInterval(async () => {
+      await loadReleases();
+      if (!rel?.running) clearInterval(relPoll);
+    }, 2000);
+  }
+  onDestroy(() => clearInterval(relPoll));
 
   async function refreshDeezerStatus(force = false) {
     if (!$user?.admin || !CAN_ADMIN) return;
@@ -1023,6 +1062,55 @@
     {#if store.archive_dir}
       <p class="muted hint path">{store.archive_dir}</p>
     {/if}
+  </section>
+{/if}
+
+<section class="card">
+  <h2>Découverte</h2>
+  <p class="muted sub">
+    Jusqu'où le Flow et les suggestions « Pour vous » s'éloignent de ce que vous écoutez.
+    Le réglage vous suit sur tous vos appareils.
+  </p>
+  <DiscoverySlider bare />
+</section>
+
+{#if $user?.admin && CAN_ADMIN && rel}
+  <section class="card">
+    <h2>Nouveautés</h2>
+    <p class="muted sub">
+      Le serveur vérifie les sorties de vos artistes favoris et de quelques artistes très
+      proches d'eux. Rien n'est téléchargé&nbsp;: les sorties apparaissent dans « Nouveautés ».
+    </p>
+    <label class="rule">
+      <input type="checkbox" checked={rel.on} disabled={relSaving} on:change={(e) => saveReleases("on", e.currentTarget.checked)} />
+      <span>Vérifier les nouveautés automatiquement</span>
+    </label>
+    {#if rel.on}
+      <div class="rel-grid">
+        <label class="rel-field">
+          <span>Vérifier toutes les</span>
+          <span class="rel-input"><input type="number" min="1" max="168" value={rel.every} disabled={relSaving} on:change={(e) => saveReleases("every", e.currentTarget.value)} /> h</span>
+        </label>
+        <label class="rel-field">
+          <span>Artistes proches par favori</span>
+          <span class="rel-input"><input type="number" min="0" max="5" value={rel.close} disabled={relSaving} on:change={(e) => saveReleases("close", e.currentTarget.value)} /></span>
+        </label>
+        <label class="rel-field">
+          <span>Sorties des derniers</span>
+          <span class="rel-input"><input type="number" min="7" max="365" value={rel.window} disabled={relSaving} on:change={(e) => saveReleases("window", e.currentTarget.value)} /> jours</span>
+        </label>
+      </div>
+    {/if}
+    <div class="rel-foot">
+      <button class="ghost-btn" on:click={checkReleases} disabled={rel.running}>
+        <Icon name="refresh" size={16} /> {rel.running ? "Vérification…" : "Vérifier maintenant"}
+      </button>
+      <span class="muted hint">
+        {rel.favourites ?? rel.watched} artistes favoris · {rel.links} proches · {rel.releases} sorties connues
+        {#if rel.last_run}<br />Dernière vérification {new Date(rel.last_run).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })}{/if}
+      </span>
+    </div>
+    {#if rel.last_error}<p class="muted hint warn"><Icon name="alert" size={14} /> {rel.last_error}</p>{/if}
   </section>
 {/if}
 
@@ -1952,5 +2040,65 @@
   }
   .rm:hover {
     color: var(--accent-2);
+  }
+  .rel-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+    margin: 14px 0 4px;
+  }
+  .rel-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--bg-hover);
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+  .rel-input {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+  }
+  .rel-input input {
+    width: 76px;
+    min-height: 38px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-weight: 700;
+  }
+  .rel-foot {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    margin-top: 14px;
+  }
+  .rel-foot .hint {
+    margin: 0;
+    flex: 1 1 200px;
+  }
+  .ghost-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 40px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text);
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .ghost-btn:disabled {
+    opacity: 0.6;
   }
 </style>

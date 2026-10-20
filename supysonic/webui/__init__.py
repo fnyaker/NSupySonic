@@ -2324,27 +2324,9 @@ def track_gains():
 # -- radio / flow / recommendations -----------------------------------------
 
 
-_FLOW_SEEDS = 20
 _RADIO_SIZE = 40
 #: Fewer neighbours than this and the radio is topped up from the artist and the genre.
 _RADIO_MIN = 10
-
-
-@webapi.route("/flow")
-@login_required
-def flow():
-    """The endless radio: what sounds like the last twenty tracks played, from
-    the library, with Deezer or without it."""
-    seeds = [
-        r[0]
-        for r in _visible_tracks(
-            Track.select(Track.id).where(_archived_tracks() & Track.last_play.is_null(False))
-        )
-        .order_by(Track.last_play.desc())
-        .limit(_FLOW_SEEDS)
-        .tuples()
-    ]
-    return jsonify({"tracks": _tracks_in_order(similar.radio(seeds, _RADIO_SIZE))})
 
 
 @webapi.route("/radio/track/<track_id>")
@@ -4397,3 +4379,4 @@ from . import youtube  # noqa: E402,F401  isort:skip
 from . import services  # noqa: E402,F401  isort:skip
 from . import playlist_import  # noqa: E402,F401  isort:skip
 from . import androidapk  # noqa: E402,F401  isort:skip
+from . import discover as _discover_routes  # noqa: E402,F401  isort:skip

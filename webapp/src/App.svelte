@@ -89,6 +89,7 @@
     "/genres": wrap({ asyncComponent: () => import("./routes/Genres.svelte") }),
     "/import": wrap({ asyncComponent: () => import("./routes/Import.svelte") }),
     "/import/:url": wrap({ asyncComponent: () => import("./routes/Import.svelte") }),
+    "/releases": wrap({ asyncComponent: () => import("./routes/Releases.svelte") }),
   };
 
   // The projector renders outside the router (it is a screen, not a route), so

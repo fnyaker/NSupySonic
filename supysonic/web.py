@@ -174,6 +174,12 @@ def create_application(config=None):
     if not app.testing:
         _enrich_backfill.resume_if_interrupted(app)
 
+    # The releases of favourite artists and their close artists, every few
+    # hours, from whichever provider can answer (never under test).
+    from . import releases as _releases
+
+    _releases.start(app)
+
     # Test for the cache directory
     cache_path = app.config["WEBAPP"]["cache_dir"]
     if not path.exists(cache_path):

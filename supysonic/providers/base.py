@@ -25,8 +25,12 @@ CATALOG = "catalog"
 ACCOUNT = "account"
 LINKS = "links"
 PODCASTS = "podcasts"
+# An artist's neighbourhood on the provider: its releases newest first, the
+# artists it lists as close, its most played titles. Read by the background
+# job only (supysonic/releases.py), never in a click.
+RELATED = "related"
 
-CAPABILITIES = frozenset({SEARCH, AUDIO, CATALOG, ACCOUNT, LINKS, PODCASTS})
+CAPABILITIES = frozenset({SEARCH, AUDIO, CATALOG, ACCOUNT, LINKS, PODCASTS, RELATED})
 
 # Which methods a declared capability promises (checked by the registry's
 # ``require`` and by the tests: a declared capability with a method missing is
@@ -38,6 +42,7 @@ METHODS = {
     ACCOUNT: ("account", "import_account"),
     LINKS: ("parse_link",),
     PODCASTS: ("search_shows", "get_show", "get_episodes"),
+    RELATED: ("artist_releases", "similar_artists", "artist_top"),
 }
 
 MAIN = "main"
@@ -218,6 +223,20 @@ class Provider:
 
     def get_episodes(self, ref) -> list:
         self._missing("get_episodes")
+
+    # RELATED
+    def artist_releases(self, ref, limit=50) -> list:
+        """``[{ref, title, cover_url, release_date "YYYY-MM-DD", kind
+        (album|single|ep|compile), tracks_count}]``, newest first."""
+        self._missing("artist_releases")
+
+    def similar_artists(self, ref, limit=20) -> list:
+        """``[{ref, name, cover_url, fans}]``, closest first."""
+        self._missing("similar_artists")
+
+    def artist_top(self, ref, limit=5) -> list:
+        """The artist's most played titles, as TrackHits, most played first."""
+        self._missing("artist_top")
 
 
 def check_declared(provider: Provider) -> None:

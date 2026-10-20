@@ -752,6 +752,15 @@ class DeezerProvider:
         """The artist's most-played tracks, public API (typed, with `id`)."""
         return (self.dz.api.get_artist_top(art_id, limit=limit) or {}).get("data") or []
 
+    def get_artist_releases(self, art_id, limit: int = 100) -> list[dict]:
+        """The artist's releases, public API (typed: ``release_date``,
+        ``record_type``, image URLs). Order is Deezer's; callers sort."""
+        return (self.dz.api.get_artist_albums(art_id, limit=limit) or {}).get("data") or []
+
+    def get_artist_related(self, art_id, limit: int = 20) -> list[dict]:
+        """The artists Deezer lists as close to this one, closest first."""
+        return (self.dz.api.get_artist_related(art_id, limit=limit) or {}).get("data") or []
+
     def get_lyrics(self, sng_id) -> dict:
         return self.dz.gw.get_track_lyrics(sng_id)
 

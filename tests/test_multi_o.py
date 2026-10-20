@@ -816,7 +816,7 @@ class UpgradeTestCase(_Db):
         before = self.snapshot()
         init_database(self.uri)
         genretree.invalidate()
-        self.assertEqual(Meta["schema_version"].value, "20261021")
+        self.assertEqual(Meta["schema_version"].value, dbmod.SCHEMA_VERSION)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(GenreParent.select().count(), 0)
         # nobody opened the studio: the default data answers, identically
@@ -838,7 +838,7 @@ class UpgradeTestCase(_Db):
         conn.commit()
         conn.close()
         init_database(self.uri)
-        self.assertEqual(Meta["schema_version"].value, "20261021")
+        self.assertEqual(Meta["schema_version"].value, dbmod.SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

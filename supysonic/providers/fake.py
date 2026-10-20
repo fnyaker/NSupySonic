@@ -67,6 +67,9 @@ class FakeProvider(base.Provider):
         self.albums = {}  # ref -> {"title", "artists", "tracks": [refs]}
         self.artists = {}
         self.playlists = {}
+        self.releases = {}  # artist ref -> [release dicts], newest first
+        self.related = {}  # artist ref -> [artist dicts], closest first
+        self.tops = {}  # artist ref -> [TrackHit]
         self.offers_by_ref = dict(offers or {})  # ref -> [Offer]
         self.gone = set()  # refs the provider answers are removed
         self.fail = fail  # None | Exception | {method: Exception}
@@ -212,3 +215,17 @@ class FakeProvider(base.Provider):
     def get_episodes(self, ref):
         self._enter("get_episodes", ref)
         return []
+
+    # -- RELATED ----------------------------------------------------------------
+
+    def artist_releases(self, ref, limit=50):
+        self._enter("artist_releases", ref)
+        return [dict(r) for r in self.releases.get(ref, [])][:limit]
+
+    def similar_artists(self, ref, limit=20):
+        self._enter("similar_artists", ref)
+        return [dict(a) for a in self.related.get(ref, [])][:limit]
+
+    def artist_top(self, ref, limit=5):
+        self._enter("artist_top", ref)
+        return [dict(t) for t in self.tops.get(ref, [])][:limit]
