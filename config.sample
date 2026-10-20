@@ -90,6 +90,11 @@ online_lyrics = off
 ;android_version =
 ; Where that update is downloaded from. Default: the project's releases page.
 ;android_url = https://github.com/fnyaker/NSupySonic/releases/latest
+; The app installs that update itself, from this server (/api/android/apk): by
+; default the server fetches nsupysonic.apk from the GitHub release named
+; android_version on the repository android_url points at, once, and keeps it
+; in cache_dir. Set a path here to serve your own build instead.
+;android_apk = /srv/nsupysonic/nsupysonic.apk
 
 [daemon]
 ; Socket file the daemon will listen on for incoming management commands

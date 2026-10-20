@@ -214,6 +214,18 @@ rebuilt page comes back on the same track at the same position. Having actually 
 doing it is also the only moment the app offers the battery-optimization exemption
 (`offerBatteryExemptionOnce`, once ever) — the setup screen keeps the same button.
 
+**Updating itself from the server** (`Updater.kt`, `supysonic/webui/androidapk.py`, `lib/appversion.js`). The app
+fetches its update from ITS server, never from a page it sends the user to: `GET /api/android/apk` (login) serves
+`[webapp] android_apk` (an operator's own build) or the GitHub release asset `nsupysonic.apk` of the declared
+`android_version` on the repository `android_url` points at, downloaded once into `<cache_dir>/android/` (only
+https to GitHub's hosts, a zip or nothing, 200 MB cap). `/api/version`'s `android.apk` says it can. The native side
+checks the APK BEFORE asking Android — same package, higher versionCode, signed with the installed key (lineage
+included) — so the page can say "signature différente" (a CI build without the signing secrets has a throwaway key)
+instead of an installer error; then the "install unknown apps" permission (settings opened, resumed on return) and
+the system installer (ACTION_VIEW on a FileProvider uri). `NSNative.bridgeVersion()` (2) is what the page may ask of
+an APK: an older one answers nothing and keeps the "Télécharger" link. Progress: `window.__nsUpdate({state,…})`.
+This is the delivery channel for the native audio work (study: `/mnt/project-files/natif/etude-rust-natif.md`).
+
 **Naming the audio output** (`AudioRoute`): a fault measured on the processed path sends ONE
 CONNECTION of an output direct (see *Where the sound goes* below), and a WebView cannot see what it
 plays to, so the activity lists AudioManager's output devices (no permission needed; a Bluetooth

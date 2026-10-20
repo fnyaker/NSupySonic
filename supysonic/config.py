@@ -63,6 +63,10 @@ class DefaultConfig:
         # Where that update is downloaded from (defaults to the project's
         # releases page).
         "android_url": None,
+        # A local APK to serve as that update (a private or fork build). Empty =
+        # the GitHub release of android_version on the repository android_url
+        # points at.
+        "android_apk": None,
     }
     DAEMON = {
         "socket": (

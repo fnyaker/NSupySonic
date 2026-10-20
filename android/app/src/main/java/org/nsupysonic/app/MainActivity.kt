@@ -60,6 +60,8 @@ import java.util.concurrent.Executors
 class MainActivity : AppCompatActivity() {
 
     companion object {
+        /** Bridge.bridgeVersion: what the page may ask of this APK. */
+        private const val BRIDGE_VERSION = 2
         /** Upper bound on a single Bridge.saveText payload (16 MB of chars). */
         private const val MAX_SAVE_TEXT = 16 * 1024 * 1024
         /** How long away counts as "long enough that the page may be gone". */
@@ -69,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var prefs: Prefs
+    private var updater: Updater? = null
     private lateinit var webView: WebView
     private lateinit var errorView: View
     private lateinit var shimJs: String
@@ -140,6 +143,17 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
+        updater = Updater(
+            this, prefs,
+            cookieFor = { url ->
+                try {
+                    CookieManager.getInstance().getCookie(url)
+                } catch (_: Exception) {
+                    null
+                }
+            },
+            report = { msg -> pushUpdate(msg.toString()) },
+        )
         if (!prefs.configured) {
             startActivity(Intent(this, SetupActivity::class.java))
             finish()
@@ -499,6 +513,8 @@ class MainActivity : AppCompatActivity() {
         if (pendingRebuild || webViewDead) rebuildWebView()
         else if (mainFrameFailed) reload()
         else pingPage()
+        // Back from "allow installs from this app": install what was waiting.
+        updater?.resume()
 
         // The login screen can go away without ever delivering a result — the
         // launcher icon re-entering this singleTask activity clears it off the
@@ -787,6 +803,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Updater's progress and outcome, for lib/appversion.js. [json] is JSONObject's output. */
+    private fun pushUpdate(json: String) {
+        if (webViewDead || !::webView.isInitialized) return
+        if (!isServerUrl(webView.url)) return
+        try {
+            webView.evaluateJavascript("window.__nsUpdate && window.__nsUpdate($json)", null)
+        } catch (_: Exception) {
+            /* WebView torn down under us */
+        }
+    }
+
     private fun runJsCommand(cmd: String, value: Double?) {
         // A media-button command is posted to the main looper, so it can land
         // AFTER the activity tore its WebView down (or after the renderer died).
@@ -857,6 +884,24 @@ class MainActivity : AppCompatActivity() {
          * read once by the page at startup (lib/audio/output.js); later changes
          * are pushed to window.__nsAudioRoute.
          */
+        /**
+         * What this native side can do for the page, as a number the page
+         * compares against (lib/appversion.js): 2 = installUpdate. An APK older
+         * than this method answers nothing, which the page reads as 1.
+         */
+        @JavascriptInterface
+        fun bridgeVersion(): Int = if (!allowed()) 0 else BRIDGE_VERSION
+
+        /**
+         * Download this app's update from the server and install it (Updater).
+         * Progress goes to window.__nsUpdate.
+         */
+        @JavascriptInterface
+        fun installUpdate() {
+            if (!allowed()) return
+            runOnUiThread { updater?.start() }
+        }
+
         @JavascriptInterface
         fun audioRoute(): String =
             if (!allowed()) "{\"kind\":\"unknown\",\"name\":\"\"}" else try {
@@ -955,6 +1000,7 @@ class MainActivity : AppCompatActivity() {
         // The WebView (the actual audio) dies with us — take the service down.
         if (isFinishing) stopService(Intent(this, PlayerService::class.java))
         shareExecutor.shutdownNow()
+        updater?.shutdown()
         disposeWebView()
         super.onDestroy()
     }
