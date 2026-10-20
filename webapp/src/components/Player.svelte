@@ -63,6 +63,7 @@
     noteContextLatency,
   } from "../lib/audio/output.js";
   import { startTimekeeper, judge } from "../lib/audio/timekeeper.js";
+  import { createNativeElement, isNativeEl, nativeAudioWanted } from "../lib/audio/nativeplayer.js";
   import { primeEdges, knownEdges } from "../lib/edges.js";
   import { primeGains, knownGain, gainFor } from "../lib/gaincache.js";
   import { primeAnalyses } from "../lib/analysis.js";
@@ -131,7 +132,9 @@
     ["pause", partyPoke],
   ];
   function makeEl() {
-    const el = new Audio();
+    // The Android app's own player when the setting asks for it (and the app
+    // could make one), the page's <audio> otherwise.
+    const el = (get(nativeAudioWanted) && createNativeElement()) || new Audio();
     el.preload = "auto";
     // A podcast at 1.5x must still sound like the same voice.
     el.preservesPitch = true;
@@ -1013,7 +1016,7 @@
     // which it can never leave: the new track goes onto a fresh element. The
     // outgoing sound is being cut here anyway (a new source), so this is the
     // one hand-over that costs nothing.
-    if (isDirect() && isWired(audio)) swapToFresh("track change");
+    if (stale(audio)) swapToFresh("track change");
     // A paused session-restore boot must not buffer audio in the background —
     // that silently burned data on EVERY app launch. preload=none defers the
     // fetch until the user actually presses play (play() triggers the load).
@@ -1413,6 +1416,17 @@
     for (const [ev, fn] of EL_EVENTS) el.removeEventListener(ev, fn);
     stopElement(el);
     releaseElement(el);
+    if (isNativeEl(el)) el.release();
+  }
+
+  // An element that must be replaced: routed through Web Audio while the path
+  // is direct (it can never leave the graph), or played by the wrong player
+  // (the app's own one, or the page's, whichever the setting no longer asks
+  // for).
+  function stale(e) {
+    if (!e) return false;
+    if (isDirect() && isWired(e)) return true;
+    return isNativeEl(e) !== get(nativeAudioWanted);
   }
 
   function bufferedAt(el, t) {
@@ -1429,7 +1443,7 @@
   // is playing on it.
   function renewIdle() {
     const idle = els.find((e) => e !== audio);
-    if (!idle || !isWired(idle) || switching) return;
+    if (!idle || !stale(idle) || switching) return;
     if (xfade && (xfade.el === idle || xfade.old === idle)) return;
     const el = makeEl();
     els = els.map((e) => (e === idle ? el : e));
@@ -1447,8 +1461,8 @@
     registerSource(el);
     disposeEl(old);
     renewIdle();
-    renewWanted = els.some((e) => isWired(e));
-    logInfo("audio", `playing off Web Audio from here (${reason})`, null, { important: true });
+    renewWanted = els.some(stale);
+    logInfo("audio", `fresh element from here (${reason}, ${isNativeEl(el) ? "app player" : "page player"})`, null, { important: true });
     return el;
   }
 
@@ -1458,7 +1472,7 @@
   }
 
   function renewElements(reason) {
-    if (!audio || !isDirect() || !els.some((e) => isWired(e))) {
+    if (!audio || !els.some(stale)) {
       renewWanted = false;
       return;
     }
@@ -1466,7 +1480,7 @@
     // Mid-transition states own the elements; the watchdog tries again.
     if (switching || recovering || chasing || loadingTrack || xfade) return;
     renewIdle();
-    if (!isWired(audio)) {
+    if (!stale(audio)) {
       renewWanted = false;
       return;
     }
@@ -1535,7 +1549,7 @@
       switching = false;
       renewWanted = true; // the next track change, or a quiet moment, does it
       if (why !== "cancelled") renewDeferredFor = trackKey(cur);
-      logInfo("audio", `hand-over off Web Audio postponed (${why})`, null, { important: true });
+      logInfo("audio", `hand-over to a fresh element postponed (${why})`, null, { important: true });
     };
     const onErr = () => abandon("the fresh element failed to load");
     renewCleanup = () => abandon("cancelled");
@@ -1574,8 +1588,8 @@
       if (get(player).playing) startPlayback("renew");
       disposeEl(old);
       switching = false;
-      renewWanted = els.some((e) => isWired(e));
-      logInfo("audio", `playing off Web Audio from here (${reason}, handed over at ${target.toFixed(2)} s)`, null, {
+      renewWanted = els.some(stale);
+      logInfo("audio", `fresh element from here (${reason}, handed over at ${target.toFixed(2)} s)`, null, {
         important: true,
       });
     }
@@ -1589,7 +1603,15 @@
   function onDirectChange(d) {
     if (!els.length) return;
     if (d) renewElements("direct output");
-    else renewWanted = false;
+    else renewWanted = els.some(stale);
+  }
+
+  // The app's own player switched on or off: the elements change hands at the
+  // next quiet moment, or at once when nothing is being heard.
+  $: onNativeChange($nativeAudioWanted);
+  function onNativeChange() {
+    if (!els.length) return;
+    renewElements("app player setting");
   }
 
   // The timekeeper's verdict (lib/audio/timekeeper.js): the music is not keeping

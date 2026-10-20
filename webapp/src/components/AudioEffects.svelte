@@ -17,6 +17,7 @@
     trimSilence,
     trimThresholdDb,
     audioOutput,
+    nativePlayer,
     glitchRoutes,
     saveFxPreset,
     applyFxPreset,
@@ -25,6 +26,7 @@
   } from "../lib/stores.js";
   import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/audio/graph.js";
   import { outputPlan, retryNow } from "../lib/audio/output.js";
+  import { nativeAudioAvailable } from "../lib/audio/nativeplayer.js";
   import Icon from "./Icon.svelte";
 
   // -- where the sound goes (lib/audio/output.js) ------------------------------
@@ -64,7 +66,12 @@
     glitch: "le son se hachait en lecture traitée sur cette sortie",
     probing: "nouvel essai après un son haché — le lecteur écoute",
     default: routeText || "",
+    native: routeText || "",
   }[plan.why];
+  // The Android app's own player (lib/audio/nativeplayer.js): only offered
+  // where the app has one.
+  const nativeOffered = nativeAudioAvailable();
+  $: native = nativeOffered && $nativePlayer;
   $: retryText =
     plan.why === "glitch" && plan.retryAt
       ? `Nouvel essai vers ${fmtTime(plan.retryAt)}, ou dès que la sortie se reconnecte.`
@@ -189,7 +196,20 @@
   <p class="muted sub">
     Le chemin du son jusqu'à vos écouteurs, votre enceinte ou l'autoradio.
   </p>
-  <div class="seg out-seg" role="radiogroup" aria-label="Sortie audio">
+  {#if nativeOffered}
+    <button class="toggle native-tg" role="switch" aria-checked={$nativePlayer} on:click={() => nativePlayer.set(!$nativePlayer)}>
+      <span class="tg-txt">
+        <span class="tg-title">Lecteur de l'application</span>
+        <span class="tg-hint muted">
+          Le son est lu par Android lui-même, hors de la page : il continue écran
+          éteint et en Bluetooth comme dans une application de musique. En essai :
+          l'égaliseur, les basses et les animations ne le suivent pas encore.
+        </span>
+      </span>
+      <span class="sw" class:on={$nativePlayer}><span class="knob"></span></span>
+    </button>
+  {/if}
+  <div class="seg out-seg" class:dimmed={native} role="radiogroup" aria-label="Sortie audio">
     {#each OUTPUT_MODES as m}
       <button
         class="seg-btn"
@@ -197,17 +217,18 @@
         role="radio"
         aria-checked={$audioOutput === m.id}
         aria-label={m.label}
+        disabled={native}
         on:click={() => audioOutput.set(m.id)}
       >
         {#if m.short}<span class="long">{m.label}</span><span class="short">{m.short}</span>{:else}{m.label}{/if}
       </button>
     {/each}
   </div>
-  <p class="muted out-hint">{OUTPUT_HINTS[$audioOutput] || OUTPUT_HINTS.auto}</p>
+  {#if !native}<p class="muted out-hint">{OUTPUT_HINTS[$audioOutput] || OUTPUT_HINTS.auto}</p>{/if}
   <div class="out-status" class:direct={plan.direct}>
     <span class="out-ico"><Icon name={route.kind === "bluetooth" ? "bluetooth" : "speaker"} size={16} /></span>
     <span class="out-txt">
-      <span class="out-mode">{plan.direct ? "Lecture directe" : "Lecture traitée"}</span>
+      <span class="out-mode">{plan.why === "native" ? "Lecteur Android" : plan.direct ? "Lecture directe" : "Lecture traitée"}</span>
       {#if whyText}<span class="muted out-why">{whyText}</span>{/if}
       {#if plan.why === "glitch" && routeText}<span class="muted out-why">{routeText}</span>{/if}
     </span>
@@ -506,6 +527,16 @@
   }
   .out-seg .short {
     display: none;
+  }
+  .out-seg.dimmed {
+    opacity: 0.45;
+  }
+  .native-tg {
+    padding-bottom: 16px;
+  }
+  .native-tg .tg-hint {
+    max-width: 62ch;
+    line-height: 1.45;
   }
   @media (max-width: 420px) {
     .out-seg .long {

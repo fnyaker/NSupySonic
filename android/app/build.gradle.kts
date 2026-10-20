@@ -54,7 +54,11 @@ dependencies {
     // WebViewCompat.addDocumentStartJavaScript (mediaSession shim injection).
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("com.google.android.material:material:1.12.0")
-    // MediaSessionCompat + MediaStyle notification (the WebView owns the audio;
-    // native only exposes session/transport, so media3/ExoPlayer is not needed).
+    // MediaSessionCompat + MediaStyle notification (PlayerService): the page
+    // owns the queue and the session, whichever player makes the sound.
     implementation("androidx.media:media:1.7.0")
+    // The native player (NativeAudio.kt): ExoPlayer plays the page's audio
+    // elements in the app's process when Réglages asks for it. 1.4.x is the
+    // last line that builds against compileSdk 34.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
 }

@@ -46,6 +46,7 @@
 
 import { derived, get, writable } from "svelte/store";
 import { audioOutput, glitchRoutes } from "../stores.js";
+import { nativeAudioWanted } from "./nativeplayer.js";
 
 export const OUTPUT_MODES = ["auto", "direct", "graph"];
 
@@ -162,10 +163,17 @@ export function decideOutput(mode, route, glitches, now = Date.now()) {
   return { direct: false, why: sameConnection(v, route, now) ? "probing" : "default" };
 }
 
-export const outputPlan = derived([audioOutput, audioRoute, glitchRoutes], ([$mode, $route, $glitches]) => ({
-  ...decideOutput(OUTPUT_MODES.includes($mode) ? $mode : "auto", $route, $glitches),
-  route: $route,
-}));
+// The Android app's own player (nativeplayer.js) has no Web Audio graph to go
+// through: it is the direct path, whatever the mode says.
+export const outputPlan = derived(
+  [audioOutput, audioRoute, glitchRoutes, nativeAudioWanted],
+  ([$mode, $route, $glitches, $native]) => ({
+    ...($native
+      ? { direct: true, why: "native" }
+      : decideOutput(OUTPUT_MODES.includes($mode) ? $mode : "auto", $route, $glitches)),
+    route: $route,
+  })
+);
 
 /** true while the player must keep its elements off Web Audio. */
 export const directOutput = derived(outputPlan, ($p) => $p.direct);
