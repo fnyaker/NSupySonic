@@ -113,6 +113,7 @@ class NativeAnalysis(private val emit: (String) -> Unit) {
                     free()
                 }
             }
+            Unit // the `when` above is a statement, not the lambda's value
         }
     }
 
