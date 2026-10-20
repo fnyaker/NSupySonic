@@ -18,6 +18,7 @@
     trimThresholdDb,
     audioOutput,
     nativePlayer,
+    nativeFault,
     glitchRoutes,
     saveFxPreset,
     applyFxPreset,
@@ -26,7 +27,13 @@
   } from "../lib/stores.js";
   import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/audio/graph.js";
   import { outputPlan, retryNow } from "../lib/audio/output.js";
-  import { nativeAudioAvailable, nativeDspAvailable } from "../lib/audio/nativeplayer.js";
+  import {
+    nativeAudioAvailable,
+    nativeDspAvailable,
+    nativeChoiceOn,
+    faultHolds,
+    clearNativeFault,
+  } from "../lib/audio/nativeplayer.js";
   import Icon from "./Icon.svelte";
 
   // -- where the sound goes (lib/audio/output.js) ------------------------------
@@ -71,7 +78,11 @@
   // The Android app's own player (lib/audio/nativeplayer.js): only offered
   // where the app has one.
   const nativeOffered = nativeAudioAvailable();
-  $: native = nativeOffered && $nativePlayer;
+  // On by default where the app's player carries the effects too; what the
+  // switch shows is the setting, a failure below it says what plays instead.
+  $: nativeOn = nativeChoiceOn($nativePlayer);
+  $: nativeFailed = nativeOn && faultHolds($nativeFault);
+  $: native = nativeOffered && nativeOn && !nativeFailed;
   $: retryText =
     plan.why === "glitch" && plan.retryAt
       ? `Nouvel essai vers ${fmtTime(plan.retryAt)}, ou dès que la sortie se reconnecte.`
@@ -199,7 +210,7 @@
     Le chemin du son jusqu'à vos écouteurs, votre enceinte ou l'autoradio.
   </p>
   {#if nativeOffered}
-    <button class="toggle native-tg" role="switch" aria-checked={$nativePlayer} on:click={() => nativePlayer.set(!$nativePlayer)}>
+    <button class="toggle native-tg" role="switch" aria-checked={nativeOn} on:click={() => nativePlayer.set(!nativeOn)}>
       <span class="tg-txt">
         <span class="tg-title">Lecteur de l'application</span>
         <span class="tg-hint muted">
@@ -209,8 +220,17 @@
           l'égaliseur, les basses et les animations ne le suivent pas encore (mettez l'application à jour).{/if}
         </span>
       </span>
-      <span class="sw" class:on={$nativePlayer}><span class="knob"></span></span>
+      <span class="sw" class:on={nativeOn}><span class="knob"></span></span>
     </button>
+    {#if nativeFailed}
+      <div class="out-next native-fail">
+        <span class="muted">
+          Le lecteur de l'application a échoué sur cet appareil ; la page lit la musique à sa place
+          jusqu'à demain ou jusqu'à la prochaine mise à jour de l'application.
+        </span>
+        <button class="g-retry" on:click={clearNativeFault}>Réessayer maintenant</button>
+      </div>
+    {/if}
   {/if}
   <div class="seg out-seg" class:dimmed={native} role="radiogroup" aria-label="Sortie audio">
     {#each OUTPUT_MODES as m}
@@ -536,6 +556,9 @@
   }
   .native-tg {
     padding-bottom: 16px;
+  }
+  .native-fail {
+    margin: -6px 0 16px;
   }
   .native-tg .tg-hint {
     max-width: 62ch;

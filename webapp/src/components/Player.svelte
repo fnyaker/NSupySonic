@@ -447,6 +447,13 @@
     if (e && e.target !== audio) return;
     logInfo("audio", "error code=" + (audio?.error?.code ?? "?"), null, { important: true });
     if (loadingTrack) return; // stale error from the outgoing source
+    // The app's player itself failed (nativeplayer.js#noteNativeFault): the
+    // page's carries the track on from where it was, instead of reloading it
+    // into the player that just broke.
+    if (isNativeEl(audio) && !get(nativeAudioWanted)) {
+      fallBackToPage();
+      return;
+    }
     // A failing chase reload (network dropped mid-chase): fold back into the
     // normal recovery path, which parks offline / resumes at the last position.
     if (chasing) cancelSeekChase();
@@ -1494,24 +1501,42 @@
     const quiet = !get(player).playing || audio.readyState < 2;
     if (!quiet && renewDeferredFor === curId) return;
     if (quiet) {
-      const old = audio;
-      const pos = old.readyState >= 1 ? old.currentTime : get(player).currentTime || 0;
-      const preload = old.preload;
-      const url = currentSourceUrl(cur);
-      const el = swapToFresh(reason);
-      el.preload = preload;
-      if (detachLadder) {
-        detachLadder();
-        detachLadder = watchAudio(el, curId);
-      }
-      el.src = url;
-      el.load();
-      setTrackGain(gainFor(cur));
-      if (pos > 0) seekOnceLoaded(pos);
-      if (get(player).playing) startPlayback("renew");
+      moveSourceToFresh(cur, reason);
       return;
     }
     handOverToFresh(cur, reason);
+  }
+
+  // The current track onto a fresh element, at the position it had reached.
+  function moveSourceToFresh(cur, reason) {
+    const old = audio;
+    const pos = old.readyState >= 1 && old.currentTime > 0 ? old.currentTime : get(player).currentTime || 0;
+    const preload = old.preload;
+    const url = currentSourceUrl(cur);
+    const el = swapToFresh(reason);
+    el.preload = preload;
+    if (detachLadder) {
+      detachLadder();
+      detachLadder = watchAudio(el, curId);
+    }
+    el.src = url;
+    el.load();
+    setTrackGain(gainFor(cur));
+    if (pos > 0) seekOnceLoaded(pos);
+    if (get(player).playing) startPlayback(reason);
+  }
+
+  // The app's player failed under the playing track: whatever was recovering
+  // or chasing it belongs to the broken element.
+  function fallBackToPage() {
+    cancelRecovery();
+    if (chasing) cancelSeekChase();
+    const cur = get(current);
+    if (!cur || !curId) {
+      swapToFresh("app player failed");
+      return;
+    }
+    moveSourceToFresh(cur, "app player failed");
   }
 
   function handOverToFresh(cur, reason) {

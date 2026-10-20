@@ -108,9 +108,25 @@ export const audioOutput = persisted("audio.output", "auto");
 // One connection of one output each; lib/audio/output.js owns the rules.
 export const glitchRoutes = persisted("audio.glitchRoutes", {});
 // The Android app plays through its own player (Media3, NativeAudio.kt)
-// instead of the WebView's media pipeline (lib/audio/nativeplayer.js). Only
-// ever true where the app offers it; off by default while it is new.
-export const nativePlayer = persisted("audio.native", false);
+// instead of the WebView's media pipeline (lib/audio/nativeplayer.js), where
+// the app offers it. null: the app decides — on wherever its player carries
+// the EQ, the bass lift and the animations too (bridge version 6); true /
+// false: the person's own choice. The old switch ("audio.native", off by
+// default) carries over only when it was turned ON: "off" was nobody's choice.
+// Read once, then the old key goes: the new one holds the answer from then on.
+export const nativePlayer = persisted("audio.native.choice", null);
+try {
+  if (!REMOTE && localStorage.getItem("audio.native") !== null) {
+    if (localStorage.getItem("audio.native") === "true" && get(nativePlayer) === null) nativePlayer.set(true);
+    localStorage.removeItem("audio.native");
+  }
+} catch {
+  /* ignore */
+}
+// The app's player itself failed on this device (a decoder, the audio output
+// it opens: NativeAudio.kt), so the page's plays instead: { at, app, why }.
+// Held for a day and for this version of the app (nativeplayer.js#faultHolds).
+export const nativeFault = persisted("audio.native.fault", null);
 
 // -- crossfade between tracks ------------------------------------------------
 // Off by default: crossfading needs the Web Audio graph, and the default (pure

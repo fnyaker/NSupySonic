@@ -26,7 +26,8 @@
 // native storage, those play the way they always did.
 
 import { derived } from "svelte/store";
-import { nativePlayer, eqEnabled, eqBands, bassBoost } from "../stores.js";
+import { nativePlayer, nativeFault, eqEnabled, eqBands, bassBoost } from "../stores.js";
+import { logInfo } from "../log.js";
 
 // ExoPlayer's playback states, as the native side reports them.
 export const ST_IDLE = 1;
@@ -154,18 +155,63 @@ bassBoost.subscribe((v) => {
   sendFx();
 });
 
+/** The setting as it stands: the person's choice, or the app's default. */
+export function nativeChoiceOn(choice) {
+  if (!nativeAudioAvailable()) return false;
+  if (choice === true || choice === false) return choice;
+  return nativeDspAvailable();
+}
+
+// A failure of the app's player ITSELF sends the music back to the page's for
+// a day, and for this version of the app only: an update is the likely fix.
+export const FAULT_HOLD_MS = 24 * 3600 * 1000;
+function appId() {
+  try {
+    const b = bridge();
+    return String((b && typeof b.appVersion === "function" && b.appVersion()) || "");
+  } catch {
+    return "";
+  }
+}
+/** Whether a recorded fault still keeps the app's player off. */
+export function faultHolds(f, at = Date.now()) {
+  return !!(f && typeof f.at === "number" && at - f.at >= 0 && at - f.at < FAULT_HOLD_MS && f.app === appId());
+}
+/** The app's player could not play at all here: the page's takes over. */
+export function noteNativeFault(why) {
+  const msg = String(why || "app player failed").slice(0, 120);
+  logInfo("audio", `app player failed (${msg}): the page's player takes over`, null, { important: true });
+  nativeFault.set({ at: Date.now(), app: appId(), why: msg });
+}
+export function clearNativeFault() {
+  nativeFault.set(null);
+}
+// What only the app's player can get wrong, against what any player would:
+// HTMLMediaElement code 3 is the decoder or the audio output (ExoPlayer's
+// 4000-5999), and "no player" is the app unable to make one. A network error
+// or a source refused would fail the page's player just the same.
+function isPlayerFault(code, msg) {
+  return code === 3 || (code === 4 && msg === "no player");
+}
+
 /** true while the player must play through the app's own player. */
-export const nativeAudioWanted = derived(nativePlayer, (on) => !!on && nativeAudioAvailable());
+export const nativeAudioWanted = derived(
+  [nativePlayer, nativeFault],
+  ([choice, fault]) => nativeChoiceOn(choice) && !faultHolds(fault),
+);
 
 /** A native element, or null when the app could not make a player. */
 export function createNativeElement() {
   if (!nativeAudioAvailable()) return null;
   try {
     const el = new NativeAudioElement(bridge());
-    return el._id ? el : null;
+    if (el._id) return el;
   } catch {
-    return null;
+    /* below */
   }
+  // Without a player, asking again on every element would ask for ever.
+  noteNativeFault("no player");
+  return null;
 }
 
 export function isNativeEl(el) {
@@ -286,6 +332,8 @@ export class NativeAudioElement extends EventTarget {
     if (c < this._srcSeq) return; // about a source we have since replaced
     if (s.ev === "error") {
       this._err = { code: [1, 2, 3, 4].includes(s.code) ? s.code : 2, message: String(s.msg || "") };
+      // Before the event: whoever handles it already reads the page's player as the one wanted.
+      if (isPlayerFault(this._err.code, this._err.message)) noteNativeFault(this._err.message || "code " + this._err.code);
       this._settlePlays(Object.assign(new Error(this._err.message || "native playback failed"), { name: "NotSupportedError" }));
       this._fire("error");
       return;

@@ -200,3 +200,76 @@ test("volume, rate and release go across; nothing is sent after release", () => 
   el.play().catch(() => {});
   assert.equal(sent.at(-1).op === "release" ? sent.length : -1, n);
 });
+
+// Lot N6: on by default where the app's player carries everything the page's
+// does, and the page's player back the moment the app's own fails.
+function dspApp(version = 6, appVersion = "1.6.0") {
+  const sent = app({ version });
+  Object.assign(window.NSNative, {
+    naFx() {},
+    naAnalysis() {},
+    naAnalysisAvailable: () => true,
+    appVersion: () => appVersion,
+  });
+  N.resetNativeAudio();
+  return sent;
+}
+
+test("nobody chose: on where the app's player has the effects and the animations, off where it has not", () => {
+  S.nativeFault.set(null);
+  S.nativePlayer.set(null);
+  dspApp(6);
+  assert.equal(get(N.nativeAudioWanted), true, "bridge 6: the app's player");
+  app({ version: 5 });
+  assert.equal(get(N.nativeAudioWanted), false, "bridge 5 (no EQ, no animations): the page's");
+  S.nativePlayer.set(true);
+  assert.equal(get(N.nativeAudioWanted), true, "unless the person asked for it");
+  dspApp(6);
+  S.nativePlayer.set(false);
+  assert.equal(get(N.nativeAudioWanted), false, "and a choice of off is kept");
+  S.nativePlayer.set(null);
+});
+
+test("the app's player failing hands the music to the page's, before anyone hears of the error", () => {
+  S.nativeFault.set(null);
+  S.nativePlayer.set(null);
+  const sent = dspApp(6, "1.6.0");
+  const el = N.createNativeElement();
+  el.src = "/api/stream/x";
+  el.load();
+  let wantedAtError = null;
+  el.addEventListener("error", () => (wantedAtError = get(N.nativeAudioWanted)));
+  // A network error is not the player's: the page's would fail just the same.
+  report(el, { c: sent.at(-1).c, ev: "error", code: 2, msg: "ERROR_CODE_IO_NETWORK_CONNECTION_FAILED" });
+  assert.equal(wantedAtError, true);
+  assert.equal(get(S.nativeFault), null);
+  // The audio output could not be opened: that one is.
+  report(el, { c: sent.at(-1).c, ev: "error", code: 3, msg: "ERROR_CODE_AUDIO_TRACK_INIT_FAILED" });
+  assert.equal(wantedAtError, false, "Player.svelte's handler already reads the page's player as wanted");
+  assert.equal(get(S.nativeFault).why, "ERROR_CODE_AUDIO_TRACK_INIT_FAILED");
+  assert.equal(get(N.nativeAudioWanted), false);
+});
+
+test("a fault holds for a day and for this version of the app", () => {
+  dspApp(6, "1.6.0");
+  const at = Date.now();
+  const f = { at, app: "1.6.0", why: "x" };
+  assert.equal(N.faultHolds(f, at + 23 * 3600e3), true);
+  assert.equal(N.faultHolds(f, at + 25 * 3600e3), false, "tried again the next day");
+  dspApp(6, "1.7.0");
+  assert.equal(N.faultHolds(f, at + 1000), false, "and by a new version of the app");
+  S.nativeFault.set({ at, app: "1.7.0", why: "x" });
+  assert.equal(get(N.nativeAudioWanted), false);
+  N.clearNativeFault();
+  assert.equal(get(N.nativeAudioWanted), true, "Réessayer maintenant");
+});
+
+test("an app that cannot make a player is not asked again on every element", () => {
+  S.nativeFault.set(null);
+  dspApp(6);
+  window.NSNative.naCreate = () => 0;
+  assert.equal(N.createNativeElement(), null);
+  assert.equal(get(S.nativeFault).why, "no player");
+  assert.equal(get(N.nativeAudioWanted), false);
+  S.nativeFault.set(null);
+});
