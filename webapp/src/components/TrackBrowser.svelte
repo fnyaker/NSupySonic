@@ -137,9 +137,19 @@
   .empty {
     margin-top: 18px;
   }
+  /* A phone has no room for the search box beside the sort controls (it was
+     squeezed to "Recherc"): it takes its own line, the sort fills the next. */
   @media (max-width: 640px) {
+    .toolbar {
+      flex-wrap: wrap;
+    }
     .searchbox {
       max-width: none;
+      flex: 1 1 100%;
+    }
+    .sortsel {
+      flex: 1;
+      min-width: 0;
     }
     .spacer {
       display: none;
