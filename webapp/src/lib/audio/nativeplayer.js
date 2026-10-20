@@ -298,8 +298,17 @@ export class NativeAudioElement extends EventTarget {
 
   // --- the element -----------------------------------------------------------
 
+  // Played in the page rather than by the app: a local object (an offline
+  // download's blob) the native side cannot fetch. Anything else, whatever its
+  // scheme, goes to the app, which only ever opens the server's own URLs.
   _isWebSrc(url) {
-    return /^(blob|data):/i.test(url);
+    let scheme;
+    try {
+      scheme = new URL(url, typeof location !== "undefined" ? location.href : undefined).protocol;
+    } catch {
+      return false;
+    }
+    return scheme === "blob:" || scheme === "data:";
   }
 
   _ensureWeb() {
