@@ -22,7 +22,9 @@ const ctx = await browser.newContext(
     ? { viewport: { width: 412, height: 915 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }
     : { viewport: { width: 1440, height: 900 } }
 );
-await ctx.route(/dzcdn\.net|api\.deezer\.com/, (r) => r.abort());
+// Deezer's CDN and public API are never reached by a bench: matched on the HOSTNAME, not the URL text.
+const deezerHost = (u) => u.hostname === "api.deezer.com" || u.hostname.endsWith(".dzcdn.net");
+await ctx.route(deezerHost, (r) => r.abort());
 const wav = silence(120);
 await ctx.route(/\/api\/stream\//, (r) =>
   r.fulfill({ status: 200, body: wav, headers: { "Content-Type": "audio/wav", "Content-Length": String(wav.length) } })

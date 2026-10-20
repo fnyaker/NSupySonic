@@ -49,7 +49,9 @@ let wav = tone(40);
 
 const browser = await chromium.launch({ args: ["--autoplay-policy=no-user-gesture-required"] });
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-await ctx.route(/dzcdn\.net|api\.deezer\.com/, (r) => r.abort());
+// Deezer's CDN and public API are never reached by a bench: matched on the HOSTNAME, not the URL text.
+const deezerHost = (u) => u.hostname === "api.deezer.com" || u.hostname.endsWith(".dzcdn.net");
+await ctx.route(deezerHost, (r) => r.abort());
 await ctx.route(/\/api\/stream\//, (r) => {
   const total = wav.length;
   const m = /bytes=(\d+)-(\d*)/.exec(r.request().headers()["range"] || "");
