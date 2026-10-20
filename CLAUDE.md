@@ -247,7 +247,8 @@ NDK's clang (16 KB pages) into `app/src/main/jniLibs/` (git-ignored; android.yam
 an APK without it has `NsCore.available` false. `NSNative.nativeCore()` reports it (bridge version 3).
 
 **The native player** (`NativeAudio.kt`, `lib/audio/nativeplayer.js`; lot N3). Réglages → Audio → *Lecteur de
-l'application* (`audio.native`, off by default, offered only from bridge version 4) makes the page's audio elements
+l'application* (`audio.native.choice`, offered from bridge version 4; ON by default from bridge 6, where the app's player carries
+the EQ, the bass lift and the animations too; `null` = the app decides, an old `audio.native` true carries over) makes the page's audio elements
 Media3/ExoPlayer players in the app's process. Player.svelte is unchanged in logic: `makeEl` gets a
 `NativeAudioElement`, the HTMLMediaElement subset it uses (src/load/play/pause/currentTime/volume/playbackRate/
 buffered/the events), so the queue, the crossfade on the volumes, the party host and the timekeeper all read it as an
@@ -272,6 +273,13 @@ the output path. A frame 3 s ahead of the clock or 1 s behind it is a seek's lef
 through the chain while there is no effect and no view (a copy, bit for bit). The normalization still rides on the
 element's volume; the oscilloscope has no waveform on this path. `test/nativeanalysis.test.mjs` plays the app with
 the shipped rhythm.wasm on an arranged record.
+
+**When the app's player fails** (lot N6, `nativeplayer.js#noteNativeFault`, `Player.svelte#fallBackToPage`): a player
+error (MEDIA_ERR_DECODE, i.e. ExoPlayer's decoder or audio-track codes, or `naCreate` refusing) is recorded in
+`audio.native.fault` BEFORE the element's error fires, so `nativeAudioWanted` is already false and the playing track moves
+to a page `<audio>` at the position it reached instead of being retried on the same player. A network error is not a fault.
+It holds for a day and for that app version only (an update tries again); Réglages says so under the switch, which still
+shows the setting, with *Réessayer maintenant*. `node test/native/run.mjs` drives both (bridge 6 default, a code 3 fault).
 
 **Downloads in the app's storage** (`OfflineStore.kt`, `lib/nativeoffline.js`, `lib/offline.js`; lot N4, bridge
 version 5). On an APK that has it, a download's AUDIO is a file in `filesDir/offline`, fetched by the app itself

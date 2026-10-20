@@ -83,8 +83,24 @@ function fakeApp() {
     el.addEventListener("error", () => emit(id, { c: sl.c, ev: "error", code: 2, msg: "fake" }));
     return sl;
   }
+  // The APK under test: bridge 4 (the player alone) unless the bench says 6.
+  const version = () => +(localStorage.getItem("__bridge") || 4);
+  // The player itself breaking (the audio output refused, as ExoPlayer reports it).
+  window.__fake.fail = () => {
+    for (const sl of slots.values()) {
+      if (sl.el.paused) continue;
+      clearInterval(sl.tick);
+      sl.el.pause();
+      sl.pwr = false;
+      emit(sl.id, { c: sl.c, ev: "error", code: 3, msg: "ERROR_CODE_AUDIO_TRACK_INIT_FAILED" });
+    }
+  };
   window.NSNative = {
-    bridgeVersion: () => 4,
+    bridgeVersion: () => version(),
+    appVersion: () => "1.6.0",
+    naFx() {},
+    naAnalysis() {},
+    naAnalysisAvailable: () => version() >= 6,
     nativeAudio: () => true,
     naCreate(page) {
       const id = next++;
@@ -268,6 +284,48 @@ const queue = ids.ids.slice(0, 3).map((id, k) => song(id, k + 1));
   }
   check(both >= 5 && w.title === "Song 2" && w.playing === 1, "crossfade: both players heard together, then the next alone",
     `${(both * 0.2).toFixed(1)} s overlap, now ${w.title} on ${w.playing}`);
+  await ctx.close();
+}
+
+{
+  // Lot N6: nobody chose, and the app's player has the effects and the
+  // animations (bridge 6): it plays. Then it fails under the song.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await open(ctx, { __bridge: 6 }, queue);
+  let w = await where(page);
+  check(w.why === "native" && w.pageEls === 0, "bridge 6, no choice made: the app's player by default", `${w.why}, ${w.pageEls} page el`);
+  await page.locator("footer.player .pp").click();
+  await page.waitForTimeout(2500);
+  const before = await where(page);
+  const tb = Date.now();
+  await page.evaluate(() => window.__fake.fail());
+  await page.waitForTimeout(1500);
+  w = await where(page);
+  const ran = (Date.now() - tb) / 1000;
+  check(w.why !== "native" && w.pageEls >= 1 && !w.paused && w.title === before.title && w.t > before.t - 0.3 && w.t < before.t + ran + 0.3,
+    "the app's player fails: the page's carries the same song on from where it was",
+    `${w.why}, ${w.pageEls} page el, ${before.title} ${before.t.toFixed(2)} → ${w.title} ${w.t?.toFixed(2)} in ${ran.toFixed(1)} s`);
+  await page.waitForTimeout(1000);
+  const w2 = await where(page);
+  check(w2.t > w.t + 0.7 && w2.playing === 0, "and keeps playing, with no app player left running", `${w.t.toFixed(2)} → ${w2.t.toFixed(2)}, ${w2.playing} native`);
+  // Réglages says so, with a way back.
+  for (const [name, vp] of [["desktop", { width: 1280, height: 900 }], ["phone", { width: 390, height: 844 }]]) {
+    await page.setViewportSize(vp);
+    await page.evaluate(() => (location.hash = "#/settings"));
+    await page.waitForSelector(".native-fail");
+    const card = page.locator("section.card", { has: page.locator(".out-seg") });
+    const box = await card.boundingBox();
+    const btn = await page.locator(".native-fail .g-retry").boundingBox();
+    check(btn && btn.x >= box.x && btn.x + btn.width <= box.x + box.width + 0.5 && btn.height >= 36,
+      `${name}: the failure is said under the switch, with its button inside the card`, btn ? `${btn.width.toFixed(0)}×${btn.height.toFixed(0)}` : "missing");
+    const on = await page.locator(".native-tg").getAttribute("aria-checked");
+    check(on === "true", `${name}: the switch still shows the setting (on)`, on);
+    if (shotsAt) await card.screenshot({ path: join(shotsAt, `native-fail-${name}.png`) });
+  }
+  await page.locator(".native-fail .g-retry").click();
+  await page.waitForTimeout(2500);
+  w = await where(page);
+  check(w.why === "native" && w.playing === 1 && !w.paused, "Réessayer: back on the app's player, still playing", `${w.why}, ${w.playing} native playing`);
   await ctx.close();
 }
 
