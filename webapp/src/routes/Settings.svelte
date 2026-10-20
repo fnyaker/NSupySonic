@@ -1880,6 +1880,7 @@
     gap: 12px;
   }
   .count {
+    white-space: nowrap;
     font-weight: 400;
     font-size: 0.9rem;
   }
@@ -1887,6 +1888,8 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
+    white-space: nowrap;
     color: var(--text-dim);
     font-size: 0.85rem;
   }

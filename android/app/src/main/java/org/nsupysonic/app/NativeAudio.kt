@@ -20,6 +20,9 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import org.json.JSONObject
 import java.io.EOFException
+import java.io.File
+import java.io.RandomAccessFile
+import java.nio.channels.Channels
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -58,6 +61,8 @@ class NativeAudio(
     private val prefs: Prefs,
     private val cookieFor: (String) -> String?,
     private val emit: (Int, String) -> Unit,
+    // A download in the app's storage (OfflineStore), played off the disk.
+    private val localFile: (String) -> File? = { null },
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val nextId = AtomicInteger(1)
@@ -173,7 +178,7 @@ class NativeAudio(
     private inner class Slot(val id: Int) : Player.Listener {
         val player: ExoPlayer = ExoPlayer.Builder(context)
             .setMediaSourceFactory(
-                DefaultMediaSourceFactory(DataSource.Factory { ServerDataSource(prefs, cookieFor) })
+                DefaultMediaSourceFactory(DataSource.Factory { ServerDataSource(prefs, cookieFor, localFile) })
             )
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -352,12 +357,14 @@ class NativeAudio(
 /**
  * The server's audio, read through Net: Range requests for seeking, the session
  * cookie, the pinned certificate. A server that answers a ranged request with
- * the whole file (200) is read past the bytes before the range.
+ * the whole file (200) is read past the bytes before the range. A download's
+ * URL (OfflineStore.PATH) is read from its file instead, with no network.
  */
 @OptIn(UnstableApi::class)
 class ServerDataSource(
     private val prefs: Prefs,
     private val cookieFor: (String) -> String?,
+    private val localFile: (String) -> File? = { null },
 ) : BaseDataSource(true) {
     private var conn: HttpURLConnection? = null
     private var input: InputStream? = null
@@ -370,6 +377,18 @@ class ServerDataSource(
         transferInitializing(dataSpec)
         val url = dataSpec.uri.toString()
         if (!prefs.isServerUrl(url)) throw IOException("not the server")
+        val unset0 = C.LENGTH_UNSET.toLong()
+        localFile(url)?.let { f ->
+            val raf = RandomAccessFile(f, "r")
+            raf.seek(dataSpec.position)
+            input = Channels.newInputStream(raf.channel)
+            val left = f.length() - dataSpec.position
+            if (left < 0) throw EOFException()
+            remaining = if (dataSpec.length != unset0) minOf(dataSpec.length, left) else left
+            opened = true
+            transferStarted(dataSpec)
+            return remaining
+        }
         val headers = HashMap<String, String>()
         // Compressed bytes would not match the byte offsets ExoPlayer asks for.
         headers["Accept-Encoding"] = "identity"
