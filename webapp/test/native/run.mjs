@@ -169,7 +169,12 @@ function fakeApp() {
 }
 
 async function open(ctx, settings, queue) {
-  await ctx.route(/dzcdn\.net|api\.deezer\.com/, (r) => r.abort());
+  // Deezer's CDN and API are never reached from the bench.
+  const offline = (u) => {
+    const h = new URL(u).hostname;
+    return h === "api.deezer.com" || h === "dzcdn.net" || h.endsWith(".dzcdn.net");
+  };
+  await ctx.route(offline, (r) => r.abort());
   await ctx.addInitScript(fakeApp);
   await ctx.addInitScript(() => {
     const j = sessionStorage.getItem("__inject");
