@@ -16,7 +16,11 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import org.json.JSONObject
 import java.io.EOFException
@@ -63,7 +67,39 @@ class NativeAudio(
     private val emit: (Int, String) -> Unit,
     // A download in the app's storage (OfflineStore), played off the disk.
     private val localFile: (String) -> File? = { null },
+    // The analysis frames (NativeAnalysis), for lib/audio/engine.js.
+    emitFrames: ((String) -> Unit)? = null,
 ) {
+    /** The rhythm analyser on what the players play; null without the native core. */
+    val analysis: NativeAnalysis? = if (emitFrames != null && NsCore.available) NativeAnalysis(emitFrames) else null
+
+    // The EQ and the bass lift every player's chain applies (NsProcessor).
+    @Volatile private var fx = NsProcessor.Fx(0, FloatArray(10), 0f)
+
+    /** The page's effects: `{eq: [10 dB], bass: 0..1}` (graph.js's settings). */
+    fun setFx(json: String) {
+        val o = try {
+            JSONObject(json)
+        } catch (_: Exception) {
+            return
+        }
+        val bands = FloatArray(10)
+        o.optJSONArray("eq")?.let { a ->
+            for (i in 0 until minOf(10, a.length())) {
+                val v = a.optDouble(i, 0.0)
+                bands[i] = if (v.isFinite()) v.toFloat().coerceIn(-16f, 16f) else 0f
+            }
+        }
+        val amount = o.optDouble("bass", 0.0).let { if (it.isFinite()) it.coerceIn(0.0, 1.0) else 0.0 }
+        fx = NsProcessor.Fx(fx.version + 1, bands, (amount * 12).toFloat())
+    }
+
+    /** One command for the analyser (NativeAnalysis.command). */
+    fun analyse(json: String) {
+        val a = analysis ?: return
+        main.post { a.command(json) }
+    }
+
     private val main = Handler(Looper.getMainLooper())
     private val nextId = AtomicInteger(1)
     private val live = AtomicInteger(0)
@@ -120,6 +156,7 @@ class NativeAudio(
             slots.clear()
             pausedByFocus.clear()
             abandonFocus()
+            analysis?.release()
         }
         if (Looper.myLooper() == Looper.getMainLooper()) run.run() else main.post(run)
     }
@@ -176,7 +213,8 @@ class NativeAudio(
     // --- one player ----------------------------------------------------------
 
     private inner class Slot(val id: Int) : Player.Listener {
-        val player: ExoPlayer = ExoPlayer.Builder(context)
+        val proc = NsProcessor(id, analysis) { fx }
+        val player: ExoPlayer = ExoPlayer.Builder(context, Renderers(context, proc))
             .setMediaSourceFactory(
                 DefaultMediaSourceFactory(DataSource.Factory { ServerDataSource(prefs, cookieFor, localFile) })
             )
@@ -223,6 +261,7 @@ class NativeAudio(
                         return
                     }
                     player.playWhenReady = false
+                    proc.startAt = 0.0
                     player.volume = o.optDouble("v", 1.0).toFloat().coerceIn(0f, 1f)
                     player.setPlaybackSpeed(rate(o.optDouble("r", 1.0)))
                     player.setMediaItem(MediaItem.fromUri(url))
@@ -240,9 +279,15 @@ class NativeAudio(
                 }
                 "play" -> {
                     if (hasItem) prepare()
-                    if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
+                    if (player.playbackState == Player.STATE_ENDED) {
+                        proc.startAt = 0.0
+                        player.seekTo(0)
+                    }
                     requestFocus()
                     pausedByFocus.remove(id)
+                    // The analyser follows the player told to play last: the
+                    // incoming track of a crossfade, the one the page names.
+                    analysis?.analysed = id
                     player.playWhenReady = true
                     send(null)
                 }
@@ -259,6 +304,7 @@ class NativeAudio(
                     }
                     prepare()
                     pendingSeek = true
+                    proc.startAt = ms / 1000.0
                     player.seekTo(ms)
                     // A seek that needs no buffering may never leave READY.
                     if (player.playbackState == Player.STATE_READY) {
@@ -346,6 +392,17 @@ class NativeAudio(
             }
             error(code, e.errorCodeName)
         }
+    }
+
+    /** A player whose audio sink runs its PCM through [proc]. */
+    private class Renderers(context: Context, private val proc: NsProcessor) : DefaultRenderersFactory(context) {
+        override fun buildAudioSink(
+            context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean
+        ): AudioSink? = DefaultAudioSink.Builder(context)
+            .setEnableFloatOutput(enableFloatOutput)
+            .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+            .setAudioProcessors(arrayOf<AudioProcessor>(proc))
+            .build()
     }
 
     companion object {

@@ -26,7 +26,7 @@
   } from "../lib/stores.js";
   import { EQ_FREQS, EQ_MIN_DB, EQ_MAX_DB } from "../lib/audio/graph.js";
   import { outputPlan, retryNow } from "../lib/audio/output.js";
-  import { nativeAudioAvailable } from "../lib/audio/nativeplayer.js";
+  import { nativeAudioAvailable, nativeDspAvailable } from "../lib/audio/nativeplayer.js";
   import Icon from "./Icon.svelte";
 
   // -- where the sound goes (lib/audio/output.js) ------------------------------
@@ -78,7 +78,9 @@
       : "Nouvel essai au prochain titre.";
   // The equalizer and the bass lift change the sound on its way THROUGH the
   // processor, which the direct path does not go through.
-  $: dspNote = plan.direct ? "Inactif en lecture directe." : "";
+  // The app's own player runs them itself (bridge 6: the Rust chain).
+  const nativeDsp = nativeDspAvailable();
+  $: dspNote = plan.direct && !(plan.why === "native" && nativeDsp) ? "Inactif en lecture directe." : "";
   function fmtTime(ts) {
     try {
       return new Date(ts).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
@@ -202,8 +204,9 @@
         <span class="tg-title">Lecteur de l'application</span>
         <span class="tg-hint muted">
           Le son est lu par Android lui-même, hors de la page : il continue écran
-          éteint et en Bluetooth comme dans une application de musique. En essai :
-          l'égaliseur, les basses et les animations ne le suivent pas encore.
+          éteint et en Bluetooth comme dans une application de musique.
+          {#if nativeDsp}L'égaliseur, les basses et les animations le suivent.{:else}En essai :
+          l'égaliseur, les basses et les animations ne le suivent pas encore (mettez l'application à jour).{/if}
         </span>
       </span>
       <span class="sw" class:on={$nativePlayer}><span class="knob"></span></span>

@@ -14,8 +14,15 @@
 //! - a gain change is ramped over a few milliseconds rather than stepped (a step
 //!   in the middle of a waveform is a click).
 //!
-//! The bass lift's two compressors are not here yet: they join this chain with
-//! the native player that needs them.
+//! - the bass lift is the shelf plus graph.js's two compressors: a soft-knee one
+//!   whose threshold and ratio follow the lift, then the brick-wall limiter just
+//!   under 0 dBFS. They follow the Web Audio DynamicsCompressorNode's static
+//!   curve (soft knee, ratio, and its automatic makeup gain,
+//!   `(1 / gain at 0 dBFS)^0.6`) with one-pole attack and release on the gain
+//!   reduction, without its 6 ms look-ahead.
+//!
+//! With everything flat the chain is bit-transparent, dynamics included: on the
+//! web the compressors are only in the path while an effect is.
 
 pub const EQ_FREQS: [f64; 10] = [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
 pub const EQ_Q: f64 = 1.1;
@@ -112,6 +119,78 @@ impl Biquad {
     }
 }
 
+/// A feed-forward compressor on the loudest channel, in decibels.
+#[derive(Clone, Copy)]
+pub struct Compressor {
+    threshold: f64,
+    knee: f64,
+    ratio: f64,
+    att: f64,
+    rel: f64,
+    makeup_db: f64,
+    /// The gain reduction in force, dB (<= 0).
+    env: f64,
+    /// threshold 0 and ratio 1: nothing to do.
+    neutral: bool,
+}
+
+impl Compressor {
+    pub fn new(sr: f64) -> Compressor {
+        let mut c = Compressor { threshold: 0.0, knee: 0.0, ratio: 1.0, att: 0.0, rel: 0.0, makeup_db: 0.0, env: 0.0, neutral: true };
+        c.set(sr, 0.0, 0.0, 1.0, 0.003, 0.25);
+        c
+    }
+
+    /// Web Audio's parameters: threshold and knee in dB, ratio, attack and release in seconds.
+    pub fn set(&mut self, sr: f64, threshold: f64, knee: f64, ratio: f64, attack: f64, release: f64) {
+        self.threshold = threshold.clamp(-100.0, 0.0);
+        self.knee = knee.clamp(0.0, 40.0);
+        self.ratio = ratio.clamp(1.0, 20.0);
+        let coef = |t: f64| (-1.0 / (t.clamp(0.0, 1.0).max(1e-5) * sr)).exp();
+        self.att = coef(attack);
+        self.rel = coef(release);
+        self.neutral = self.ratio <= 1.0 + 1e-9;
+        // The automatic makeup gain: what the curve leaves of a full-scale input.
+        self.makeup_db = if self.neutral { 0.0 } else { -0.6 * self.curve(0.0) };
+    }
+
+    /// The static curve's gain reduction (dB, <= 0) for an input at `x` dBFS.
+    #[inline]
+    pub fn curve(&self, x: f64) -> f64 {
+        let (t, w, r) = (self.threshold, self.knee, self.ratio);
+        let d = x - t;
+        if 2.0 * d < -w {
+            0.0
+        } else if w > 0.0 && 2.0 * d.abs() <= w {
+            (1.0 / r - 1.0) * (d + w / 2.0).powi(2) / (2.0 * w)
+        } else {
+            d * (1.0 / r - 1.0)
+        }
+    }
+
+    /// The linear gain for a frame whose loudest sample is `peak`.
+    #[inline]
+    fn gain(&mut self, peak: f64) -> f64 {
+        if self.neutral {
+            self.env = 0.0;
+            return 1.0;
+        }
+        let x = if peak > 1e-9 { 20.0 * peak.log10() } else { -180.0 };
+        let target = self.curve(x);
+        let a = if target < self.env { self.att } else { self.rel };
+        self.env = a * self.env + (1.0 - a) * target;
+        10f64.powf((self.env + self.makeup_db) / 20.0)
+    }
+
+    pub fn reduction(&self) -> f64 {
+        self.env
+    }
+
+    fn clear(&mut self) {
+        self.env = 0.0;
+    }
+}
+
 /// A 0..1 envelope ridden on the quarter circle (see the module notes).
 #[derive(Clone, Copy)]
 struct Ramp {
@@ -148,6 +227,11 @@ pub struct Chain {
     eq: [Biquad; 10],
     eq_db: [f64; 10],
     bass: Biquad,
+    bass_comp: Compressor,
+    limiter: Compressor,
+    /// The compressors in the path (off only for the filter tests, which
+    /// measure the filters alone).
+    dynamics: bool,
     // The normalization: linear, ramped from `gain_from` toward `gain_to`.
     gain_from: f64,
     gain_to: f64,
@@ -164,6 +248,13 @@ impl Chain {
             eq: [Biquad::flat(); 10],
             eq_db: [0.0; 10],
             bass: Biquad::flat(),
+            bass_comp: Compressor::new(sr.max(1.0) as f64),
+            limiter: {
+                let mut l = Compressor::new(sr.max(1.0) as f64);
+                l.set(sr.max(1.0) as f64, -0.5, 0.0, 20.0, 0.002, 0.06);
+                l
+            },
+            dynamics: true,
             gain_from: 1.0,
             gain_to: 1.0,
             gain_len: 0,
@@ -225,6 +316,18 @@ impl Chain {
         let db = if db.is_finite() { db.clamp(0.0, EQ_MAX_DB) } else { 0.0 };
         let sr = self.sr;
         self.bass.lowshelf(sr, BASS_FREQ, db);
+        // graph.js: the lift is `amount * 12` dB, and the compressor follows the
+        // amount — neutral at none, -6..-20 dB and 2..6:1 from a little to all.
+        let amount = (db / 12.0).clamp(0.0, 1.0);
+        if amount > 0.001 {
+            self.bass_comp.set(sr, -6.0 - amount * 14.0, 30.0, 2.0 + amount * 4.0, 0.012, 0.22);
+        } else {
+            self.bass_comp.set(sr, 0.0, 30.0, 1.0, 0.012, 0.22);
+        }
+    }
+
+    pub fn bass_compressor(&self) -> &Compressor {
+        &self.bass_comp
     }
 
     pub fn eq_filter(&self, band: usize) -> &Biquad {
@@ -242,13 +345,17 @@ impl Chain {
             b.z1 = [0.0; MAX_CHANNELS];
             b.z2 = [0.0; MAX_CHANNELS];
         }
+        self.bass_comp.clear();
+        self.limiter.clear();
     }
 
     /// Process `frames` interleaved frames of `self.channels()` samples in place.
     pub fn process(&mut self, buf: &mut [f32], frames: usize) {
         let ch = self.channels;
         let frames = frames.min(buf.len() / ch);
+        // The filters, and the dynamics behind them, only while an effect is on.
         let any_eq = self.eq.iter().any(|b| !b.flat) || !self.bass.flat;
+        let mut row = [0f64; MAX_CHANNELS];
         for f in 0..frames {
             let g = self.gain_now() * self.fade.value();
             if self.gain_at < self.gain_len {
@@ -257,20 +364,35 @@ impl Chain {
             if self.fade.at < self.fade.len {
                 self.fade.at += 1;
             }
-            let row = &mut buf[f * ch..f * ch + ch];
-            for (c, s) in row.iter_mut().enumerate() {
+            let out = &mut buf[f * ch..f * ch + ch];
+            if !any_eq {
+                for s in out.iter_mut() {
+                    *s = (*s as f64 * g) as f32;
+                }
+                continue;
+            }
+            let mut peak = 0f64;
+            for (c, s) in out.iter().enumerate() {
                 let mut x = *s as f64 * g;
-                if any_eq {
-                    for b in self.eq.iter_mut() {
-                        if !b.flat {
-                            x = b.run(x, c);
-                        }
-                    }
-                    if !self.bass.flat {
-                        x = self.bass.run(x, c);
+                for b in self.eq.iter_mut() {
+                    if !b.flat {
+                        x = b.run(x, c);
                     }
                 }
-                *s = x as f32;
+                if !self.bass.flat {
+                    x = self.bass.run(x, c);
+                }
+                row[c] = x;
+                peak = peak.max(x.abs());
+            }
+            let (gc, gl) = if self.dynamics {
+                let gc = self.bass_comp.gain(peak);
+                (gc, self.limiter.gain(peak * gc))
+            } else {
+                (1.0, 1.0)
+            };
+            for (c, s) in out.iter_mut().enumerate() {
+                *s = (row[c] * gc * gl) as f32;
             }
         }
     }
@@ -288,6 +410,7 @@ mod tests {
 
     /// The level a sine comes out at, measured on the samples (after settling).
     fn measured_gain(chain: &mut Chain, f: f64) -> f64 {
+        chain.dynamics = false;
         let n = 48000;
         let mut buf: Vec<f32> = (0..n * 2)
             .map(|i| (2.0 * core::f64::consts::PI * f * (i / 2) as f64 / SR as f64).sin() as f32 * 0.25)
@@ -391,6 +514,76 @@ mod tests {
         let mut one = vec![1.0f32; 1];
         c.process(&mut one, 1);
         assert!((one[0] as f64 - mid).abs() < 1e-3);
+    }
+
+    /// A 50 Hz sine at `amp`, stereo, through the chain; the peak of its last half.
+    fn peak_out(c: &mut Chain, amp: f32) -> f32 {
+        let n = 48000;
+        let mut buf: Vec<f32> = (0..n * 2)
+            .map(|i| (2.0 * core::f64::consts::PI * 50.0 * (i / 2) as f64 / SR as f64).sin() as f32 * amp)
+            .collect();
+        c.process(&mut buf, n);
+        buf[n..].iter().fold(0f32, |m, v| m.max(v.abs()))
+    }
+
+    #[test]
+    fn the_curve_is_web_audios() {
+        let mut k = Compressor::new(SR as f64);
+        k.set(SR as f64, -20.0, 30.0, 6.0, 0.012, 0.22);
+        // Below the knee nothing; far above it the ratio.
+        assert_eq!(k.curve(-40.0), 0.0);
+        assert!((k.curve(0.0) - 20.0 * (1.0 / 6.0 - 1.0)).abs() < 1e-9);
+        // Inside the knee, a smooth join: continuous at both ends.
+        let lo = k.curve(-35.0 + 1e-9);
+        let hi = k.curve(-5.0);
+        assert!(lo.abs() < 1e-6 && (hi - 15.0 * (1.0 / 6.0 - 1.0)).abs() < 1e-6, "{lo} {hi}");
+        // The limiter's: -0.5 dB, 20:1, no knee; its makeup is 0.6 of what it takes off full scale.
+        let mut l = Compressor::new(SR as f64);
+        l.set(SR as f64, -0.5, 0.0, 20.0, 0.002, 0.06);
+        assert!((l.makeup_db - 0.6 * 0.5 * (1.0 - 1.0 / 20.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_bass_lift_never_saturates() {
+        // Full lift on a full-scale bass note: +12 dB at the shelf, and the two
+        // compressors keep it under full scale, by a hair at most.
+        let mut c = Chain::new(SR, 2);
+        c.set_bass(12.0);
+        let p = peak_out(&mut c, 0.95);
+        assert!(p < 1.06, "peak {p}");
+        assert!(c.bass_compressor().reduction() < -3.0, "{}", c.bass_compressor().reduction());
+        // A quiet passage is lifted, not squashed: the shelf's 12 dB plus the
+        // compressor's makeup, 0.6 of the 16.7 dB its curve takes off full
+        // scale — exactly what the web's DynamicsCompressorNode adds.
+        let mut q = Chain::new(SR, 2);
+        q.set_bass(12.0);
+        let g = db(peak_out(&mut q, 0.01) as f64 / 0.01);
+        assert!((g - 22.0).abs() < 1.0, "{g:.2} dB");
+    }
+
+    #[test]
+    fn the_limiter_holds_an_eq_boost_under_full_scale() {
+        // +12 dB at 62 Hz on a 50 Hz note at 0.9: four times full scale out of
+        // the filter, and the limiter alone (no lift) brings it back to about
+        // 0 dBFS. Measured 1.107: its makeup (+0.29 dB) and a 2 ms attack with
+        // no look-ahead let each cycle's crest over by a little, as Web Audio's
+        // does; the PCM conversion clips that last tenth of a dB.
+        let mut c = Chain::new(SR, 2);
+        c.set_eq(1, 12.0);
+        let p = peak_out(&mut c, 0.9);
+        assert!(p < 1.15, "peak {p}");
+    }
+
+    #[test]
+    fn no_lift_leaves_the_dynamics_alone() {
+        // EQ on, bass off: the compressor is neutral, only the limiter can act,
+        // and a moderate signal passes at the EQ's own gain.
+        let mut c = Chain::new(SR, 2);
+        c.set_eq(1, 3.0);
+        c.set_bass(0.0);
+        assert_eq!(c.bass_compressor().reduction(), 0.0);
+        let g = db(peak_out(&mut c, 0.1) as f64 / 0.1);
+        assert!(g > 1.0 && g < 3.6, "{g:.2} dB");
     }
 
     #[test]
