@@ -25,6 +25,7 @@
     trimThresholdDb,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
+  import { discoveryLevel } from "../lib/discovery.js";
   import { online } from "../lib/net.js";
   import { logInfo } from "../lib/log.js";
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
@@ -2460,7 +2461,7 @@
     extending = true;
     try {
       const more = isFlow
-        ? (await api.flow()).tracks || []
+        ? (await api.flow(get(discoveryLevel))).tracks || []
         : (await api.trackRadio(seedId)).tracks || [];
       // extend() reports what it actually appended: nothing means this source
       // has no more to give at this queue length, so stop asking it.

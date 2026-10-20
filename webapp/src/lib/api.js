@@ -243,7 +243,30 @@ export const api = {
   // discovery
   home: () => req("/home"),
   homeMix: (id) => req("/home/mix/" + encodeURIComponent(id)),
-  flow: () => req("/flow"),
+  // The Flow at a discovery level (0 = what you know, 1 = far from it); a new
+  // seed is a new draw.
+  flow: (level, seed) => {
+    const q = [];
+    if (level != null) q.push("d=" + encodeURIComponent(Number(level).toFixed(2)));
+    if (seed) q.push("seed=" + encodeURIComponent(seed));
+    return req("/flow" + (q.length ? "?" + q.join("&") : ""));
+  },
+  recommend: (level, seed) =>
+    req(
+      "/recommend?d=" + encodeURIComponent(Number(level).toFixed(2)) +
+        (seed ? "&seed=" + encodeURIComponent(seed) : "")
+    ),
+  discoverPrefs: () => req("/discover/prefs"),
+  setDiscoverLevel: (level) =>
+    req("/discover/prefs", { method: "PUT", body: body({ level }) }),
+  muteArtist: (provider, id) =>
+    req("/discover/mute", { method: "POST", body: body({ provider, id }) }),
+  releases: () => req("/releases"),
+  releasesSeen: () => req("/releases/seen", { method: "POST" }),
+  releasesSettings: () => req("/releases/settings"),
+  saveReleasesSettings: (values) =>
+    req("/releases/settings", { method: "PUT", body: body(values) }),
+  releasesCheck: () => req("/releases/check", { method: "POST" }),
   search: (q) => req("/search?q=" + encodeURIComponent(q)),
 
   // entities

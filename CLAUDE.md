@@ -695,6 +695,25 @@ the route searches after answering). Shared building blocks: `library.update_tra
 doesn't). Before that only Subsonic's `scrobble` did, so a library played entirely through the web
 app looked untouched — and the cleanup decides what to drop from exactly this data.
 
+**Recommendations, the Flow's discovery level and the releases** (`supysonic/discover.py`,
+`supysonic/releases.py`, `webui/discover.py`, `lib/discovery.js`, `components/DiscoverySlider.svelte`,
+`routes/Releases.svelte`; multi-provider lots L + N, plan §12). Every screen READS the database: no click
+asks a provider. A person's taste is their plays (log of the count, faded over 45 days), their stars
+(track, album, artist) and the genres of what they play, lifted up the genre tree. Each candidate gets a
+DISTANCE (0 already loved; an unplayed loved artist 0.12; `track_neighbor` 0.08-0.45; a provider's close
+artist 0.30-0.60, +0.15 for its catalogue top titles; same genre 0.45 then +0.5 x tree distance) and the
+slider (0..1, per person in `user_taste`, four named steps) picks a band of distance — `pick` relaxes the
+band on a thin library rather than returning nothing, at most two titles an artist, and the Flow keeps a
+share of known titles from 80 % to 20 %. `tests/test_discover.py` pins the mean distance as MONOTONE in
+the level. Moving the slider while the Flow plays replaces what follows the playing track
+(`player.replaceUpcoming`, no `seq` bump). Releases: following an artist IS starring it; `releases.py`
+wakes every 15 min and asks only the artists due (`rel.every`, default 6 h, Réglages → Compte), one
+request a second, stopping at the first outage (never a verdict), and keeps each favourite's
+`rel.close` nearest artists (`artist_link`) and their top titles (`artist_top`), re-read weekly. The
+tables are keyed by the PROVIDER's ref (`artist_watch`, `artist_release`, `artist_link`, `artist_top`):
+a close artist has no library row and must not get one to be proposed. Catalogue suggestions are never
+downloaded to be proposed.
+
 **Cleanup** (`supysonic/deezer/cleanup.py`) is the **only** code in the project that deletes archived
 audio. It is off by default, needs a free-space floor (`clean_min_free_gb`) to do anything, and is
 event-driven like the rest — `prefetch._check_space` looks right after a download, the one moment the
@@ -2727,7 +2746,7 @@ what exists; nothing moved and no route reads them yet (lot E wires `/stream`).
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261018`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261022`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported. A migration script is split on `;` AFTER its
 `--` comment lines are dropped (`db.split_sql_script`): a `;` inside a comment used to cut it in two

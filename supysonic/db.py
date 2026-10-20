@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261021"
+SCHEMA_VERSION = "20261022"
 
 
 def now():
@@ -1249,6 +1249,114 @@ class ProviderAccount(_Model):
         table_name = "provider_account"
 
 
+# -- recommendations and releases (supysonic/discover.py, supysonic/releases.py)
+#
+# What a provider says about artists is kept under the provider's own refs, not
+# as Artist rows: the library prunes an artist with no track, and a related
+# artist nobody has a track of would be pruned the next scan.
+
+
+class ArtistWatch(_Model):
+    """An artist whose releases the background job checks (a favourite, or an
+    artist very close to one), and when it last asked."""
+
+    provider = CharField(16)
+    ref = CharField(128)
+    name = CharField(255)
+    picture = CharField(512, null=True)
+    checked = DateTimeField(null=True)
+    linked = DateTimeField(null=True)
+    added = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "artist_watch"
+        primary_key = CompositeKey("provider", "ref")
+
+
+class ArtistRelease(_Model):
+    """A release a watched artist put out, as its provider lists it."""
+
+    provider = CharField(16)
+    ref = CharField(128)
+    artist_ref = CharField(128)
+    artist_name = CharField(255)
+    title = CharField(255)
+    cover = CharField(512, null=True)
+    kind = CharField(12, null=True)
+    released = CharField(10, null=True)
+    nb_tracks = IntegerField(null=True)
+    found = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "artist_release"
+        primary_key = CompositeKey("provider", "ref")
+
+
+class ArtistLink(_Model):
+    """``other`` is listed by the provider as close to ``artist``."""
+
+    provider = CharField(16)
+    artist_ref = CharField(128)
+    other_ref = CharField(128)
+    other_name = CharField(255)
+    other_picture = CharField(512, null=True)
+    score = FloatField()
+    pos = IntegerField()
+    fetched = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "artist_link"
+        primary_key = CompositeKey("provider", "artist_ref", "other_ref")
+
+
+class ArtistTop(_Model):
+    """One of an artist's most played titles on its provider: what discovery
+    offers of an artist the library has nothing of."""
+
+    provider = CharField(16)
+    ref = CharField(128)
+    artist_ref = CharField(128)
+    artist_name = CharField(255)
+    title = CharField(255)
+    album_ref = CharField(128, null=True)
+    album_title = CharField(255, null=True)
+    cover = CharField(512, null=True)
+    duration = IntegerField(default=0)
+    pos = IntegerField()
+    fetched = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "artist_top"
+        primary_key = CompositeKey("provider", "ref")
+
+
+class UserTaste(_Model):
+    """A person's discovery level (0 = what they know, 1 = far from it) and
+    when they last looked at their releases."""
+
+    user = ForeignKeyField(User, primary_key=True, backref="+", on_delete="CASCADE")
+    discovery = FloatField(default=0.35)
+    releases_seen = DateTimeField(null=True)
+    updated = DateTimeField(null=True)
+
+    class Meta:
+        table_name = "user_taste"
+
+
+class ArtistMute(_Model):
+    """An artist a person does not want recommended (``provider`` "local" and
+    the row's UUID for an artist only the library knows)."""
+
+    user = ForeignKeyField(User, backref="+", on_delete="CASCADE")
+    provider = CharField(16)
+    ref = CharField(128)
+    created = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "artist_mute"
+        primary_key = CompositeKey("user", "provider", "ref")
+
+
 def get_resource_text(respath):
     return importlib.resources.files(__package__).joinpath(respath).read_text("utf-8")
 
@@ -1403,6 +1511,12 @@ def _migration_order():
         TrackSource,  # after Track
         EntityRef,
         ProviderAccount,  # after User
+        ArtistWatch,
+        ArtistRelease,
+        ArtistLink,
+        ArtistTop,
+        UserTaste,  # after User
+        ArtistMute,  # after User
     ]
 
 

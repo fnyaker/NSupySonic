@@ -1027,6 +1027,21 @@ function createPlayer() {
       return add.length;
     },
 
+    // Swap everything AFTER the playing track for `tracks` (the Flow re-tuned
+    // to a new discovery level). The playing track and what was heard stay;
+    // `seq` is not bumped, so the audio does not restart.
+    replaceUpcoming(tracks) {
+      const extra = clean(tracks);
+      update((s) => {
+        if (s.index < 0) return s;
+        const kept = s.queue.slice(0, s.index + 1);
+        const have = new Set(kept.map(trackKey));
+        const add = extra.filter((t) => !have.has(trackKey(t)));
+        const queue = [...kept, ...add];
+        return { ...s, queue, _orig: s._orig ? queue.slice() : null };
+      });
+    },
+
     // Append + advance silently (used by autoplay/radio continuation).
     autoExtend(tracks) {
       const extra = clean(tracks);

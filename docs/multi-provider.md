@@ -426,6 +426,33 @@ rangée ; les candidats non archivés se jouent par `sources.pick` et ne sont **
 être proposés**. Une sortie bornée et dédupliquée (`matching`) ; une graine aléatoire par session pour
 que « Rafraîchir » change la rangée sans dépendre de l'heure.
 
+### Livré (20/10/2026) : ce qui diffère du plan ci-dessus
+
+Les lots L et N sont livrés ensemble, avec trois écarts voulus.
+
+- **Suivre = mettre en favori.** Pas de table `artist_follow` ni de bouton d'import : un artiste
+  étoilé (par n'importe qui, ou l'import ponctuel du compte) est suivi. Une seule notion pour la
+  personne, et rien à importer en plus.
+- **Les tables sont indexées par la référence du fournisseur, pas par une ligne locale**
+  (`artist_watch`, `artist_release`, `artist_link`, `artist_top`, schéma `20261022`) : un artiste
+  proche n'a pas de ligne dans la bibliothèque et ne doit pas en recevoir une pour être proposé.
+  `user_taste` garde le niveau de découverte et le « vu » des nouveautés, `artist_mute` les artistes
+  ignorés. La capacité `RELATED` (`artist_releases`, `similar_artists`, `artist_top`) remplace
+  `FOLLOWS` ; Deezer l'implémente par l'API publique.
+- **Toutes les 6 h, pas une fois par jour** (demande du propriétaire, réglable de 1 à 168 h dans
+  Réglages → Compte → Nouveautés, comme le nombre d'artistes proches par favori et la fenêtre en
+  jours) : `releases.py` se réveille toutes les 15 min et n'interroge que les artistes échus, à une
+  requête par seconde, s'arrête au premier refus ou à la première panne et ne retient jamais une
+  panne comme réponse. Les proches et leurs titres phares sont relus une fois par semaine.
+
+La découverte (`discover.py`) : un profil de goût par personne (écoutes pondérées par leur
+fraîcheur, favoris, genres remontés dans l'arbre §11) ; chaque candidat reçoit une distance (0 déjà
+aimé, voisins `track_neighbor`, artistes proches, titres phares du catalogue, même genre puis genres
+voisins par la distance dans l'arbre) et la barre choisit une bande de distance, plus une part de
+connu de 80 % à 20 % pour le Flow. Le Flow, les rangées « Pour vous » (titres, albums, artistes) et la
+barre de l'accueil lisent seulement la base ; bouger la barre pendant le Flow remplace ce qui suit le
+titre en cours. Les titres proposés hors bibliothèque ne sont jamais téléchargés pour être proposés.
+
 ## 13. Tout se règle depuis la web UI
 
 Exigence du propriétaire (19/10/2026) : **tout ce qui est configurable l'est depuis la web UI**,
