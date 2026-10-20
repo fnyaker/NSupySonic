@@ -60,8 +60,13 @@ import java.util.concurrent.Executors
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        /** Bridge.bridgeVersion: what the page may ask of this APK (2 installUpdate, 3 nativeCore). */
-        private const val BRIDGE_VERSION = 3
+        /**
+         * Bridge.bridgeVersion: what the page may ask of this APK (2 installUpdate,
+         * 3 nativeCore, 4 the native player: nativeAudio / naCreate / naCmd).
+         */
+        private const val BRIDGE_VERSION = 4
+        /** Upper bound on one native player command (they are a few dozen bytes). */
+        private const val MAX_AUDIO_CMD = 4096
         /** Upper bound on a single Bridge.saveText payload (16 MB of chars). */
         private const val MAX_SAVE_TEXT = 16 * 1024 * 1024
         /** How long away counts as "long enough that the page may be gone". */
@@ -72,6 +77,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var prefs: Prefs
     private var updater: Updater? = null
+    // The page's audio elements when it plays through the app (NativeAudio).
+    private var nativeAudio: NativeAudio? = null
     private lateinit var webView: WebView
     private lateinit var errorView: View
     private lateinit var shimJs: String
@@ -153,6 +160,17 @@ class MainActivity : AppCompatActivity() {
                 }
             },
             report = { msg -> pushUpdate(msg.toString()) },
+        )
+        nativeAudio = NativeAudio(
+            applicationContext, prefs,
+            cookieFor = { url ->
+                try {
+                    CookieManager.getInstance().getCookie(url)
+                } catch (_: Exception) {
+                    null
+                }
+            },
+            emit = { id, json -> pushNativeAudio(id, json) },
         )
         if (!prefs.configured) {
             startActivity(Intent(this, SetupActivity::class.java))
@@ -616,6 +634,8 @@ class MainActivity : AppCompatActivity() {
     private fun disposeWebView() {
         if (webViewDead || !::webView.isInitialized) return
         webViewDead = true
+        // The page drove the players; without it nothing advances the queue.
+        nativeAudio?.releaseAll()
         try {
             // Nothing else may touch the WebView here — after a renderer death
             // even stopLoading() goes through the dead process. Detach, destroy.
@@ -803,6 +823,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** A native player's state, for lib/audio/nativeplayer.js. [json] is JSONObject's output. */
+    private fun pushNativeAudio(id: Int, json: String) {
+        if (webViewDead || !::webView.isInitialized) return
+        if (!onServerPage) return
+        try {
+            webView.evaluateJavascript("window.__nsAudio && window.__nsAudio($id, $json)", null)
+        } catch (_: Exception) {
+            /* WebView torn down under us */
+        }
+    }
+
     /** Updater's progress and outcome, for lib/appversion.js. [json] is JSONObject's output. */
     private fun pushUpdate(json: String) {
         if (webViewDead || !::webView.isInitialized) return
@@ -902,6 +933,27 @@ class MainActivity : AppCompatActivity() {
          */
         @JavascriptInterface
         fun nativeCore(): String = if (!allowed()) "{\"available\":false}" else NsCore.describe()
+
+        /** Whether the page may play through the app's own player (NativeAudio). */
+        @JavascriptInterface
+        fun nativeAudio(): Boolean = allowed() && this@MainActivity.nativeAudio != null
+
+        /**
+         * A new native player's id, 0 when none can be made. [page] is a token
+         * the document drew at load: the first player a NEW document makes
+         * releases every player an earlier one left behind.
+         */
+        @JavascriptInterface
+        fun naCreate(page: String): Int =
+            if (!allowed() || page.isEmpty() || page.length > 64) 0
+            else this@MainActivity.nativeAudio?.create(page) ?: 0
+
+        /** A command for player [id] (lib/audio/nativeplayer.js). */
+        @JavascriptInterface
+        fun naCmd(id: Int, json: String) {
+            if (!allowed() || json.length > MAX_AUDIO_CMD) return
+            this@MainActivity.nativeAudio?.command(id, json)
+        }
 
         @JavascriptInterface
         fun installUpdate() {
@@ -1009,6 +1061,8 @@ class MainActivity : AppCompatActivity() {
         shareExecutor.shutdownNow()
         updater?.shutdown()
         disposeWebView()
+        nativeAudio?.releaseAll()
+        nativeAudio = null
         super.onDestroy()
     }
 }

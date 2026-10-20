@@ -239,6 +239,21 @@ bit, so equality is not the contract). `nscore/build-android.sh` builds arm64-v8
 NDK's clang (16 KB pages) into `app/src/main/jniLibs/` (git-ignored; android.yaml runs it before Gradle). Optional:
 an APK without it has `NsCore.available` false. `NSNative.nativeCore()` reports it (bridge version 3).
 
+**The native player** (`NativeAudio.kt`, `lib/audio/nativeplayer.js`; lot N3). Réglages → Audio → *Lecteur de
+l'application* (`audio.native`, off by default, offered only from bridge version 4) makes the page's audio elements
+Media3/ExoPlayer players in the app's process. Player.svelte is unchanged in logic: `makeEl` gets a
+`NativeAudioElement`, the HTMLMediaElement subset it uses (src/load/play/pause/currentTime/volume/playbackRate/
+buffered/the events), so the queue, the crossfade on the volumes, the party host and the timekeeper all read it as an
+element; the setting changing hands the elements over like leaving Web Audio does (`stale` in Player.svelte), and the
+plan is direct with `why: "native"`. The wire is `NSNative.naCreate(pageToken)` / `naCmd(id, json)` and
+`window.__nsAudio(id, state)`; every command carries a sequence number the state echoes, and a field is adopted only from
+a state that has seen the last command that could change it (a tick in flight must not undo a pause or a seek).
+`currentTime` is interpolated between the 250 ms ticks and never steps back by less than 50 ms. Sources are the server's
+URLs only, fetched by `ServerDataSource` through `Net` (Range, cookie, pin); one audio focus request for every player (a
+crossfade plays two); players belong to the document that made them (a new token releases the old document's,
+`pagehide` and the WebView's death release them). A `blob:` source (an IndexedDB download, until N4) plays on a real
+`<audio>` inside the element. Not yet: the EQ, the bass lift and the animations' copy of the sound (N5).
+
 **Naming the audio output** (`AudioRoute`): a fault measured on the processed path sends ONE
 CONNECTION of an output direct (see *Where the sound goes* below), and a WebView cannot see what it
 plays to, so the activity lists AudioManager's output devices (no permission needed; a Bluetooth

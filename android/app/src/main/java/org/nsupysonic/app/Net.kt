@@ -23,10 +23,12 @@ object Net {
 
     /**
      * Open [url] and return the connection once it answered 2xx (the caller
-     * reads and disconnects it). [cookie] goes only to the configured server.
+     * reads and disconnects it). [cookie] goes only to the configured server;
+     * [headers] (a Range, say) go with every hop.
      */
     fun get(
-        prefs: Prefs, url: String, cookie: String?, connectTimeout: Int, readTimeout: Int
+        prefs: Prefs, url: String, cookie: String?, connectTimeout: Int, readTimeout: Int,
+        headers: Map<String, String> = emptyMap(),
     ): HttpURLConnection {
         var current = url
         for (hop in 0..MAX_REDIRECTS) {
@@ -39,6 +41,7 @@ object Net {
             conn.connectTimeout = connectTimeout
             conn.readTimeout = readTimeout
             conn.instanceFollowRedirects = false
+            for ((k, v) in headers) conn.setRequestProperty(k, v)
             if (ours && !cookie.isNullOrEmpty()) conn.setRequestProperty("Cookie", cookie)
             val code = conn.responseCode
             if (code in 300..399) {

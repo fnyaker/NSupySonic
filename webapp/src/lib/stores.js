@@ -107,6 +107,10 @@ export const audioOutput = persisted("audio.output", "auto");
 // route key: { at, conn, why, ratio, backoff, retryAt, probing, good, count }.
 // One connection of one output each; lib/audio/output.js owns the rules.
 export const glitchRoutes = persisted("audio.glitchRoutes", {});
+// The Android app plays through its own player (Media3, NativeAudio.kt)
+// instead of the WebView's media pipeline (lib/audio/nativeplayer.js). Only
+// ever true where the app offers it; off by default while it is new.
+export const nativePlayer = persisted("audio.native", false);
 
 // -- crossfade between tracks ------------------------------------------------
 // Off by default: crossfading needs the Web Audio graph, and the default (pure
