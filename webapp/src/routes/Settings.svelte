@@ -560,7 +560,7 @@
   <h1>Réglages</h1>
 </div>
 
-<div class="tabs" role="tablist" aria-label="Sections des réglages">
+<div class="tabs bleed-x" role="tablist" aria-label="Sections des réglages">
   {#each TABS as t}
     <button class="tab" class:sel={tab === t.id} role="tab" aria-selected={tab === t.id} on:click={() => (tab = t.id)}>{t.label}</button>
   {/each}

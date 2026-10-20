@@ -22,6 +22,13 @@
   let rowH = FALLBACK_H;
   let start = 0;
   let end = 0;
+  // No buffer until the list has been painted once. Opening a screen used to
+  // mount the window from a guess (the scroller's height + 8, as if the list
+  // started at its top), so a phone's library — header, tabs and toolbar above
+  // the list — built 24 rows to show 8, and destroyed 8 of them a moment
+  // later, all before the first frame of the screen. The first frame now gets
+  // the rows it shows; the buffer follows right after it.
+  let buffer = 0;
 
   $: total = tracks.length;
   $: topPad = start * rowH;
@@ -54,8 +61,8 @@
     // Where the viewport sits relative to the list's own top.
     const above = sr.top - lr.top; // list content scrolled above the viewport
     const viewH = sr.height;
-    let s = Math.floor(above / rowH) - BUFFER;
-    let e = Math.ceil((above + viewH) / rowH) + BUFFER;
+    let s = Math.floor(above / rowH) - buffer;
+    let e = Math.ceil((above + viewH) / rowH) + buffer;
     s = Math.max(0, Math.min(s, total));
     e = Math.max(0, Math.min(e, total));
     if (s !== start || e !== end) {
@@ -92,7 +99,14 @@
 
   onMount(() => {
     scroller = findScroller(listEl);
-    end = Math.min(total, Math.ceil((scroller?.clientHeight || 800) / rowH) + BUFFER);
+    recompute();
+    let growTimer = 0;
+    const growFrame = requestAnimationFrame(() => {
+      growTimer = setTimeout(() => {
+        buffer = BUFFER;
+        recompute();
+      }, 0);
+    });
     scroller?.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll, { passive: true });
     // The scroll container can change size without the WINDOW ever resizing —
@@ -109,6 +123,8 @@
       scroller?.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
       ro?.disconnect();
+      cancelAnimationFrame(growFrame);
+      clearTimeout(growTimer);
     };
   });
 
