@@ -14,6 +14,7 @@ up or not.
 
 import datetime
 import random
+import secrets
 import threading
 import time
 
@@ -131,7 +132,7 @@ def flow():
         level = _level_arg()
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    seed = _seed_arg() or str(random.getrandbits(32))
+    seed = _seed_arg() or secrets.token_hex(4)
     picked = discover.flow(request.webuser, level, FLOW_SIZE, seed=seed)
     return jsonify({"tracks": _serialise_tracks(picked)})
 
@@ -225,12 +226,14 @@ def recommend():
     if hit is not None and time.monotonic() - hit[0] < RECO_TTL:
         return jsonify(hit[1])
     taste = discover.profile(user)
-    rng = random.Random(f"{user.id}:{seed}")
+    rng = random.Random(f"{user.id}:{seed}")  # nosec B311 - a seeded draw so a suggestion repeats, not a secret
     pool = discover.track_candidates(user, taste, rng)
     discover._dedupe_library(pool)
     tracks = discover.pick(pool, max(level, 0.08), 20, rng, known_share=0.0)
-    albums = discover.album_candidates(user, taste, level, random.Random(f"{user.id}:{seed}:a"), pool=pool)
-    artists = discover.artist_candidates(user, taste, level, random.Random(f"{user.id}:{seed}:r"), pool=pool)
+    rng_a = random.Random(f"{user.id}:{seed}:a")  # nosec B311 - a seeded draw so a suggestion repeats, not a secret
+    rng_r = random.Random(f"{user.id}:{seed}:r")  # nosec B311 - a seeded draw so a suggestion repeats, not a secret
+    albums = discover.album_candidates(user, taste, level, rng_a, pool=pool)
+    artists = discover.artist_candidates(user, taste, level, rng_r, pool=pool)
     out = {
         "level": level,
         "step": discover.step_name(level),

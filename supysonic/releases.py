@@ -222,7 +222,7 @@ def _pause(stats):
 
             workload.quiet_wait(5.0)
         except Exception:
-            pass
+            logger.debug("releases: quiet_wait failed", exc_info=True)
         time.sleep(stats.get("pause", PAUSE))
 
 
@@ -415,7 +415,7 @@ def _watch(provider_id, ref, name, linked=None):
             with db.atomic():
                 ArtistWatch.create(provider=provider_id, ref=ref, name=(name or ref)[:255], linked=linked)
         except Exception:  # created meanwhile by another run
-            pass
+            logger.debug("releases: %s/%s watched meanwhile", provider_id, ref)
         return
     changes = {}
     if linked is not None:
@@ -473,7 +473,7 @@ def _guarded(app, force=False):
         try:
             close_connection()
         except Exception:
-            pass
+            logger.debug("releases: close_connection failed", exc_info=True)
 
 
 def _loop(app):
@@ -482,7 +482,7 @@ def _loop(app):
 
         workload.renice()
     except Exception:
-        pass
+        logger.debug("releases: renice failed", exc_info=True)
     time.sleep(BOOT_DELAY)
     while True:
         with _lock:

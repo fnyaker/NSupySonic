@@ -571,7 +571,7 @@ def known_share(level) -> float:
 
 def flow(user, level, n=40, seed=None, exclude=()):
     taste = profile(user)
-    rng = random.Random(f"{getattr(user, 'id', '')}:{seed}")
+    rng = random.Random(f"{getattr(user, 'id', '')}:{seed}")  # nosec B311 - a seeded draw so a suggestion repeats, not a secret
     pool = track_candidates(user, taste, rng)
     _dedupe_library(pool)
     return pick(pool, level, n, rng, known_share(level), exclude)
