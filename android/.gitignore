@@ -7,3 +7,5 @@ local.properties
 *.iml
 captures/
 .cxx/
+# libnscore, built by nscore/build-android.sh (CI does it before Gradle)
+app/src/main/jniLibs/

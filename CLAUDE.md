@@ -226,6 +226,19 @@ the system installer (ACTION_VIEW on a FileProvider uri). `NSNative.bridgeVersio
 an APK: an older one answers nothing and keeps the "Télécharger" link. Progress: `window.__nsUpdate({state,…})`.
 This is the delivery channel for the native audio work (study: `/mnt/project-files/natif/etude-rust-natif.md`).
 
+**The native audio core** (`android/nscore`, Rust, `NsCore.kt`; lot N2 of the native-audio plan). The `rhythm`
+crate — the analyser the web app runs in its AudioWorklet — compiled for the device, plus `dsp.rs`: the output chain
+graph.js builds from Web Audio nodes (ReplayGain ramped, the equal-power fade on its quarter circle, the ten peaking
+bands at Q 1.1 and the 120 Hz low shelf, the BiquadFilterNode formulas; the bass lift's compressors are not in yet).
+Reached over JNI written against the C ABI (`jni.rs`: NewStringUTF and NewDirectByteBuffer at their jni.h slots, every
+other argument a primitive); each object is a handle whose buffers are handed to Kotlin ONCE as direct ByteBuffers, and
+0 is a no-op everywhere. `node test/compare.mjs` (after `cargo build --release`) drives the host build through those
+very entry points from a desktop JVM (`NsCoreCheck.java`) and holds it to rhythm.wasm on six arranged records: no event
+on a different frame, every field within 1e-3 of its value (measured: under 1.2e-5 — libm rounds differently in the last
+bit, so equality is not the contract). `nscore/build-android.sh` builds arm64-v8a, armeabi-v7a and x86_64 with the
+NDK's clang (16 KB pages) into `app/src/main/jniLibs/` (git-ignored; android.yaml runs it before Gradle). Optional:
+an APK without it has `NsCore.available` false. `NSNative.nativeCore()` reports it (bridge version 3).
+
 **Naming the audio output** (`AudioRoute`): a fault measured on the processed path sends ONE
 CONNECTION of an output direct (see *Where the sound goes* below), and a WebView cannot see what it
 plays to, so the activity lists AudioManager's output devices (no permission needed; a Bluetooth
