@@ -538,5 +538,21 @@
     .art {
       width: 150px;
     }
+    /* Same as the favourites' toolbar: the search on a line of its own. Beside
+       the sort it was squeezed to a 90 px box showing "Rech". */
+    .toolbar {
+      flex-wrap: wrap;
+    }
+    .searchbox {
+      max-width: none;
+      flex: 1 1 100%;
+    }
+    .sortsel {
+      flex: 1;
+      min-width: 0;
+    }
+    .toolbar .spacer {
+      display: none;
+    }
   }
 </style>

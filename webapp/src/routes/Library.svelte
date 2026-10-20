@@ -278,7 +278,7 @@
   {#if local === null}
     <Skeleton kind="list" />
   {:else if !local.length}
-    <p class="muted hint">Aucun fichier local. Cliquez sur « Importer des fichiers » pour ajouter votre propre musique (n'importe quel format).</p>
+    <p class="muted hint">Aucun fichier local. Cliquez sur « <span class="full">Importer des fichiers</span><span class="short">Fichiers</span> » pour ajouter votre propre musique (n'importe quel format).</p>
   {:else}
     <div class="row fav-head">
       <button class="pill" on:click={playLocal}><Icon name="play" size={18} /> Tout lire</button>
@@ -302,16 +302,19 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  .upload .short {
+  .upload .short,
+  .hint .short {
     display: none;
   }
   /* On a phone three pills of full labels stack into a column: the short ones
      keep the import pair on one row. */
   @media (max-width: 520px) {
-    .upload .full {
+    .upload .full,
+    .hint .full {
       display: none;
     }
-    .upload .short {
+    .upload .short,
+    .hint .short {
       display: inline;
     }
   }
