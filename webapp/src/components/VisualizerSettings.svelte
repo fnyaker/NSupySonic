@@ -689,10 +689,13 @@
   .card {
     background: var(--bg-card);
     border-radius: var(--radius);
-    padding: 18px 20px;
+    padding: 20px;
     margin-bottom: 18px;
   }
   .card h2 {
+    /* The page's h2 margin (1.7em above) doubled the card's own padding over
+       the title: 46 px above it against 20 at the sides. */
+    margin-top: 0;
     font-size: 1.05rem;
     display: flex;
     align-items: center;

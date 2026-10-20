@@ -82,7 +82,7 @@
   {#if $isAdmin && CAN_KEEP}
     <form class="search" on:submit|preventDefault={onSubmit}>
       <input
-        placeholder="Rechercher un podcast (ou coller une URL Deezer)…"
+        placeholder="Nom du podcast ou lien Deezer…"
         bind:value={q}
         on:input={onInput}
       />
@@ -109,7 +109,7 @@
     <Skeleton kind="list" />
   {:else if !channels.length}
     <p class="muted empty">
-      Aucun abonnement pour l'instant.{#if $isAdmin} Cherchez un podcast ci-dessus pour vous abonner.{/if}
+      Aucun abonnement pour l'instant.{#if $isAdmin}{" "}Cherchez un podcast ci-dessus pour vous abonner.{/if}
     </p>
   {:else}
     <div class="grid" class:hidden={$isAdmin && q.trim()}>

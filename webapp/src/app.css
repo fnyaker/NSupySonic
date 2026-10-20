@@ -182,6 +182,31 @@ h2 {
   scroll-padding-inline: var(--page-x, 0px);
 }
 
+/* A notice over a detail page. The back button floats at the top left on the
+   same layer as the sticky notices, which come later in the page: the first
+   card was drawn over the button and hid it, and the page's gradient header
+   bled up behind the notices' opaque bar (a dark band, then the colour). So
+   the notices make room for the button, the button stays on top, and the
+   header starts under the notices. */
+.layout:has(> .back) .notices {
+  padding-left: 38px;
+}
+.layout > button.back {
+  z-index: 61;
+}
+main:has(> .notices) .gh {
+  margin-top: 0;
+  padding-top: 28px;
+}
+@media (max-width: 640px) {
+  .layout:has(> .back) .notices {
+    padding-left: 36px;
+  }
+  main:has(> .notices) .gh {
+    padding-top: 20px;
+  }
+}
+
 /* a horizontally scrolling shelf of cards */
 .shelf {
   display: grid;

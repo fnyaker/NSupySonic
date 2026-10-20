@@ -192,6 +192,9 @@
     align-items: baseline;
   }
   .artist {
+    /* A link set as a button: without this the button's own padding indented
+       the artist from the title and the "Album" label above it. */
+    padding: 0;
     font-weight: 700;
     text-align: left;
   }
