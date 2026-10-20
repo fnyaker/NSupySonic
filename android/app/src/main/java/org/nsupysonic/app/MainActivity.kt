@@ -60,8 +60,8 @@ import java.util.concurrent.Executors
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        /** Bridge.bridgeVersion: what the page may ask of this APK. */
-        private const val BRIDGE_VERSION = 2
+        /** Bridge.bridgeVersion: what the page may ask of this APK (2 installUpdate, 3 nativeCore). */
+        private const val BRIDGE_VERSION = 3
         /** Upper bound on a single Bridge.saveText payload (16 MB of chars). */
         private const val MAX_SAVE_TEXT = 16 * 1024 * 1024
         /** How long away counts as "long enough that the page may be gone". */
@@ -896,6 +896,13 @@ class MainActivity : AppCompatActivity() {
          * Download this app's update from the server and install it (Updater).
          * Progress goes to window.__nsUpdate.
          */
+        /**
+         * Whether this APK carries the native audio core, and which analyser
+         * sources it was built from (the same hash rhythm.wasm reports), as JSON.
+         */
+        @JavascriptInterface
+        fun nativeCore(): String = if (!allowed()) "{\"available\":false}" else NsCore.describe()
+
         @JavascriptInterface
         fun installUpdate() {
             if (!allowed()) return

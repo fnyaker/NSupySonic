@@ -18,10 +18,12 @@ on:
       - "v*"
     paths:
       - android/**
+      - webapp/rhythm/**
       - .github/workflows/android.yaml
   pull_request:
     paths:
       - android/**
+      - webapp/rhythm/**
       - .github/workflows/android.yaml
   workflow_dispatch:
 
@@ -45,6 +47,32 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+
+      # The native audio core (android/nscore): its own tests, then the same
+      # library on the host held to rhythm.wasm frame for frame through its real
+      # JNI entry points, then the three device ABIs packed into the APK.
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Native core tests
+        run: |
+          (cd webapp && npm ci --no-audit --no-fund)
+          cd android/nscore
+          cargo test --release
+          cargo build --release
+          node test/compare.mjs
+
+      - name: Build the native core for Android
+        run: android/nscore/build-android.sh
 
       - name: Prepare signing keystore
         env:

@@ -1,0 +1,24 @@
+[package]
+name = "nscore"
+version = "0.1.0"
+edition = "2021"
+description = "NSupySonic's native audio core for the Android app: the rhythm analyser and the output processing (gain, fades, EQ), reached over JNI."
+license = "AGPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+# No dependencies but the analyser itself, like the analyser: the JNI calls are
+# the handful of entry points in jni.rs, written against the C ABI.
+[dependencies]
+rhythm = { path = "../../webapp/rhythm" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
