@@ -25,6 +25,8 @@ import android.widget.FrameLayout
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.ServiceWorkerClient
+import android.webkit.ServiceWorkerController
 import android.webkit.SslErrorHandler
 import android.webkit.URLUtil
 import android.webkit.WebResourceError
@@ -62,9 +64,12 @@ class MainActivity : AppCompatActivity() {
     companion object {
         /**
          * Bridge.bridgeVersion: what the page may ask of this APK (2 installUpdate,
-         * 3 nativeCore, 4 the native player: nativeAudio / naCreate / naCmd).
+         * 3 nativeCore, 4 the native player: nativeAudio / naCreate / naCmd,
+         * 5 downloads in the app's storage: off*).
          */
-        private const val BRIDGE_VERSION = 4
+        private const val BRIDGE_VERSION = 5
+        /** Upper bound on one piece of a download moved into the app (base64 chars). */
+        private const val MAX_OFF_PIECE = 2 * 1024 * 1024
         /** Upper bound on one native player command (they are a few dozen bytes). */
         private const val MAX_AUDIO_CMD = 4096
         /** Upper bound on a single Bridge.saveText payload (16 MB of chars). */
@@ -79,6 +84,9 @@ class MainActivity : AppCompatActivity() {
     private var updater: Updater? = null
     // The page's audio elements when it plays through the app (NativeAudio).
     private var nativeAudio: NativeAudio? = null
+    // The downloads' audio, in the app's own storage (OfflineStore).
+    private var offline: OfflineStore? = null
+    private val offlineSink: (String) -> Unit = { json -> pushOffline(json) }
     private lateinit var webView: WebView
     private lateinit var errorView: View
     private lateinit var shimJs: String
@@ -161,6 +169,9 @@ class MainActivity : AppCompatActivity() {
             },
             report = { msg -> pushUpdate(msg.toString()) },
         )
+        val store = OfflineStore.shared(this)
+        store.sink = offlineSink
+        offline = store
         nativeAudio = NativeAudio(
             applicationContext, prefs,
             cookieFor = { url ->
@@ -171,6 +182,7 @@ class MainActivity : AppCompatActivity() {
                 }
             },
             emit = { id, json -> pushNativeAudio(id, json) },
+            localFile = { url -> store.fileFor(url)?.first },
         )
         if (!prefs.configured) {
             startActivity(Intent(this, SetupActivity::class.java))
@@ -261,6 +273,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // A request the service worker lets through reaches its own client, not
+        // the page's: the same rules apply to it (a download's file, cleartext).
+        try {
+            ServiceWorkerController.getInstance().setServiceWorkerClient(object : ServiceWorkerClient() {
+                override fun shouldInterceptRequest(request: WebResourceRequest?): WebResourceResponse? =
+                    intercept(request)
+            })
+        } catch (_: Exception) {
+            /* no service worker support in this WebView */
+        }
         wv.webViewClient = object : WebViewClient() {
             override fun onPageStarted(
                 view: WebView?, url: String?, favicon: android.graphics.Bitmap?
@@ -293,13 +315,7 @@ class MainActivity : AppCompatActivity() {
             override fun shouldInterceptRequest(
                 view: WebView?, request: WebResourceRequest?
             ): WebResourceResponse? {
-                val url = request?.url ?: return null
-                if (!url.scheme.equals("http", ignoreCase = true)) return null
-                if (isServerUri(url)) return null
-                return WebResourceResponse(
-                    "text/plain", "utf-8", 403, "Cleartext refused", emptyMap(),
-                    ByteArrayInputStream(ByteArray(0))
-                )
+                return intercept(request)
             }
 
             override fun onReceivedError(
@@ -823,6 +839,40 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** A download's progress or outcome (OfflineStore), for lib/offline.js. */
+    private fun pushOffline(json: String) {
+        runOnUiThread {
+            if (webViewDead || !::webView.isInitialized || !onServerPage) return@runOnUiThread
+            try {
+                webView.evaluateJavascript("window.__nsOffline && window.__nsOffline($json)", null)
+            } catch (_: Exception) {
+                /* WebView torn down under us */
+            }
+        }
+    }
+
+    /**
+     * Every request the page makes, and the ones its service worker lets
+     * through: a download's audio is answered from the app's storage, and
+     * cleartext goes to the configured server only (see Net: the manifest must
+     * allow http for a LAN server it cannot name in advance).
+     */
+    private fun intercept(request: WebResourceRequest?): WebResourceResponse? {
+        val url = request?.url ?: return null
+        val store = offline
+        if (store != null && isServerUri(url) && store.isOfflineUrl(url.toString())) {
+            val range = request.requestHeaders?.entries
+                ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }?.value
+            return store.serve(url.toString(), range)
+        }
+        if (!url.scheme.equals("http", ignoreCase = true)) return null
+        if (isServerUri(url)) return null
+        return WebResourceResponse(
+            "text/plain", "utf-8", 403, "Cleartext refused", emptyMap(),
+            ByteArrayInputStream(ByteArray(0))
+        )
+    }
+
     /** A native player's state, for lib/audio/nativeplayer.js. [json] is JSONObject's output. */
     private fun pushNativeAudio(id: Int, json: String) {
         if (webViewDead || !::webView.isInitialized) return
@@ -955,6 +1005,49 @@ class MainActivity : AppCompatActivity() {
             this@MainActivity.nativeAudio?.command(id, json)
         }
 
+        /** Whether downloads may go to the app's storage (OfflineStore). */
+        @JavascriptInterface
+        fun offAvailable(): Boolean = allowed() && offline != null
+
+        /** Downloads [url] (the server's) as [key]; progress to window.__nsOffline. */
+        @JavascriptInterface
+        fun offDownload(key: String, url: String): Boolean =
+            allowed() && offline?.download(key, url) == true
+
+        @JavascriptInterface
+        fun offCancel(key: String) {
+            if (allowed()) offline?.cancel(key)
+        }
+
+        /** One base64 piece of a download moved in from the page, at [offset]. */
+        @JavascriptInterface
+        fun offPut(key: String, offset: Double, b64: String): Boolean =
+            allowed() && b64.length <= MAX_OFF_PIECE && offset >= 0 &&
+                offline?.put(key, offset.toLong(), b64) == true
+
+        /** Finishes [offPut]'s file; its size, or -1. */
+        @JavascriptInterface
+        fun offCommit(key: String, type: String): Double =
+            if (!allowed()) -1.0 else (offline?.commit(key, type) ?: -1L).toDouble()
+
+        @JavascriptInterface
+        fun offRemove(key: String) {
+            if (allowed()) offline?.remove(key)
+        }
+
+        @JavascriptInterface
+        fun offClear() {
+            if (allowed()) offline?.clear()
+        }
+
+        /** Every stored download, `[{id, type, size}]`. */
+        @JavascriptInterface
+        fun offList(): String = if (!allowed()) "[]" else offline?.list() ?: "[]"
+
+        /** Bytes free for downloads. */
+        @JavascriptInterface
+        fun offFree(): Double = if (!allowed()) 0.0 else (offline?.free() ?: 0L).toDouble()
+
         @JavascriptInterface
         fun installUpdate() {
             if (!allowed()) return
@@ -1063,6 +1156,8 @@ class MainActivity : AppCompatActivity() {
         disposeWebView()
         nativeAudio?.releaseAll()
         nativeAudio = null
+        offline?.let { if (it.sink === offlineSink) it.sink = null }
+        offline = null
         super.onDestroy()
     }
 }

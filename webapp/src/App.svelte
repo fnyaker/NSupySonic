@@ -5,7 +5,7 @@
   import { user, authChecked, nowPlayingOpen, player } from "./lib/stores.js";
   import { api } from "./lib/api.js";
   import { initConnectivity, online } from "./lib/net.js";
-  import { loadOfflineIndex, loadCoverCache } from "./lib/offline.js";
+  import { loadOfflineIndex, loadCoverCache, moveDownloadsToApp } from "./lib/offline.js";
   import { initPlayCache } from "./lib/playcache.js";
   import { initGainCache } from "./lib/gaincache.js";
   import { migrateKeysOnce } from "./lib/keymigrate.js";
@@ -175,7 +175,9 @@
     // The records an older build keyed on Deezer ids are renamed once, behind the
     // first screen (lib/keymigrate.js); the indexes above already find them.
     if (!isDisplay) {
-      const later = () => migrateKeysOnce();
+      // Then the downloads still held as Blobs move into the Android app's own
+      // storage, once (lib/offline.js#moveDownloadsToApp).
+      const later = () => migrateKeysOnce().finally(() => moveDownloadsToApp().catch(() => {}));
       if ("requestIdleCallback" in window) requestIdleCallback(later, { timeout: 8000 });
       else setTimeout(later, 3000);
     }

@@ -119,6 +119,8 @@ cd webapp && node test/repeat/run.mjs               # repeat one / all on a 4 s 
                                                      # every pass reaches its end, none jumps back from the middle, no dead air
 cd webapp && node test/skip/run.mjs                 # a crossfaded skip in a HIDDEN page whose timers are throttled (the phone behind a car
                                                      # radio): the next track must be heard at once, graph and direct paths
+cd webapp && node test/offline/run.mjs              # downloads kept by the Android app: an old Blob moved in byte for byte, played off
+                                                     # /__nsoffline/, a new download, the Réglages list (a stand-in app; needs npm run build)
 cd webapp && node test/clicks/run.mjs               # what a click costs before the screen answers (Event Timing, 4x CPU throttle): the
                                                      # nav, opening and closing the full-screen player; PHONE=1, PROFILE="<action>" for
                                                      # its heaviest functions (build with `npx vite build --minify false` to read them)
@@ -258,6 +260,21 @@ URLs only, fetched by `ServerDataSource` through `Net` (Range, cookie, pin); one
 crossfade plays two); players belong to the document that made them (a new token releases the old document's,
 `pagehide` and the WebView's death release them). A `blob:` source (an IndexedDB download, until N4) plays on a real
 `<audio>` inside the element. Not yet: the EQ, the bass lift and the animations' copy of the sound (N5).
+
+**Downloads in the app's storage** (`OfflineStore.kt`, `lib/nativeoffline.js`, `lib/offline.js`; lot N4, bridge
+version 5). On an APK that has it, a download's AUDIO is a file in `filesDir/offline`, fetched by the app itself
+(`Net`: cookie, pin, `Accept-Encoding: identity`), named by a hash of the page's key — no key names a path — and
+published only once the whole body is there (an empty or short body is an error, the `.part` dropped). The page keeps
+what it LISTS (the `meta` record, now `native: true`, and the cover) in IndexedDB and plays the file from
+`<origin>/__nsoffline/<key>`, which `MainActivity.intercept` answers from disk with byte ranges — for the WebView and
+for the requests the service worker passes on (`ServiceWorkerController`) — and which the native player reads straight
+off the disk (`NativeAudio`'s `localFile`). The Blobs an older APK left in IndexedDB move over ONCE at launch
+(`offline.js#moveDownloadsToApp`): 768 KiB pieces as base64 through `offPut` (each must start where the last ended),
+`offCommit` checked against the Blob's size, and only then the IndexedDB copy is deleted; a refusal leaves the page's
+copy exactly as it was, and nothing moves with less than the Blob + 64 MB free. At launch a file no record lists is
+dropped and a record whose file is gone is forgotten. `test/nativeoffline.test.mjs` (the logic) and
+`node test/offline/run.mjs` (Chromium: the move byte for byte, the play off `/__nsoffline/`, a new download, the
+Réglages list at two widths) pin it.
 
 **Naming the audio output** (`AudioRoute`): a fault measured on the processed path sends ONE
 CONNECTION of an output direct (see *Where the sound goes* below), and a WebView cannot see what it

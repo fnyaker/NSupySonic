@@ -6,6 +6,10 @@
 // on playback) and `covers` (art). A download is only ever removed by the user
 // (per-track or "clear all"). The set of downloaded ids and total size are
 // mirrored into Svelte stores at startup so the UI has instant state.
+//
+// In the Android app (bridge 5) the AUDIO lives in the app's storage instead
+// (nativeoffline.js): `meta` and `covers` stay here, a record carries
+// `native: true`, and the blobs downloaded before are moved there once.
 
 import { get } from "svelte/store";
 import { api } from "./api.js";
@@ -15,6 +19,17 @@ import { logInfo } from "./log.js";
 import { online } from "./net.js";
 import { primeGain } from "./gaincache.js";
 import { migrateKey, trackKey, trackRef } from "./trackkey.js";
+import {
+  nativeAdopt,
+  nativeClear,
+  nativeDownload,
+  nativeFree,
+  nativeHas,
+  nativeList,
+  nativeOfflineAvailable,
+  nativeOfflineUrl,
+  nativeRemove,
+} from "./nativeoffline.js";
 import {
   downloads,
   downloadsSize,
@@ -96,7 +111,8 @@ function slimTrack(t) {
 export async function loadOfflineIndex() {
   try {
     const db = await openDB();
-    const metas = await reqp(tx(db, "meta", "readonly").objectStore("meta").getAll());
+    let metas = await reqp(tx(db, "meta", "readonly").objectStore("meta").getAll());
+    if (nativeOfflineAvailable()) metas = await reconcileNative(db, metas);
     const ids = new Set();
     let size = 0;
     for (const m of metas) {
@@ -110,6 +126,23 @@ export async function loadOfflineIndex() {
   } catch {
     /* IndexedDB unavailable (private mode?) — offline cache just stays empty */
   }
+}
+
+// The app's files against this index: a file nobody lists (its record was
+// never written: the page went away mid-download) is dropped, and so is a
+// record whose file is gone — it would claim a download that cannot play.
+async function reconcileNative(db, metas) {
+  const files = nativeList();
+  const listed = new Set(metas.map((m) => String(m.id)));
+  for (const f of files) if (!listed.has(String(f.id))) nativeRemove(f.id);
+  const lost = metas.filter((m) => m.native && !nativeHas(m.id));
+  if (!lost.length) return metas;
+  const t = tx(db, "meta", "readwrite");
+  for (const m of lost) t.objectStore("meta").delete(m.id);
+  await done(t);
+  logInfo("download", `${lost.length} download(s) whose file the app no longer has were forgotten`,
+          null, { important: true });
+  return metas.filter((m) => !lost.includes(m));
 }
 
 export function isDownloaded(id) {
@@ -338,6 +371,8 @@ export async function listDownloads() {
 
 // Read the stored blob and hand back an object URL (caller revokes it).
 export async function getObjectURL(id) {
+  // Kept by the app: a URL it answers from the file (nothing to revoke).
+  if (nativeHas(id)) return nativeOfflineUrl(id);
   const db = await openDB();
   const rec = await reqp(tx(db, "audio", "readonly").objectStore("audio").get(diskId(id)));
   if (!rec || !rec.blob) return null;
@@ -379,6 +414,27 @@ export async function downloadTrack(track, quality, onProgress = null) {
   const t0 = Date.now();
   logInfo("download", `start ${id} "${track.title || ""}" q=${quality || "default"}`);
   try {
+    if (nativeOfflineAvailable()) {
+      const { size } = await nativeDownload(id, api.streamUrl(trackRef(track), quality), onProgress);
+      await primeGain(track).catch(() => {});
+      const db = await openDB();
+      const t = tx(db, "meta", "readwrite");
+      t.objectStore("meta").put({
+        id,
+        quality,
+        size,
+        native: true,
+        track: slimTrack(track),
+        addedAt: Date.now(),
+        lastPlayedAt: Date.now(),
+      });
+      await done(t);
+      downloads.update((s) => new Set(s).add(id));
+      downloadsSize.update((n) => n + size);
+      await cacheCover(track.album?.cover, trackRef(track));
+      logInfo("download", `ok ${id} ${(size / 1048576).toFixed(1)} MB in ${Date.now() - t0}ms (app storage)`);
+      return true;
+    }
     const res = await fetch(api.streamUrl(trackRef(track), quality), { credentials: "include" });
     if (!res.ok) throw new Error("stream " + res.status);
 
@@ -402,6 +458,8 @@ export async function downloadTrack(track, quality, onProgress = null) {
     } else {
       blob = await res.blob();
     }
+    // An empty body is not a download: it would be listed, and never play.
+    if (!blob.size) throw new Error("empty body");
 
     // Learn the ReplayGain now, so it is stored WITH the file: a downloaded
     // track must never ask the network how loud it is when it starts — offline
@@ -449,6 +507,7 @@ export async function removeTrack(key) {
     t.objectStore("meta").delete(at);
     t.objectStore("audio").delete(at);
     await done(t);
+    nativeRemove(id);
     storedAs.delete(id);
     downloads.update((s) => {
       const n = new Set(s);
@@ -475,6 +534,7 @@ export async function clearAll() {
     t.objectStore("audio").clear();
     t.objectStore("covers").clear();
     await done(t);
+    nativeClear();
     downloads.set(new Set());
     downloadsSize.set(0);
     offlineCovers.update((m) => {
@@ -527,5 +587,48 @@ export async function migrateStoredKeys() {
     // Between records: this is a courtesy to the frame, not a rate limit.
     await new Promise((r) => setTimeout(r, 0));
   }
+  return moved;
+}
+
+// Move the downloads this page still holds as Blobs into the app's storage,
+// once, in the background (after the key migration: the app's files are keyed
+// on track UUIDs only). One at a time, a piece at a time; a record is switched
+// to the app's copy only once the whole file is there, and its Blob dropped
+// only then, so an interruption costs nothing but starting that file again.
+// Stops, untouched, when the device lacks room for the next one.
+let adopting = null;
+export function moveDownloadsToApp() {
+  if (!nativeOfflineAvailable()) return Promise.resolve(0);
+  if (!adopting) adopting = adoptAll().finally(() => (adopting = null));
+  return adopting;
+}
+
+async function adoptAll() {
+  const db = await openDB();
+  const metas = await reqp(tx(db, "meta", "readonly").objectStore("meta").getAll());
+  let moved = 0;
+  for (const m of metas) {
+    if (m.native || storedAs.has(migrateKey(m.id)) || migrateKey(m.id) !== m.id) continue;
+    const rec = await reqp(tx(db, "audio", "readonly").objectStore("audio").get(m.id));
+    if (!rec || !rec.blob) continue;
+    const free = nativeFree();
+    if (free && free < rec.blob.size + 64 * 1048576) {
+      logInfo("download", `moving downloads to the app paused: ${(free / 1048576).toFixed(0)} MB free`,
+              null, { important: true });
+      break;
+    }
+    try {
+      await nativeAdopt(m.id, rec.blob);
+    } catch (e) {
+      logInfo("download", `could not move ${m.id} to the app: ${e && e.message}`, null, { important: true });
+      break;
+    }
+    const t = tx(db, ["meta", "audio"], "readwrite");
+    t.objectStore("meta").put({ ...m, native: true, size: rec.blob.size });
+    t.objectStore("audio").delete(m.id);
+    await done(t);
+    moved++;
+  }
+  if (moved) logInfo("download", `${moved} download(s) moved to the app's storage`, null, { important: true });
   return moved;
 }
