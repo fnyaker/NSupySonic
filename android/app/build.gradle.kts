@@ -61,4 +61,6 @@ dependencies {
     // elements in the app's process when Réglages asks for it. 1.4.x is the
     // last line that builds against compileSdk 34.
     implementation("androidx.media3:media3-exoplayer:1.4.1")
+    // RangeBody's contract with the WebView's loader (RangeBodyTest), on the JVM.
+    testImplementation("junit:junit:4.13.2")
 }

@@ -134,10 +134,10 @@
     // the next one to whichever cover is closest to what you are looking at.
     if (eager || usingBlob) admitted = true;
     else turn = requestCover(() => tile, () => (admitted = true));
-    // With a cached blob there is nothing to upgrade to: it already IS the
-    // hi-res art, so skip the CDN preload entirely (one less request, and one
-    // less thing to hang on a bad link).
-    if (!usingBlob && baseCover(s) !== s) preloadHi(s);
+    // The hi-res upgrade waits for the base art (see maybeUpgrade): asked
+    // here, it went out for EVERY mounted cover at once and outside the
+    // loader's queue — the releases page fired 300 requests for 1000px art
+    // the moment it opened, to draw 170px cards.
     // A dead-network fetch can hang without ever firing load OR error, leaving
     // the art blank forever. Step to the next source in the chain instead.
     stallTimer = setTimeout(() => {
@@ -157,6 +157,19 @@
     // network art — a happily displayed cover is left alone.
     if (recovered && src && (failed || usingProxy || retries)) onSrcChange(src);
   }
+
+  // Ask for the hi-res art only once the base is on screen, and only where it
+  // can show: a tile drawn smaller than the base art's 500px gains nothing
+  // from a 1000px copy but a bigger download. With a cached blob there is
+  // nothing to upgrade to: it already IS the hi-res art.
+  function maybeUpgrade() {
+    if (usingBlob || usingProxy || hiUrl || hiLoader || !src || baseCover(src) === src) return;
+    const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+    const px = (tile && tile.clientWidth) || size || 0;
+    if (px * dpr <= BASE_PX) return;
+    preloadHi(src);
+  }
+  const BASE_PX = 500; // what baseCover asks for
 
   function preloadHi(url) {
     const im = new Image();
@@ -253,7 +266,7 @@
         .then(() => forgetCachedCover(url))
         .then((mine) => (mine ? null : forgetDownloadedCover(url)))
         .catch(() => {});
-      if (src && baseCover(src) !== src) preloadHi(src);
+      maybeUpgrade();
     } else if (hiUrl) {
       hiUrl = null;
     } else if (!usingProxy && retries < 2 && navigator.onLine !== false) {
@@ -318,6 +331,7 @@
       on:load={() => {
         loaded = true;
         release(); // the slot goes to the next cover the moment this one settles
+        maybeUpgrade();
       }}
       on:error={onError}
     />

@@ -10,10 +10,7 @@ import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.io.FilterInputStream
 import java.io.IOException
-import java.io.InputStream
-import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -226,57 +223,22 @@ class OfflineStore private constructor(
         val headers = HashMap<String, String>()
         headers["Accept-Ranges"] = "bytes"
         headers["Cache-Control"] = "no-store"
-        val m = range?.let { RANGE.matchEntire(it.trim()) }
-        if (m == null) {
+        if (!RangeBody.isRange(range)) {
             headers["Content-Length"] = size.toString()
             return WebResourceResponse(type, null, 200, "OK", headers, file.inputStream())
         }
-        val (a, b) = m.destructured
-        val start: Long
-        val end: Long
-        if (a.isEmpty()) {
-            val n = b.toLongOrNull() ?: 0L
-            start = maxOf(0L, size - n)
-            end = size - 1
-        } else {
-            start = a.toLong()
-            end = if (b.isEmpty()) size - 1 else minOf(b.toLong(), size - 1)
-        }
-        if (start >= size || end < start) {
+        val span = RangeBody.bounds(range, size)
+        if (span == null) {
             headers["Content-Range"] = "bytes */$size"
             return WebResourceResponse(
                 type, null, 416, "Range Not Satisfiable", headers, ByteArrayInputStream(ByteArray(0))
             )
         }
+        val (start, end) = span[0] to span[1]
         headers["Content-Range"] = "bytes $start-$end/$size"
-        headers["Content-Length"] = (end - start + 1).toString()
-        return WebResourceResponse(type, null, 206, "Partial Content", headers, RangeStream(file, start, end - start + 1))
-    }
-
-    /** [length] bytes of [file] from [start]. */
-    class RangeStream(file: File, start: Long, private var left: Long) :
-        FilterInputStream(open(file, start)) {
-        override fun read(): Int {
-            if (left <= 0) return -1
-            val r = super.read()
-            if (r >= 0) left--
-            return r
-        }
-
-        override fun read(b: ByteArray, off: Int, len: Int): Int {
-            if (left <= 0) return -1
-            val n = super.read(b, off, minOf(len.toLong(), left).toInt())
-            if (n > 0) left -= n
-            return n
-        }
-
-        companion object {
-            private fun open(file: File, start: Long): InputStream {
-                val raf = RandomAccessFile(file, "r")
-                raf.seek(start)
-                return java.nio.channels.Channels.newInputStream(raf.channel)
-            }
-        }
+        // No Content-Length: the WebView sets it from the range it applies
+        // itself, on a body that starts at byte 0 (see RangeBody).
+        return WebResourceResponse(type, null, 206, "Partial Content", headers, RangeBody.of(file, end))
     }
 
     companion object {
@@ -303,7 +265,6 @@ class OfflineStore private constructor(
         private const val CONNECT_MS = 15000
         private const val READ_MS = 60000
         private val KEY = Regex("[A-Za-z0-9:_-]{1,96}")
-        private val RANGE = Regex("bytes=(\\d*)-(\\d*)")
         fun keyOk(key: String) = KEY.matches(key)
     }
 }
