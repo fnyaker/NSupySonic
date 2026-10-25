@@ -95,15 +95,17 @@ FIELDS = {
 }
 
 #: A login mode's id -> French label. The provider adds its own fields and help.
-AUTH_MODE_KINDS = {
-    "browser": "Connexion sur la page du service",
-    "arl": "Cookie de session (ARL)",
-    "headers": "En-têtes d'un onglet connecté",
-    "token": "Jeton",
-    "key": "Clé d'API",
-    "oauth": "OAuth",
-    "password": "Identifiant et mot de passe",
-}
+AUTH_MODE_KINDS = dict(
+    [
+        ("browser", "Connexion sur la page du service"),
+        ("arl", "Cookie de session (ARL)"),
+        ("headers", "En-têtes d'un onglet connecté"),
+        ("token", "Jeton"),
+        ("key", "Clé d'API"),
+        ("oauth", "OAuth"),
+        ("password", "Identifiant et mot de passe"),
+    ]
+)
 
 
 def scope(feature):
