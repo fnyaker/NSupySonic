@@ -13,6 +13,9 @@ they bring into that person's library (the engine is supysonic/libraryimport.py)
   from Deezer's own login page by the Android app). Checked by signing in.
 - ``DELETE /me/accounts/<id>``: unlink it (nothing imported is removed).
 - ``PUT /me/accounts/<id>``: what is imported automatically.
+- ``PUT /me/accounts/default``: my default platform, the ONE whose favourites
+  are synced every day (``{"account": id}``, or null for none). Choosing one
+  imports from it at once.
 - ``POST /me/accounts/<id>/import``: import what is new now.
 - ``GET|PUT /me/accounts/<id>/library/<kind>``: the account's artists, albums
   or playlists, to tick or untick one by one.
@@ -69,6 +72,7 @@ def link_youtube(user_id, label=None):
             provider="youtube", user=user_id, label=(label or "YouTube Music")[:64],
             mode="headers", status="ok", checked=now(), created=now(),
         )
+        li.keep_default(user_id, row.id)
     else:
         row.status, row.checked = "ok", now()
         if label:
@@ -97,7 +101,7 @@ def unlink_youtube(user_id):
         unlink(row)
 
 
-def _account_json(row):
+def _account_json(row, default_id=None):
     opts = li.options(row)
     live = li.status(row.id)
     return {
@@ -112,6 +116,7 @@ def _account_json(row):
         "last": opts["last"],
         "lossless": opts["lossless"],
         "running": live,
+        "default": default_id is not None and str(default_id) == str(row.id),
         "kinds": list(li.KINDS),
         "pickable": list(li.PICKABLE),
     }
@@ -132,18 +137,23 @@ def my_accounts():
         # Linked for the export before accounts existed: it is one now.
         link = ServiceLink.get((ServiceLink.user == me.id) & (ServiceLink.service == "youtube"))
         link_youtube(me.id, link.account)
-    rows = (
-        ProviderAccount.select()
-        .where((ProviderAccount.user == me.id) & ProviderAccount.provider.in_(list(li.SOURCES)))
-        .order_by(ProviderAccount.provider)
-    )
+    return my_accounts_payload()
+
+
+def my_accounts_payload(**extra):
+    me = _me()
+    rows = li._rows_of(me.id)
     holds_server = any(r.mode == access.SERVER for r in rows)
+    default = li._default_of(rows)
+    default_id = default.id if default is not None else None
     return jsonify(
         {
-            "accounts": [_account_json(r) for r in rows],
+            "accounts": [_account_json(r, default_id) for r in rows],
+            "default": str(default_id) if default_id is not None else None,
             # A personal Deezer next to the server's is one account too many:
             # whoever holds the server's imports from it.
             "can_link": {"deezer": not holds_server},
+            **extra,
         }
     )
 
@@ -234,9 +244,14 @@ def my_accounts_link_deezer():
     opts = li.options(row)
     opts["lossless"] = who.get("lossless", False)
     li._save_options(row, opts)
+    li.keep_default(me.id, row.id)
     access.bump()
-    li.start(current_app._get_current_object(), row.id)
-    return jsonify({"account": _account_json(row)})
+    default = li.default_account(me.id)
+    if default is not None and default.id == row.id:
+        # Only the default platform syncs the favourites (and a first account is
+        # the default until its holder chooses).
+        li.start(current_app._get_current_object(), row.id)
+    return jsonify({"account": _account_json(row, default.id if default is not None else None)})
 
 
 @webapi.route("/me/accounts/<account_id>", methods=["DELETE"])
@@ -261,7 +276,23 @@ def my_accounts_options(account_id):
     if not isinstance(auto, dict) or any(k not in li.KINDS for k in auto):
         return jsonify({"error": "auto invalide"}), 400
     li.set_auto(row, auto)
-    return jsonify({"account": _account_json(row)})
+    return jsonify({"account": _account_json(row, _default_id())})
+
+
+def _default_id():
+    default = li.default_account(_me().id)
+    return default.id if default is not None else None
+
+
+@webapi.route("/me/accounts/default", methods=["PUT"])
+@login_required
+def my_accounts_default():
+    data = request.get_json(silent=True) or {}
+    account = data.get("account")
+    if account is not None and _row(account) is None:
+        return jsonify({"error": "compte inconnu"}), 404
+    started = li.set_default(current_app._get_current_object(), _me().id, account)
+    return my_accounts_payload(started=started)
 
 
 @webapi.route("/me/accounts/<account_id>/import", methods=["POST"])
@@ -275,7 +306,7 @@ def my_accounts_import(account_id):
         return jsonify({"error": "kinds invalide"}), 400
     started = li.start(current_app._get_current_object(), row.id, kinds=kinds or None)
     row = ProviderAccount.get_by_id(row.id)
-    return jsonify({"started": started, "account": _account_json(row)}), 202
+    return jsonify({"started": started, "account": _account_json(row, _default_id())}), 202
 
 
 def _provider_error(exc):

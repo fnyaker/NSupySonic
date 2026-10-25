@@ -51,7 +51,7 @@ EVENTS = (
 )
 
 # How much of a favourited artist to take.
-#   all      — the whole discography (the default; what a favourite means)
+#   all      — the whole discography (once `on_fav_artist` is switched on)
 #   releases — the `artist_limit` most RECENT releases
 #   top      — the artist's `artist_limit` most-played tracks
 ARTIST_SCOPES = ("all", "releases", "top")
@@ -65,13 +65,16 @@ CLEANUP_ORDERS = ("oldest_play", "least_played", "largest", "oldest")
 
 DEFAULTS = {
     # events. `on_play_context` is the aggressive one — playing one track pulls
-    # the whole album or playlist it came from — so it is opt-in; the rest
-    # reproduce the behaviour that shipped before this module existed.
+    # the whole album or playlist it came from — so it is opt-in. So is a
+    # favourite ARTIST: a whole discography per heart is the user's call to
+    # make once they have sorted their artists (an imported account follows
+    # dozens at once), never a default. The rest reproduce the behaviour that
+    # shipped before this module existed.
     "on_play_context": False,
     "on_fav_track": True,
     "on_fav_album": True,
     "on_fav_playlist": True,
-    "on_fav_artist": True,
+    "on_fav_artist": False,
     "on_playlist_add": True,
     "on_podcast": True,
     # artists

@@ -449,6 +449,231 @@ class YoutubeTestCase(_ImportCase):
         self.assertEqual(ProviderAccount.get_by_id(acc["id"]).status, "auth")
 
 
+class UpgradeBaselineTestCase(_ImportCase):
+    """A server the OLD nightly sync mirrored: its holder's favourites are
+    already here, minus what they took off. The first import on that account
+    must not put any of it back (Maître, 2026-10-25: titles removed here, or
+    replaced by a YouTube fallback, came back because Deezer still listed
+    them)."""
+
+    def mirrored_library(self):
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        # The old sync had starred 1 and 2 and followed 9 and 8; the holder
+        # then took 1 and 8 off here. Deezer still lists all four.
+        library.upsert_track(raw_track(1, "T1"), root, "FLAC")
+        two = library.upsert_track(raw_track(2, "T2"), root, "FLAC")
+        StarredTrack.create(user=self.alice, starred=two.id)
+        nine = library.upsert_artist("9", "Foo")
+        library.upsert_artist("8", "Bar")
+        StarredArtist.create(user=self.alice, starred=nine.id)
+
+    def test_what_was_taken_off_before_the_upgrade_stays_off(self):
+        self.mirrored_library()
+        self.as_alice()
+        acc = str(self.server_account().id)
+        self.run_import(acc)
+        self.assertEqual(self.stars(StarredTrack, self.alice), {str(ids.track_uuid(2))})
+        self.assertEqual(self.stars(StarredArtist, self.alice), {str(ids.artist_uuid(9))})
+        (row,) = [a for a in self.my_accounts() if a["id"] == acc]
+        self.assertEqual(row["last"]["added"], {"artists": 0, "tracks": 0})
+        self.assertEqual(row["last"]["kept"], {"artists": 2, "tracks": 2})
+        # Nothing of the favourites' records was even asked for.
+        self.assertFalse([c for c in self.gw.calls if c[0] == "tracks"])
+        # What the account adds AFTER the upgrade is imported as usual.
+        self.gw.favs.append("3")
+        self.gw.artists.append(("7", "New"))
+        self.run_import(acc)
+        self.assertEqual(
+            self.stars(StarredTrack, self.alice), {str(ids.track_uuid(2)), str(ids.track_uuid(3))}
+        )
+        self.assertEqual(
+            self.stars(StarredArtist, self.alice), {str(ids.artist_uuid(9)), str(ids.artist_uuid(7))}
+        )
+
+    def test_a_fresh_server_imports_everything(self):
+        # No Deezer favourite here yet: nothing was mirrored, so nothing was
+        # taken off, and the first run brings the account in.
+        self.as_alice()
+        acc = str(self.server_account().id)
+        self.run_import(acc)
+        self.assertEqual(len(self.stars(StarredTrack, self.alice)), 2)
+
+    def test_a_personal_account_is_never_a_baseline(self):
+        # bob starred Deezer titles here by hand, then links his own account:
+        # its favourites are new to this library, and come in.
+        from supysonic.deezer import library
+
+        root = library.get_root_folder(self.archive)
+        StarredTrack.create(user=self.bob, starred=library.upsert_track(raw_track(5, "T5"), root, "FLAC").id)
+        self.as_bob()
+        PersonalDeezerTestCase.link_bob(self)
+        self.assertEqual(
+            self.stars(StarredTrack, self.bob),
+            {str(ids.track_uuid(5)), str(ids.track_uuid(1)), str(ids.track_uuid(2))},
+        )
+
+
+class DefaultPlatformTestCase(_ImportCase):
+    link_bob = PersonalDeezerTestCase.link_bob
+
+    def youtube_too(self):
+        ServiceLink.create(user=self.bob, service="youtube", data=encrypt_password("{}"), account="Bob YT", updated=now())
+        return [a for a in self.my_accounts() if a["provider"] == "youtube"][0]
+
+    def test_only_the_default_platform_syncs_every_day(self):
+        self.as_bob()
+        dz, _p = self.link_bob()
+        yt = self.youtube_too()
+        payload = self.client.get("/api/me/accounts").get_json()
+        self.assertEqual(payload["default"], dz["id"])  # never chosen: their Deezer
+        self.assertEqual({a["id"]: a["default"] for a in payload["accounts"]}, {dz["id"]: True, yt["id"]: False})
+        self.assertEqual(self.started_for_bob(), [])  # dz ran at linking
+        row = ProviderAccount.get_by_id(dz["id"])
+        opts = li.options(row)
+        opts["last"] = None
+        li._save_options(row, opts)
+        self.assertEqual(self.started_for_bob(), [dz["id"]])
+
+    def started_for_bob(self):
+        mine = {str(r.id) for r in ProviderAccount.select().where(ProviderAccount.user == self.bob.id)}
+        with mock.patch.object(li, "start") as start:
+            li.run_due(self.app)
+        return [str(c.args[1]) for c in start.call_args_list if str(c.args[1]) in mine]
+
+    def test_choosing_a_default_imports_from_it_at_once_and_sticks(self):
+        self.as_bob()
+        dz, _p = self.link_bob()
+        yt = self.youtube_too()
+        with mock.patch.object(li, "_youtube_client", return_value=FakeYtClient()):
+            rv = self.client.put("/api/me/accounts/default", json={"account": yt["id"]})
+        self.assertEqual(rv.status_code, 200, rv.get_data(as_text=True))
+        body = rv.get_json()
+        self.assertTrue(body["started"])
+        self.assertEqual(body["default"], yt["id"])
+        self.assertEqual([a["id"] for a in body["accounts"] if a["default"]], [yt["id"]])
+        self.assertIn(str(ids.youtube_track_uuid("abcdefghijk")), self.stars(StarredTrack, self.bob))
+        # Deezer is no longer read every day; YouTube Music is, when due.
+        for acc_id in (dz["id"], yt["id"]):
+            row = ProviderAccount.get_by_id(acc_id)
+            opts = li.options(row)
+            opts["last"] = None
+            li._save_options(row, opts)
+        self.assertEqual(self.started_for_bob(), [yt["id"]])
+        # None at all: nothing is read every day.
+        rv = self.client.put("/api/me/accounts/default", json={"account": None})
+        self.assertIsNone(rv.get_json()["default"])
+        self.assertEqual(self.started_for_bob(), [])
+
+    def test_somebody_elses_account_cannot_be_my_default(self):
+        self.as_bob()
+        dz, _p = self.link_bob()
+        self.as_carol()
+        rv = self.client.put("/api/me/accounts/default", json={"account": dz["id"]})
+        self.assertEqual(rv.status_code, 404)
+        self.as_bob()
+        self.assertEqual(self.client.get("/api/me/accounts").get_json()["default"], dz["id"])
+
+    def test_a_second_account_linked_does_not_import_on_its_own(self):
+        self.as_bob()
+        yt = self.youtube_too()  # the first account: the default
+        with mock.patch.object(li, "start") as start:
+            dz, _p = self.link_bob()
+        start.assert_not_called()
+        self.assertFalse(dz["default"])
+        # ... and does not take the default over, even being a Deezer.
+        self.assertEqual(self.client.get("/api/me/accounts").get_json()["default"], yt["id"])
+
+
+class ProgressTestCase(_ImportCase):
+    def test_a_run_says_which_list_and_how_far(self):
+        self.gw.favs = [str(i) for i in range(1, 451)]
+        self.as_alice()
+        acc = str(self.server_account().id)
+        seen = []
+        real = self.gw.get_tracks
+
+        def watched(refs):
+            seen.append(li.status(acc))
+            return real(refs)
+
+        self.gw.get_tracks = watched
+        with mock.patch.object(li, "_yield") as yielded:
+            self.client.put(f"/api/me/accounts/{acc}", json={"auto": {"artists": False}})
+            li._runs[acc] = {"running": True}
+            try:
+                li.run(self.app, acc)
+            finally:
+                li._runs.pop(acc, None)
+        self.assertEqual(
+            [(s["kind"], s["phase"], s["done"], s["total"]) for s in seen],
+            [("tracks", "import", 0, 450), ("tracks", "import", 200, 450), ("tracks", "import", 400, 450)],
+        )
+        # Between two batches, whatever a person waits on goes first.
+        self.assertEqual(yielded.call_count, 2)
+
+    def test_between_two_batches_the_import_waits_for_a_person(self):
+        from supysonic.deezer import workload
+
+        with mock.patch.object(workload, "quiet_wait") as wait, mock.patch.object(li.time, "sleep") as sleep:
+            li._yield()
+        wait.assert_called_once()
+        sleep.assert_called_once_with(li.PAUSE)
+
+
+class FavouritesCompleteTestCase(_ImportCase):
+    """Every star is in the favourites list, whatever the title is made of,
+    and a replacement keeps its place there."""
+
+    def test_every_star_is_listed_and_a_replacement_keeps_its_place(self):
+        from datetime import datetime
+
+        from supysonic.deezer import library
+        from supysonic.deezer import youtube as yt
+        from supysonic.providers.youtube import youtube_from_hit
+        from supysonic.webui.availability import replace_everywhere
+
+        root = library.get_root_folder(self.archive)
+        dead = library.upsert_track(raw_track(1, "Dead"), root, "FLAC")
+        kept = library.upsert_track(raw_track(2, "Kept"), root, "FLAC")
+        hit = {"ref": "abcdefghijk", "title": "Dead", "artists": [{"name": "Foo", "ref": "UCfoo"}],
+               "album": {"name": "LP", "ref": "MPREb_lp"}, "duration": 200}
+        fallback = yt.upsert_track(youtube_from_hit(hit), self.archive)
+        StarredTrack.create(user=self.alice, starred=dead.id, date=datetime(2024, 1, 1))
+        StarredTrack.create(user=self.alice, starred=kept.id, date=datetime(2024, 1, 2))
+        replace_everywhere(self.app, dead, fallback, self.alice.id, True)
+
+        self.as_alice()
+        listed = [t["id"] for t in self.client.get("/api/me/favorites").get_json()["tracks"]]
+        # Newest star first, the stand-in where the dead title was (not on top).
+        self.assertEqual(listed, [str(kept.id), str(fallback.id)])
+        ids_ = self.client.get("/api/me/favorite-ids").get_json()["ids"]
+        self.assertEqual(len(ids_), StarredTrack.select().where(StarredTrack.user == self.alice.id).count())
+        self.assertEqual(ids_, ["2", str(fallback.id)])
+
+
+class CliTestCase(_ImportCase):
+    def test_the_cli_import_is_the_same_remembering_import(self):
+        from click.testing import CliRunner
+
+        from supysonic import cli as cli_mod
+
+        class Conf:
+            DEEZER = {"sync_user": "alice", "archive_dir": self.archive}
+
+        StarredTrack.delete().execute()
+        runner = CliRunner()
+        with mock.patch.object(cli_mod, "_require_provider", return_value=self.app.deezer):
+            rv = runner.invoke(cli_mod.cli, ["deezer", "import-account"], obj=Conf())
+            self.assertEqual(rv.exit_code, 0, rv.output)
+            self.assertIn("tracks: 2 added", rv.output)
+            StarredTrack.delete().where(StarredTrack.starred == ids.track_uuid(1)).execute()
+            rv = runner.invoke(cli_mod.cli, ["deezer", "import-account"], obj=Conf())
+        self.assertEqual(rv.exit_code, 0, rv.output)
+        self.assertEqual(self.stars(StarredTrack, self.alice), {str(ids.track_uuid(2))})
+
+
 class MigrationTestCase(unittest.TestCase):
     """A server at 20261025 boots on this code: the table and the column appear,
     and nothing else moves."""

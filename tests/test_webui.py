@@ -2636,19 +2636,31 @@ class WebUITestCase(unittest.TestCase):
         thread.join(timeout=5)
         self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"])
 
+    def test_favoriting_an_artist_archives_nothing_by_default(self):
+        """A whole discography per heart is the person's choice (an imported
+        account follows dozens of artists at once), not a default."""
+        from supysonic.deezer import backfill, rules
+
+        rules.invalidate()
+        self.assertFalse(rules.load(self.app)["on_fav_artist"])
+        self.assertIsNone(backfill.archive_entity(self.app, self.app.deezer, "artist", "9"))
+        self.assertEqual(self.app.deezer_prefetch.ids, [])
+
     def test_favoriting_an_artist_archives_the_whole_discography(self):
         """Every track of every official release — and each one only once, even
         though gw lists the same record under several tabs/editions."""
-        from supysonic.deezer import backfill
+        from supysonic.deezer import backfill, rules
 
+        rules.save({"on_fav_artist": True})
         thread = backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
         thread.join(timeout=5)
         # Albums 10 and 11 (10 listed twice), 5 tracks each, same ids: one pass.
         self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"])
 
     def test_an_unreadable_release_does_not_abort_the_discography(self):
-        from supysonic.deezer import backfill
+        from supysonic.deezer import backfill, rules
 
+        rules.save({"on_fav_artist": True})
         real = self.app.deezer.get_album_tracks
 
         def flaky(alb_id):

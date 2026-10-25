@@ -482,23 +482,35 @@ def deezer_import(config, ref):
 @deezer.command("import-account")
 @click.pass_obj
 def deezer_import_account(config):
-    """One-off import of your Deezer playlists and favorites (never removes anything)."""
+    """Import what is new in the server's Deezer account (its holder's favourites,
+    followed artists…): the same import as Réglages → Sources → Mes comptes, so
+    nothing removed here is put back, and nothing is removed."""
 
     provider = _require_provider(config)
+    from . import access, libraryimport
+
+    owner = None
     sync_user = config.DEEZER.get("sync_user")
-    if not sync_user:
-        raise ClickException("Set 'sync_user' in the [deezer] config to a supysonic username.")
+    if sync_user:
+        owner = User.get_or_none(User.name == sync_user)
+        if owner is None:
+            raise ClickException(f"sync_user '{sync_user}' does not exist.")
+    row = access.ensure_server_account(owner=owner)
+    if row.user_id is None:
+        raise ClickException("The server's Deezer account has no holder: set 'sync_user' in [deezer].")
 
-    from .deezer.importer import DeezerImporter
+    class _App:
+        deezer = provider
+        testing = False
 
-    try:
-        importer = DeezerImporter(provider, sync_user, progress=click.echo)
-    except User.DoesNotExist as e:
-        raise ClickException(f"sync_user '{sync_user}' does not exist.") from e
-    out = importer.import_account()
-    click.echo(f"Playlists: {out['playlists']}, favorites: {out['favorites']}")
-    for f in out["failed"]:
-        click.echo(f"  ! {f}", err=True)
+    _App.config = {"DEEZER": config.DEEZER}
+    out = libraryimport.run(_App, row.id, kinds=list(libraryimport.KINDS))
+    for kind, n in (out.get("added") or {}).items():
+        click.echo(f"{kind}: {n} added")
+    for kind, n in (out.get("kept") or {}).items():
+        click.echo(f"{kind}: {n} already handled here, left as they are")
+    if out.get("error"):
+        raise ClickException(out["error"])
 
 
 @deezer.command("sync")

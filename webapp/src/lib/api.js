@@ -261,6 +261,7 @@ export const api = {
   unlinkAccount: (id) => req("/me/accounts/" + encodeURIComponent(id), { method: "DELETE" }),
   setAccountAuto: (id, auto) =>
     req("/me/accounts/" + encodeURIComponent(id), { method: "PUT", body: body({ auto }) }),
+  setDefaultAccount: (id) => req("/me/accounts/default", { method: "PUT", body: body({ account: id }) }),
   importAccount: (id, kinds) =>
     req("/me/accounts/" + encodeURIComponent(id) + "/import", { method: "POST", body: body(kinds ? { kinds } : {}) }),
   accountLibrary: (id, kind, fresh) =>
@@ -605,8 +606,6 @@ export const api = {
   // manual Deezer refresh (admin) — kicks off a background sync, then poll status
   sync: () => req("/sync", { method: "POST" }),
   syncStatus: () => req("/sync/status"),
-  importAccount: () => req("/deezer/import-account", { method: "POST" }),
-  importAccountStatus: () => req("/deezer/import-account"),
 
   // upload local audio files into the archive (multipart; let the browser set
   // the Content-Type/boundary, so this bypasses the JSON `req` helper).
