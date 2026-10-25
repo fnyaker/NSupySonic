@@ -15,7 +15,10 @@ The rules, in order:
    to whoever a grant names: ``all``, a group (``g:<id>``) or a person
    (``u:<id>``). A grant on feature ``*`` covers the whole account; a grant
    naming a feature replaces it for that feature, so a feature added later
-   inherits the account's setting instead of being closed in silence.
+   inherits the account's setting instead of being closed in silence;
+4. which account serves is chosen per request (``serving``): one's own first,
+   then the server's, then one lent by somebody else, then the provider's
+   anonymous use for what it answers without any account (lot P3).
 
 Everything is read in one go and kept until a version in ``Meta`` moves
 (checked once a second at most), so a check is a few dictionary lookups: it
@@ -47,6 +50,10 @@ ANONYMOUS = ""  # the account column of a provider's anonymous use
 #: on the first run.
 ANONYMOUS_DEFAULTS = ("youtube",)
 
+#: Anonymous uses opened later, each once (lot P3: Deezer's public API, for the
+#: features it answers without an account), granted to ``all`` like the first.
+LATER_ANONYMOUS = (("deezer", "acc.anon.deezer"),)
+
 _lock = threading.Lock()
 _state = None  # (checked monotonic, database, version, Snapshot)
 _booted = set()  # the databases whose first run is known done (weakly: tokens)
@@ -62,6 +69,8 @@ class Snapshot:
         self.accounts = {}
         # user id -> frozenset(group ids)
         self.groups = {}
+        # account ids whose credential was last seen refused: they serve nobody
+        self.refused = frozenset()
 
     def has_server_account(self):
         return any(m == SERVER for _a, _o, m in self.accounts.get("deezer", ()))
@@ -81,28 +90,68 @@ class Snapshot:
             owner == user_id and mode == SERVER for _a, owner, mode in self.accounts.get(provider, ())
         )
 
-    def allowed(self, user_id, provider, feature):
+    def _granted(self, key, feature, mine):
+        per = self.grants.get(key)
+        if not per:
+            return False
+        who = per.get(feature)
+        if who is None:
+            who = per.get(F.ANY)
+        return bool(who) and not who.isdisjoint(mine)
+
+    def serving(self, user_id, provider, feature):
+        """Which accounts may serve ``user_id`` for ``feature``, best first
+        (lot P3): their own account, then the server's (held or lent), then
+        somebody else's that is lent to them, then the provider's anonymous
+        use (``ANONYMOUS``) where the feature needs no account. Account ids."""
         if F.is_personal(feature):
             # Their own favourites and playlists: the holder of an account, no one else.
-            return bool(user_id) and self.owns(user_id, provider)
-        # A shared feature runs through the server's account (a personal one does
-        # not carry the catalogue yet: lot P3), so holding a personal account
-        # opens nothing more than the grants already do.
-        if user_id and self.holds_server(user_id, provider):
-            return True
+            if not user_id:
+                return []
+            return [a for a, owner, _m in self.accounts.get(provider, ()) if owner == user_id]
         mine = self.subjects_for(user_id)
-        keys = [(provider, acc) for acc, _o, _m in self.accounts.get(provider, ())]
-        keys.append((provider, ANONYMOUS))
-        for key in keys:
-            per = self.grants.get(key)
-            if not per:
+        own, server, lent = [], [], []
+        for acc, owner, mode in self.accounts.get(provider, ()):
+            if acc in self.refused:
                 continue
-            who = per.get(feature)
-            if who is None:
-                who = per.get(F.ANY)
-            if who and not who.isdisjoint(mine):
-                return True
-        return False
+            if user_id and owner == user_id:
+                (server if mode == SERVER else own).append(acc)
+            elif self._granted((provider, acc), feature, mine):
+                (server if mode == SERVER else lent).append(acc)
+        out = own + server + lent
+        if anonymous_answers(provider, feature) and self._granted(
+            (provider, ANONYMOUS), feature, mine
+        ):
+            out.append(ANONYMOUS)
+        return out
+
+    def allowed(self, user_id, provider, feature):
+        return bool(self.serving(user_id, provider, feature))
+
+
+def anonymous_answers(provider_id, feature) -> bool:
+    """Does ``provider_id`` answer ``feature`` without any account? From its
+    declaration (``auth: none``); a provider whose class is not at hand is
+    taken at its word that it has an anonymous use."""
+    spec = _declared(provider_id)
+    if spec is None:
+        return True
+    entry = spec.get(feature)
+    return entry is not None and entry["auth"] == F.AUTH_NONE
+
+
+_DECLARED = {}
+
+
+def _declared(provider_id):
+    if provider_id not in _DECLARED:
+        cls = None
+        if provider_id == "deezer":
+            from .providers.deezer import DeezerAdapter as cls
+        elif provider_id == "youtube":
+            from .providers.youtube import YoutubeAdapter as cls
+        _DECLARED[provider_id] = F.declared(cls) if cls is not None else None
+    return _DECLARED[provider_id]
 
 
 def _uid(user):
@@ -152,12 +201,19 @@ def _load():
         snap.grants.setdefault((provider, account), {}).setdefault(feature, set()).add(subject)
     for key, per in snap.grants.items():
         snap.grants[key] = {f: frozenset(s) for f, s in per.items()}
-    for acc, provider, owner, mode in ProviderAccount.select(
-        ProviderAccount.id, ProviderAccount.provider, ProviderAccount.user, ProviderAccount.mode
+    refused = set()
+    for acc, provider, owner, mode, status in ProviderAccount.select(
+        ProviderAccount.id, ProviderAccount.provider, ProviderAccount.user, ProviderAccount.mode,
+        ProviderAccount.status,
     ).tuples():
         snap.accounts.setdefault(provider, []).append(
             (str(acc), str(owner) if owner is not None else None, mode)
         )
+        if status == "auth" and mode != SERVER:
+            # The server's account has its own health check; a personal one
+            # whose ARL was refused stops serving until it is linked again.
+            refused.add(str(acc))
+    snap.refused = frozenset(refused)
     groups = {}
     for group, user in UserGroupMember.select(UserGroupMember.group, UserGroupMember.user).tuples():
         groups.setdefault(str(user), set()).add(str(group))
@@ -200,6 +256,7 @@ def snapshot() -> Snapshot:
         if where not in _booted:
             if _meta_get(BOOT_KEY) is None:
                 bootstrap()
+            open_later_anonymous()
             _booted.add(where)
         version = _meta_get(VERSION_KEY)
         if state is not None and state[1] == where and state[2] == version:
@@ -222,7 +279,7 @@ def snapshot() -> Snapshot:
         snap = Snapshot()
         snap.grants[("deezer", SERVER)] = {F.ANY: frozenset({ALL})}
         snap.accounts["deezer"] = [(SERVER, None, SERVER)]
-        for pid in ANONYMOUS_DEFAULTS:
+        for pid in ANONYMOUS_DEFAULTS + tuple(p for p, _k in LATER_ANONYMOUS):
             snap.grants[(pid, ANONYMOUS)] = {F.ANY: frozenset({ALL})}
         return snap
     with _lock:
@@ -336,6 +393,29 @@ def bootstrap():
     if server_configured():
         ensure_server_account()
     bump()
+
+
+def open_later_anonymous():
+    """An anonymous use a release added (``LATER_ANONYMOUS``), granted to
+    ``all`` once per server: what a server with no account can now answer
+    (Deezer's public catalogue). Never again once written, so an admin who
+    closes it keeps it closed."""
+    from .db import ProviderGrant, db
+
+    changed = False
+    for pid, key in LATER_ANONYMOUS:
+        if _meta_get(key) is not None:
+            continue
+        with db.atomic():
+            if _meta_get(key) is not None:
+                continue
+            ProviderGrant.insert(
+                provider=pid, account=ANONYMOUS, feature=F.ANY, subject=ALL
+            ).on_conflict_ignore().execute()
+            _meta_set(key, "1")
+            changed = True
+    if changed:
+        bump()
 
 
 # -- editing -----------------------------------------------------------------

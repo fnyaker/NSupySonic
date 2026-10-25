@@ -80,6 +80,14 @@
     return `Dernier import ${ago(last.at)} : ${counts(last.added)}`;
   }
 
+  // Lot P3: what this account is used for, besides the import.
+  function useLine(a) {
+    if (a.provider !== "deezer" || a.server || a.status === "auth") return "";
+    if (a.lossless === false)
+      return "Vos recherches et vos pages Deezer passent par ce compte. Sans FLAC (offre gratuite), la musique est récupérée par un autre compte.";
+    return "Vos recherches, vos pages et votre musique Deezer passent par ce compte.";
+  }
+
   const title = (a) => (a.server ? `${a.name} · compte du serveur` : a.name);
 
   async function toggleAuto(a, kind) {
@@ -182,6 +190,7 @@
           <span class="txt">
             <span class="nm">{title(a)}{#if a.label && !a.server}<span class="who muted">{a.label}</span>{/if}</span>
             <span class="muted st" class:warn={a.status === "auth"} aria-live="polite">{statusLine(a)}</span>
+            {#if useLine(a)}<span class="muted st">{useLine(a)}</span>{/if}
           </span>
         </header>
 

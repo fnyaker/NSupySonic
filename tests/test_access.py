@@ -107,6 +107,17 @@ class _Case(unittest.TestCase):
         self.alice = User.get(name="alice")
         self.bob = User.get(name="bob")
         self.carol = User.get(name="carol")
+        if self.CLOSE_ANONYMOUS:
+            self.close_anonymous()
+
+    #: These cases are about lending the server's account: the public API
+    #: (lot P3) would answer the pages they expect refused, so it is closed.
+    CLOSE_ANONYMOUS = True
+
+    def close_anonymous(self):
+        self.as_alice()
+        self.grant("*", [], account="")
+        self.client.post("/api/logout")
 
     def tearDown(self):
         test_webui.WebUITestCase.tearDown(self)
@@ -302,7 +313,8 @@ class GroupsTestCase(_Case):
         self.assertIn("deezer", ids)
         self.assertNotIn("local", ids)
         dz = next(p for p in j["providers"] if p["id"] == "deezer")
-        self.assertIsNone(dz["anonymous_use"])  # Deezer reaches nothing without the account yet
+        # Lot P3: its public API answers anybody it is opened to (closed here).
+        self.assertEqual(dz["anonymous_use"]["grants"], {})
         acc = dz["accounts"][0]
         self.assertTrue(acc["server"] and acc["editable"])
         self.assertEqual(acc["owner"]["name"], "alice")

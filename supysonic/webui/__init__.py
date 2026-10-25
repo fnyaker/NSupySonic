@@ -584,11 +584,39 @@ def _deezer_allowed() -> bool:
     return allowed
 
 
+_UNSET = object()
+
+
 def _provider():
-    provider = getattr(current_app, "deezer", None)
-    if provider is None or not _deezer_allowed():
-        return None
+    """The Deezer that serves this request (lot P3): the person's own account
+    when it can, else the server's, else one lent to them. None when none
+    can — and then ``_deezer_anonymous()`` says whether the public API may
+    still answer for them."""
+    if not has_request_context():
+        return getattr(current_app, "deezer", None)
+    cached = getattr(g, "_dz_provider", _UNSET)
+    if cached is not _UNSET:
+        return cached
+    feature = _deezer_feature()
+    user = getattr(request, "webuser", None)
+    if feature is None:
+        provider, anonymous = getattr(current_app, "deezer", None), False
+    else:
+        from ..deezer import accounts as dz_accounts
+
+        provider, anonymous = dz_accounts.serving(current_app._get_current_object(), user, feature)
+    g._dz_provider = provider
+    g._dz_anonymous = provider is None and anonymous
     return provider
+
+
+def _deezer_anonymous() -> bool:
+    """Is this request served by Deezer's public API alone (no account for
+    this person, the anonymous use granted)?"""
+    if not has_request_context():
+        return False
+    _provider()
+    return bool(getattr(g, "_dz_anonymous", False))
 
 
 # A failure that is about DEEZER, not about this server, carries a code of its
@@ -604,6 +632,17 @@ DEEZER_DENIED = "deezer-denied"
 
 
 def _deezer_disabled():
+    if _deezer_anonymous():
+        # Only the public API serves this person, and this page needs an account.
+        resp = jsonify(
+            {
+                "error": "Cette page demande un compte Deezer, et aucun ne vous est prêté",
+                "code": DEEZER_DENIED,
+            }
+        )
+        resp.status_code = 403
+        resp.headers[NO_RETRY_HEADER] = DEEZER_DENIED
+        return resp
     if getattr(current_app, "deezer", None) is not None and not _deezer_allowed():
         # Deezer runs, but not for this person: a refusal, not an outage.
         resp = jsonify(
@@ -658,6 +697,11 @@ def _deezer_down(exc=None) -> bool:
 def _deezer_missing(exc=None):
     """The answer for a page neither Deezer nor the database could give."""
     if _provider() is None:
+        if getattr(g, "_dz_public", False):
+            # The public API was asked for this person, and did not have it.
+            if exc is not None and is_transport_failure(exc):
+                return _deezer_unreachable()
+            return jsonify({"error": "not found"}), 404
         return _deezer_disabled()
     if _deezer_down(exc):
         return _deezer_unreachable()
@@ -701,6 +745,13 @@ def _dz_api():
     """
     provider = _dz_live()
     if provider is None:
+        if _deezer_anonymous():
+            # Nobody's account serves this person: the public API, signed in
+            # as nobody, answers what it answers to anybody (lot P3).
+            from ..deezer.accounts import public_api
+
+            g._dz_public = True
+            return public_api()
         return None
     try:
         return provider.dz.api
@@ -1839,6 +1890,114 @@ def _side_by_side(*fns):
     with ThreadPoolExecutor(max_workers=len(fns)) as pool:
         return [f.result() for f in [pool.submit(call, fn) for fn in fns]]
 
+PUBLIC_PAGE = 1000
+PUBLIC_MAX = 10000
+
+
+def _public_all(fetch):
+    """Every item of a paged public-API list (``fetch(index, limit)``), page
+    after page until the API says there is no next one. Raises what the call
+    raises, so the caller can tell an outage from an empty list."""
+    items, index = [], 0
+    while len(items) < PUBLIC_MAX:
+        page = fetch(index, PUBLIC_PAGE) or {}
+        batch = page.get("data") or []
+        items.extend(batch)
+        if not batch or not page.get("next"):
+            break
+        index += len(batch)
+    return items
+
+
+def _public_tracks(raw, album=None):
+    """Public-API tracks as the pages serve them. An album's tracklist leaves
+    the album out of each track (it is the page's), so it is put back."""
+    out = []
+    for t in raw or []:
+        if album is not None and isinstance(t, dict) and not t.get("album"):
+            t = dict(t, album=album)
+        x = _track_api(t)
+        if x:
+            out.append(x)
+    return flag_unavailable(out)
+
+
+def _public_album_page(album_id):
+    """The album page from the public API alone (lot P3: nobody lends this
+    person an account): the album and its full tracklist, side by side."""
+    api = _dz_api()
+    if api is None:
+        return _deezer_missing()
+    (info, exc), (songs, songs_exc) = _side_by_side(
+        lambda: api.get_album(album_id),
+        lambda: _public_all(lambda i, n: api.get_album_tracks(album_id, index=i, limit=n)),
+    )
+    if exc is not None:
+        _log_deezer_failure("album %s public page failed", album_id, exc=exc)
+        return _deezer_missing(exc)
+    if not (info or {}).get("id"):
+        return jsonify({"error": "not found"}), 404
+    if songs_exc is not None:
+        songs = ((info.get("tracks") or {}).get("data")) or []
+    out = _album_api(info)
+    out["cover"] = _pic(info, "cover_big", "cover_medium", "cover") or out["cover"]
+    out["is_favorite"] = _starred("album", deezer_id=album_id)
+    return jsonify({"album": out, "tracks": _public_tracks(songs, album=info)})
+
+
+def _public_playlist_page(playlist_id):
+    """A Deezer playlist's page from the public API alone (lot P3)."""
+    api = _dz_api()
+    if api is None:
+        return _deezer_missing()
+    (info, exc), (songs, songs_exc) = _side_by_side(
+        lambda: api.get_playlist(playlist_id),
+        lambda: _public_all(lambda i, n: api.get_playlist_tracks(playlist_id, index=i, limit=n)),
+    )
+    if exc is not None:
+        _log_deezer_failure("playlist %s public page failed", playlist_id, exc=exc)
+        return _deezer_missing(exc)
+    if not (info or {}).get("id"):
+        return jsonify({"error": "not found"}), 404
+    if songs_exc is not None:
+        songs = ((info.get("tracks") or {}).get("data")) or []
+    out = _playlist_api(info)
+    out["duration"] = int(info.get("duration") or 0)
+    out["editable"] = False
+    return jsonify({"playlist": out, "tracks": _public_tracks(songs)})
+
+
+def _public_discography(artist_id):
+    """An artist's releases from the public API alone (lot P3), in the tabs
+    the gateway's discography uses: ``all`` and one per record type."""
+    api = _dz_api()
+    if api is None:
+        return {}
+    try:
+        raw = _public_all(lambda i, n: api.get_artist_albums(artist_id, index=i, limit=n))
+    except Exception:
+        _log_deezer_failure("discography %s public failed", artist_id)
+        return {}
+    out = {}
+    for r in raw:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        kind = r.get("record_type") or "album"
+        item = {
+            "deezer_id": str(r.get("id")),
+            "title": r.get("title", ""),
+            "cover": _pic(r, "cover_medium", "cover_big", "cover"),
+            "release_date": (str(r.get("release_date") or "")[:10]) or None,
+            "year": (str(r.get("release_date") or "")[:4]) or None,
+            "record_type": kind,
+            "nb_tracks": r.get("nb_tracks"),
+        }
+        out.setdefault("all", []).append(item)
+        out.setdefault(kind, []).append(item)
+    for items in out.values():
+        items.sort(key=lambda x: x["release_date"] or "", reverse=True)
+    return out
+
 
 def _podcast_card(p):
     """A public-API podcast (show) search result, shaped as a card."""
@@ -2044,7 +2203,8 @@ def artist_on_deezer(artist_id):
     did = str(ar.deezer_id) if ar is not None and ar.deezer_id else str(artist_id)
     if not _valid_id(did):
         return jsonify({"albums": []})
-    if _provider() is None:  # switched off: nothing more to offer, no error
+    if _provider() is None and not _deezer_anonymous():
+        # switched off (or not for this person): nothing more to offer, no error
         return jsonify({"albums": []})
     dzapi = _dz_api()
     if dzapi is None:
@@ -2135,6 +2295,8 @@ def album(album_id):
         return jsonify(_db_album_response(alb))
     provider = _provider()
     exc = None
+    if provider is None and _deezer_anonymous() and _valid_id(album_id):
+        return _public_album_page(album_id)
     if provider is not None and _valid_id(album_id):
         # The page (header + favourite state) and the FULL tracklist side by
         # side: the page alone only carries the first tracks.
@@ -2166,6 +2328,17 @@ def album_on_deezer(album_id):
     provider = _provider()
     if not _valid_id(did):
         return jsonify({"tracks": []})
+    if provider is None and _deezer_anonymous():
+        api = _dz_api()
+        if api is None:
+            return _deezer_missing()
+        try:
+            raw = _public_all(lambda i, n: api.get_album_tracks(did, index=i, limit=n))
+        except Exception as exc:
+            _log_deezer_failure("album %s public tracks failed", did, exc=exc)
+            return _deezer_missing(exc)
+        album = {"id": did, "title": alb.name if alb is not None else ""}
+        return jsonify({"tracks": _not_in_library(Track, _public_tracks(raw, album=album))})
     if provider is None:  # switched off: nothing more to offer, no error
         return jsonify({"tracks": []})
     if not provider.available():
@@ -2204,6 +2377,8 @@ def playlist(playlist_id):
             }
         )
 
+    if _provider() is None and _deezer_anonymous() and _valid_id(playlist_id):
+        return _public_playlist_page(playlist_id)
     provider, err = _need_provider()
     if err:
         return err
@@ -2242,6 +2417,8 @@ def discography(artist_id):
         return jsonify({"error": "not found"}), 404
     provider = _provider()
     tabs = {}
+    if provider is None and _deezer_anonymous():
+        return jsonify({"discography": _public_discography(artist_id)})
     if provider is not None:
         try:
             tabs = provider.get_artist_discography(artist_id)

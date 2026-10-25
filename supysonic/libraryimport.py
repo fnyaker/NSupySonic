@@ -98,11 +98,14 @@ def options(row) -> dict:
         if k in auto:
             auto[k] = bool(v)
     last = raw.get("last") if isinstance(raw.get("last"), dict) else None
-    return {"auto": auto, "last": last}
+    lossless = raw.get("lossless") if isinstance(raw.get("lossless"), bool) else None
+    return {"auto": auto, "last": last, "lossless": lossless}
 
 
 def _save_options(row, opts):
-    row.options = json.dumps({"auto": opts["auto"], "last": opts.get("last")})
+    row.options = json.dumps(
+        {"auto": opts["auto"], "last": opts.get("last"), "lossless": opts.get("lossless")}
+    )
     ProviderAccount.update(options=row.options).where(ProviderAccount.id == row.id).execute()
 
 

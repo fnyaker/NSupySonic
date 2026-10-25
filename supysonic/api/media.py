@@ -54,6 +54,17 @@ def _may_use(provider_id, feature):
     return user is None or access.can(user, provider_id, feature)
 
 
+def _deezer_for(feature):
+    """The Deezer serving this Subsonic user for ``feature`` (lot P3: their own
+    account first), or None."""
+    from ..deezer.accounts import serving
+
+    provider, _anonymous = serving(
+        current_app._get_current_object(), getattr(request, "user", None), feature
+    )
+    return provider
+
+
 def _ensure_deezer_archived(res):
     """Lazily fetch+archive a Deezer-backed track's FLAC on first access.
 
@@ -63,12 +74,12 @@ def _ensure_deezer_archived(res):
     if getattr(res, "youtube_id", None) and not getattr(res, "deezer_id", None):
         _ensure_youtube_archived(res)
         return
-    provider = getattr(current_app, "deezer", None)
-    if provider is None or not getattr(res, "deezer_id", None):
+    if getattr(current_app, "deezer", None) is None or not getattr(res, "deezer_id", None):
         return
     if os.path.isfile(res.path):
         return
-    if not _may_use("deezer", "stream"):
+    provider = _deezer_for("stream")
+    if provider is None:
         raise ServerError("You may not use Deezer on this server")
     from ..deezer import workload
     from ..deezer.archive import ensure_archived
@@ -112,7 +123,8 @@ def _ensure_episode_archived(episode):
         raise ServerError("Deezer proxy is not enabled")
     if episode.path and os.path.isfile(episode.path):
         return
-    if not _may_use("deezer", "podcasts"):
+    provider = _deezer_for("podcasts")
+    if provider is None:
         raise ServerError("You may not use Deezer on this server")
     from ..deezer.archive import ensure_episode_archived
 
