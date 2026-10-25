@@ -355,7 +355,7 @@ class YoutubeAdapterTestCase(unittest.TestCase):
 
     def test_it_is_the_fallback_and_declares_what_it_does(self):
         self.assertEqual(self.adapter.role, base.FALLBACK)
-        self.assertEqual(self.adapter.capabilities, {base.SEARCH, base.AUDIO, base.LINKS})
+        self.assertEqual(self.adapter.capabilities, {base.SEARCH, base.AUDIO, base.LINKS, base.LIBRARY})
         base.check_declared(self.adapter)
 
     def test_search_is_the_one_existing_request_and_the_hit_promises_an_opus_offer(self):

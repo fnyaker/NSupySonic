@@ -368,6 +368,7 @@ CREATE TABLE IF NOT EXISTS provider_account (
     label VARCHAR(64),
     secret TEXT,
     mode VARCHAR(16),
+    options TEXT,
     status VARCHAR(12) NOT NULL,
     checked DATETIME,
     created DATETIME NOT NULL,
@@ -487,4 +488,11 @@ CREATE TABLE IF NOT EXISTS listen_event (
     CONSTRAINT listen_event_track_fk FOREIGN KEY (track_id) REFERENCES track(id) ON DELETE CASCADE,
     INDEX index_listen_event_user_at (user_id, at),
     INDEX index_listen_event_user_track (user_id, track_id)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS library_item (
+    account VARCHAR(36) NOT NULL,
+    kind VARCHAR(12) NOT NULL,
+    ref VARCHAR(64) NOT NULL,
+    excluded BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (account, kind, ref)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

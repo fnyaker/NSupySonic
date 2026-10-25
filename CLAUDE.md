@@ -2821,9 +2821,24 @@ and YouTube's anonymous use to `all`, so an upgrade changes nothing. Enforcement
 `X-NS-Error: deezer-denied`), `webui/youtube.allowed`, and Subsonic's stream (`api/media._may_use`). `/api/me` carries
 `access` and the SPA hides what would be refused (`lib/access.js`). `tests/test_access.py`.
 
+**Each person's own account and their library (lot P2)** (`supysonic/libraryimport.py`, `webui/myaccounts.py`,
+`components/MyAccounts.svelte` + `AccountPicker.svelte`, Réglages → Sources → *Mes comptes*). A person links their own
+Deezer (an ARL typed, or read off Deezer's login page by the Android app; checked by signing in, stored encrypted in
+`provider_account.secret`, refused when it IS the server's account) or their YouTube Music (the export's pasted headers:
+linking or unlinking one links or unlinks the other); the holder of the server account imports from that one. What the
+account lists — followed artists, loved tracks, saved albums, playlists — is read through `library(kind)` and made into
+THEIR rows: artists starred (so followed for Nouveautés; a YouTube channel matched by name to an existing artist and its
+ref kept in `entity_ref`, which `youtube._artist_row` then reuses), tracks starred, albums with their tracklist,
+playlists merged (one of the same id that is somebody else's is never touched). Rules: each item is imported ONCE
+(`library_item`), so the local library counts after that; one unticked in the picker (`excluded`) is never imported and
+an artist's or album's star comes off; nothing is written to the account and nothing is downloaded. Runs on linking,
+from the button, and daily (`start_watcher`; an hour after an outage; stopped by a refused credential until relinked;
+never under test unless `LIBRARY_IMPORT_INLINE`). Options and the last report live in `provider_account.options` (schema
+`20261027`). Every route is the holder's own and `NEVER` for a remote session. `tests/test_library_import.py`.
+
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261026`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261027`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported. A migration script is split on `;` AFTER its
 `--` comment lines are dropped (`db.split_sql_script`): a `;` inside a comment used to cut it in two

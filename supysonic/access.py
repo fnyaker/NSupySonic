@@ -76,11 +76,20 @@ class Snapshot:
     def owns(self, user_id, provider):
         return any(owner == user_id for _a, owner, _m in self.accounts.get(provider, ()))
 
+    def holds_server(self, user_id, provider):
+        return any(
+            owner == user_id and mode == SERVER for _a, owner, mode in self.accounts.get(provider, ())
+        )
+
     def allowed(self, user_id, provider, feature):
-        if user_id and self.owns(user_id, provider):
-            return True
         if F.is_personal(feature):
-            return False
+            # Their own favourites and playlists: the holder of an account, no one else.
+            return bool(user_id) and self.owns(user_id, provider)
+        # A shared feature runs through the server's account (a personal one does
+        # not carry the catalogue yet: lot P3), so holding a personal account
+        # opens nothing more than the grants already do.
+        if user_id and self.holds_server(user_id, provider):
+            return True
         mine = self.subjects_for(user_id)
         keys = [(provider, acc) for acc, _o, _m in self.accounts.get(provider, ())]
         keys.append((provider, ANONYMOUS))

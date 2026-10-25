@@ -37,6 +37,7 @@
   import AudioEffects from "../components/AudioEffects.svelte";
   import VisualizerSettings from "../components/VisualizerSettings.svelte";
   import AccessSettings from "../components/AccessSettings.svelte";
+  import MyAccounts from "../components/MyAccounts.svelte";
   import ServicesSettings from "../components/ServicesSettings.svelte";
   import DiscoverySlider from "../components/DiscoverySlider.svelte";
 
@@ -616,6 +617,7 @@
 {/if}
 
 {#if tab === "sources"}
+  <MyAccounts />
   <AccessSettings />
 {/if}
 

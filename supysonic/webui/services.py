@@ -323,6 +323,13 @@ def services_youtube_connect():
     except ServiceError as exc:
         return jsonify({"error": str(exc)}), 400
     _store(_uid(), "youtube", headers_json, account)
+    # The same session is an account to import from (Réglages → Sources).
+    from . import myaccounts
+    from .. import libraryimport
+
+    row, _created = myaccounts.link_youtube(_uid(), account)
+    libraryimport.forget_client(row.id)
+    libraryimport.start(current_app._get_current_object(), row.id)
     return jsonify({"ok": True, "account": account})
 
 
@@ -334,6 +341,10 @@ def services_disconnect(service):
     ServiceLink.delete().where(
         (ServiceLink.user == _uid()) & (ServiceLink.service == service)
     ).execute()
+    if service == "youtube":
+        from . import myaccounts
+
+        myaccounts.unlink_youtube(_uid())
     return jsonify({"ok": True})
 
 
