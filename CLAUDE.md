@@ -2836,6 +2836,18 @@ from the button, and daily (`start_watcher`; an hour after an outage; stopped by
 never under test unless `LIBRARY_IMPORT_INLINE`). Options and the last report live in `provider_account.options` (schema
 `20261027`). Every route is the holder's own and `NEVER` for a remote session. `tests/test_library_import.py`.
 
+**Which Deezer serves a person (lot P3)** (`supysonic/deezer/accounts.py`, `access.Snapshot.serving`,
+`webui._provider`, `api/media._deezer_for`). Per request and per feature, the first account that can: the person's
+OWN, then the server's (held or granted), then a personal one lent to them, then the ANONYMOUS use — the public API
+alone (`accounts.public_api`, signed in as nobody), only for a feature the provider declares `auth: none`. An
+account whose status is `auth`, or that Deezer refused at its last sign-in, is passed over. The SOUND only goes
+through an account that may stream FLAC (`can_stream_lossless`, recorded at linking in `provider_account.options`,
+asked once for older rows): a Free account serves search and pages, the archive stays FLAC. The anonymous Deezer use
+is granted to `all` ONCE (`access.LATER_ANONYMOUS`, Meta `acc.anon.deezer`) so an admin's closing it sticks. With
+no account the album, playlist and discography pages are built from the public API (`_public_album_page`, paged by
+`next`); what needs the gateway is a 403 `deezer-denied`, never an outage. Deezer switched off on the server is no
+public API either. `tests/test_multi_p3.py`.
+
 ## Database / schema
 
 Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261027`); bump it

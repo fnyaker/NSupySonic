@@ -110,6 +110,7 @@ def _account_json(row):
         "status": row.status,
         "auto": opts["auto"],
         "last": opts["last"],
+        "lossless": opts["lossless"],
         "running": live,
         "kinds": list(li.KINDS),
         "pickable": list(li.PICKABLE),
@@ -158,7 +159,12 @@ def _deezer_login(arl):
     probe = DeezerProvider(arl, cfg.get("archive_dir") or "", cfg.get("quality") or "FLAC")
     try:
         user = probe.dz.current_user or {}
-        return {"id": str(user.get("id") or ""), "name": str(user.get("name") or "Deezer")}
+        return {
+            "id": str(user.get("id") or ""),
+            "name": str(user.get("name") or "Deezer"),
+            # Lot P3: an account that cannot stream FLAC never fetches the sound.
+            "lossless": bool(user.get("can_stream_lossless")),
+        }
     except Exception as exc:
         login = getattr(probe, "_login_error", None)
         if login and login[0] == "arl":
@@ -225,6 +231,9 @@ def my_accounts_link_deezer():
         li.forget_client(row.id)
         row.secret, row.label, row.mode, row.status, row.checked = blob, who["name"][:64], mode, "ok", now()
         row.save()
+    opts = li.options(row)
+    opts["lossless"] = who.get("lossless", False)
+    li._save_options(row, opts)
     access.bump()
     li.start(current_app._get_current_object(), row.id)
     return jsonify({"account": _account_json(row)})

@@ -162,8 +162,8 @@ class DeezerAdapter(base.Provider):
     requires_credentials = True
     # What Deezer itself needs (plan §15): its public API answers the catalogue
     # without an account; the sound, the podcasts and the account's own library
-    # need one. (The adapter still reaches all of it through the server's
-    # account: an anonymous path is lot P3.)
+    # need one. Somebody no account serves reaches the "none" ones through the
+    # public API (lot P3, ``webui._dz_api``).
     features = {
         "search": {"auth": "none"},
         "browse": {"auth": "none"},
@@ -186,7 +186,7 @@ class DeezerAdapter(base.Provider):
         "my_artists": {"auth": "account"},
         "my_playlists": {"auth": "account"},
     }
-    anonymous_use = False
+    anonymous_use = True
     auth_modes = (
         {
             "id": "browser",

@@ -578,7 +578,14 @@ version dans `Meta`), puis c'est une recherche dans un dictionnaire.
   ici n'est pas remise le lendemain parce que le compte la liste encore.
 - **P3 — Écouter par son propre compte, et Deezer sans compte.** Une personne qui a relié un Deezer
   qui marche écoute par lui plutôt que par celui du serveur ; et la recherche, les pages et les infos
-  de Deezer passent par l'API publique quand aucun compte n'est prêté.
+  de Deezer passent par l'API publique quand aucun compte n'est prêté. **Fait** : l'ordre est le compte
+  de la personne, puis celui du serveur (détenu ou prêté), puis un compte personnel prêté, puis l'usage
+  anonyme (`access.Snapshot.serving`) ; un compte que Deezer refuse est sauté. Le son ne passe que par
+  un compte qui a droit au FLAC (`can_stream_lossless`, lu à la liaison) : un compte gratuit sert la
+  recherche et les pages, l'archive reste en FLAC. L'usage anonyme de Deezer est ouvert à tous une seule
+  fois à la mise à jour (`acc.anon.deezer`) et un admin peut le fermer dans Sources ; il ne répond qu'à
+  ce que l'API publique sait (recherche, artiste, album, playlist, discographie), le reste est un refus
+  (403 `deezer-denied`), jamais une panne. Deezer désactivé sur le serveur l'est aussi pour l'API publique.
 
 ## 14. Ce que ce plan ne fait pas
 
