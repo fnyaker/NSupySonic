@@ -251,6 +251,13 @@ export const api = {
     if (seed) q.push("seed=" + encodeURIComponent(seed));
     return req("/flow" + (q.length ? "?" + q.join("&") : ""));
   },
+  // A Flow refill: what the queue holds and what this session skipped go with
+  // it, so nothing comes back twice and the skips steer the rest.
+  flowNext: (level, { exclude = [], skipped = [] } = {}) =>
+    req("/flow", {
+      method: "POST",
+      body: body({ d: level, exclude: exclude.map(String), skipped: skipped.map(String) }),
+    }),
   recommend: (level, seed) =>
     req(
       "/recommend?d=" + encodeURIComponent(Number(level).toFixed(2)) +
@@ -411,6 +418,19 @@ export const api = {
   trackRadio: (id) => req("/radio/track/" + id),
   trackCredits: (id) => req("/track/" + id + "/credits"),
   artistRadio: (id) => req("/radio/artist/" + id),
+  // The next titles of a radio already playing: its ORIGINAL seed and the
+  // session (heard through, skipped, queued) — never the queue's last title,
+  // which made the radio drift a neighbour of a neighbour at a time.
+  radioNext: (seed, { recent = [], skipped = [], exclude = [] } = {}) =>
+    req("/radio/next", {
+      method: "POST",
+      body: body({
+        seed,
+        recent: recent.map(String),
+        skipped: skipped.map(String),
+        exclude: exclude.map(String),
+      }),
+    }),
 
   // podcasts
   podcasts: () => req("/podcasts"),

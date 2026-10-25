@@ -47,10 +47,17 @@ KEY_ON = "rel.on"
 KEY_EVERY = "rel.every"
 KEY_CLOSE = "rel.close"
 KEY_WINDOW = "rel.window"
+KEY_LISTENED = "rel.listened"
 #: Defaults: on, every 6 hours, 2 close artists per favourite, releases of the
-#: last 90 days.
-DEFAULTS = {KEY_ON: True, KEY_EVERY: 6, KEY_CLOSE: 2, KEY_WINDOW: 90}
-BOUNDS = {KEY_EVERY: (1, 168), KEY_CLOSE: (0, 5), KEY_WINDOW: (7, 365)}
+#: last 90 days, and the 30 artists each person listens to most (Release Radar
+#: covers "the artists you follow and listen to most", ListenBrainz's fresh
+#: releases the artists a person listened to).
+DEFAULTS = {KEY_ON: True, KEY_EVERY: 6, KEY_CLOSE: 2, KEY_WINDOW: 90, KEY_LISTENED: 30}
+BOUNDS = {KEY_EVERY: (1, 168), KEY_CLOSE: (0, 5), KEY_WINDOW: (7, 365), KEY_LISTENED: (0, 200)}
+#: Listened artists whose close artists are also read (on top of favourites).
+LINKS_OF_LISTENED = 20
+#: Watched artists at most, all people together.
+WATCH_MAX = 1500
 
 #: The close artists watched for releases, all favourites together.
 CLOSE_MAX = 60
@@ -88,12 +95,13 @@ def settings() -> dict:
         except (KeyError, ValueError, TypeError):
             pass
     return {"on": out[KEY_ON], "every": out[KEY_EVERY], "close": out[KEY_CLOSE],
-            "window": out[KEY_WINDOW]}
+            "window": out[KEY_WINDOW], "listened": out[KEY_LISTENED]}
 
 
 def save_settings(values: dict) -> dict:
     """Store what ``values`` carries (validated, clamped) and return the whole."""
-    names = {"on": KEY_ON, "every": KEY_EVERY, "close": KEY_CLOSE, "window": KEY_WINDOW}
+    names = {"on": KEY_ON, "every": KEY_EVERY, "close": KEY_CLOSE, "window": KEY_WINDOW,
+             "listened": KEY_LISTENED}
     for name, key in names.items():
         if name not in values:
             continue
@@ -106,8 +114,21 @@ def save_settings(values: dict) -> dict:
                 value = str(min(hi, max(lo, int(raw))))
             except (TypeError, ValueError):
                 raise ValueError(f"{name} must be a whole number") from None
-        Meta.insert(key=key, value=value).on_conflict_replace().execute()
+        _meta_put(key, value)
     return settings()
+
+
+def _meta_put(key, value):
+    """Write one ``Meta`` row on any engine (PostgreSQL has no REPLACE)."""
+    from .db import db
+
+    if Meta.update(value=value).where(Meta.key == key).execute():
+        return
+    try:
+        with db.atomic():
+            Meta.create(key=key, value=value)
+    except Exception:  # written meanwhile
+        Meta.update(value=value).where(Meta.key == key).execute()
 
 
 # -- who is watched -----------------------------------------------------------------
@@ -143,6 +164,117 @@ def favourite_refs(provider_id, users=None) -> dict:
         ):
             out[ref] = by_id.get(entity, "")
     return out
+
+
+def _refs_of(provider_id, artist_ids) -> dict:
+    """``{ref: name}`` of library artists ``provider_id`` knows."""
+    out = {}
+    ids = list(artist_ids)
+    if not ids:
+        return out
+    rows = []
+    for i in range(0, len(ids), 500):
+        rows += list(Artist.select(Artist.id, Artist.name, Artist.deezer_id)
+                     .where(Artist.id.in_(ids[i : i + 500])).tuples())
+    if provider_id == "deezer":
+        for _aid, name, dz in rows:
+            if dz:
+                out[str(dz)] = name
+        return out
+    by_id = {aid: name for aid, name, _dz in rows}
+    for ref, entity in (
+        EntityRef.select(EntityRef.ref, EntityRef.entity)
+        .where((EntityRef.kind == "artist") & (EntityRef.provider == provider_id)
+               & EntityRef.entity.in_(list(by_id)))
+        .tuples()
+    ):
+        out[ref] = by_id.get(entity, "")
+    return out
+
+
+def listened_artists(users=None, per_user=None) -> list:
+    """The library artists each person (``users``, or everybody) listens to
+    most, by the activation of their own history (supysonic/listening.py),
+    best first; a person with no history of their own yet is answered by the
+    shared play counters."""
+    from . import listening
+    from .db import Track, User
+    from peewee import fn
+
+    n = settings()["listened"] if per_user is None else per_user
+    if n <= 0:
+        return []
+    people = list(User.select()) if users is None else list(User.select().where(User.id.in_(list(users))))
+    out, seen = [], set()
+    shared = None
+    for user in people:
+        top = listening.top_artists(user, n)
+        # The shared counters are the owner's library from before the log, not
+        # a guest's listening: only an admin falls back on them.
+        if not top and user.admin:
+            if shared is None:
+                shared = [
+                    a for (a,) in Track.select(Track.artist)
+                    .where(Track.play_count > 0)
+                    .group_by(Track.artist)
+                    .order_by(fn.SUM(Track.play_count).desc())
+                    .limit(n)
+                    .tuples()
+                ]
+            top = shared
+        for a in top:
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+    return out
+
+
+def listened_refs(provider_id, users=None, per_user=None) -> dict:
+    return _refs_of(provider_id, listened_artists(users, per_user))
+
+
+_KIND_RANK = {"album": 3, "ep": 2, "single": 1}
+_BRACKETS = None
+
+
+def title_key(title) -> str:
+    """A release title with its edition and format notes dropped: "Name",
+    "Name (Deluxe)", "Name - Single" and "NAME" are one release."""
+    import re
+    import unicodedata
+
+    global _BRACKETS
+    if _BRACKETS is None:
+        _BRACKETS = (
+            re.compile(r"[\(\[][^\)\]]*[\)\]]"),
+            re.compile(r"\s+-\s+(single|ep|deluxe.*|remaster.*|expanded.*)$", re.I),
+            re.compile(r"[^\w]+"),
+        )
+    t = unicodedata.normalize("NFKD", str(title or "")).encode("ascii", "ignore").decode().lower()
+    t = _BRACKETS[0].sub(" ", t)
+    t = _BRACKETS[1].sub("", t.strip())
+    return _BRACKETS[2].sub(" ", t).strip()
+
+
+def shown_releases(rows):
+    """What a feed shows of ``rows`` (newest first): no compilation (Release
+    Radar leaves them out), and a release put out as a single then on an EP or
+    an album under the same title once, as its most complete form
+    (ListenBrainz de-duplicates near-identical titles)."""
+    best = {}
+    order = []
+    for r in rows:
+        kind = (r.kind or "album").lower()
+        if kind in ("compile", "compilation"):
+            continue
+        k = (r.artist_ref, title_key(r.title) or r.ref)
+        have = best.get(k)
+        if have is None:
+            best[k] = r
+            order.append(k)
+        elif _KIND_RANK.get(kind, 3) > _KIND_RANK.get((have.kind or "album").lower(), 3):
+            best[k] = r
+    return [best[k] for k in order]
 
 
 def close_refs(provider_id, favs, per_fav, cap=CLOSE_MAX) -> dict:
@@ -287,7 +419,8 @@ def _store_tops(provider_id, ref, name, hits):
             (ArtistTop.provider == provider_id) & (ArtistTop.artist_ref == ref)
         ).execute()
         if rows:
-            ArtistTop.insert_many(rows).on_conflict_replace().execute()
+            # A title can be another artist's top too: the first one keeps it.
+            ArtistTop.insert_many(rows).on_conflict_ignore().execute()
 
 
 def _store_releases(provider_id, ref, name, releases, since) -> int:
@@ -341,6 +474,7 @@ def run_once(app, force=False, stats=None) -> dict:
         pid = provider.id
         try:
             favs = favourite_refs(pid)
+            heard = {r: nm for r, nm in listened_refs(pid).items() if r not in favs}
             # 1. the favourites' neighbourhood, weekly
             linked = {
                 r: at
@@ -348,7 +482,10 @@ def run_once(app, force=False, stats=None) -> dict:
                 .where(ArtistWatch.provider == pid)
                 .tuples()
             }
-            for ref, name in favs.items():
+            link_sources = dict(favs)
+            for ref in list(heard)[:LINKS_OF_LISTENED]:
+                link_sources.setdefault(ref, heard[ref])
+            for ref, name in link_sources.items():
                 at = linked.get(ref)
                 if not force and at is not None and now() - at < LINK_EVERY:
                     continue
@@ -374,6 +511,10 @@ def run_once(app, force=False, stats=None) -> dict:
             # 2. who is watched: the favourites and their nearest
             close = close_refs(pid, favs, conf["close"])
             wanted = dict(favs)
+            for ref, name in heard.items():
+                if len(wanted) >= WATCH_MAX:
+                    break
+                wanted.setdefault(ref, name)
             for ref, (name, _pic) in close.items():
                 wanted.setdefault(ref, name)
             ArtistWatch.delete().where(

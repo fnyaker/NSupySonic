@@ -220,6 +220,10 @@ def scrobble():
     if submission in (None, "", True, "true", "True", 1, "1"):
         lfm.scrobble(res, t)
         lbz.scrobble(res, t)
+        # A client says this was listened to: the person's own history too.
+        from .. import listening
+
+        listening.record(request.user, res, res.duration, "subsonic")
     else:
         lfm.now_playing(res)
         lbz.now_playing(res)

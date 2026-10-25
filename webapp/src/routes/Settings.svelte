@@ -1078,8 +1078,9 @@
   <section class="card">
     <h2>Nouveautés</h2>
     <p class="muted sub">
-      Le serveur vérifie les sorties de vos artistes favoris et de quelques artistes très
-      proches d'eux. Rien n'est téléchargé&nbsp;: les sorties apparaissent dans « Nouveautés ».
+      Le serveur vérifie les sorties de vos artistes favoris, des artistes que chacun écoute
+      le plus et de quelques artistes très proches des favoris. Rien n'est téléchargé&nbsp;:
+      les sorties apparaissent dans « Nouveautés ».
     </p>
     <label class="rule">
       <input type="checkbox" checked={rel.on} disabled={relSaving} on:change={(e) => saveReleases("on", e.currentTarget.checked)} />
@@ -1090,6 +1091,10 @@
         <label class="rel-field">
           <span>Vérifier toutes les</span>
           <span class="rel-input"><input type="number" min="1" max="168" value={rel.every} disabled={relSaving} on:change={(e) => saveReleases("every", e.currentTarget.value)} /> h</span>
+        </label>
+        <label class="rel-field">
+          <span>Plus écoutés suivis par personne</span>
+          <span class="rel-input"><input type="number" min="0" max="200" value={rel.listened} disabled={relSaving} on:change={(e) => saveReleases("listened", e.currentTarget.value)} /></span>
         </label>
         <label class="rel-field">
           <span>Artistes proches par favori</span>
@@ -1106,7 +1111,7 @@
         <Icon name="refresh" size={16} /> {rel.running ? "Vérification…" : "Vérifier maintenant"}
       </button>
       <span class="muted hint">
-        {rel.favourites ?? rel.watched} artistes favoris · {rel.links} proches · {rel.releases} sorties connues
+        {rel.watched} artistes suivis (dont {rel.favourites} favoris) · {rel.releases} sorties connues
         {#if rel.last_run}<br />Dernière vérification {new Date(rel.last_run).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })}{/if}
       </span>
     </div>
@@ -2061,6 +2066,7 @@
     color: var(--text-dim);
   }
   .rel-input {
+    margin-top: auto;
     display: flex;
     align-items: center;
     gap: 8px;
