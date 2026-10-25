@@ -288,7 +288,11 @@ published only once the whole body is there (an empty or short body is an error,
 what it LISTS (the `meta` record, now `native: true`, and the cover) in IndexedDB and plays the file from
 `<origin>/__nsoffline/<key>`, which `MainActivity.intercept` answers from disk with byte ranges — for the WebView and
 for the requests the service worker passes on (`ServiceWorkerController`) — and which the native player reads straight
-off the disk (`NativeAudio`'s `localFile`). The Blobs an older APK left in IndexedDB move over ONCE at launch
+off the disk (`NativeAudio`'s `localFile`). The WebView applies a request's `Range` ITSELF to what
+`shouldInterceptRequest` returns (it reads `available()` as the whole size and skips the start), so the
+body is the file from byte 0, cut at the range's end (`RangeBody`, `RangeBodyTest` models Chromium's
+loader): a stream already positioned at the start was skipped twice, and every read past the first
+broke a download on the page's own `<audio>`. The Blobs an older APK left in IndexedDB move over ONCE at launch
 (`offline.js#moveDownloadsToApp`): 768 KiB pieces as base64 through `offPut` (each must start where the last ended),
 `offCommit` checked against the Blob's size, and only then the IndexedDB copy is deleted; a refusal leaves the page's
 copy exactly as it was, and nothing moves with less than the Blob + 64 MB free. At launch a file no record lists is
@@ -670,10 +674,15 @@ user's own requests for thirty seconds behind work they never asked for:
   play count wait until the element can play and then run **one at a time**; the prefetch of the
   next track waits for the same signal. Caching the artwork before telling the media session about
   it is also what stopped the same cover being fetched twice per track change.
-- **Artwork** (`lib/coverqueue.js`): four covers in flight, each freed slot going to whichever
-  waiting cover is closest to the viewport, with the scroll direction counted as closer. Art that
-  costs no request (above the fold, or already on the device) never queues, and everything degrades
-  to "just load it" — a missing picture is worse than an unordered one.
+- **Artwork** (`lib/coverqueue.js`): six covers in flight (three at most for covers not on screen
+  yet), each freed slot going to whichever waiting cover is closest to the viewport — sideways too,
+  for a shelf — with the scroll direction counted as closer. A cover more than two screens away is
+  not fetched until a scroll brings it near, and a turn that has not settled in 4 s gives its slot
+  back. It used to admit anything that had waited 8 s, and `Cover.svelte` asked for every card's
+  1000px copy on mount, outside the queue: opening *Nouveautés* (300 cards) put 311 requests in
+  flight and the covers scrolled to waited minutes on a phone's link. The hi-res copy is now asked
+  only once the base art is drawn, and only where the tile is drawn larger than 500 device pixels.
+  Art that costs no request (above the fold, or already on the device) never queues.
 
 Worker recycling (`GUNICORN_MAX_REQUESTS`) is **off by default**: the hours-long library jobs run on
 threads inside the worker, and recycling killed them mid-run.
