@@ -48,7 +48,7 @@ import random
 import threading
 import time
 
-from . import genretree
+from . import genretree, listening, mix
 from .db import (
     Album, Artist, ArtistLink, ArtistMute, ArtistRelease, ArtistTop, StarredAlbum,
     StarredArtist, StarredTrack, Track, TrackAnalysis, TrackNeighbor, UserTaste,
@@ -72,8 +72,21 @@ SEEDS = 30
 RECENT = 20 * 60
 #: The profile of a person is kept this long (seconds).
 PROFILE_TTL = 120
-#: The library rows read for the genre candidates (unplayed titles).
-GENRE_POOL = 6000
+#: The library rows sampled for the genre candidates (unplayed titles): this
+#: many random starting points in the index, this many rows from each.
+GENRE_STARTS = 4
+GENRE_RUN = 400
+#: Below this many events of their own, a person's profile is completed by
+#: the shared play counters (a server upgraded from before the log).
+LEGACY_UNTIL = 200
+#: A known title heard less long ago than this weighs ``FATIGUE`` as much.
+FATIGUE_HOURS = 3
+FATIGUE = 0.25
+#: Known titles: the best by affinity drawn from this many.
+KNOWN_POOL = 600
+#: The Flow's draw inside the band: low enough that the band decides, high
+#: enough that two refreshes differ.
+BAND_TEMPERATURE = 0.4
 
 _cache = {}
 _cache_lock = threading.Lock()
@@ -142,6 +155,7 @@ class Taste:
         self.artist_names = {}  # artist id -> name
         self.artist_refs = {}  # artist id -> Deezer id (the provider refs)
         self.muted = set()  # (provider, ref)
+        self.history = listening.History()  # skips, last heard
 
     def top_artists(self, n):
         return [a for a, _ in sorted(self.artists.items(), key=lambda p: -p[1])[:n]]
@@ -194,16 +208,39 @@ def invalidate(user=None):
 def _build(user) -> Taste:
     t = Taste()
     today = now()
-    for tid, aid, alid, plays, last in _visible(
-        Track.select(Track.id, Track.artist, Track.album, Track.play_count, Track.last_play)
-        .where((Track.play_count > 0) | Track.last_play.is_null(False)),
-        user,
-    ).tuples():
-        w = math.log1p(max(1, plays or 0)) * _fade(last, today)
+    # The person's OWN listening (supysonic/listening.py): ACT-R activation of
+    # each title, skips kept apart.
+    hist = listening.history(user, today) if user is not None else listening.History()
+    t.history = hist
+    for tid, a in hist.track.items():
         t.played.add(tid)
-        t.tracks[tid] = t.tracks.get(tid, 0.0) + w
-        t.artists[aid] = t.artists.get(aid, 0.0) + w
-        t.albums[alid] = t.albums.get(alid, 0.0) + w
+        t.tracks[tid] = t.tracks.get(tid, 0.0) + a
+    for aid, a in hist.artist.items():
+        t.artists[aid] = t.artists.get(aid, 0.0) + a
+    for alid, a in hist.album.items():
+        t.albums[alid] = t.albums.get(alid, 0.0) + a
+    _normalise(t.tracks)
+    _normalise(t.artists)
+    _normalise(t.albums)
+    # A server upgraded from before the log has only the shared counters: they
+    # complete the profile until the person's own history is long enough.
+    legacy = max(0.0, 1.0 - hist.events / LEGACY_UNTIL)
+    if legacy > 0:
+        lt, la, lal = {}, {}, {}
+        for tid, aid, alid, plays, last in _visible(
+            Track.select(Track.id, Track.artist, Track.album, Track.play_count, Track.last_play)
+            .where((Track.play_count > 0) | Track.last_play.is_null(False)),
+            user,
+        ).tuples():
+            w = math.log1p(max(1, plays or 0)) * _fade(last, today)
+            t.played.add(tid)
+            lt[tid] = lt.get(tid, 0.0) + w
+            la[aid] = la.get(aid, 0.0) + w
+            lal[alid] = lal.get(alid, 0.0) + w
+        for mine, old in ((t.tracks, lt), (t.artists, la), (t.albums, lal)):
+            _normalise(old)
+            for k, w in old.items():
+                mine[k] = mine.get(k, 0.0) + legacy * w
     if user is not None:
         for tid, aid, alid, date in (
             Track.select(Track.id, Track.artist, Track.album, StarredTrack.date)
@@ -242,14 +279,12 @@ def _build(user) -> Taste:
         q = TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.style).where(
             TrackAnalysis.style.is_null(False)
         )
-        starred = StarredTrack.select(StarredTrack.starred).where(StarredTrack.user == user) if user else None
-        cond = TrackAnalysis.track.in_(
-            Track.select(Track.id).where((Track.play_count > 0) | Track.last_play.is_null(False))
-        )
-        if starred is not None:
-            cond = cond | TrackAnalysis.track.in_(starred)
         tree = genretree.get()
-        for tid, style in q.where(cond).tuples():
+        weighted = list(t.tracks)
+        rows = []
+        for i in range(0, len(weighted), 500):
+            rows += list(q.where(TrackAnalysis.track.in_(weighted[i : i + 500])).tuples())
+        for tid, style in rows:
             w = t.tracks.get(tid)
             if not w:
                 continue
@@ -347,14 +382,29 @@ def track_candidates(user, taste, rng, with_catalog=True):
             user,
         )
 
+    hist = taste.history
+    fatigue_since = now() - datetime.timedelta(hours=FATIGUE_HOURS)
+
+    def liked(tid, w):
+        """A known title's weight: its affinity, less what the person skips,
+        a quarter while it was heard in the last few hours."""
+        w *= 1.0 - 0.8 * hist.skip_ratio(tid)
+        last = hist.last.get(tid)
+        if last is not None and last >= fatigue_since:
+            w *= FATIGUE
+        return w
+
     # Known: the titles the taste rests on.
-    top = sorted(taste.tracks.items(), key=lambda p: -p[1])[:300]
+    top = sorted(taste.tracks.items(), key=lambda p: -p[1])[:KNOWN_POOL]
     if top:
-        for tid, aid in fresh(Track.select(Track.id, Track.artist).where(
-            Track.id.in_([k for k, _ in top])
-        )).tuples():
-            _offer(pool, Cand(tid, 0.0, taste.tracks.get(tid, 0.0), "Vous l'aimez",
-                              track=tid, artist=aid))
+        wanted = [k for k, _ in top if not hist.rejected(k)]
+        for i in range(0, len(wanted), 500):
+            for tid, aid in fresh(Track.select(Track.id, Track.artist).where(
+                Track.id.in_(wanted[i : i + 500])
+            )).tuples():
+                _offer(pool, Cand(tid, 0.0, liked(tid, taste.tracks.get(tid, 0.0)), "Vous l'aimez",
+                                  track=tid, artist=aid))
+        top = top[:300]
 
     # Neighbours by sound of the seeds.
     seeds = [k for k, _ in top[:SEEDS]]
@@ -388,11 +438,9 @@ def track_candidates(user, taste, rng, with_catalog=True):
     # Unplayed titles of the loved artists.
     loved = taste.top_artists(25)
     if loved:
-        for tid, aid in fresh(
-            Track.select(Track.id, Track.artist).where(
-                Track.artist.in_(loved) & (Track.play_count == 0)
-            )
-        ).limit(400).tuples():
+        for tid, aid in _sampled(fresh(
+            Track.select(Track.id, Track.artist).where(Track.artist.in_(loved))
+        ), rng, 400, taste.played):
             name = names.get(aid)
             _offer(pool, Cand(tid, 0.12, taste.artists.get(aid, 0.0),
                               f"De {name}" if name else "Un artiste que vous aimez",
@@ -419,11 +467,9 @@ def track_candidates(user, taste, rng, with_catalog=True):
         }
         if local:
             back = {aid: ref for ref, aid in local.items()}
-            for tid, aid in fresh(
-                Track.select(Track.id, Track.artist).where(
-                    Track.artist.in_(list(back)) & (Track.play_count == 0)
-                )
-            ).order_by(Track.play_count.desc()).limit(600).tuples():
+            for tid, aid in _sampled(fresh(
+                Track.select(Track.id, Track.artist).where(Track.artist.in_(list(back)))
+            ), rng, 600, taste.played):
                 dist, w, _name, src = by_ref[back[aid]]
                 _offer(pool, Cand(tid, dist, w, f"Proche de {names.get(src, '')}".strip(),
                                   track=tid, artist=aid))
@@ -451,16 +497,9 @@ def track_candidates(user, taste, rng, with_catalog=True):
     # The library's unplayed titles, by how far their genre is from the taste.
     genres = taste.top_genres(6)
     styles = {}
-    rows = list(
-        fresh(
-            Track.select(Track.id, Track.artist, TrackAnalysis.style)
-            .join(TrackAnalysis, peewee_left(), on=(TrackAnalysis.track == Track.id))
-            .where(Track.play_count == 0)
-        ).limit(GENRE_POOL).tuples()
-    )
-    rng.shuffle(rows)
-    for tid, aid, style in rows[:1500]:
-        if tid in pool:
+    rows = _sample_unplayed(fresh, taste, rng)
+    for tid, aid, style in rows:
+        if tid in pool or hist.rejected(tid):
             continue
         if style is None:
             _offer(pool, Cand(tid, 0.75, 0.2, "Au hasard de votre bibliothèque", track=tid, artist=aid))
@@ -476,6 +515,47 @@ def track_candidates(user, taste, rng, with_catalog=True):
         _offer(pool, Cand(tid, 0.45 + 0.5 * g, max(0.1, 1.0 - g), f"Un peu de {style}",
                           track=tid, artist=aid))
     return pool
+
+
+def _sample_unplayed(fresh, taste, rng):
+    """A random sample of the library's unheard titles, with their genre:
+    ``GENRE_STARTS`` random points in the primary-key index, ``GENRE_RUN``
+    rows from each — O(log n) per point on every engine, and a new sample on
+    every draw (a bare LIMIT read the same rows every time)."""
+    import uuid
+
+    seen = set()
+    rows = []
+    for _ in range(GENRE_STARTS):
+        start = uuid.UUID(int=rng.getrandbits(128), version=4)
+        got = list(
+            fresh(
+                Track.select(Track.id, Track.artist, TrackAnalysis.style)
+                .join(TrackAnalysis, peewee_left(), on=(TrackAnalysis.track == Track.id))
+                .where(Track.id >= start)
+            ).order_by(Track.id).limit(GENRE_RUN).tuples()
+        )
+        if len(got) < GENRE_RUN:  # wrapped past the end: the start of the index
+            got += list(
+                fresh(
+                    Track.select(Track.id, Track.artist, TrackAnalysis.style)
+                    .join(TrackAnalysis, peewee_left(), on=(TrackAnalysis.track == Track.id))
+                    .where(Track.id < start)
+                ).order_by(Track.id).limit(GENRE_RUN - len(got)).tuples()
+            )
+        for r in got:
+            if r[0] not in seen and r[0] not in taste.played:
+                seen.add(r[0])
+                rows.append(r)
+    rng.shuffle(rows)
+    return rows
+
+
+def _sampled(query, rng, k, skip):
+    """At most ``k`` rows of ``query`` (two columns, the id first) the person
+    has not heard, drawn with ``rng`` so a seed repeats the draw."""
+    rows = [r for r in query.order_by(Track.id).limit(4000).tuples() if r[0] not in skip]
+    return rows if len(rows) <= k else rng.sample(rows, k)
 
 
 def peewee_left():
@@ -495,56 +575,54 @@ def _artist_key(c):
 
 def pick(pool, level, n, rng, known_share=0.0, exclude=()):
     """``n`` candidates: ``known_share`` of them known (distance 0), the rest
-    weighed by how close their distance is to ``level``.
+    drawn by how close their distance is to ``level``, then assembled
+    (``mix.assemble``: a draw proportional to the score, MMR over the last
+    titles, ``PER_ARTIST`` titles of an artist, never two within three).
 
-    A small library may hold too little at the asked distance. The list is then
-    completed in this order, never the other way round: the same band with a
-    looser cap per artist, then the nearest distances to the level whatever
-    they are, and only then more known titles."""
+    A small library may hold too little at the asked distance: a candidate far
+    from the level keeps a tiny score, so the band is filled first, then the
+    nearest distances, and only then more known titles."""
     exclude = set(exclude)
     known = [c for c in pool.values() if c.dist == 0.0 and c.key not in exclude]
     other = [c for c in pool.values() if c.dist > 0.0 and c.key not in exclude]
-
-    def jitter():
-        return 0.6 + 0.8 * rng.random()
-
-    ranked_known = sorted(known, key=lambda c: -(0.35 + 0.65 * c.rel) * jitter())
-    scored = [(_fit(c, level) * (0.35 + 0.65 * c.rel) * jitter(), c) for c in other]
-    in_band = [c for s, c in sorted(scored, key=lambda p: -p[0]) if s > 1e-3]
-    by_nearness = sorted(other, key=lambda c: (abs(c.dist - level), -c.rel * jitter()))
-    per_artist = {}
-    seen_titles = set()
-    taken = set()
-    chosen_known, chosen_other = [], []
-
-    def take(src, dst, want, cap):
-        for c in src:
-            if len(dst) >= want:
-                return
-            if c.key in taken:
-                continue
-            a = _artist_key(c)
-            if per_artist.get(a, 0) >= cap:
-                continue
-            title_key = _title_key(c)
-            if title_key and title_key in seen_titles:
-                continue
-            per_artist[a] = per_artist.get(a, 0) + 1
-            if title_key:
-                seen_titles.add(title_key)
-            taken.add(c.key)
-            dst.append(c)
-
     n_known = min(len(known), int(round(n * known_share)))
-    for cap in (PER_ARTIST + 1, 2 * PER_ARTIST + 1, n):
-        take(ranked_known, chosen_known, n_known, cap)
-    want = n - len(chosen_known)
-    take(in_band, chosen_other, want, PER_ARTIST)
-    take(in_band, chosen_other, want, 2 * PER_ARTIST)
-    take(by_nearness, chosen_other, want, 2 * PER_ARTIST)
-    take(by_nearness, chosen_other, want, n)
-    if len(chosen_known) + len(chosen_other) < n:  # a thin library: what is left is known
-        take(ranked_known, chosen_known, n - len(chosen_other), n)
+
+    def item(c, score):
+        return mix.Item(c.key, score, artist=_artist_key(c), track=c.track, payload=c)
+
+    def near(c):
+        return math.exp(-8.0 * abs(c.dist - level))
+
+    deduped = _one_per_title(other)
+    # The band first (its caps relaxed to twice before anything else), then
+    # the nearest distances, then — a thin library — anything at all.
+    in_band = [c for c in deduped if _fit(c, level) * (0.35 + 0.65 * c.rel) > 1e-3]
+    rest = [c for c in deduped if c not in set(in_band)]
+    want = n - n_known
+    others = mix.assemble(
+        [item(c, _fit(c, level) * (0.35 + 0.65 * c.rel)) for c in in_band],
+        want, rng, temperature=BAND_TEMPERATURE, cap=PER_ARTIST, gap=3, relax=False,
+    )
+    if len(others) < want and rest:
+        others += mix.assemble(
+            [item(c, near(c) * (0.35 + 0.65 * c.rel)) for c in rest],
+            want - len(others), rng, temperature=BAND_TEMPERATURE, cap=PER_ARTIST, gap=3,
+            fixed=others, relax=False,
+        )
+    if len(others) < want:
+        left = [c for c in deduped if c.key not in {it.key for it in others}]
+        others += mix.assemble([item(c, near(c) + 1e-9) for c in left], want - len(others),
+                               rng, cap=PER_ARTIST, fixed=others)
+    chosen_other = [it.payload for it in others]
+    taken_artists = {}
+    for c in chosen_other:
+        taken_artists[_artist_key(c)] = taken_artists.get(_artist_key(c), 0) + 1
+    want_known = n - len(chosen_other) if len(chosen_other) < n - n_known else n_known
+    kn = mix.assemble(
+        [item(c, 0.05 + c.rel) for c in known], want_known, rng,
+        temperature=0.8, cap=PER_ARTIST + 1, gap=2,
+    )
+    chosen_known = [it.payload for it in kn]
     # Known titles spread evenly through the list.
     out = []
     k = len(chosen_known)
@@ -561,6 +639,17 @@ def pick(pool, level, n, rng, known_share=0.0, exclude=()):
     return out
 
 
+def _one_per_title(cands):
+    """A catalogue title listed under two close artists is one candidate."""
+    seen = {}
+    for c in cands:
+        k = _title_key(c) or c.key
+        have = seen.get(k)
+        if have is None or c.dist < have.dist:
+            seen[k] = c
+    return list(seen.values())
+
+
 def _title_key(c):
     return c.info and ("t:" + (c.info.get("artist") or "").lower() + "|" + (c.info.get("title") or "").lower())
 
@@ -569,11 +658,23 @@ def known_share(level) -> float:
     return KNOWN_AT_0 + (KNOWN_AT_1 - KNOWN_AT_0) * level
 
 
-def flow(user, level, n=40, seed=None, exclude=()):
+def flow(user, level, n=40, seed=None, exclude=(), skipped=()):
+    """The Flow: ``exclude`` is what the queue already holds, ``skipped`` what
+    this session skipped (their artists weigh half for the rest of it)."""
     taste = profile(user)
     rng = random.Random(f"{getattr(user, 'id', '')}:{seed}")  # nosec B311 - a seeded draw so a suggestion repeats, not a secret
     pool = track_candidates(user, taste, rng)
     _dedupe_library(pool)
+    if skipped:
+        gone = set(skipped)
+        artists = {
+            a for (a,) in Track.select(Track.artist).where(Track.id.in_(list(gone))).tuples()
+        }
+        for c in list(pool.values()):
+            if c.key in gone:
+                pool.pop(c.key, None)
+            elif c.artist in artists:
+                c.rel *= 0.5
     return pick(pool, level, n, rng, known_share(level), exclude)
 
 

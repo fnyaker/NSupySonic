@@ -123,17 +123,33 @@ def discover_prefs_set():
 # -- the Flow and the recommendations -------------------------------------------------
 
 
-@webapi.route("/flow")
+@webapi.route("/flow", methods=["GET", "POST"])
 @login_required
 def flow():
     """The endless radio, at the person's discovery level: a share of what they
-    love, the rest at the distance the slider asks for."""
+    love, the rest at the distance the slider asks for. A refill POSTs what the
+    queue holds (``exclude``) and what this session skipped (``skipped``), so
+    nothing comes back twice and the session's skips steer the rest."""
+    data = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
     try:
-        level = _level_arg()
+        if request.method == "POST" and data.get("d") not in (None, ""):
+            level = discover.clamp(data.get("d"))
+        else:
+            level = _level_arg()
     except ValueError:
         return jsonify({"error": "invalid level"}), 400
     seed = _seed_arg() or secrets.token_hex(4)
-    picked = discover.flow(request.webuser, level, FLOW_SIZE, seed=seed)
+    exclude, skipped = (), ()
+    if data:
+        from . import _ref_list
+
+        exclude = set(_ref_list(data, "exclude", 400))
+        skipped = _ref_list(data, "skipped", 30)
+        # A catalogue title in the queue is excluded by its provider key.
+        raw = data.get("exclude") if isinstance(data.get("exclude"), list) else []
+        exclude |= {f"deezer:{x}" for x in raw[-400:] if isinstance(x, str) and x.isdigit()}
+    picked = discover.flow(request.webuser, level, FLOW_SIZE, seed=seed,
+                           exclude=exclude, skipped=skipped)
     return jsonify({"tracks": _serialise_tracks(picked)})
 
 
@@ -286,8 +302,10 @@ def discover_mute():
 def _user_releases(user, limit=RELEASES_MAX):
     conf = releases.settings()
     favs = releases.favourite_refs("deezer", users=[user.id])
-    close = releases.close_refs("deezer", favs, conf["close"])
-    refs = list(favs) + [r for r in close if r not in favs]
+    heard = {r: n for r, n in releases.listened_refs("deezer", users=[user.id]).items() if r not in favs}
+    close = {r: v for r, v in releases.close_refs("deezer", favs, conf["close"]).items()
+             if r not in heard}
+    refs = list(favs) + list(heard) + [r for r in close if r not in favs]
     if not refs:
         return [], 0
     since = (now().date() - datetime.timedelta(days=conf["window"])).isoformat()
@@ -308,14 +326,21 @@ def _user_releases(user, limit=RELEASES_MAX):
             names.setdefault(o, favs.get(a))
         close_to = names
     out, unseen = [], 0
-    for r in (
-        ArtistRelease.select()
-        .where((ArtistRelease.provider == "deezer") & ArtistRelease.artist_ref.in_(refs)
-               & (ArtistRelease.released >= since))
-        .order_by(ArtistRelease.released.desc(), ArtistRelease.found.desc())
-        .limit(limit)
-    ):
-        is_close = r.artist_ref not in favs
+    rows = []
+    for i in range(0, len(refs), 500):
+        rows += list(
+            ArtistRelease.select()
+            .where((ArtistRelease.provider == "deezer")
+                   & ArtistRelease.artist_ref.in_(refs[i : i + 500])
+                   & (ArtistRelease.released >= since))
+        )
+    # Newest first; on the same day, a favourite before an artist listened to,
+    # before an artist close to a favourite.
+    tier = {r: 0 for r in favs}
+    tier.update({r: 1 for r in heard if r not in tier})
+    rows.sort(key=lambda r: (r.released or "", -tier.get(r.artist_ref, 2), r.found), reverse=True)
+    for r in releases.shown_releases(rows)[:limit]:
+        is_close = r.artist_ref not in favs and r.artist_ref not in heard
         new = seen is None or r.found > seen
         unseen += 1 if new else 0
         out.append(_release_card(

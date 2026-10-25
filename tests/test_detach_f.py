@@ -239,7 +239,7 @@ class IndexTest(Base):
 
 
 class RouteTest(Base):
-    def test_track_radio_follows_the_stored_neighbours_in_three_reads(self):
+    def test_track_radio_follows_the_stored_neighbours_in_a_bounded_number_of_reads(self):
         a = [self.track(f"A{i}", cluster=0) for i in range(14)]
         [self.track(f"B{i}", cluster=1, artist="2", album="20") for i in range(6)]
         job = similar.rebuild_job()
@@ -248,10 +248,13 @@ class RouteTest(Base):
         self._login()
         with count_statements() as n:
             titles = self.titles(f"/api/radio/track/{a[0].id}")
-        self.assertLessEqual(sum(n.values()), AUTH + 3, n)
+        # The seed's neighbours and their neighbours (2), the person's history
+        # (1), the candidates' rows (1), the pairs among them for the order (1)
+        # and the answer's rows: a fixed count, whatever the library's size.
+        self.assertLessEqual(sum(n.values()), AUTH + 11, n)
         self.assertEqual(set(titles), {f"A{i}" for i in range(1, 14)})
-        # The Deezer id of the same row works too.
-        self.assertEqual(self.titles(f"/api/radio/track/{a[0].deezer_id}"), titles)
+        # The Deezer id of the same row works too (a new draw: the same titles).
+        self.assertEqual(set(self.titles(f"/api/radio/track/{a[0].deezer_id}")), set(titles))
 
     def test_radio_works_with_deezer_unreachable(self):
         a = [self.track(f"A{i}", cluster=0) for i in range(4)]
@@ -345,9 +348,11 @@ class RouteTest(Base):
         similar.drop_index()
         self._login()
         titles = self.titles("/api/radio/artist/1")
-        self.assertEqual(titles[:3], ["Own0", "Own1", "Own2"])
-        self.assertEqual(set(titles[3:6]), {"Like0", "Like1", "Like2"})
-        self.assertEqual(self.titles(f"/api/radio/artist/{own[0].artist_id}"), titles)
+        # The artist's best title first, then its own titles among what sounds
+        # like them (artist rules: never three in a row), the far ones last.
+        self.assertEqual(titles[0], "Own0")
+        self.assertEqual(set(titles[:6]), {"Own0", "Own1", "Own2", "Like0", "Like1", "Like2"})
+        self.assertEqual(set(self.titles(f"/api/radio/artist/{own[0].artist_id}")), set(titles))
         neigh = similar.artist_neighbors(own[0].artist_id)
         self.assertEqual(len(neigh), 1)  # artist 2 sounds like artist 1; 3 does not
 

@@ -472,3 +472,15 @@ CREATE TABLE IF NOT EXISTS provider_grant (
     subject VARCHAR(40) NOT NULL,
     PRIMARY KEY (provider, account, feature, subject)
 );
+CREATE TABLE IF NOT EXISTS listen_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id CHAR(36) NOT NULL REFERENCES user ON DELETE CASCADE,
+    track_id CHAR(36) NOT NULL REFERENCES track ON DELETE CASCADE,
+    at DATETIME NOT NULL,
+    listened INTEGER NOT NULL DEFAULT 0,
+    outcome INTEGER NOT NULL DEFAULT 0,
+    source VARCHAR(16)
+);
+CREATE INDEX IF NOT EXISTS index_listen_event_user_at ON listen_event(user_id, at);
+CREATE INDEX IF NOT EXISTS index_listen_event_user_track ON listen_event(user_id, track_id);
+CREATE INDEX IF NOT EXISTS index_listen_event_track_id_fk ON listen_event(track_id);

@@ -746,24 +746,34 @@ the route searches after answering). Shared building blocks: `library.update_tra
 doesn't). Before that only Subsonic's `scrobble` did, so a library played entirely through the web
 app looked untouched — and the cleanup decides what to drop from exactly this data.
 
-**Recommendations, the Flow's discovery level and the releases** (`supysonic/discover.py`,
-`supysonic/releases.py`, `webui/discover.py`, `lib/discovery.js`, `components/DiscoverySlider.svelte`,
-`routes/Releases.svelte`; multi-provider lots L + N, plan §12). Every screen READS the database: no click
-asks a provider. A person's taste is their plays (log of the count, faded over 45 days), their stars
-(track, album, artist) and the genres of what they play, lifted up the genre tree. Each candidate gets a
-DISTANCE (0 already loved; an unplayed loved artist 0.12; `track_neighbor` 0.08-0.45; a provider's close
-artist 0.30-0.60, +0.15 for its catalogue top titles; same genre 0.45 then +0.5 x tree distance) and the
-slider (0..1, per person in `user_taste`, four named steps) picks a band of distance — `pick` relaxes the
-band on a thin library rather than returning nothing, at most two titles an artist, and the Flow keeps a
-share of known titles from 80 % to 20 %. `tests/test_discover.py` pins the mean distance as MONOTONE in
-the level. Moving the slider while the Flow plays replaces what follows the playing track
-(`player.replaceUpcoming`, no `seq` bump). Releases: following an artist IS starring it; `releases.py`
-wakes every 15 min and asks only the artists due (`rel.every`, default 6 h, Réglages → Compte), one
-request a second, stopping at the first outage (never a verdict), and keeps each favourite's
-`rel.close` nearest artists (`artist_link`) and their top titles (`artist_top`), re-read weekly. The
-tables are keyed by the PROVIDER's ref (`artist_watch`, `artist_release`, `artist_link`, `artist_top`):
-a close artist has no library row and must not get one to be proposed. Catalogue suggestions are never
-downloaded to be proposed.
+**Recommendations, the radio, the Flow and the releases** (`supysonic/listening.py`, `supysonic/mix.py`,
+`supysonic/radio.py`, `supysonic/discover.py`, `supysonic/releases.py`, `webui/discover.py`; design and sources in
+`/mnt/project-files/algos/refonte-decouverte.md`). Every screen READS the database: no click asks a provider.
+- **Taste is PER PERSON** (`listen_event`, schema `20261026`): every track change the player reports (and Subsonic's
+  scrobble) is one row, judged by published rules — a listen is half the track or 240 s (Last.fm), a skip is under
+  30 s, a track of 30 s or less is never a listen. A title's weight is ACT-R's base-level activation
+  `sum((hours+1)^-0.5)` (Reiter-Haas et al. 2021); a title skipped twice and never heard is rejected. The shared
+  `Track.play_count` only fills a new person's profile, faded out over their first 200 events.
+- **One assembler** (`mix.assemble`): membership is a Gumbel-top-k draw proportional to the score under the artist
+  cap (3 per list, LB Radio), then the ORDER is a windowed multiplicative MMR `rel*(1-(1-lam)*sim)`, lam 0.5, over
+  the last 5 with a 0.75 fade (sim: `track_neighbor`, same album 0.8, same style 0.3), no artist within 3 positions.
+  Membership and order are separate on purpose: an MMR choosing members pulls in an unrelated cluster for being
+  different.
+- **The radio is anchored** (`radio.build`, `POST /api/radio/next`): every refill scores from the ORIGINAL seed
+  (weight 1) plus the session — positives at most 0.6 in all, fading 0.8 a step, skips -0.5 each (Pereira et al.
+  2019) — so it never drifts track by track. Pool: the seed's neighbours, two hops through its top 8 (x0.6, never
+  overriding a skip), then same artist / style. A softmax at T 0.04 on the similarity before the draw. The player
+  sends what is queued, heard and skipped (`Player.svelte#nextBatch`, also the end-of-queue autoplay).
+- **The Flow** keeps the distance model and the slider (`tests/test_discover.py` pins the mean distance MONOTONE in
+  the level); known titles come from the top 600 by activation (heard in the last 3 h: x0.25), the genre pool is
+  sampled from random keyset starts, refills post the queue and the session's skips (a skipped artist halved).
+- **Releases** follow favourites AND each person's most-listened artists (`rel.listened`, 30 by default, Réglages
+  -> Compte; the shared play-count fallback is the admin's only), plus close artists of favourites; compilations
+  are dropped and a single later released on an album under the same title shows once. Writes are portable
+  upserts — PostgreSQL has no REPLACE, which is what the "Nouveautés" error was. `releases.py` wakes every 15 min,
+  asks only the artists due, one request a second, stopping at the first outage (never a verdict). The tables are
+  keyed by the PROVIDER's ref (`artist_watch`, `artist_release`, `artist_link`, `artist_top`); catalogue
+  suggestions are never downloaded to be proposed.
 
 **Cleanup** (`supysonic/deezer/cleanup.py`) is the **only** code in the project that deletes archived
 audio. It is off by default, needs a free-space floor (`clean_min_free_gb`) to do anything, and is
@@ -2813,7 +2823,7 @@ and YouTube's anonymous use to `all`, so an upgrade changes nothing. Enforcement
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261022`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261026`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported. A migration script is split on `;` AFTER its
 `--` comment lines are dropped (`db.split_sql_script`): a `;` inside a comment used to cut it in two

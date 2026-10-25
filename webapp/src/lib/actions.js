@@ -359,7 +359,9 @@ export async function startTrackRadio(track) {
     const key = trackRef(track);
     const r = await api.trackRadio(key);
     if (r.tracks && r.tracks.length) {
-      player.playQueue(r.tracks, 0, { kind: "radio", id: key });
+      // A radio starts with its own seed, then what sounds like it.
+      const rest = r.tracks.filter((t) => trackRef(t) !== key);
+      player.playQueue([track, ...rest], 0, { kind: "radio", id: key });
       toasts.push("Radio lancée");
     }
   } catch {

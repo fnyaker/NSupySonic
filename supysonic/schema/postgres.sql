@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS track (
     unavailable TIMESTAMP,
     root_folder_id INTEGER NOT NULL REFERENCES folder,
     folder_id INTEGER NOT NULL REFERENCES folder,
-    owner_id UUID REFERENCES "user"
+    owner_id UUID
 );
 CREATE INDEX IF NOT EXISTS index_track_album_id_fk ON track(album_id);
 CREATE INDEX IF NOT EXISTS index_track_artist_id_fk ON track(artist_id);
@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS "user" (
     last_play_date TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS index_user_last_play_id_fk ON "user"(last_play_id);
+-- track and "user" reference each other: the owner's key is added once both exist.
+ALTER TABLE track ADD FOREIGN KEY (owner_id) REFERENCES "user";
 
 CREATE TABLE IF NOT EXISTS client_prefs (
     user_id UUID NOT NULL REFERENCES "user",
@@ -472,3 +474,15 @@ CREATE TABLE IF NOT EXISTS provider_grant (
     subject VARCHAR(40) NOT NULL,
     PRIMARY KEY (provider, account, feature, subject)
 );
+CREATE TABLE IF NOT EXISTS listen_event (
+    id SERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES "user" ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES track ON DELETE CASCADE,
+    at TIMESTAMP NOT NULL,
+    listened INTEGER NOT NULL DEFAULT 0,
+    outcome INTEGER NOT NULL DEFAULT 0,
+    source VARCHAR(16)
+);
+CREATE INDEX IF NOT EXISTS index_listen_event_user_at ON listen_event(user_id, at);
+CREATE INDEX IF NOT EXISTS index_listen_event_user_track ON listen_event(user_id, track_id);
+CREATE INDEX IF NOT EXISTS index_listen_event_track_id_fk ON listen_event(track_id);
