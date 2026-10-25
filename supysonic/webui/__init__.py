@@ -63,7 +63,7 @@ from deezerpy.errors import is_transport_failure
 from ..deezer.provider import TrackUnavailable
 from ..managers.user import UserManager
 from ..ratelimit import auth_limiter
-from .. import access, similar
+from .. import access, radio, similar
 from . import refs
 from ..utils import like_term
 from .refs import cover_url_for
@@ -2412,56 +2412,80 @@ def track_gains():
 
 
 _RADIO_SIZE = 40
-#: Fewer neighbours than this and the radio is topped up from the artist and the genre.
-_RADIO_MIN = 10
 
 
 @webapi.route("/radio/track/<track_id>")
 @login_required
 def track_radio(track_id):
-    """An endless mix seeded from a single track: its stored neighbours, one
-    indexed read, whatever Deezer is doing."""
+    """A radio seeded from one track (supysonic/radio.py): anchored on it,
+    drawn afresh on every call, at most three titles of one artist."""
     seed = refs.resolve_track(track_id)
     if seed is None:
         return jsonify({"tracks": []})
-    rows = _db_tracks(
-        similar.neighbor_query(
-            seed.id,
-            base=Track.select(Track, Album, Artist)
-            .join(Album, on=(Track.album == Album.id))
-            .switch(Track)
-            .join(Artist, on=(Track.artist == Artist.id))
-            .switch(Track),
-        ).limit(_RADIO_SIZE)
-    )
-    if len(rows) < _RADIO_MIN:
-        # A track with no vector (or a young library): the same artist, the same genre.
-        have = {r["deezer_id"] for r in rows}
-        extra = [
-            i for i in similar.fallback_ids(seed, _RADIO_SIZE - len(rows)) if i != seed.id
-        ]
-        rows += [r for r in _tracks_in_order(extra) if r["deezer_id"] not in have]
-    return jsonify({"tracks": rows})
+    ids = radio.build(request.webuser, [seed.id], _RADIO_SIZE)
+    return jsonify({"tracks": _tracks_in_order(ids)})
 
 
 @webapi.route("/radio/artist/<artist_id>")
 @login_required
 def artist_radio(artist_id):
-    """Artist radio: the artist's own best-played titles, then what sounds like
-    them, from the library."""
+    """Artist radio: the artist's own best titles among what sounds like them,
+    the artist first."""
     ar = _artist_row(artist_id)
     if ar is None:
         return jsonify({"tracks": []})
-    own = [
-        r[0]
-        for r in _visible_tracks(
-            Track.select(Track.id).where(_archived_tracks() & (Track.artist == ar))
-        )
-        .order_by(Track.play_count.desc(), Track.id)
-        .limit(20)
-        .tuples()
-    ]
-    ids = own[:6] + similar.radio(own, _RADIO_SIZE - len(own[:6]), exclude=own[:6])
+    seeds, own = radio.artist_seeds(request.webuser, ar.id)
+    if not seeds:
+        return jsonify({"tracks": []})
+    ids = seeds[:1] + radio.build(
+        request.webuser, seeds, _RADIO_SIZE - 1, exclude=seeds[:1], seed_artist=ar.id, own=own,
+        block_seeds=False,
+    )
+    return jsonify({"tracks": _tracks_in_order(ids)})
+
+
+def _ref_list(data, name, limit):
+    raw = data.get(name) or []
+    if not isinstance(raw, list):
+        return []
+    raw = [str(x)[:64] for x in raw[-limit:] if isinstance(x, (str, int))]
+    return [t.id for t in refs.resolve_tracks(raw) if t is not None]
+
+
+@webapi.route("/radio/next", methods=["POST"])
+@login_required
+def radio_next():
+    """The next titles of a radio already playing: the ORIGINAL seed (a track
+    or an artist) plus what this session heard through, skipped and queued,
+    so the radio follows the listener without drifting off its seed."""
+    data = request.get_json(silent=True) or {}
+    seed = data.get("seed") or {}
+    if not isinstance(seed, dict):
+        return jsonify({"error": "invalid seed"}), 400
+    kind = seed.get("kind")
+    sid = str(seed.get("id") or "")[:64]
+    try:
+        n = max(1, min(int(data.get("n") or _RADIO_SIZE), _RADIO_SIZE))
+    except (TypeError, ValueError):
+        n = _RADIO_SIZE
+    recent = _ref_list(data, "recent", 20)
+    skipped = _ref_list(data, "skipped", 30)
+    exclude = _ref_list(data, "exclude", 400)
+    user = request.webuser
+    if kind == "artist":
+        ar = _artist_row(sid)
+        if ar is None:
+            return jsonify({"tracks": []})
+        seeds, own = radio.artist_seeds(user, ar.id)
+        ids = radio.build(user, seeds, n, recent, skipped, exclude, seed_artist=ar.id, own=own,
+                          block_seeds=False)
+    elif kind == "track":
+        track = refs.resolve_track(sid)
+        if track is None:
+            return jsonify({"tracks": []})
+        ids = radio.build(user, [track.id], n, recent, skipped, exclude)
+    else:
+        return jsonify({"error": "invalid seed"}), 400
     return jsonify({"tracks": _tracks_in_order(ids)})
 
 
@@ -3011,7 +3035,16 @@ def _record_play(track, listened):
     that the archive cleanup decides what to drop from exactly this data. A skip
     is not a play (hence the floor), and this never touches Deezer.
     """
-    if listened < _LISTEN_MIN_SECONDS or track is None:
+    if track is None:
+        return
+    # The person's own history keeps every change, skips included: they are
+    # what the radios and the Flow learn to steer away from.
+    from .. import listening
+
+    ctx = (request.get_json(silent=True) or {}).get("context") or {}
+    listening.record(request.webuser, track, listened,
+                     ctx.get("kind") if isinstance(ctx, dict) else None)
+    if listened < _LISTEN_MIN_SECONDS:
         return
     try:
         Track.update(play_count=Track.play_count + 1, last_play=now()).where(

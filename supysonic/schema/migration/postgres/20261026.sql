@@ -1,12 +1,15 @@
--- Each person's own accounts and what is imported from them (plan
--- multi-provider §15, lot P2): the account's import options, and every item
--- already imported or unticked by its holder: each is imported once, and an
--- unticked one never.
-CREATE TABLE IF NOT EXISTS library_item (
-    account VARCHAR(36) NOT NULL,
-    kind VARCHAR(12) NOT NULL,
-    ref VARCHAR(64) NOT NULL,
-    excluded BOOLEAN NOT NULL DEFAULT FALSE,
-    PRIMARY KEY (account, kind, ref)
+-- A person's own listening history (supysonic/listening.py): one row per
+-- track change, with how long it played and whether that was a listen or a
+-- skip. Strictly additive; existing play counts are untouched.
+CREATE TABLE IF NOT EXISTS listen_event (
+    id SERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES "user" ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES track ON DELETE CASCADE,
+    at TIMESTAMP NOT NULL,
+    listened INTEGER NOT NULL DEFAULT 0,
+    outcome INTEGER NOT NULL DEFAULT 0,
+    source VARCHAR(16)
 );
-ALTER TABLE provider_account ADD COLUMN IF NOT EXISTS options TEXT;
+CREATE INDEX IF NOT EXISTS index_listen_event_user_at ON listen_event(user_id, at);
+CREATE INDEX IF NOT EXISTS index_listen_event_user_track ON listen_event(user_id, track_id);
+CREATE INDEX IF NOT EXISTS index_listen_event_track_id_fk ON listen_event(track_id);

@@ -654,6 +654,7 @@
       const played = listenAccum + (listenMark ? Date.now() - listenMark : 0);
       const listened = Math.max(0, Math.round(played / 1000));
       const s = get(player);
+      noteSession(s, listenId, listened);
       api.reportListen({
         id: listenId,
         listened,
@@ -2435,8 +2436,7 @@
     }
     if (s.autoplay && cur) {
       try {
-        const r = await api.trackRadio(trackRef(cur));
-        const more = (r.tracks || []).filter((t) => trackKey(t) !== trackKey(cur));
+        const more = (await nextBatch(s)).filter((t) => trackKey(t) !== trackKey(cur));
         if (more.length) {
           player.autoExtend(more);
           return;
@@ -2447,6 +2447,52 @@
     }
     flushListen(null); // playback stops here — report the final track
     player.pause();
+  }
+
+  // What this listening session said, for the radio and the Flow refills:
+  // the titles heard through and the ones skipped (under 30 s — the server's
+  // own rule, supysonic/listening.py). A new context is a new session.
+  const SKIP_UNDER = 30;
+  let session = { key: null, heard: [], skipped: [], seed: null };
+  function sessionFor(s) {
+    const c = s.context || {};
+    const key = `${c.kind || ""}:${c.id || ""}`;
+    if (session.key !== key) session = { key, heard: [], skipped: [], seed: null };
+    return session;
+  }
+  function noteSession(s, id, listened) {
+    const ss = sessionFor(s);
+    if (listened < SKIP_UNDER) ss.skipped = [...ss.skipped.slice(-29), id];
+    else ss.heard = [...ss.heard.slice(-19), id];
+  }
+  // The seed every refill of this queue is asked with: a radio's own, else the
+  // title playing when the queue first ran out — and then kept, so the
+  // continuation never wanders off a neighbour of a neighbour at a time.
+  function radioSeed(s) {
+    const c = s.context || {};
+    if (c.kind === "radio" && c.id) return { kind: "track", id: String(c.id) };
+    if ((c.kind === "artist-radio" || c.kind === "artist") && c.id)
+      return { kind: "artist", id: String(c.id) };
+    const ss = sessionFor(s);
+    if (!ss.seed) {
+      const t = s.queue[s.queue.length - 1] || s.queue[s.index];
+      if (t) ss.seed = { kind: "track", id: String(trackRef(t)) };
+    }
+    return ss.seed;
+  }
+  async function nextBatch(s) {
+    const ss = sessionFor(s);
+    const exclude = s.queue.slice(-400).map((t) => trackRef(t));
+    if (s.context && s.context.kind === "flow") {
+      return (
+        (await api.flowNext(get(discoveryLevel), { exclude, skipped: ss.skipped })).tracks || []
+      );
+    }
+    const seed = radioSeed(s);
+    if (!seed) return [];
+    return (
+      (await api.radioNext(seed, { recent: ss.heard, skipped: ss.skipped, exclude })).tracks || []
+    );
   }
 
   // Keep the queue topped up so Flow / radio play endlessly without a gap.
@@ -2476,18 +2522,15 @@
     if (s.index < s.queue.length - 3) return; // still buffered
     if (extending) return;
     const isFlow = !!(s.context && s.context.kind === "flow");
-    const seed = isFlow ? null : s.queue[s.queue.length - 1] || s.queue[s.index];
+    const seed = isFlow ? null : radioSeed(s);
     if (!isFlow && !seed) return;
-    const seedId = isFlow ? null : trackRef(seed);
-    const key = `${isFlow ? "flow" : seedId}|${s.queue.length}`;
+    const key = `${isFlow ? "flow" : seed.kind + ":" + seed.id}|${s.queue.length}`;
     if (key === exhausted) return;
     if (Date.now() - lastExtendAt < MIN_EXTEND_GAP) return;
     lastExtendAt = Date.now();
     extending = true;
     try {
-      const more = isFlow
-        ? (await api.flow(get(discoveryLevel))).tracks || []
-        : (await api.trackRadio(seedId)).tracks || [];
+      const more = await nextBatch(s);
       // extend() reports what it actually appended: nothing means this source
       // has no more to give at this queue length, so stop asking it.
       if (!player.extend(more)) {

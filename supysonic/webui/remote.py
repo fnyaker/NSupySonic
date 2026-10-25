@@ -198,6 +198,7 @@ POLICY = {
     "releases_check": "admin",
     "track_radio": "read",
     "artist_radio": "read",
+    "radio_next": "read",
     "my_playlists": "read",
     "my_favorite_ids": "read",
     "my_local": "read",
