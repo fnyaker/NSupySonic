@@ -385,8 +385,9 @@ if one was not built from the sources beside it. The Flask development server is
 export FLASK_APP="supysonic.web:create_application()"; flask run
 ```
 
-[CLAUDE.md](CLAUDE.md) is the long-form engineering guide — architecture, the rules each subsystem
-learned the hard way, and the measurements behind them. [todo.md](todo.md) is the roadmap.
+[CLAUDE.md](CLAUDE.md) (also `AGENTS.md`) is the working process and the standing rules;
+[docs/agents/](docs/agents/) is the long-form engineering guide, one file per area — architecture, the
+rules each subsystem learned the hard way, and the measurements behind them. [todo.md](todo.md) is the roadmap.
 
 ## Project layout
 
