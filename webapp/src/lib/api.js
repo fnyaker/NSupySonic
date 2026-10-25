@@ -562,6 +562,8 @@ export const api = {
   // library
   myPlaylists: () => req("/me/playlists"),
   myFavorites: () => req("/me/favorites"),
+  myArtists: () => req("/me/artists"),
+  myAlbums: () => req("/me/albums"),
   myLocal: () => req("/me/local"),
   favoriteIds: () => req("/me/favorite-ids"),
 

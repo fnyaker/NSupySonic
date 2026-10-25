@@ -195,6 +195,7 @@
     class="row track"
     class:active={isCurrent}
     class:noalb={!(showAlbum && track.album)}
+    class:over={index === null && showCover}
     style={dx ? `transform:translate3d(${dx}px,0,0)` : ""}
     on:dblclick={play}
     on:contextmenu={menu}
@@ -212,7 +213,10 @@
       {/if}
     </button>
 
-    <div class="titles">
+    <!-- The title and artist are the row's main target, as in every music app:
+         a tap there plays, the controls around it keep their own job. -->
+    <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
+    <div class="titles" on:click={play}>
       {#if showCover}
         <div class="thumb"><Cover src={track.album?.cover} alt={track.title} size={40} kind="track" fallbackId={trackRef(track)} /></div>
       {/if}
@@ -358,6 +362,34 @@
     align-items: center;
     gap: 10px;
     min-width: 0;
+    cursor: pointer;
+  }
+  /* No track number but a cover: the play glyph (and the playing indicator)
+     sits ON the cover instead of in an empty 40 px column of its own — the
+     list then starts at the cover, as Spotify's and Apple Music's do. */
+  .track.over {
+    position: relative;
+    grid-template-columns: 1fr 1fr 30px 44px 30px;
+  }
+  .track.over.noalb {
+    grid-template-columns: 1fr 30px 44px 30px;
+  }
+  .track.over .play {
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    border-radius: 6px;
+    color: #fff;
+    pointer-events: none;
+  }
+  .track.over:hover .play,
+  .track.over.active .play {
+    background: rgba(0, 0, 0, 0.5);
+  }
+  .track.over:not(:hover) .play .ic {
+    display: none;
   }
   .thumb {
     flex: none;
@@ -489,6 +521,10 @@
     .track.noalb {
       grid-template-columns: 36px 1fr 30px 30px;
     }
+    .track.over,
+    .track.over.noalb {
+      grid-template-columns: 1fr 30px 30px;
+    }
     .alb,
     .dur {
       display: none;
@@ -504,6 +540,10 @@
     .track.noalb {
       grid-template-columns: 36px 1fr 30px 30px;
       gap: 10px;
+    }
+    .track.over,
+    .track.over.noalb {
+      grid-template-columns: 1fr 30px 30px;
     }
     .alb,
     .dur {

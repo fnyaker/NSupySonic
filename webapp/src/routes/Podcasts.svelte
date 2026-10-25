@@ -10,6 +10,9 @@
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
 
+  // Inside the library's "Podcasts" chip: the library already says where you are.
+  export let embedded = false;
+
   let channels = [];
   let loading = true;
 
@@ -75,9 +78,11 @@
 </script>
 
 <div class="fade-in">
-  <div class="head">
-    <h1><Icon name="mic" size={26} /> Podcasts</h1>
-  </div>
+  {#if !embedded}
+    <div class="head">
+      <h1><Icon name="mic" size={26} /> Podcasts</h1>
+    </div>
+  {/if}
 
   {#if $isAdmin && CAN_KEEP}
     <form class="search" on:submit|preventDefault={onSubmit}>
@@ -104,7 +109,7 @@
     {/if}
   {/if}
 
-  <h2 class:hidden={$isAdmin && q.trim()}>Mes podcasts</h2>
+  {#if !embedded}<h2 class:hidden={$isAdmin && q.trim()}>Mes podcasts</h2>{/if}
   {#if loading}
     <Skeleton kind="list" />
   {:else if !channels.length}

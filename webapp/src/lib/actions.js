@@ -354,6 +354,20 @@ export async function subscribeToPodcast(showDeezerId) {
   }
 }
 
+// A title on its own — on the home, in the search results, among the
+// suggestions — plays at once and then turns into its radio: the queue starts
+// with that title alone and the player tops it up from the radio anchored on
+// it (Player.svelte#ensureUpcoming), the way Spotify, YouTube Music and Apple
+// Music's Autoplay continue from a single song. No request stands between the
+// tap and the sound. `artist` lets the server radio on the artist when the
+// title is a catalogue one whose row its first play has not made yet.
+export function playThenRadio(track) {
+  if (!track) return;
+  const key = trackRef(track);
+  const artist = trackEntityRef(track, "artist", track.artist) || "";
+  player.playQueue([track], 0, { kind: "radio", id: key, artist });
+}
+
 export async function startTrackRadio(track) {
   try {
     const key = trackRef(track);

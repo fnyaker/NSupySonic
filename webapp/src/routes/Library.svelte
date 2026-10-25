@@ -1,6 +1,7 @@
 <script>
   import { trackKey } from "../lib/trackkey.js";
   import { onDestroy, onMount } from "svelte";
+  import { push, replace } from "svelte-spa-router";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, CAN_BROWSE } from "../lib/remote/mode.js";
   import {
     player,
@@ -13,8 +14,9 @@
     resolvedUnavailable,
     unavailableVersion,
     playlists,
+    openMenu,
   } from "../lib/stores.js";
-  import { userPlaylists, loadMyFavorites, runDeezerSync } from "../lib/actions.js";
+  import { userPlaylists, loadMyFavorites, runDeezerSync, upsertPlaylistLocal } from "../lib/actions.js";
   import { listDownloads } from "../lib/offline.js";
   import { api } from "../lib/api.js";
   import { rememberScreen, recallScreen } from "../lib/nav.js";
@@ -24,11 +26,32 @@
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
   import UnavailableList from "../components/UnavailableList.svelte";
+  import ArtistTile from "../components/ArtistTile.svelte";
+  import Podcasts from "./Podcasts.svelte";
 
-  // Back from an album you opened out of "Téléchargés" belongs on "Téléchargés"
-  // — restore the tab (and the playlist filter) the screen was left on.
+  // One library, filtered by chips (Spotify's "Your Library", 2021): what you
+  // keep is in one place whatever it is — titles, artists, albums, playlists,
+  // podcasts, downloads, your own files. The chip is in the URL
+  // (#/library/artists) so the home's "Tout afficher" lands on it and Back
+  // returns to it.
+  export let params = {};
+  const CHIPS = [
+    { id: "favorites", label: "Titres" },
+    { id: "artists", label: "Artistes" },
+    { id: "albums", label: "Albums" },
+    { id: "playlists", label: "Playlists", admin: true },
+    { id: "podcasts", label: "Podcasts" },
+    { id: "downloaded", label: "Téléchargés", local: true },
+    { id: "local", label: "Mes fichiers" },
+    { id: "gone", label: "Indisponibles" },
+  ];
+  $: chips = CHIPS.filter((c) => (!c.admin || $isAdmin) && (!c.local || !REMOTE));
   const saved = recallScreen();
-  let tab = saved?.tab ?? "favorites";
+  let tab = (CHIPS.some((c) => c.id === params.tab) && params.tab) || saved?.tab || "favorites";
+  function choose(id) {
+    tab = id;
+    replace("/library/" + id);
+  }
   // Upload usage/cap for the current user (guests get a per-user quota; admins
   // are unlimited). Null until loaded.
   let usage = null;
@@ -47,7 +70,7 @@
   // shows up in this tab the moment it exists.
   $: myPlaylists = $playlists;
   let plQuery = saved?.plQuery ?? "";
-  $: rememberScreen({ tab, plQuery });
+  $: rememberScreen({ tab, plQuery, arQuery, arSort });
   $: shownPlaylists = filterPlaylists(myPlaylists, plQuery);
   function filterPlaylists(list, term) {
     if (!list) return null;
@@ -55,6 +78,45 @@
     if (!t) return list;
     return list.filter((p) => (p.title || "").toLowerCase().includes(t));
   }
+  // -- artists and albums you starred -----------------------------------------
+  let artists = null;
+  let albums = null;
+  let arQuery = saved?.arQuery ?? "";
+  let arSort = saved?.arSort ?? "plays"; // plays | name | recent
+  const AR_SORTS = [
+    { id: "plays", label: "Les plus écoutés" },
+    { id: "name", label: "A-Z" },
+    { id: "recent", label: "Ajoutés récemment" },
+  ];
+  $: if (tab === "artists" && artists === null) loadArtists();
+  $: if (tab === "albums" && albums === null) loadAlbums();
+  async function loadArtists() {
+    artists = [];
+    try {
+      await api.swr("/me/artists", (d) => (artists = d.artists || []));
+    } catch {
+      /* the list stays empty and says so */
+    }
+  }
+  async function loadAlbums() {
+    albums = [];
+    try {
+      await api.swr("/me/albums", (d) => (albums = d.albums || []));
+    } catch {
+      /* the list stays empty and says so */
+    }
+  }
+  const fold = (x) => (x || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  $: shownArtists = (() => {
+    if (!artists) return [];
+    const t = fold(arQuery.trim());
+    const list = t ? artists.filter((a) => fold(a.name).includes(t)) : artists.slice();
+    if (arSort === "name") list.sort((a, b) => fold(a.name).localeCompare(fold(b.name), "fr"));
+    else if (arSort === "recent") list.sort((a, b) => (b.starred || "").localeCompare(a.starred || ""));
+    return list; // "plays" is the server's own order
+  })();
+  const titles = (n) => (n ? `${n} titre${n > 1 ? "s" : ""}` : "Aucun titre gardé");
+
   let local = null;
   let offline = null;
   // Tracks the server knows can no longer be played. Loaded when the tab is
@@ -139,7 +201,7 @@
         toasts.push(`${r.skipped.length} ignoré(s) (format non géré)`, "error");
       await loadLocal();
       await loadUsage();
-      tab = "local";
+      choose("local");
     } catch (e) {
       toasts.push(e?.status === 413 ? e.message : "Échec de l'import", "error");
     } finally {
@@ -158,27 +220,43 @@
   async function syncDeezer() {
     if (await runDeezerSync()) userPlaylists(true);
   }
+
+  async function newPlaylist() {
+    const title = (window.prompt("Nom de la playlist ?") || "").trim();
+    if (!title) return;
+    try {
+      const r = await api.createPlaylist(title, []);
+      if (r?.id) upsertPlaylistLocal({ id: String(r.id), title, deezer_id: r.deezer_id });
+      userPlaylists(true);
+      if (r?.id) push("/playlist/" + r.id);
+    } catch {
+      toasts.push("Impossible de créer la playlist", "error");
+    }
+  }
+
+  // The adding actions are ONE button opening a menu (a toolbar holds
+  // actions, the platforms' rule): three pills of labels crowded the title on
+  // a phone and read as navigation.
+  function addMenu(e) {
+    const items = [];
+    if (CAN_KEEP && $isAdmin) items.push({ label: "Nouvelle playlist", icon: "plus", action: newPlaylist });
+    if (CAN_BROWSE)
+      items.push({ label: "Importer une playlist partagée", icon: "link", action: () => push("/import") });
+    if (CAN_KEEP) items.push({ label: "Importer des fichiers audio", icon: "upload", action: () => fileInput.click() });
+    if ($isAdmin && CAN_ADMIN)
+      items.push({ label: "Synchroniser depuis Deezer", icon: "refresh", action: syncDeezer });
+    const r = e.currentTarget.getBoundingClientRect();
+    openMenu({ preventDefault() {}, stopPropagation() {}, clientX: r.right, clientY: r.bottom + 4 }, items);
+  }
 </script>
 
 <div class="head">
-  <h1>Ma bibliothèque</h1>
-  <div class="head-actions">
-    {#if $isAdmin && CAN_ADMIN}
-      <button class="upload" class:spin={$syncing} on:click={syncDeezer} disabled={$syncing} title="Synchroniser depuis Deezer">
-        <Icon name="refresh" size={17} /> {$syncing ? "Sync…" : "Synchroniser Deezer"}
-      </button>
-    {/if}
-    {#if CAN_BROWSE}
-      <a class="upload" href="#/import" title="Importer une playlist partagée (Deezer, Spotify, YouTube, Apple Music)">
-        <Icon name="link" size={17} /> <span class="full">Importer une playlist</span><span class="short">Playlist partagée</span>
-      </a>
-    {/if}
-    {#if CAN_KEEP}
-      <button class="upload" on:click={() => fileInput.click()} disabled={uploading}>
-        <Icon name="upload" size={17} /> {#if uploading}Import…{:else}<span class="full">Importer des fichiers</span><span class="short">Fichiers</span>{/if}
-      </button>
-    {/if}
-  </div>
+  <h1>Bibliothèque</h1>
+  {#if CAN_KEEP || CAN_BROWSE}
+    <button class="add" on:click={addMenu} disabled={uploading || $syncing} aria-label="Ajouter à la bibliothèque" title="Ajouter">
+      {#if uploading || $syncing}<span class="spin"><Icon name="refresh" size={20} /></span>{:else}<Icon name="plus" size={22} />{/if}
+    </button>
+  {/if}
   <input
     bind:this={fileInput}
     type="file"
@@ -196,26 +274,19 @@
   </div>
 {/if}
 
-<div class="tabs bleed-x">
-  <button class:active={tab === "favorites"} on:click={() => (tab = "favorites")}>Titres favoris</button>
-  {#if $isAdmin}
-    <button class:active={tab === "playlists"} on:click={() => (tab = "playlists")}>Mes playlists</button>
-  {/if}
-  {#if !REMOTE}
-    <!-- This device's own downloads: nothing to do with the player driven. -->
-    <button class:active={tab === "downloaded"} on:click={() => (tab = "downloaded")}>Téléchargés</button>
-  {/if}
-  <button class:active={tab === "local"} on:click={() => (tab = "local")}>Mes fichiers</button>
-  <button class:active={tab === "gone"} on:click={() => (tab = "gone")}>
-    Indisponibles{#if gone?.length}<span class="badge">{gone.length}</span>{/if}
-  </button>
+<div class="tabs bleed-x" role="tablist" aria-label="Filtrer la bibliothèque">
+  {#each chips as c (c.id)}
+    <button role="tab" aria-selected={tab === c.id} class:active={tab === c.id} on:click={() => choose(c.id)}>
+      {c.label}{#if c.id === "gone" && gone?.length}<span class="badge">{gone.length}</span>{/if}
+    </button>
+  {/each}
 </div>
 
 {#if tab === "favorites"}
   {#if favorites === null}
     <Skeleton kind="list" />
   {:else if !favorites.length}
-    <p class="muted hint">Aucun titre favori. Survolez un titre et cliquez sur le cœur pour l'ajouter.</p>
+    <p class="muted hint">Aucun titre favori. Touche le cœur d'un titre pour le garder ici.</p>
   {:else}
     <div class="row fav-head">
       <button class="pill" on:click={playFavorites}><Icon name="play" size={18} /> Tout lire</button>
@@ -226,6 +297,45 @@
     </div>
     <TrackBrowser tracks={favorites} context={{ kind: "favorites" }} />
   {/if}
+{:else if tab === "artists"}
+  {#if artists === null || (!artists.length && !arQuery)}
+    {#if artists === null}<Skeleton kind="shelf" />{:else}
+      <p class="muted hint">Aucun artiste favori. Ouvre la page d'un artiste et touche le cœur pour le suivre : ses nouveautés arriveront sur l'accueil.</p>
+    {/if}
+  {:else}
+    <div class="row tools">
+      <div class="pl-search">
+        <Icon name="search" size={16} />
+        <input placeholder="Rechercher un artiste…" bind:value={arQuery} />
+      </div>
+      <label class="sort">
+        <span class="muted">Trier</span>
+        <select bind:value={arSort} aria-label="Trier les artistes">
+          {#each AR_SORTS as o}<option value={o.id}>{o.label}</option>{/each}
+        </select>
+      </label>
+      <span class="muted count">{artists.length} artiste{artists.length > 1 ? "s" : ""}</span>
+    </div>
+    {#if !shownArtists.length}
+      <p class="muted hint">Aucun artiste ne correspond à « {arQuery} ».</p>
+    {:else}
+      <div class="artist-grid">
+        {#each shownArtists as a (a.id)}<ArtistTile artist={a} detail={titles(a.tracks)} />{/each}
+      </div>
+    {/if}
+  {/if}
+{:else if tab === "albums"}
+  {#if albums === null}
+    <Skeleton kind="shelf" />
+  {:else if !albums.length}
+    <p class="muted hint">Aucun album favori. Touche le cœur sur la page d'un album pour le garder ici.</p>
+  {:else}
+    <div class="grid">
+      {#each albums as a (a.id)}<Card item={a} kind="album" />{/each}
+    </div>
+  {/if}
+{:else if tab === "podcasts"}
+  <Podcasts embedded />
 {:else if tab === "playlists"}
   {#if myPlaylists === null}
     <Skeleton kind="shelf" />
@@ -278,7 +388,7 @@
   {#if local === null}
     <Skeleton kind="list" />
   {:else if !local.length}
-    <p class="muted hint">Aucun fichier local. Cliquez sur « <span class="full">Importer des fichiers</span><span class="short">Fichiers</span> » pour ajouter votre propre musique (n'importe quel format).</p>
+    <p class="muted hint">Aucun fichier à toi pour l'instant. Touche + en haut, puis « Importer des fichiers audio », pour ajouter ta propre musique (n'importe quel format).</p>
   {:else}
     <div class="row fav-head">
       <button class="pill" on:click={playLocal}><Icon name="play" size={18} /> Tout lire</button>
@@ -296,54 +406,10 @@
     gap: 12px;
     flex-wrap: wrap;
   }
-  .head-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .upload .short,
-  .hint .short {
-    display: none;
-  }
-  /* On a phone three pills of full labels stack into a column: the short ones
-     keep the import pair on one row. */
-  @media (max-width: 520px) {
-    .upload .full,
-    .hint .full {
-      display: none;
-    }
-    .upload .short,
-    .hint .short {
-      display: inline;
-    }
-  }
-  .upload {
-    text-decoration: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 9px 15px;
-    border-radius: 999px;
-    background: var(--bg-card);
-    color: var(--text);
-    font-weight: 600;
-    font-size: 0.9rem;
-  }
-  .upload.spin :global(svg) {
-    animation: spin 1s linear infinite;
-  }
   @keyframes spin {
     to {
       transform: rotate(360deg);
     }
-  }
-  .upload:hover {
-    background: var(--bg-hover);
-  }
-  .upload:disabled {
-    opacity: 0.6;
-    cursor: default;
   }
   .quota {
     margin-top: 12px;
@@ -465,5 +531,63 @@
   }
   .hint {
     margin-top: 24px;
+  }
+  .head h1 {
+    margin: 0;
+  }
+  .add {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    color: var(--text);
+    background: var(--bg-card);
+    flex: none;
+  }
+  .add:hover {
+    background: var(--bg-hover);
+  }
+  .add .spin {
+    display: grid;
+    animation: spin 1s linear infinite;
+  }
+  .tools {
+    gap: 10px 14px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .tools .pl-search {
+    margin-bottom: 0;
+    flex: 1 1 220px;
+  }
+  .sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.88rem;
+  }
+  .sort select {
+    min-height: 40px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-hover);
+    background: var(--bg-card);
+    color: var(--text);
+    font: inherit;
+  }
+  .count {
+    font-size: 0.88rem;
+  }
+  .artist-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 6px;
+  }
+  @media (max-width: 640px) {
+    .artist-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 2px;
+    }
   }
 </style>

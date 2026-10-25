@@ -195,7 +195,8 @@ CREATE TABLE IF NOT EXISTS podcast_channel (
     last_fetched DATETIME,
     error_message VARCHAR(256),
     subscribed BOOLEAN NOT NULL DEFAULT true,
-    gone DATETIME
+    gone DATETIME,
+    auto_archive BOOLEAN NOT NULL DEFAULT false
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE INDEX index_podcast_channel_user_id_fk ON podcast_channel(user_id);
 
@@ -409,6 +410,7 @@ CREATE TABLE IF NOT EXISTS artist_release (
     kind VARCHAR(12),
     released VARCHAR(10),
     nb_tracks INTEGER,
+    tracks TEXT,
     found DATETIME NOT NULL,
     PRIMARY KEY (provider, ref),
     INDEX index_artist_release_artist (provider, artist_ref, released),

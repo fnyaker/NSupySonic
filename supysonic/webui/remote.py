@@ -203,6 +203,8 @@ POLICY = {
     "my_favorite_ids": "read",
     "my_local": "read",
     "my_favorites": "read",
+    "my_artists": "read",
+    "my_albums": "read",
     "podcasts": "read",
     "podcast": "read",
     "podcast_progress": "read",

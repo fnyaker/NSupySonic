@@ -31,6 +31,7 @@ Settings live in ``Meta`` (``rel.*``) and are set from Réglages.
 """
 
 import datetime
+import json
 import logging
 import threading
 import time
@@ -74,6 +75,11 @@ TICK = 15 * 60
 BOOT_DELAY = 90
 #: Between two calls to a provider.
 PAUSE = 1.0
+#: Tracklists read per run (newest releases first): an upgraded server with a
+#: table full of releases catches up over a few runs instead of in one burst.
+TRACKLISTS_PER_RUN = 40
+#: Titles kept per release (a 200-title compilation is not a "new release").
+TRACKS_KEPT = 60
 
 _lock = threading.Lock()
 _status = {"running": False, "last_run": None, "last_error": None, "asked": 0}
@@ -458,6 +464,76 @@ def _store_releases(provider_id, ref, name, releases, since) -> int:
     return len(fresh)
 
 
+def _pack_tracks(hits) -> str:
+    """A release's titles as the compact JSON kept in ``artist_release.tracks``."""
+    out = []
+    for h in hits[:TRACKS_KEPT]:
+        ref = str(h.get("ref") or "")[:64]
+        if not ref:
+            continue
+        out.append({
+            "r": ref,
+            "t": str(h.get("title") or "")[:255],
+            "d": int(h.get("duration") or 0),
+            "e": bool(h.get("explicit")),
+            "a": [[str(a.get("ref") or "")[:64], str(a.get("name") or "")[:255]]
+                  for a in (h.get("artists") or [])[:6]],
+        })
+    return json.dumps(out, separators=(",", ":"))
+
+
+def release_tracks(row) -> list:
+    """The titles a release's row keeps, unpacked (``[]`` when none)."""
+    if not row.tracks:
+        return []
+    try:
+        got = json.loads(row.tracks)
+    except ValueError:
+        return []
+    return [t for t in got if isinstance(t, dict) and t.get("r")] if isinstance(got, list) else []
+
+
+def _fill_tracklists(provider, since, stats):
+    """Read the tracklist of releases that have none yet, newest first, so the
+    home can list new TITLES straight from the database. Deezer answering that
+    the album is gone keeps an empty list (not asked again); anything else that
+    is not an answer leaves the row as it was, for the next run."""
+    from .providers.errors import Gone, NotFound, ProviderError, ProviderHeld, ProviderUnavailable
+
+    from .providers import base
+
+    if base.CATALOG not in (provider.capabilities or ()):
+        return
+    due = (
+        ArtistRelease.select(ArtistRelease.ref)
+        .where((ArtistRelease.provider == provider.id) & ArtistRelease.tracks.is_null(True)
+               & (ArtistRelease.released >= since))
+        .order_by(ArtistRelease.released.desc())
+        .limit(TRACKLISTS_PER_RUN)
+        .tuples()
+    )
+    for (ref,) in list(due):
+        if not provider.available():
+            raise _Stop()
+        stats["asked"] = stats.get("asked", 0) + 1
+        try:
+            album = provider.get_album(ref) or {}
+            packed = _pack_tracks(album.get("tracks") or [])
+        except (ProviderUnavailable, ProviderHeld) as exc:
+            raise _Stop() from exc
+        except (Gone, NotFound):
+            packed = "[]"
+        except (ProviderError, NotImplementedError) as exc:
+            logger.info("%s get_album(%s): %s", provider.id, ref, exc)
+            packed = None
+        if packed is not None:
+            ArtistRelease.update(tracks=packed).where(
+                (ArtistRelease.provider == provider.id) & (ArtistRelease.ref == ref)
+            ).execute()
+            stats["tracklists"] = stats.get("tracklists", 0) + 1
+        _pause(stats)
+
+
 def run_once(app, force=False, stats=None) -> dict:
     """One pass over what is due. ``force`` asks every watched artist now."""
     stats = stats if stats is not None else {}
@@ -538,6 +614,8 @@ def run_once(app, force=False, stats=None) -> dict:
                     (ArtistWatch.provider == pid) & (ArtistWatch.ref == ref)
                 ).execute()
                 _pause(stats)
+            # 4. the titles of the releases found (now or by an older version)
+            _fill_tracklists(provider, since, stats)
         except _Stop:
             stats["stopped"] = pid
             logger.info("Releases: %s does not answer; the rest waits for the next tick", pid)

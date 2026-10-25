@@ -821,6 +821,22 @@ nothing matched or when the service stopped answering. Credentials live in `serv
 `password_clear`, never lent to a remote session. The Spotify PKCE state is kept server-side, not in the
 session: Android opens the consent page in the system browser.
 
+**Navigation, the home and the library** (design and sources: `/mnt/project-files/ui/refonte-navigation.md`).
+Four destinations — Accueil, Rechercher, Bibliothèque, Réglages (Material 3 and Apple's tab-bar rules: five or fewer,
+one-word labels); podcasts live IN the library. **A title on its own plays and then its radio**
+(`actions.playThenRadio`, `TrackList radio`): the queue is that title alone with context `{kind: "radio", id,
+artist}` and `Player.svelte#ensureUpcoming` tops it up from `/api/radio/next` at once — no request before the sound;
+`artist` lets the server radio on the artist while a catalogue title's row does not exist yet. Inside a collection
+(album, playlist, favourites, the Nouveautés page) a tap plays the collection from there. The home is: the Flow (the
+discovery level behind one chip), **Nouveautés as TITLES** (one per release, `/api/releases` `tracks`, read from
+`artist_release.tracks`, which the releases watcher fills when it finds a release — `releases._fill_tracklists`,
+`TRACKLISTS_PER_RUN` a run, an outage leaves it for the next run, Deezer answering "gone" keeps `[]`), the favourite
+artists (`/me/artists`: stars + library count + the person's listens, three statements), Pour toi (titles), recently
+played shortcuts, mixes. The library is one page of chips (`/library/<chip>`: Titres, Artistes, Albums, Playlists,
+Podcasts, Téléchargés, Mes fichiers, Indisponibles), its adding actions one "+" menu. A track row is played by its
+title too (the whole row is the target), and without a number the play glyph sits on the cover. Starring an artist
+FOLLOWS it; archiving its discography (`on_fav_artist`) is off by default.
+
 **Search leads with the titles**: the "Tout" tab is ten tracks, then a shelf of albums, then
 artists, playlists and podcasts — a search is usually for a song, and the shortlist has to be the
 first thing on screen rather than something you scroll past two shelves to reach. Each section
@@ -2850,7 +2866,7 @@ public API either. `tests/test_multi_p3.py`.
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261027`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261028`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported. A migration script is split on `;` AFTER its
 `--` comment lines are dropped (`db.split_sql_script`): a `;` inside a comment used to cut it in two
