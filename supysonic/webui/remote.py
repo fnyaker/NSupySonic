@@ -113,6 +113,12 @@ POLICY = {
     "me": "queue",
     "app_version": "queue",
     "deezer_status": "queue",
+    # who may use which provider (plan multi-provider §15)
+    "access_overview": "full",
+    "access_set_grants": "admin",
+    "group_create": "admin",
+    "group_update": "admin",
+    "group_delete": "admin",
     # the controller's own channel
     "remote_claim": "queue",
     "remote_leave": "queue",

@@ -157,9 +157,50 @@ class DeezerAdapter(base.Provider):
     role = base.MAIN
     capabilities = frozenset(
         {base.SEARCH, base.AUDIO, base.CATALOG, base.ACCOUNT, base.LINKS, base.PODCASTS,
-         base.RELATED}
+         base.RELATED, base.INFO, base.LIBRARY}
     )
     requires_credentials = True
+    # What Deezer itself needs (plan §15): its public API answers the catalogue
+    # without an account; the sound, the podcasts and the account's own library
+    # need one. (The adapter still reaches all of it through the server's
+    # account: an anonymous path is lot P3.)
+    features = {
+        "search": {"auth": "none"},
+        "browse": {"auth": "none"},
+        "links": {"auth": "none"},
+        "related": {"auth": "none"},
+        "stream": {"auth": "account"},
+        "podcasts": {"auth": "account"},
+        "track_info": {
+            "auth": "none",
+            "fields": ["title", "artists", "album", "duration", "isrc", "release_date",
+                       "contributors", "label", "explicit", "cover"],
+        },
+        "artist_info": {"auth": "none", "fields": ["name", "picture", "fans"]},
+        "album_info": {
+            "auth": "none",
+            "fields": ["title", "cover", "tracks", "release_date"],
+        },
+        "my_tracks": {"auth": "account"},
+        "my_albums": {"auth": "account"},
+        "my_artists": {"auth": "account"},
+        "my_playlists": {"auth": "account"},
+    }
+    anonymous_use = False
+    auth_modes = (
+        {
+            "id": "browser",
+            "label": "Identifiant et mot de passe Deezer",
+            "help": "Sur la page de connexion de Deezer, dans l'application Android : "
+            "le mot de passe ne passe jamais par le serveur, seul l'ARL revient.",
+            "app_only": True,
+        },
+        {
+            "id": "arl",
+            "label": "ARL",
+            "help": "Le cookie arl d'une session Deezer ouverte dans un navigateur.",
+        },
+    )
     # Deezer's own facts are exact (dates, ISRC, ids); its genre and BPM are not
     # believed over what is measured (plan §6).
     trust = {"date": 3, "isrc": 3, "artist": 3, "bpm": 1}
@@ -431,6 +472,98 @@ class DeezerAdapter(base.Provider):
             for i in range(0, len(sng_ids), 200):
                 tracks.extend(gw.get_tracks(sng_ids[i : i + 200]))
         yield {"kind": "favorites", "tracks": [hit_from_gw(t) for t in tracks]}
+
+    # -- INFO -------------------------------------------------------------------
+
+    def info(self, feature, query):
+        ref = (query or {}).get("ref")
+        if not ref:
+            return {}  # Deezer is asked about its own records only
+        if feature == "track_info":
+            ref = _ref(ref)
+            with self._translated(ref):
+                raw = self._p().get_track_info(ref)
+            out = dict(hit_from_gw(raw))
+            roles = raw.get("SNG_CONTRIBUTORS")
+            if isinstance(roles, dict):
+                out["contributors"] = {
+                    str(k)[:40]: [str(n)[:160] for n in (v or [])[:40]]
+                    for k, v in list(roles.items())[:40]
+                    if isinstance(v, list)
+                }
+            if raw.get("LABEL_NAME"):
+                out["label"] = str(raw["LABEL_NAME"])[:160]
+            if out.get("cover_url"):
+                out["cover"] = out.pop("cover_url")
+            return out
+        if feature == "artist_info":
+            got = self.get_artist(ref)
+            return {"name": got["name"], "picture": got["cover_url"], "fans": got["fans"]}
+        if feature == "album_info":
+            got = self.get_album(ref)
+            return {
+                "title": got["title"],
+                "cover": got["cover_url"],
+                "tracks": got["tracks"],
+                "release_date": got["release_date"],
+            }
+        return {}
+
+    # -- LIBRARY (read only, the holder's) -----------------------------------------
+
+    _TABS = {"artists": "artists", "albums": "albums"}
+
+    def library(self, kind, account=None):
+        """The account's own favourites, read and never written. ``account``
+        is a ``DeezerProvider`` signed in as somebody (lot P2); None is the
+        server's account."""
+        with self._translated():
+            provider = account if account is not None else self._p()
+            gw = provider.dz.gw
+            uid = provider.user_id
+        if kind == "tracks":
+            with self._translated():
+                raw_ids = gw.get_user_favorite_ids(limit=100000)
+                sng_ids = [x["SNG_ID"] for x in (raw_ids or {}).get("data", [])]
+            for i in range(0, len(sng_ids), 200):
+                with self._translated():
+                    chunk = gw.get_tracks(sng_ids[i : i + 200])
+                for t in chunk:
+                    yield hit_from_gw(t)
+        elif kind == "playlists":
+            with self._translated():
+                found = gw.get_user_playlists(uid, limit=1000)
+            for pl in found:
+                yield {
+                    "ref": str(pl.get("id")),
+                    "title": str(pl.get("title") or "Playlist"),
+                    "description": str(pl.get("description") or ""),
+                    "tracks_count": int(pl.get("nb_tracks") or 0),
+                    "cover_url": pl.get("picture_xl") or pl.get("picture_big") or None,
+                }
+        elif kind in self._TABS:
+            tab = self._TABS[kind]
+            with self._translated():
+                page = gw.get_user_profile_page(uid, tab, limit=10000) or {}
+            rows = ((page.get("TAB") or {}).get(tab) or {}).get("data") or []
+            for row in rows:
+                if kind == "artists" and row.get("ART_ID"):
+                    yield {
+                        "ref": str(row["ART_ID"]),
+                        "name": str(row.get("ART_NAME") or ""),
+                        "cover_url": (
+                            f"https://e-cdns-images.dzcdn.net/images/artist/{row['ART_PICTURE']}/500x500-000000-80-0-0.jpg"
+                            if row.get("ART_PICTURE")
+                            else None
+                        ),
+                    }
+                elif kind == "albums" and row.get("ALB_ID"):
+                    yield {
+                        "ref": str(row["ALB_ID"]),
+                        "title": str(row.get("ALB_TITLE") or ""),
+                        "artists": [_named(row.get("ART_ID"), row.get("ART_NAME"))],
+                        "cover_url": cover_url(row.get("ALB_PICTURE")),
+                    }
 
     # -- LINKS ------------------------------------------------------------------
 

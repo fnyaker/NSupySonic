@@ -18,8 +18,9 @@ import logging
 import os
 import uuid
 
-from flask import current_app, jsonify, request, send_file
+from flask import current_app, has_request_context, jsonify, request, send_file
 
+from .. import access
 from ..db import Album, Artist, Meta, Track
 from ..deezer import youtube as yt
 from . import admin_required, login_required, webapi
@@ -30,6 +31,7 @@ ENABLED_KEY = "yt.enabled"
 NO_RETRY_HEADER = "X-NS-Error"
 YOUTUBE_UNREACHABLE = "youtube-unreachable"
 YOUTUBE_DISABLED = "youtube-disabled"
+YOUTUBE_DENIED = "youtube-denied"
 
 # A client asking for less than the file holds gets a transcode; asking for
 # about what it holds (128 of a 131 kbit/s file) gets the file itself. Within
@@ -65,6 +67,19 @@ def _refusal(code: str, message: str, status: int = 503):
 
 def _disabled():
     return _refusal(YOUTUBE_DISABLED, "YouTube est désactivé sur ce serveur")
+
+
+def allowed(feature) -> bool:
+    """May the person behind this request use YouTube for ``feature`` (plan
+    multi-provider §15)? Outside a request nobody is asking."""
+    if not has_request_context():
+        return True
+    user = getattr(request, "webuser", None) or getattr(request, "user", None)
+    return user is None or access.can(user, "youtube", feature)
+
+
+def _denied():
+    return _refusal(YOUTUBE_DENIED, "Vous n'avez pas accès à YouTube sur ce serveur", 403)
 
 
 def _unreachable():
@@ -158,7 +173,7 @@ def materialize(track_id) -> Track | None:
 def search_tracks(query: str, limit: int = yt.SEARCH_LIMIT) -> list:
     """For other routes (replacement candidates): hits as tracks, [] on any
     failure — a fallback that fails must not take the rest of the answer down."""
-    if not enabled():
+    if not enabled() or not allowed("search"):
         return []
     try:
         return hits_as_tracks(yt.search(query, limit, _store()))
@@ -184,6 +199,7 @@ def youtube_status():
             "held": held,
             "retry_in": left,
             "reason": why or None,
+            "allowed": {f: allowed(f) for f in ("search", "stream")},
         }
     )
 
@@ -213,6 +229,8 @@ def youtube_search():
         return jsonify({"tracks": []})
     if not enabled():
         return _disabled()
+    if not allowed("search"):
+        return _denied()
     try:
         limit = max(1, min(int(request.args.get("limit", yt.SEARCH_LIMIT)), yt.SEARCH_LIMIT))
     except (TypeError, ValueError):
@@ -242,6 +260,8 @@ def stream_cold(track: Track):
         return resp
     if not enabled():
         return _disabled()
+    if not allowed("stream"):
+        return _denied()
     archive_dir = _archive_dir()
     if not archive_dir:
         return jsonify({"error": "archive_dir not configured"}), 503

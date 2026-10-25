@@ -9,6 +9,7 @@
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
   import { youtubeStatus, loadYoutubeStatus } from "../lib/youtube.js";
+  import { access } from "../lib/access.js";
   import { playlistLink, importRoute } from "../lib/linkimport.js";
 
   export let params = {};
@@ -42,7 +43,7 @@
   let ytError = "";
   let ytSeq = 0;
   loadYoutubeStatus();
-  $: ytAvailable = !!$youtubeStatus?.enabled;
+  $: ytAvailable = !!$youtubeStatus?.enabled && $access.can("youtube", "search");
   $: ytStale = yt && ytAvailable && q.trim() !== ytFor;
 
   async function runYoutube() {

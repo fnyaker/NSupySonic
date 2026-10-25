@@ -367,6 +367,7 @@ CREATE TABLE IF NOT EXISTS provider_account (
     user_id CHAR(32) REFERENCES user(id) ON DELETE CASCADE,
     label VARCHAR(64),
     secret TEXT,
+    mode VARCHAR(16),
     status VARCHAR(12) NOT NULL,
     checked DATETIME,
     created DATETIME NOT NULL,
@@ -454,4 +455,24 @@ CREATE TABLE IF NOT EXISTS artist_mute (
     created DATETIME NOT NULL,
     CONSTRAINT artist_mute_user_fk FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
     PRIMARY KEY (user_id, provider, ref)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS user_group (
+    id CHAR(32) PRIMARY KEY,
+    name VARCHAR(64) NOT NULL UNIQUE,
+    created DATETIME NOT NULL
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS user_group_member (
+    group_id CHAR(32) NOT NULL,
+    user_id CHAR(32) NOT NULL,
+    CONSTRAINT user_group_member_group_fk FOREIGN KEY (group_id) REFERENCES user_group(id) ON DELETE CASCADE,
+    CONSTRAINT user_group_member_user_fk FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, user_id),
+    INDEX index_user_group_member_user_id_fk (user_id)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS provider_grant (
+    provider VARCHAR(16) NOT NULL,
+    account VARCHAR(36) NOT NULL,
+    feature VARCHAR(16) NOT NULL,
+    subject VARCHAR(40) NOT NULL,
+    PRIMARY KEY (provider, account, feature, subject)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
