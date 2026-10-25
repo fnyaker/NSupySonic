@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261025"
+SCHEMA_VERSION = "20261026"
 
 
 def now():
@@ -1241,12 +1241,52 @@ class ProviderAccount(_Model):
     user = ForeignKeyField(User, null=True, backref="+", on_delete="CASCADE")
     label = CharField(64, null=True)
     secret = TextField(null=True)
+    # How it was signed in (``server``: the server's ARL, kept where it always
+    # was, in Meta or the config; ``arl``, ``browser``, ``headers``…).
+    mode = CharField(16, null=True)
     status = CharField(12)
     checked = DateTimeField(null=True)
     created = DateTimeField(default=now)
 
     class Meta:
         table_name = "provider_account"
+
+
+class UserGroup(_Model):
+    """A group of people the admin names ("Proches"), to lend an account to
+    several of them at once (plan multi-provider §15)."""
+
+    id = PrimaryKeyField()
+    name = CharField(64, unique=True)
+    created = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "user_group"
+
+
+class UserGroupMember(_Model):
+    group = ForeignKeyField(UserGroup, backref="+", on_delete="CASCADE")
+    user = ForeignKeyField(User, backref="+", on_delete="CASCADE")
+
+    class Meta:
+        table_name = "user_group_member"
+        primary_key = CompositeKey("group", "user")
+
+
+class ProviderGrant(_Model):
+    """Who may use an account (``account``: its id as text; "" is the
+    provider's anonymous use) for a feature (``*``: the whole account, which a
+    row naming a feature overrides). ``subject``: ``all``, ``g:<group id>`` or
+    ``u:<user id>``. Read through supysonic/access.py, never directly."""
+
+    provider = CharField(16)
+    account = CharField(36)
+    feature = CharField(16)
+    subject = CharField(40)
+
+    class Meta:
+        table_name = "provider_grant"
+        primary_key = CompositeKey("provider", "account", "feature", "subject")
 
 
 # -- recommendations and releases (supysonic/discover.py, supysonic/releases.py)
@@ -1530,6 +1570,9 @@ def _migration_order():
         TrackSource,  # after Track
         EntityRef,
         ProviderAccount,  # after User
+        UserGroup,
+        UserGroupMember,  # after UserGroup and User
+        ProviderGrant,
         ArtistWatch,
         ArtistRelease,
         ArtistLink,

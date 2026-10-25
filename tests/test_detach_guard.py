@@ -87,6 +87,9 @@ ALLOWED = {
 #: thread, so it is driven on its own rather than attributed by route.
 IMPORT_ENDPOINT = "webapi.import_account"
 IMPORT_READS = {"gw.get_user_playlists", "gw.get_user_favorite_ids", "gw.get_playlist_tracks", "gw.get_tracks"}
+#: The holder's own library (LIBRARY, plan multi-provider §15): the import's
+#: reads plus the profile page's tabs (favourite artists and albums).
+LIBRARY_READS = IMPORT_READS | {"gw.get_user_profile_page"}
 
 _SAMPLE = {
     "int": "1",
@@ -230,10 +233,20 @@ class ProviderGuardTestCase(unittest.TestCase):
         """Call every method of every capability the adapter declares."""
         from supysonic.providers import base
 
+        calls = []
         for cap in adapter.capabilities:
             for name in base.METHODS[cap]:
+                if name == "library":
+                    calls += [(name, (kind,)) for kind in ("tracks", "albums", "artists", "playlists", "shows")]
+                elif name == "info":
+                    calls += [(name, (f, {"ref": "1", "isrc": "FRZ111111111", "title": "t", "artist": "a"}))
+                              for f in ("track_info", "artist_info", "album_info", "lyrics")]
+                else:
+                    calls.append((name, None))
+        for name, given in calls:
+            if True:
                 method = getattr(adapter, name)
-                args = {
+                args = given or {
                     "search": ("q",), "search_shows": ("q",),
                     "parse_link": ("https://www.deezer.com/album/1",),
                     "fetch": ("1", {"fmt": "flac"}, "/nonexistent/x"),
@@ -259,10 +272,13 @@ class ProviderGuardTestCase(unittest.TestCase):
             self._drive(DeezerAdapter(lambda: provider))
         heard = {c for _w, c in calls}
         self.assertTrue(heard, "the walk should reach Deezer")
-        self.assertLessEqual(heard, PROVIDER_ALLOWED["deezer"] | IMPORT_READS)
-        # the account is read only by import_account, with the import's own calls
+        self.assertLessEqual(heard, PROVIDER_ALLOWED["deezer"] | LIBRARY_READS)
+        # the account is read only by import_account, with the import's own
+        # calls, and by the holder's own library (plan §15: read only, served
+        # to the holder), which adds the profile page's tabs
         account_calls = {c for c in heard if re.search(r"user_|favorite", c)}
-        self.assertLessEqual(account_calls, IMPORT_READS | {"gw.get_user_data"})
+        self.assertLessEqual(account_calls, LIBRARY_READS | {"gw.get_user_data"})
+        self.assertIn("gw.get_user_profile_page", heard)
 
     def test_the_youtube_adapter_only_makes_allowed_calls(self):
         from supysonic.deezer import youtube as yt

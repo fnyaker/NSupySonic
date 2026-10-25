@@ -97,6 +97,11 @@ jobs:
             echo "ANDROID_KEY_PASSWORD=${KEY_PASSWORD:-nsupysonic}"
           } >> "$GITHUB_ENV"
 
+      # RangeBody's contract with the WebView's own range handling (a download
+      # served to the page's <audio> element), on the JVM.
+      - name: Unit tests
+        run: gradle -p android testReleaseUnitTest
+
       - name: Build release APK
         env:
           VERSION_CODE: ${{ github.run_number }}

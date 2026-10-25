@@ -193,6 +193,13 @@ export function isDeezerUnreachable(err) {
   return !!err && err.code === DEEZER_UNREACHABLE;
 }
 
+// A page only Deezer has, for somebody the server's Deezer account is not lent
+// to (plan multi-provider §15): a refusal, not an outage — nothing to retry.
+export const DEEZER_DENIED = "deezer-denied";
+export function isDeezerDenied(err) {
+  return !!err && err.code === DEEZER_DENIED;
+}
+
 // The last cached copy of a content GET, read straight from disk with no
 // network at all. Returns null when there's nothing cached (or the path isn't
 // cacheable).
@@ -239,6 +246,15 @@ export const api = {
     req("/login", { method: "POST", body: body({ username, password }) }),
   logout: () => req("/logout", { method: "POST" }),
   me: () => req("/me"),
+
+  // who may use which provider (plan multi-provider §15)
+  access: () => req("/access"),
+  setGrants: (provider, account, feature, subjects) =>
+    req("/access/grants", { method: "PUT", body: body({ provider, account, feature, subjects }) }),
+  createGroup: (name, members) => req("/groups", { method: "POST", body: body({ name, members }) }),
+  updateGroup: (id, changes) =>
+    req("/groups/" + encodeURIComponent(id), { method: "PUT", body: body(changes) }),
+  deleteGroup: (id) => req("/groups/" + encodeURIComponent(id), { method: "DELETE" }),
 
   // discovery
   home: () => req("/home"),

@@ -165,6 +165,16 @@ def create_application(config=None):
         app.providers.register(FakeProvider())
     app.providers.load_entry_points()
 
+    # Who may use which provider (plan multi-provider §15): the first run
+    # writes down what everybody had, before the first request pays for it.
+    from . import access
+
+    with app.app_context():
+        try:
+            access.snapshot()
+        except Exception:  # pragma: no cover - never stops the server starting
+            logger.exception("could not read the provider grants")
+
     # MusicBrainz enrichment: the options for the worker (it has no app
     # context), and a catch-up run an interrupted restart left unfinished.
     from .enrich import backfill as _enrich_backfill

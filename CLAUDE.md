@@ -288,7 +288,11 @@ published only once the whole body is there (an empty or short body is an error,
 what it LISTS (the `meta` record, now `native: true`, and the cover) in IndexedDB and plays the file from
 `<origin>/__nsoffline/<key>`, which `MainActivity.intercept` answers from disk with byte ranges — for the WebView and
 for the requests the service worker passes on (`ServiceWorkerController`) — and which the native player reads straight
-off the disk (`NativeAudio`'s `localFile`). The Blobs an older APK left in IndexedDB move over ONCE at launch
+off the disk (`NativeAudio`'s `localFile`). The WebView applies a request's `Range` ITSELF to what
+`shouldInterceptRequest` returns (it reads `available()` as the whole size and skips the start), so the
+body is the file from byte 0, cut at the range's end (`RangeBody`, `RangeBodyTest` models Chromium's
+loader): a stream already positioned at the start was skipped twice, and every read past the first
+broke a download on the page's own `<audio>`. The Blobs an older APK left in IndexedDB move over ONCE at launch
 (`offline.js#moveDownloadsToApp`): 768 KiB pieces as base64 through `offPut` (each must start where the last ended),
 `offCommit` checked against the Blob's size, and only then the IndexedDB copy is deleted; a refusal leaves the page's
 copy exactly as it was, and nothing moves with less than the Blob + 64 MB free. At launch a file no record lists is
@@ -670,10 +674,15 @@ user's own requests for thirty seconds behind work they never asked for:
   play count wait until the element can play and then run **one at a time**; the prefetch of the
   next track waits for the same signal. Caching the artwork before telling the media session about
   it is also what stopped the same cover being fetched twice per track change.
-- **Artwork** (`lib/coverqueue.js`): four covers in flight, each freed slot going to whichever
-  waiting cover is closest to the viewport, with the scroll direction counted as closer. Art that
-  costs no request (above the fold, or already on the device) never queues, and everything degrades
-  to "just load it" — a missing picture is worse than an unordered one.
+- **Artwork** (`lib/coverqueue.js`): six covers in flight (three at most for covers not on screen
+  yet), each freed slot going to whichever waiting cover is closest to the viewport — sideways too,
+  for a shelf — with the scroll direction counted as closer. A cover more than two screens away is
+  not fetched until a scroll brings it near, and a turn that has not settled in 4 s gives its slot
+  back. It used to admit anything that had waited 8 s, and `Cover.svelte` asked for every card's
+  1000px copy on mount, outside the queue: opening *Nouveautés* (300 cards) put 311 requests in
+  flight and the covers scrolled to waited minutes on a phone's link. The hi-res copy is now asked
+  only once the base art is drawn, and only where the tile is drawn larger than 500 device pixels.
+  Art that costs no request (above the fold, or already on the device) never queues.
 
 Worker recycling (`GUNICORN_MAX_REQUESTS`) is **off by default**: the hours-long library jobs run on
 threads inside the worker, and recycling killed them mid-run.
@@ -740,7 +749,7 @@ app looked untouched — and the cleanup decides what to drop from exactly this 
 **Recommendations, the radio, the Flow and the releases** (`supysonic/listening.py`, `supysonic/mix.py`,
 `supysonic/radio.py`, `supysonic/discover.py`, `supysonic/releases.py`, `webui/discover.py`; design and sources in
 `/mnt/project-files/algos/refonte-decouverte.md`). Every screen READS the database: no click asks a provider.
-- **Taste is PER PERSON** (`listen_event`, schema `20261025`): every track change the player reports (and Subsonic's
+- **Taste is PER PERSON** (`listen_event`, schema `20261026`): every track change the player reports (and Subsonic's
   scrobble) is one row, judged by published rules — a listen is half the track or 240 s (Last.fm), a skip is under
   30 s, a track of 30 s or less is never a listen. A title's weight is ACT-R's base-level activation
   `sum((hours+1)^-0.5)` (Reiter-Haas et al. 2021); a title skipped twice and never heard is rejected. The shared
@@ -2796,9 +2805,25 @@ what exists; nothing moved and no route reads them yet (lot E wires `/stream`).
   `register_builtin(registry, getter)`. `tests/test_detach_guard.py` has a list of allowed calls per provider and
   fails if the interface grows a write verb.
 
+**Who may use a provider, for what (multi-provider §15, lot P1)** (`supysonic/providers/features.py`,
+`supysonic/access.py`, `webui/accessapi.py`, `components/AccessSettings.svelte` + `WhoPicker.svelte`, Réglages →
+*Sources*). A provider declares FEATURES (`features.CATALOGUE`: shared ones such as search, stream, browse, track_info,
+artist_info…, and PERSONAL ones, my_tracks / my_artists / my_playlists…), what each needs (`none` / `account`), the
+fields an info feature gives, its login modes (`auth_modes`) and whether it runs without an account. Info providers
+(MusicBrainz, AcoustID, LRCLIB) are registered with role `info`. Rules: everything on disk is everybody's; a personal
+feature serves the account's holder only and is never lent; a shared feature serves the holder and whoever a grant
+names (`provider_grant`: `all`, `g:<group>`, `u:<user>`; feature `*` is the whole account, a per-feature row overrides
+it). Groups are the admin's (`user_group`, `user_group_member`). `access.snapshot()` is read once and kept until Meta
+`acc.v` moves (checked at most once a second): a check is dictionary lookups, no statement. The FIRST run on a server
+(`acc.boot`) grants the server's Deezer account (a `provider_account` row of mode `server`, its ARL left where it was)
+and YouTube's anonymous use to `all`, so an upgrade changes nothing. Enforcement: `webui._provider()` through the
+`DEEZER_FEATURE` endpoint table (a refused person gets the route's local answer; a Deezer-only page is a 403
+`X-NS-Error: deezer-denied`), `webui/youtube.allowed`, and Subsonic's stream (`api/media._may_use`). `/api/me` carries
+`access` and the SPA hides what would be refused (`lib/access.js`). `tests/test_access.py`.
+
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261025`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261026`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported. A migration script is split on `;` AFTER its
 `--` comment lines are dropped (`db.split_sql_script`): a `;` inside a comment used to cut it in two

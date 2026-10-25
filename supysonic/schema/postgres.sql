@@ -371,6 +371,7 @@ CREATE TABLE IF NOT EXISTS provider_account (
     user_id UUID REFERENCES "user" ON DELETE CASCADE,
     label VARCHAR(64),
     secret TEXT,
+    mode VARCHAR(16),
     status VARCHAR(12) NOT NULL,
     checked TIMESTAMP,
     created TIMESTAMP NOT NULL,
@@ -454,6 +455,24 @@ CREATE TABLE IF NOT EXISTS artist_mute (
     ref VARCHAR(128) NOT NULL,
     created TIMESTAMP NOT NULL,
     PRIMARY KEY (user_id, provider, ref)
+);
+CREATE TABLE IF NOT EXISTS user_group (
+    id UUID PRIMARY KEY,
+    name VARCHAR(64) NOT NULL UNIQUE,
+    created TIMESTAMP NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_group_member (
+    group_id UUID NOT NULL REFERENCES user_group ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES "user" ON DELETE CASCADE,
+    PRIMARY KEY (group_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS index_user_group_member_user_id_fk ON user_group_member(user_id);
+CREATE TABLE IF NOT EXISTS provider_grant (
+    provider VARCHAR(16) NOT NULL,
+    account VARCHAR(36) NOT NULL,
+    feature VARCHAR(16) NOT NULL,
+    subject VARCHAR(40) NOT NULL,
+    PRIMARY KEY (provider, account, feature, subject)
 );
 CREATE TABLE IF NOT EXISTS listen_event (
     id SERIAL PRIMARY KEY,

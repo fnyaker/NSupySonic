@@ -36,6 +36,7 @@
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
   import VisualizerSettings from "../components/VisualizerSettings.svelte";
+  import AccessSettings from "../components/AccessSettings.svelte";
   import ServicesSettings from "../components/ServicesSettings.svelte";
   import DiscoverySlider from "../components/DiscoverySlider.svelte";
 
@@ -72,6 +73,7 @@
     { id: "viz", label: "Animations" },
     ...(REMOTE ? [] : [{ id: "quality", label: "Qualité sonore" }]),
     { id: "account", label: REMOTE ? "Contrôle" : "Compte" },
+    ...(REMOTE ? [] : [{ id: "sources", label: "Sources" }]),
   ];
   // Back from Spotify's consent page (?svc=…): the services live in "Compte".
   let tab = /[?&]svc=/.test(window.location.hash) && !REMOTE ? "account" : TABS[0].id;
@@ -611,6 +613,10 @@
 
 {#if tab === "viz"}
   <VisualizerSettings />
+{/if}
+
+{#if tab === "sources"}
+  <AccessSettings />
 {/if}
 
 {#if tab === "quality"}

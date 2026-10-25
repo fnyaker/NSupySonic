@@ -19,7 +19,9 @@ from collections import Counter
 from . import base
 from .errors import Gone, NotFound, ProviderUnavailable
 
-ALL = frozenset(base.CAPABILITIES)
+# The capabilities of lot A (the detailed INFO and LIBRARY of §15 are declared
+# by the providers that have them; the fake is about sound and the catalogue).
+ALL = base.CAPABILITIES - {base.INFO, base.LIBRARY}
 
 # A track the fake knows by default.
 DEFAULT_OFFER = {"quality": 100, "fmt": "wav", "bitrate": 1411, "lossless": True}

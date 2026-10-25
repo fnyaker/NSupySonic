@@ -29,8 +29,17 @@ PODCASTS = "podcasts"
 # artists it lists as close, its most played titles. Read by the background
 # job only (supysonic/releases.py), never in a click.
 RELATED = "related"
+# Facts only (MusicBrainz, AcoustID, LRCLIB, and Deezer's own records): what a
+# provider knows about a track, an artist, an album, and the lyrics. The fields
+# each one gives are declared per feature (features.py).
+INFO = "info"
+# The account holder's own library: favourites, playlists, followed artists.
+# Read only, and served to the holder only (features.PERSONAL).
+LIBRARY = "library"
 
-CAPABILITIES = frozenset({SEARCH, AUDIO, CATALOG, ACCOUNT, LINKS, PODCASTS, RELATED})
+CAPABILITIES = frozenset(
+    {SEARCH, AUDIO, CATALOG, ACCOUNT, LINKS, PODCASTS, RELATED, INFO, LIBRARY}
+)
 
 # Which methods a declared capability promises (checked by the registry's
 # ``require`` and by the tests: a declared capability with a method missing is
@@ -43,10 +52,15 @@ METHODS = {
     LINKS: ("parse_link",),
     PODCASTS: ("search_shows", "get_show", "get_episodes"),
     RELATED: ("artist_releases", "similar_artists", "artist_top"),
+    INFO: ("info",),
+    LIBRARY: ("library",),
 }
 
 MAIN = "main"
 FALLBACK = "fallback"
+# Gives facts, never sound: not asked by the search or the player.
+INFO_ROLE = "info"
+ROLES = (MAIN, FALLBACK, INFO_ROLE)
 
 KINDS = ("track", "album", "artist", "playlist", "show")
 
@@ -135,6 +149,14 @@ class Provider:
     # How much each kind of fact is believed (plan §6); filled by the lots that
     # use it. Absent kind: not trusted more than the file's own tags.
     trust = {}
+    # The detailed declaration (features.py): ``{feature: {"auth": "none" |
+    # "account", "fields": [...]}}``. Empty: derived from the capabilities.
+    features = {}
+    # How a person signs in: ``[{"id": "arl", "label", "help", "app_only"}]``.
+    auth_modes = ()
+    # Whether the adapter can serve its anonymous features without any
+    # account (Deezer's needs the server's for now: plan §15, lot P3).
+    anonymous_use = True
 
     def available(self) -> bool:
         """Instant, no network: is it worth calling this provider at all?"""
@@ -238,14 +260,29 @@ class Provider:
         """The artist's most played titles, as TrackHits, most played first."""
         self._missing("artist_top")
 
+    # INFO
+    def info(self, feature, query) -> dict:
+        """Facts for ``feature`` (``track_info``, ``artist_info``,
+        ``album_info``, ``lyrics``) about what ``query`` describes: a dict with
+        any of ``ref`` (this provider's), ``isrc``, ``mbid``, ``title``,
+        ``artist``, ``album``, ``duration``, ``path`` (a file on disk). Answers
+        only the fields the provider declared; ``{}`` when it knows nothing."""
+        self._missing("info")
+
+    # LIBRARY
+    def library(self, kind, account=None):
+        """The holder's own ``kind`` (``tracks``, ``albums``, ``artists``,
+        ``playlists``, ``shows``) on ``account``: a generator, read only."""
+        self._missing("library")
+
 
 def check_declared(provider: Provider) -> None:
     """Refuse a provider that is malformed: a bad id, an unknown capability, or
     a declared capability whose methods are not overridden."""
     if not ID_RE.match(provider.id or ""):
         raise ValueError(f"provider id {provider.id!r}: lowercase letters and digits, 1 to 16")
-    if provider.role not in (MAIN, FALLBACK):
-        raise ValueError(f"{provider.id}: role must be 'main' or 'fallback'")
+    if provider.role not in ROLES:
+        raise ValueError(f"{provider.id}: role must be one of {', '.join(ROLES)}")
     unknown = set(provider.capabilities) - CAPABILITIES
     if unknown:
         raise ValueError(f"{provider.id}: unknown capabilities {sorted(unknown)}")
@@ -254,3 +291,6 @@ def check_declared(provider: Provider) -> None:
         for name in METHODS[cap]:
             if getattr(cls, name, None) is getattr(Provider, name):
                 raise ValueError(f"{provider.id} declares {cap!r} but does not implement {name}()")
+    from . import features
+
+    features.check(provider)

@@ -154,7 +154,10 @@ class RemoteTestCase(unittest.TestCase):
     def test_a_claimed_session_is_the_owner_narrowed(self):
         c, link = self._controller("read")
         me = c.get("/api/me").get_json()
-        self.assertEqual(me["user"], {"name": "alice", "admin": True})
+        self.assertEqual(
+            {k: me["user"][k] for k in ("name", "admin")}, {"name": "alice", "admin": True}
+        )
+        self.assertIn("access", me["user"])
         self.assertEqual(me["remote"]["level"], "read")
         self.assertEqual(me["remote"]["owner"], "alice")
         self.assertEqual(me["remote"]["device"], "PC du salon")

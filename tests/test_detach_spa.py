@@ -130,6 +130,9 @@ class EntityIdsTestCase(_Case):
         from .test_deezer import count_statements
 
         self.provider._dz.api = SearchApi()
+        # The provider is set after the app was built: the first request
+        # writes down whose Deezer account it is (access.py), once.
+        self.get("/api/me")
         with count_statements() as c:
             self.get("/api/search?q=edith")
         self.assertLessEqual(sum(c.values()), 12, dict(c))
