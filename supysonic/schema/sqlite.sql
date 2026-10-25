@@ -370,6 +370,7 @@ CREATE TABLE IF NOT EXISTS provider_account (
     label VARCHAR(64),
     secret TEXT,
     mode VARCHAR(16),
+    options TEXT,
     status VARCHAR(12) NOT NULL,
     checked DATETIME,
     created DATETIME NOT NULL,
@@ -471,4 +472,11 @@ CREATE TABLE IF NOT EXISTS provider_grant (
     feature VARCHAR(16) NOT NULL,
     subject VARCHAR(40) NOT NULL,
     PRIMARY KEY (provider, account, feature, subject)
+);
+CREATE TABLE IF NOT EXISTS library_item (
+    account VARCHAR(36) NOT NULL,
+    kind VARCHAR(12) NOT NULL,
+    ref VARCHAR(64) NOT NULL,
+    excluded BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (account, kind, ref)
 );

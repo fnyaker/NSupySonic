@@ -573,7 +573,9 @@ version dans `Meta`), puis c'est une recherche dans un dictionnaire.
   artistes et titres activés par défaut) **et sélectionnable** élément par élément : ce que la
   personne décoche n'est plus jamais réimporté. Les artistes favoris deviennent des artistes étoilés de
   cette personne, donc suivis pour les Nouveautés. Toujours additif : rien n'est retiré, rien n'est
-  écrit sur le compte. Relu au moment où le compte est relié, puis une fois par jour.
+  écrit sur le compte. Relu au moment où le compte est relié, puis une fois par jour. Chaque élément n'est
+  importé qu'**une fois** (`library_item`) : ensuite la bibliothèque locale fait foi, et une étoile retirée
+  ici n'est pas remise le lendemain parce que le compte la liste encore.
 - **P3 — Écouter par son propre compte, et Deezer sans compte.** Une personne qui a relié un Deezer
   qui marche écoute par lui plutôt que par celui du serveur ; et la recherche, les pages et les infos
   de Deezer passent par l'API publique quand aucun compte n'est prêté.

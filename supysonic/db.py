@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261025"
+SCHEMA_VERSION = "20261026"
 
 
 def now():
@@ -1244,6 +1244,9 @@ class ProviderAccount(_Model):
     # How it was signed in (``server``: the server's ARL, kept where it always
     # was, in Meta or the config; ``arl``, ``browser``, ``headers``…).
     mode = CharField(16, null=True)
+    # JSON: what is imported from the account automatically (lot P2), and how
+    # the last import went. Never a secret.
+    options = TextField(null=True)
     status = CharField(12)
     checked = DateTimeField(null=True)
     created = DateTimeField(default=now)
@@ -1287,6 +1290,23 @@ class ProviderGrant(_Model):
     class Meta:
         table_name = "provider_grant"
         primary_key = CompositeKey("provider", "account", "feature", "subject")
+
+
+class LibraryItem(_Model):
+    """An item of an account's library (a favourite artist, a playlist…) as
+    seen by the import (lot P2): each is imported ONCE — after that the local
+    library is the one that counts, so a star removed here stays removed — and
+    one its holder unticked (``excluded``) is never imported. ``account`` is
+    the ``provider_account`` id as text; the rows go with the account."""
+
+    account = CharField(36)
+    kind = CharField(12)
+    ref = CharField(64)
+    excluded = BooleanField(default=False)
+
+    class Meta:
+        table_name = "library_item"
+        primary_key = CompositeKey("account", "kind", "ref")
 
 
 # -- recommendations and releases (supysonic/discover.py, supysonic/releases.py)
@@ -1554,6 +1574,7 @@ def _migration_order():
         UserGroup,
         UserGroupMember,  # after UserGroup and User
         ProviderGrant,
+        LibraryItem,
         ArtistWatch,
         ArtistRelease,
         ArtistLink,

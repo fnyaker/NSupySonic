@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from ..deezer import youtube as yt
 from . import base, quality
-from .errors import Gone, ProviderError, ProviderHeld, ProviderUnavailable
+from .errors import Gone, ProviderAuth, ProviderError, ProviderHeld, ProviderUnavailable
 
 ID = "youtube"
 ENABLED_KEY = "yt.enabled"  # the same key as webui/youtube.py#ENABLED_KEY
@@ -55,12 +55,49 @@ def hit_from_youtube(raw: dict) -> dict:
     return hit
 
 
+def youtube_from_hit(hit: dict) -> dict:
+    """The inverse of ``hit_from_youtube``: a TrackHit back as the dict
+    ``youtube.upsert_track`` takes."""
+    album = hit.get("album") or {}
+    return {
+        "video_id": hit["ref"],
+        "title": hit.get("title") or hit["ref"],
+        "artists": [{"id": a.get("ref") or "", "name": a.get("name") or ""} for a in hit.get("artists") or []],
+        "album": album.get("name") or None,
+        "album_id": album.get("ref") or None,
+        "duration": int(hit.get("duration") or 0),
+        "explicit": bool(hit.get("explicit")),
+        "thumb": hit.get("cover_url"),
+    }
+
+
+def _thumb(raw):
+    return yt._best_thumb(raw.get("thumbnails")) if isinstance(raw, dict) else None
+
+
 class YoutubeAdapter(base.Provider):
     id = ID
     name = "YouTube"
     role = base.FALLBACK
-    capabilities = frozenset({base.SEARCH, base.AUDIO, base.LINKS})
+    capabilities = frozenset({base.SEARCH, base.AUDIO, base.LINKS, base.LIBRARY})
     requires_credentials = True  # needs the optional extra to be installed
+    features = {
+        "search": {"auth": "none"},
+        "stream": {"auth": "none"},
+        "links": {"auth": "none"},
+        "my_tracks": {"auth": "account"},
+        "my_albums": {"auth": "account"},
+        "my_artists": {"auth": "account"},
+        "my_playlists": {"auth": "account"},
+    }
+    auth_modes = (
+        {
+            "id": "headers",
+            "label": "En-têtes d'un onglet YouTube Music connecté",
+            "help": "Copiés depuis les outils de développement du navigateur, dans "
+            "Réglages → Compte → Services de streaming : la même liaison sert à l'export.",
+        },
+    )
     trust = {}  # a video's title says little: the file's own tags win
 
     def __init__(self):
@@ -146,6 +183,95 @@ class YoutubeAdapter(base.Provider):
             raise self._error(exc) from exc
         out["tracks"] = [hit_from_youtube(h) for h in hits]
         return out
+
+    # -- LIBRARY ----------------------------------------------------------------
+
+    def _library_call(self, fn, *args, **kwargs):
+        from ..services import ytmusic
+
+        try:
+            return fn(*args, **kwargs) or []
+        except ytmusic.ServiceError as exc:
+            raise ProviderAuth(str(exc), provider=ID) from exc
+        except Exception as exc:
+            if ytmusic._is_auth_failure(exc):
+                raise ProviderAuth("YouTube Music refuse cette session", provider=ID) from exc
+            raise ProviderUnavailable(str(exc) or exc.__class__.__name__, provider=ID) from exc
+
+    def library(self, kind, account=None):
+        """The YouTube Music account's own library, read only. ``account`` is
+        a ``services.ytmusic.Client`` (the person's pasted headers); there is
+        no server account to fall back on."""
+        if account is None:
+            raise ProviderAuth("no YouTube Music account", provider=ID)
+        try:
+            ytm = account.ytm
+        except Exception as exc:
+            raise ProviderAuth(str(exc), provider=ID) from exc
+        if kind == "tracks":
+            found = self._library_call(ytm.get_liked_songs, limit=5000)
+            for raw in (found.get("tracks") if isinstance(found, dict) else found) or []:
+                hit = yt.normalize_hit(raw)
+                if hit is not None:
+                    yield hit_from_youtube(hit)
+        elif kind == "artists":
+            for raw in self._library_call(ytm.get_library_subscriptions, limit=None):
+                ref = str((raw or {}).get("browseId") or "")
+                if ref:
+                    yield {"ref": ref, "name": str(raw.get("artist") or "")[:255], "cover_url": _thumb(raw)}
+        elif kind == "albums":
+            for raw in self._library_call(ytm.get_library_albums, limit=None):
+                ref = str((raw or {}).get("browseId") or "")
+                if not ref:
+                    continue
+                artists = raw.get("artists") or []
+                yield {
+                    "ref": ref,
+                    "title": str(raw.get("title") or "")[:255],
+                    "artists": [
+                        {"ref": str(a.get("id") or ""), "name": str(a.get("name") or "")[:255]}
+                        for a in artists if isinstance(a, dict) and a.get("name")
+                    ][:8],
+                    "cover_url": _thumb(raw),
+                }
+        elif kind == "playlists":
+            for raw in self._library_call(ytm.get_library_playlists, limit=None):
+                ref = str((raw or {}).get("playlistId") or "")
+                if not ref or ref == "LM":  # "Liked music" is the liked songs
+                    continue
+                try:
+                    count = int(str(raw.get("count") or "0").replace(",", "").split()[0])
+                except (ValueError, IndexError):
+                    count = 0
+                yield {
+                    "ref": ref,
+                    "title": str(raw.get("title") or "Playlist")[:255],
+                    "description": str(raw.get("description") or "")[:500],
+                    "tracks_count": count,
+                    "cover_url": _thumb(raw),
+                }
+
+    def library_album(self, ref, account):
+        """One of the account's saved albums, every track, as TrackHits (the
+        album's own name and id on each, which a playlist entry may lack)."""
+        found = self._library_call(account.ytm.get_album, str(ref))
+        if not isinstance(found, dict):
+            return
+        title = str(found.get("title") or "")[:255] or None
+        for raw in found.get("tracks") or []:
+            if isinstance(raw, dict) and not isinstance(raw.get("album"), dict):
+                raw = dict(raw, album={"name": title, "id": str(ref)})
+            hit = yt.normalize_hit(raw)
+            if hit is not None:
+                yield hit_from_youtube(hit)
+
+    def library_playlist(self, ref, account):
+        """One of the account's playlists, every track, as TrackHits."""
+        found = self._library_call(account.ytm.get_playlist, str(ref), limit=None)
+        for raw in (found.get("tracks") if isinstance(found, dict) else []) or []:
+            hit = yt.normalize_hit(raw)
+            if hit is not None:
+                yield hit_from_youtube(hit)
 
     # -- AUDIO ------------------------------------------------------------------
 

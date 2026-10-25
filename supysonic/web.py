@@ -190,6 +190,11 @@ def create_application(config=None):
 
     _releases.start(app)
 
+    # What each person's own accounts bring into their library, once a day.
+    from . import libraryimport as _libraryimport
+
+    _libraryimport.start_watcher(app)
+
     # Test for the cache directory
     cache_path = app.config["WEBAPP"]["cache_dir"]
     if not path.exists(cache_path):

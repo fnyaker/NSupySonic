@@ -255,6 +255,18 @@ export const api = {
   updateGroup: (id, changes) =>
     req("/groups/" + encodeURIComponent(id), { method: "PUT", body: body(changes) }),
   deleteGroup: (id) => req("/groups/" + encodeURIComponent(id), { method: "DELETE" }),
+  // Each person's own accounts and what they bring into the library (lot P2).
+  myAccounts: () => req("/me/accounts"),
+  linkDeezer: (arl, mode) => req("/me/accounts/deezer", { method: "POST", body: body({ arl, mode }) }),
+  unlinkAccount: (id) => req("/me/accounts/" + encodeURIComponent(id), { method: "DELETE" }),
+  setAccountAuto: (id, auto) =>
+    req("/me/accounts/" + encodeURIComponent(id), { method: "PUT", body: body({ auto }) }),
+  importAccount: (id, kinds) =>
+    req("/me/accounts/" + encodeURIComponent(id) + "/import", { method: "POST", body: body(kinds ? { kinds } : {}) }),
+  accountLibrary: (id, kind, fresh) =>
+    req("/me/accounts/" + encodeURIComponent(id) + "/library/" + kind + (fresh ? "?fresh=1" : "")),
+  setAccountItems: (id, kind, refs, on) =>
+    req("/me/accounts/" + encodeURIComponent(id) + "/library/" + kind, { method: "PUT", body: body({ refs, on }) }),
 
   // discovery
   home: () => req("/home"),

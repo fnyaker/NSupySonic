@@ -53,7 +53,7 @@ from collections import OrderedDict
 from peewee import IntegrityError
 
 from .. import sources
-from ..db import Album, Artist, Folder, Track, db
+from ..db import Album, Artist, EntityRef, Folder, Track, db
 from . import ids, library
 
 logger = logging.getLogger(__name__)
@@ -345,6 +345,21 @@ def _artist_row(hit: dict) -> Artist:
     row = Artist.get_or_none(Artist.id == aid)
     if row is not None:
         return row
+    if first.get("id"):
+        # An artist the library already maps this channel to (a followed
+        # artist imported from YouTube Music, matched to its Deezer row).
+        mapped = (
+            Artist.select()
+            .join(EntityRef, on=(EntityRef.entity == Artist.id))
+            .where(
+                (EntityRef.kind == "artist")
+                & (EntityRef.provider == "youtube")
+                & (EntityRef.ref == str(first["id"]))
+            )
+            .first()
+        )
+        if mapped is not None:
+            return mapped
     return library.create_or_get(
         lambda: Artist.create(id=aid, name=name, deezer_id=None),
         lambda: Artist.get_or_none(Artist.id == aid),

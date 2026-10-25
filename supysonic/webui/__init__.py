@@ -4470,3 +4470,4 @@ from . import playlist_import  # noqa: E402,F401  isort:skip
 from . import androidapk  # noqa: E402,F401  isort:skip
 from . import discover as _discover_routes  # noqa: E402,F401  isort:skip
 from . import accessapi  # noqa: E402,F401  isort:skip
+from . import myaccounts  # noqa: E402,F401  isort:skip

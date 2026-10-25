@@ -148,6 +148,14 @@ POLICY = {
     "services_spotify_callback": NEVER,
     "services_youtube_connect": NEVER,
     "services_disconnect": NEVER,
+    # Each person's own accounts: never lent (a credential, and what it imports).
+    "my_accounts": NEVER,
+    "my_accounts_link_deezer": NEVER,
+    "my_accounts_unlink": NEVER,
+    "my_accounts_options": NEVER,
+    "my_accounts_import": NEVER,
+    "my_accounts_library": NEVER,
+    "my_accounts_library_set": NEVER,
     "services_export": NEVER,
     "services_export_status": NEVER,
     # the player's own reports: the controller plays nothing

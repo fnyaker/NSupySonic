@@ -563,6 +563,7 @@ class DeezerAdapter(base.Provider):
                         "title": str(row.get("ALB_TITLE") or ""),
                         "artists": [_named(row.get("ART_ID"), row.get("ART_NAME"))],
                         "cover_url": cover_url(row.get("ALB_PICTURE")),
+                        "picture": str(row.get("ALB_PICTURE") or "") or None,
                     }
 
     # -- LINKS ------------------------------------------------------------------
