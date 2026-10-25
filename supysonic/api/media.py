@@ -45,6 +45,15 @@ if Image.MAX_IMAGE_PIXELS is None or Image.MAX_IMAGE_PIXELS > MAX_COVER_PIXELS:
     Image.MAX_IMAGE_PIXELS = MAX_COVER_PIXELS
 
 
+def _may_use(provider_id, feature):
+    """Plan multi-provider §15: what is archived is everybody's, fetching what
+    is not goes through the provider, for whoever may use it."""
+    from .. import access
+
+    user = getattr(request, "user", None)
+    return user is None or access.can(user, provider_id, feature)
+
+
 def _ensure_deezer_archived(res):
     """Lazily fetch+archive a Deezer-backed track's FLAC on first access.
 
@@ -59,6 +68,8 @@ def _ensure_deezer_archived(res):
         return
     if os.path.isfile(res.path):
         return
+    if not _may_use("deezer", "stream"):
+        raise ServerError("You may not use Deezer on this server")
     from ..deezer import workload
     from ..deezer.archive import ensure_archived
 
@@ -83,6 +94,8 @@ def _ensure_youtube_archived(res):
     archive_dir = (current_app.config.get("DEEZER") or {}).get("archive_dir")
     if not archive_dir or not enabled():
         raise ServerError("YouTube fallback is not enabled")
+    if not _may_use("youtube", "stream"):
+        raise ServerError("You may not use YouTube on this server")
     try:
         yt.ensure_archived(res, archive_dir, yt.recall(res.id, getattr(current_app, "cache", None)))
     except yt.YoutubeError as e:
@@ -99,6 +112,8 @@ def _ensure_episode_archived(episode):
         raise ServerError("Deezer proxy is not enabled")
     if episode.path and os.path.isfile(episode.path):
         return
+    if not _may_use("deezer", "podcasts"):
+        raise ServerError("You may not use Deezer on this server")
     from ..deezer.archive import ensure_episode_archived
 
     try:

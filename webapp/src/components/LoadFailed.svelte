@@ -6,7 +6,7 @@
   // work. The client never retries that on its own (the server does the
   // reaching, see lib/api.js); "Réessayer" is the person asking.
   import { createEventDispatcher } from "svelte";
-  import { isDeezerUnreachable } from "../lib/api.js";
+  import { isDeezerDenied, isDeezerUnreachable } from "../lib/api.js";
   import Icon from "./Icon.svelte";
 
   export let error = null;
@@ -14,9 +14,19 @@
 
   const dispatch = createEventDispatcher();
   $: down = isDeezerUnreachable(error);
+  $: denied = isDeezerDenied(error);
 </script>
 
-{#if down}
+{#if denied}
+  <div class="failed fade-in" role="status">
+    <span class="icon"><Icon name="shield" size={28} /></span>
+    <h2>Réservé à d'autres comptes</h2>
+    <p>
+      Cette page n'existe que chez Deezer, et le compte Deezer de ce serveur ne t'est
+      pas prêté. Tout ce qui est déjà sur le serveur reste à toi.
+    </p>
+  </div>
+{:else if down}
   <div class="failed fade-in" role="status">
     <span class="icon"><Icon name="cloudOff" size={28} /></span>
     <h2>Deezer est injoignable</h2>

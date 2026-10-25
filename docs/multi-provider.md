@@ -475,6 +475,109 @@ données, hôte, port) restent dans le fichier de configuration.
 - Un fournisseur déclare ses réglages par `config_schema()` (§5) : ils passent par le même registre,
   donc par la même interface, et le même masquage.
 
+## 15. Fonctions détaillées, comptes par personne et accès par groupe
+
+Demande du propriétaire (22/10/2026) : se détacher de Deezer ne voulait pas dire casser ce qu'il
+apporte, mais **s'en servir de manière opportuniste, le moins possible, derrière une interface
+standard**. Les artistes favoris du compte, par exemple, on veut les avoir. Et un serveur partagé
+(la famille, des amis) ne doit pas mettre cinquante personnes sur un seul compte : c'est contraire
+aux conditions d'utilisation et c'est le meilleur moyen de se faire bloquer.
+
+### Ce qui a été regardé avant de choisir
+
+- **Music Assistant** : chaque source déclare ses fonctions (`SEARCH`, `LIBRARY_ARTISTS`,
+  `LIBRARY_TRACKS`, `ARTIST_ALBUMS`, `ARTIST_TOPTRACKS`…) et l'interface masque le reste ; plusieurs
+  comptes d'un même service coexistent ; l'import de la bibliothèque d'un compte se règle **par type**
+  (« Sync Library Artists/Albums/Tracks/Playlists… from this source ») et chaque élément peut être
+  ajouté à la main. Les sources de métadonnées (MusicBrainz, LRCLIB, Fanart…) sont des fournisseurs
+  comme les autres, qui ne fournissent que des faits.
+- **Navidrome** : les *agents* (Deezer, Last.fm, ListenBrainz, local) sont interrogés dans un ordre
+  réglable, le suivant prenant le relais quand l'un échoue ou n'a rien ; chacun dit ce qu'il fournit
+  (biographie, images, artistes proches, titres phares). L'accès **multi-bibliothèque** est donné par
+  l'admin à chaque personne, l'admin voyant tout.
+- **Django** (groupes et permissions) : une personne a les droits qu'on lui donne directement plus ceux
+  de ses groupes ; c'est le modèle le plus simple qui permet « mes proches » sans tout régler à la main.
+
+On garde de chacun ce qui répond à la demande : la déclaration par fonction (MA), le détail de ce
+que chaque fonction fournit (Navidrome), l'import par type puis par élément (MA), les groupes plus
+les personnes directement (Django).
+
+### Le modèle
+
+**Une fonction** (`providers/features.py`) est une chose que l'application sait demander à un
+fournisseur, avec une **portée** :
+
+| Portée | Sens | Exemples |
+|---|---|---|
+| `shared` (partageable) | le service rendu ne dépend pas de qui le demande ; peut être prêté | `search`, `stream`, `browse`, `podcasts`, `links`, `related`, `track_info`, `artist_info`, `album_info`, `lyrics` |
+| `personal` (propre à la personne) | les données appartiennent au titulaire du compte | `my_tracks`, `my_albums`, `my_artists`, `my_playlists`, `my_shows` |
+
+Chaque fournisseur **déclare** les fonctions qu'il fournit et, pour chacune, s'il lui faut **un compte**
+(`auth: "account"`) ou s'il marche **en anonyme** (`auth: "none"`). Une fonction d'information déclare
+en plus **les champs** qu'elle sait donner (`track_info` de Deezer : titre, artistes, album, durée,
+ISRC, date de sortie, BPM, contributeurs, label, copyright, pochette, extrait ; de MusicBrainz :
+ISRC, date de première sortie, identifiant MusicBrainz, compositeur, parolier, producteur). MusicBrainz,
+AcoustID et LRCLIB deviennent des fournisseurs de rôle `info` : ils ne fournissent que des faits,
+jamais de son, et ne sont jamais interrogés par la recherche ni la lecture.
+
+**Les modes de connexion** sont déclarés aussi (`auth_modes`) : Deezer, `browser` (la connexion par
+identifiant et mot de passe sur la page de Deezer, dans l'application Android, qui rend l'ARL : le
+mot de passe ne traverse jamais) et `arl` (coller l'ARL) ; YouTube Music, `headers` (les en-têtes
+d'un onglet connecté, ce que l'export utilise déjà). Un fournisseur à clé (AcoustID) déclare `key`.
+
+**Un compte** (`provider_account`, déjà créé au lot A) appartient à une personne. Le compte Deezer
+du serveur (l'ARL de `Meta` ou de la configuration, inchangé et non déplacé) devient le compte de
+mode `server`, dont le titulaire est l'utilisateur de synchronisation ou, à défaut, le premier admin.
+
+**Les groupes** (`user_group`, `user_group_member`) sont créés par l'admin. **Les accès**
+(`provider_grant`) disent, pour un compte (ou l'usage anonyme d'un fournisseur), **qui peut s'en
+servir** : `all` (tout le monde), un groupe, ou une personne directement. Une ligne de fonction `*`
+vaut pour tout le compte ; une ligne nommant une fonction la remplace pour cette fonction-là (donc une
+fonction ajoutée plus tard hérite du réglage du compte, au lieu d'être fermée en silence).
+
+Les règles, dans l'ordre :
+
+1. **Le contenu archivé est à tout le monde**, sans discussion : rien de ce qui est sur disque ne passe
+   par ces accès (les envois privés gardent leur règle de propriétaire).
+2. Une fonction **personnelle** n'est servie qu'au **titulaire** du compte. Elle ne se partage pas
+   (l'API le refuse) : on n'en voit pas l'intérêt pour l'instant.
+3. Une fonction **partageable** est servie au titulaire, et à qui un accès la donne.
+4. Seul le titulaire règle les accès de son compte ; le compte du serveur se règle par n'importe quel
+   admin ; les groupes et l'usage anonyme, par l'admin.
+5. **Une mise à jour ne change rien** : au premier démarrage, le compte du serveur et l'usage anonyme de
+   YouTube reçoivent l'accès `all`, ce qui est exactement le comportement d'avant. C'est ensuite au
+   titulaire de restreindre (« seulement moi et le groupe Proches »).
+6. Refusé n'est **pas** en panne : la route retombe sur sa réponse locale exactement comme quand Deezer
+   est coupé, et une page que seul Deezer a répond `403` marqué `X-NS-Error: deezer-denied` (« Vous
+   n'avez pas accès à Deezer sur ce serveur »), jamais « introuvable » ni « injoignable ».
+
+**Où c'est appliqué.** Un seul point par fournisseur, celui par lequel tout passe déjà : `_provider()`
+dans `/api` (qui ne rend plus Deezer à qui n'y a pas droit pour la fonction de la route : une table
+`FEATURE_OF_ENDPOINT`, `browse` par défaut), le flux Subsonic (`_ensure_deezer_archived`,
+`_ensure_youtube_archived`) et les routes YouTube. Les tâches de fond n'ont pas de personne et ne sont
+pas filtrées. Le coût : les accès et les groupes sont lus une fois par seconde au plus (une clé de
+version dans `Meta`), puis c'est une recherche dans un dictionnaire.
+
+### Les lots
+
+- **P1 — Fonctions, groupes, accès.** `features.py` et les déclarations des fournisseurs (Deezer,
+  YouTube, local, MusicBrainz, AcoustID, LRCLIB) ; schéma (groupes, membres, accès, `provider_account.mode`) ;
+  le compte du serveur et les accès par défaut ; l'application aux routes ; Réglages → **Sources et
+  accès** (pour chaque fournisseur : ses fonctions avec ce qu'il faut pour chacune, ses comptes, et
+  « Qui peut s'en servir ») et **Groupes** (admin) ; `/api/me` dit à la SPA ce que la personne peut
+  utiliser, pour ne pas lui proposer ce qui lui serait refusé.
+- **P2 — Le compte de chacun et sa bibliothèque.** Chaque personne relie son propre Deezer (ARL, ou la
+  connexion de l'application) et son YouTube Music (les en-têtes, partagés avec l'export : une seule
+  liaison). Capacité `LIBRARY` (`library(kind)`, lecture seule) : Deezer et YouTube fournissent titres,
+  albums, artistes et playlists favoris. Import **automatique** par type (interrupteur par compte,
+  artistes et titres activés par défaut) **et sélectionnable** élément par élément : ce que la
+  personne décoche n'est plus jamais réimporté. Les artistes favoris deviennent des artistes étoilés de
+  cette personne, donc suivis pour les Nouveautés. Toujours additif : rien n'est retiré, rien n'est
+  écrit sur le compte. Relu au moment où le compte est relié, puis une fois par jour.
+- **P3 — Écouter par son propre compte, et Deezer sans compte.** Une personne qui a relié un Deezer
+  qui marche écoute par lui plutôt que par celui du serveur ; et la recherche, les pages et les infos
+  de Deezer passent par l'API publique quand aucun compte n'est prêté.
+
 ## 14. Ce que ce plan ne fait pas
 
 Pas de réécriture de la SPA hors des écrans nommés, pas de renommage de package, pas de suppression

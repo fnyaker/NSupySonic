@@ -3,9 +3,11 @@
 #
 # Distributed under terms of the GNU AGPLv3 license.
 
-"""The providers that ship with the server: Deezer, YouTube and the local files."""
+"""The providers that ship with the server: Deezer, YouTube and the local files
+for sound; MusicBrainz, AcoustID and LRCLIB for facts."""
 
 from .deezer import DeezerAdapter
+from .info import AcoustidProvider, LrclibProvider, MusicBrainzProvider
 from .local import LocalProvider
 from .youtube import YoutubeAdapter
 
@@ -17,4 +19,7 @@ def register_builtin(registry, get_deezer):
     registry.register(DeezerAdapter(get_deezer))
     registry.register(YoutubeAdapter())
     registry.register(LocalProvider())
+    registry.register(MusicBrainzProvider())
+    registry.register(AcoustidProvider())
+    registry.register(LrclibProvider())
     return registry

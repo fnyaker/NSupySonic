@@ -27,7 +27,17 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from urllib.parse import urlsplit
 
-from flask import Blueprint, current_app, jsonify, redirect, request, send_file, session
+from flask import (
+    Blueprint,
+    current_app,
+    g,
+    has_request_context,
+    jsonify,
+    redirect,
+    request,
+    send_file,
+    session,
+)
 import peewee
 from peewee import fn
 
@@ -53,7 +63,7 @@ from deezerpy.errors import is_transport_failure
 from ..deezer.provider import TrackUnavailable
 from ..managers.user import UserManager
 from ..ratelimit import auth_limiter
-from .. import similar
+from .. import access, similar
 from . import refs
 from ..utils import like_term
 from .refs import cover_url_for
@@ -512,9 +522,71 @@ def _may_access_track(track) -> bool:
     return bool(user and (user.admin or user.id == owner_id))
 
 
+#: Which Deezer feature each route uses Deezer for (plan multi-provider §15):
+#: a person who may not use it gets the route's local answer, exactly as when
+#: Deezer is switched off. A route not listed uses Deezer for catalogue pages
+#: ("browse"); None is not gated: administration, health, and the routes that
+#: only ever touch rows the library already holds (a cover, a verdict check).
+DEEZER_FEATURE = {
+    "search": "search",
+    "replacement_candidates": "search",
+    "genre_references": "search",
+    "search_podcasts": "podcasts",
+    "subscribe_podcast": "podcasts",
+    "import_playlist_start": "links",
+    "track_credits": "track_info",
+    # these archive what they touch
+    "stream": "stream",
+    "download": "stream",
+    "favorite": "stream",
+    "favorite_entity": "stream",
+    "create_playlist": "stream",
+    "add_playlist_tracks": "stream",
+    "share_waveform": "stream",
+    "share_file": "stream",
+    "share_clip": "stream",
+    "export_zip": "stream",
+    "genre_reference_import": "stream",
+    # not gated
+    "get_settings": None,
+    "set_settings": None,
+    "deezer_status": None,
+    "trigger_sync": None,
+    "import_account": None,
+    "report_listen": None,
+    "cover": None,
+    "services_status": None,
+    "services_export": None,
+    "probe_track": None,
+    "replace_track": None,
+    "delete_track": None,
+    "genre_share_import": None,
+}
+
+
+def _deezer_feature():
+    endpoint = (request.endpoint or "").rpartition(".")[2]
+    return DEEZER_FEATURE.get(endpoint, "browse")
+
+
+def _deezer_allowed() -> bool:
+    """May the person behind this request use Deezer for what this route
+    does? Outside a request (a worker) there is nobody to ask about."""
+    if not has_request_context():
+        return True
+    cached = getattr(g, "_dz_allowed", None)
+    if cached is not None:
+        return cached
+    feature = _deezer_feature()
+    user = getattr(request, "webuser", None)
+    allowed = True if feature is None or user is None else access.can(user, "deezer", feature)
+    g._dz_allowed = allowed
+    return allowed
+
+
 def _provider():
     provider = getattr(current_app, "deezer", None)
-    if provider is None:
+    if provider is None or not _deezer_allowed():
         return None
     return provider
 
@@ -528,9 +600,18 @@ def _provider():
 NO_RETRY_HEADER = "X-NS-Error"
 DEEZER_UNREACHABLE = "deezer-unreachable"
 DEEZER_DISABLED = "deezer-disabled"
+DEEZER_DENIED = "deezer-denied"
 
 
 def _deezer_disabled():
+    if getattr(current_app, "deezer", None) is not None and not _deezer_allowed():
+        # Deezer runs, but not for this person: a refusal, not an outage.
+        resp = jsonify(
+            {"error": "Vous n'avez pas accès à Deezer sur ce serveur", "code": DEEZER_DENIED}
+        )
+        resp.status_code = 403
+        resp.headers[NO_RETRY_HEADER] = DEEZER_DENIED
+        return resp
     resp = jsonify({"error": "Deezer proxy disabled", "code": DEEZER_DISABLED})
     resp.status_code = 503
     resp.headers[NO_RETRY_HEADER] = DEEZER_DISABLED
@@ -1460,7 +1541,9 @@ def login():
     session["uid"] = str(user.id)
     session["epoch"] = user.session_epoch or 0
     session.permanent = True
-    return jsonify({"user": {"name": user.name, "admin": user.admin}})
+    from .accessapi import me_access
+
+    return jsonify({"user": {"name": user.name, "admin": user.admin, "access": me_access(user)}})
 
 
 @webapi.route("/logout", methods=["POST"])
@@ -1480,7 +1563,11 @@ def logout():
 @login_required
 def me():
     u = request.webuser
-    out = {"user": {"name": u.name, "admin": u.admin}}
+    from .accessapi import me_access
+
+    # What this person may use of each provider (plan multi-provider §15), so
+    # the web app offers nothing that would be refused.
+    out = {"user": {"name": u.name, "admin": u.admin, "access": me_access(u)}}
     # A remote-control session is logged in as the owner, with a narrower
     # grant; the web app needs both to know whose player it is driving.
     link = getattr(request, "rc", None)
@@ -3785,6 +3872,8 @@ def set_settings():
                 )
                 return jsonify({"error": message, "reason": status["reason"]}), 400
             store_arl(arl)
+            # Whoever saves the server's ARL holds the account (plan §15).
+            access.ensure_server_account(owner=request.webuser)
             provider = _provider()
             if provider is not None:
                 # Swap the credential in place: the prefetcher and the sync
@@ -4380,3 +4469,4 @@ from . import services  # noqa: E402,F401  isort:skip
 from . import playlist_import  # noqa: E402,F401  isort:skip
 from . import androidapk  # noqa: E402,F401  isort:skip
 from . import discover as _discover_routes  # noqa: E402,F401  isort:skip
+from . import accessapi  # noqa: E402,F401  isort:skip

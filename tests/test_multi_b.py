@@ -506,8 +506,13 @@ class RegistrationTestCase(_DbCase):
 
     def test_the_three_builtins_register_and_are_well_formed(self):
         reg = self.registry(DeezerProvider("arl", "/x", "FLAC"))
-        self.assertEqual([p.id for p in reg.all()], ["deezer", "youtube", "local"])
-        self.assertEqual([p.role for p in reg.all()], ["main", "fallback", "main"])
+        self.assertEqual(
+            [p.id for p in reg.all()],
+            ["deezer", "youtube", "local", "musicbrainz", "acoustid", "lrclib"],
+        )
+        self.assertEqual(
+            [p.role for p in reg.all()], ["main", "fallback", "main", "info", "info", "info"]
+        )
         self.assertEqual(reg.require("deezer", base.PODCASTS).id, "deezer")
         with self.assertRaises(CapabilityMissing):
             reg.require("local", base.SEARCH)

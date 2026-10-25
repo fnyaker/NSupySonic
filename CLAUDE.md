@@ -2795,6 +2795,22 @@ what exists; nothing moved and no route reads them yet (lot E wires `/stream`).
   `register_builtin(registry, getter)`. `tests/test_detach_guard.py` has a list of allowed calls per provider and
   fails if the interface grows a write verb.
 
+**Who may use a provider, for what (multi-provider §15, lot P1)** (`supysonic/providers/features.py`,
+`supysonic/access.py`, `webui/accessapi.py`, `components/AccessSettings.svelte` + `WhoPicker.svelte`, Réglages →
+*Sources*). A provider declares FEATURES (`features.CATALOGUE`: shared ones such as search, stream, browse, track_info,
+artist_info…, and PERSONAL ones, my_tracks / my_artists / my_playlists…), what each needs (`none` / `account`), the
+fields an info feature gives, its login modes (`auth_modes`) and whether it runs without an account. Info providers
+(MusicBrainz, AcoustID, LRCLIB) are registered with role `info`. Rules: everything on disk is everybody's; a personal
+feature serves the account's holder only and is never lent; a shared feature serves the holder and whoever a grant
+names (`provider_grant`: `all`, `g:<group>`, `u:<user>`; feature `*` is the whole account, a per-feature row overrides
+it). Groups are the admin's (`user_group`, `user_group_member`). `access.snapshot()` is read once and kept until Meta
+`acc.v` moves (checked at most once a second): a check is dictionary lookups, no statement. The FIRST run on a server
+(`acc.boot`) grants the server's Deezer account (a `provider_account` row of mode `server`, its ARL left where it was)
+and YouTube's anonymous use to `all`, so an upgrade changes nothing. Enforcement: `webui._provider()` through the
+`DEEZER_FEATURE` endpoint table (a refused person gets the route's local answer; a Deezer-only page is a 403
+`X-NS-Error: deezer-denied`), `webui/youtube.allowed`, and Subsonic's stream (`api/media._may_use`). `/api/me` carries
+`access` and the SPA hides what would be refused (`lib/access.js`). `tests/test_access.py`.
+
 ## Database / schema
 
 Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261022`); bump it

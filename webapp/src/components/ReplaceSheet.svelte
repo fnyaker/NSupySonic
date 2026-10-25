@@ -28,6 +28,7 @@
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
   import { youtubeStatus, loadYoutubeStatus } from "../lib/youtube.js";
+  import { access } from "../lib/access.js";
 
   let candidates = [];
   let query = "";
@@ -268,7 +269,7 @@
             {/each}
           </ul>
         {/if}
-        {#if !loading && $youtubeStatus?.enabled}
+        {#if !loading && $youtubeStatus?.enabled && $access.can("youtube", "search")}
           <div class="yt">
             {#if yt === "done"}
               <p class="muted hint">
