@@ -207,8 +207,9 @@ def my_accounts_link_deezer():
         return jsonify({"error": "Deezer refuse cet ARL (expiré, révoqué ou mal copié)."}), 400
     except ProviderUnavailable:
         return jsonify({"error": "Deezer ne répond pas : réessayez dans un moment."}), 503
-    except ProviderError as exc:
-        return jsonify({"error": f"Deezer : {exc}"[:200]}), 502
+    except ProviderError:
+        logger.warning("linking a Deezer account failed", exc_info=True)
+        return jsonify({"error": "Deezer a refusé la connexion pour une autre raison : réessayez plus tard."}), 502
     if who["id"] and who["id"] == _server_deezer_user_id():
         return jsonify(
             {"error": "C'est le compte Deezer du serveur : demandez à son titulaire de vous le prêter (Sources)."}
@@ -275,7 +276,8 @@ def _provider_error(exc):
         return jsonify({"error": "Le compte refuse la connexion : reliez-le à nouveau.", "reason": "auth"}), 409
     if isinstance(exc, ProviderUnavailable):
         return jsonify({"error": "Le service ne répond pas : réessayez dans un moment.", "reason": "network"}), 424
-    return jsonify({"error": str(exc)[:200], "reason": "error"}), 502
+    logger.warning("reading an account's library failed: %r", exc)
+    return jsonify({"error": "Le service a répondu par une erreur : réessayez plus tard.", "reason": "error"}), 502
 
 
 @webapi.route("/me/accounts/<account_id>/library/<kind>")
