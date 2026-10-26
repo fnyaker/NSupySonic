@@ -274,6 +274,24 @@ through the chain while there is no effect and no view (a copy, bit for bit). Th
 element's volume; the oscilloscope has no waveform on this path. `test/nativeanalysis.test.mjs` plays the app with
 the shipped rhythm.wasm on an arranged record.
 
+**Behind a locked screen, and seeking a stream with no length** (bridge version 7). With the sound in the app, the
+page is SILENT to Chromium, and a hidden silent page is throttled then frozen: a track's `ended` reached it only once
+the phone was unlocked, so nothing played after the first track. While the page is hidden, `Player.svelte#updateNativeNext`
+names the next ten tracks of the queue (`NativeAudioElement#setNext` → op `next`: each one's URL — the server's, or a
+download the app keeps —, its trimmed start, its volume, its key and what the notification shows); the player told to
+play last goes on to each by itself at its end (`NativeAudio.kt#advance`, the notification updated from `meta`), and
+every state carries `k` until the next source, so a page that heard nothing while frozen still learns it. The element
+then dispatches `nsadvance` and nothing else until `onNativeAdvance` jumps the queue to that track and `loadTrack`
+ADOPTS the source where it has reached (no reload, no seek). Visible, nothing is named, and repeat one, the sleep timer's
+end of track and a page download only it can read end the list. And a first play (or the first at an Opus quality) is
+generated as it is sent — no length, no ranges — so ExoPlayer has no seek map and the page waited for a `seekable` that
+never came: the bar moved, the sound did not. The player's buffer now holds a whole track (32 MB, so the stream is read
+to its end and the server keeps its copy), the state says `sc` (the element is seekable everywhere) and a seek there is
+HELD (`chase`: the position reported is the target) until the stream has been read whole, then the same URL is opened
+again — a file with ranges now — at the target, muted until it lands; 60 s or four reopenings and it gives up.
+`test/nativeplayer.test.mjs` and `node test/native/run.mjs` (the page frozen through two track ends; a seek on a stream
+with no seek map) pin both.
+
 **When the app's player fails** (lot N6, `nativeplayer.js#noteNativeFault`, `Player.svelte#fallBackToPage`): a player
 error (MEDIA_ERR_DECODE, i.e. ExoPlayer's decoder or audio-track codes, or `naCreate` refusing) is recorded in
 `audio.native.fault` BEFORE the element's error fires, so `nativeAudioWanted` is already false and the playing track moves

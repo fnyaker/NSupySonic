@@ -12,11 +12,13 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
@@ -57,6 +59,22 @@ import java.util.concurrent.atomic.AtomicInteger
  *    document asks for releases the old document's, the page releases its own
  *    on `pagehide`, and the WebView going away releases them all (releaseAll).
  *
+ * Two things the page cannot do for itself, because it may not be running:
+ *  - CONTINUE. Hidden behind a locked screen the page is silent as far as
+ *    Chromium knows (the sound comes out of here), and a hidden silent page is
+ *    throttled and then frozen: the `ended` of a track reached a page that only
+ *    ran again once somebody unlocked the phone. So while it is hidden the page
+ *    names the track that follows (op `next`) and the player that finishes
+ *    starts it on its own, reporting `adv`; the page catches up when it wakes
+ *    (Player.svelte#onNativeAdvance).
+ *  - SEEK IN A STREAM WITH NO LENGTH. A first play, or the first play at an
+ *    Opus quality, is generated as it is sent: no Content-Length, no ranges, so
+ *    ExoPlayer has no seek map and sends any seek back to 0. Such a seek is
+ *    held (`chase`): the position reported is the target, the stream is read
+ *    to its end (the buffer is sized to hold a whole track, which is also what
+ *    lets the server finish its cached copy), then the same URL is opened
+ *    again — now a file with ranges — at the target, muted until it lands.
+ *
  * Everything runs on the main looper: the bridge's binder thread only posts.
  */
 @OptIn(UnstableApi::class)
@@ -69,6 +87,9 @@ class NativeAudio(
     private val localFile: (String) -> File? = { null },
     // The analysis frames (NativeAnalysis), for lib/audio/engine.js.
     emitFrames: ((String) -> Unit)? = null,
+    // A player went on to the next track by itself: what the page said of it
+    // (title, artist, album, cover, duration), for the notification.
+    private val onAdvance: (JSONObject?) -> Unit = {},
 ) {
     /** The rhythm analyser on what the players play; null without the native core. */
     val analysis: NativeAnalysis? = if (emitFrames != null && NsCore.available) NativeAnalysis(emitFrames) else null
@@ -109,6 +130,8 @@ class NativeAudio(
     private var focusRequest: AudioFocusRequest? = null
     private var hasFocus = false
     private val pausedByFocus = HashSet<Int>()
+    // The player the page told to play last: the one that goes on by itself.
+    private var lastPlayed = 0
 
     /** A new player's id; one the app cannot make answers with an error at once. */
     fun create(page: String): Int {
@@ -212,11 +235,26 @@ class NativeAudio(
 
     // --- one player ----------------------------------------------------------
 
+    /** What follows the current track, as the page named it (op `next`). */
+    private class Next(val url: String, val atMs: Long, val vol: Float, val key: String, val meta: JSONObject?)
+
     private inner class Slot(val id: Int) : Player.Listener {
         val proc = NsProcessor(id, analysis) { fx }
         val player: ExoPlayer = ExoPlayer.Builder(context, Renderers(context, proc))
             .setMediaSourceFactory(
-                DefaultMediaSourceFactory(DataSource.Factory { ServerDataSource(prefs, cookieFor, localFile) })
+                DefaultMediaSourceFactory(DataSource.Factory {
+                    ServerDataSource(prefs, cookieFor, localFile) { u -> main.post { onSourceRead(u) } }
+                })
+            )
+            // A whole track in memory rather than ExoPlayer's 50 s: a stream with
+            // no length can only be sought once it has been read to its end, and
+            // the server only keeps its copy of a stream somebody read whole.
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(BUFFER_MS, BUFFER_MS, 2_500, 5_000)
+                    .setTargetBufferBytes(BUFFER_BYTES)
+                    .setPrioritizeTimeOverSizeThresholds(false)
+                    .build()
             )
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -233,6 +271,21 @@ class NativeAudio(
         private var prepared = false
         private var pendingSeek = false
         private var released = false
+        private var url = ""
+        // The current source was read from its first byte to its last.
+        private var complete = false
+        // A seek held in a stream with no seek map (ms), -1 when none.
+        private var chaseMs = -1L
+        private var chaseTries = 0
+        private var chaseReopened = false
+        // The page's volume, kept while a chase holds the player muted.
+        private var vol = 1f
+        // What follows, in order, as the page last named it.
+        private var next: List<Next> = emptyList()
+        // The key of the track this player went on to by itself, until the next source.
+        private var curKey = ""
+        private val window = Timeline.Window()
+        private val chaseTimeout = Runnable { endChase() }
         private val tick = object : Runnable {
             override fun run() {
                 if (released || !player.isPlaying) return
@@ -251,6 +304,11 @@ class NativeAudio(
             when (o.optString("op")) {
                 "src" -> {
                     val url = o.optString("url")
+                    cancelChase()
+                    next = emptyList()
+                    curKey = ""
+                    complete = false
+                    this.url = url
                     pendingSeek = false
                     player.stop()
                     player.clearMediaItems()
@@ -262,7 +320,7 @@ class NativeAudio(
                     }
                     player.playWhenReady = false
                     proc.startAt = 0.0
-                    player.volume = o.optDouble("v", 1.0).toFloat().coerceIn(0f, 1f)
+                    setVol(o.optDouble("v", 1.0))
                     player.setPlaybackSpeed(rate(o.optDouble("r", 1.0)))
                     player.setMediaItem(MediaItem.fromUri(url))
                     hasItem = true
@@ -270,6 +328,11 @@ class NativeAudio(
                     send(null)
                 }
                 "clear" -> {
+                    cancelChase()
+                    next = emptyList()
+                    curKey = ""
+                    complete = false
+                    url = ""
                     pendingSeek = false
                     player.stop()
                     player.clearMediaItems()
@@ -279,7 +342,7 @@ class NativeAudio(
                 }
                 "play" -> {
                     if (hasItem) prepare()
-                    if (player.playbackState == Player.STATE_ENDED) {
+                    if (chaseMs < 0 && player.playbackState == Player.STATE_ENDED) {
                         proc.startAt = 0.0
                         player.seekTo(0)
                     }
@@ -288,6 +351,7 @@ class NativeAudio(
                     // The analyser follows the player told to play last: the
                     // incoming track of a crossfade, the one the page names.
                     analysis?.analysed = id
+                    lastPlayed = id
                     player.playWhenReady = true
                     send(null)
                 }
@@ -303,6 +367,11 @@ class NativeAudio(
                         return
                     }
                     prepare()
+                    if (knownUnseekable()) {
+                        startChase(ms)
+                        return
+                    }
+                    cancelChase()
                     pendingSeek = true
                     proc.startAt = ms / 1000.0
                     player.seekTo(ms)
@@ -312,7 +381,8 @@ class NativeAudio(
                         send("seeked")
                     } else send(null)
                 }
-                "volume" -> player.volume = o.optDouble("v", 1.0).toFloat().coerceIn(0f, 1f)
+                "volume" -> setVol(o.optDouble("v", 1.0))
+                "next" -> next = parseNext(o)
                 "rate" -> {
                     player.setPlaybackSpeed(rate(o.optDouble("r", 1.0)))
                     send(null)
@@ -330,6 +400,106 @@ class NativeAudio(
             player.prepare()
         }
 
+        private fun setVol(v: Double) {
+            vol = if (v.isFinite()) v.toFloat().coerceIn(0f, 1f) else 1f
+            if (!(chaseMs >= 0 && chaseReopened)) player.volume = vol
+        }
+
+        /** `{q: [{url, at, v, k, meta}]}`; anything that is not the server's ends the list. */
+        private fun parseNext(o: JSONObject): List<Next> {
+            val a = o.optJSONArray("q") ?: return emptyList()
+            val out = ArrayList<Next>()
+            for (i in 0 until minOf(a.length(), MAX_NEXT)) {
+                val e = a.optJSONObject(i) ?: break
+                val u = e.optString("url")
+                if (u.isEmpty() || !prefs.isServerUrl(u)) break
+                val at = e.optDouble("at", 0.0).let { if (it.isFinite() && it > 0) (it * 1000).toLong() else 0L }
+                val v = e.optDouble("v", 1.0).let { if (it.isFinite()) it.toFloat().coerceIn(0f, 1f) else 1f }
+                out.add(Next(u, at, v, e.optString("k").take(128), e.optJSONObject("meta")))
+            }
+            return out
+        }
+
+        /** Whether the current source is known to have no seek map. */
+        private fun knownUnseekable(): Boolean {
+            val tl = player.currentTimeline
+            if (tl.isEmpty) return false
+            val i = player.currentMediaItemIndex
+            if (i < 0 || i >= tl.windowCount) return false
+            tl.getWindow(i, window)
+            return !window.isPlaceholder && !window.isSeekable
+        }
+
+        // --- a seek in a stream with no length ---------------------------------
+
+        private fun startChase(ms: Long) {
+            val first = chaseMs < 0
+            chaseMs = ms
+            chaseTries = 0
+            if (first) {
+                main.removeCallbacks(chaseTimeout)
+                main.postDelayed(chaseTimeout, CHASE_MAX_MS)
+            }
+            send(null)
+            if (!chaseReopened && (complete || player.playbackState == Player.STATE_ENDED)) reopen()
+        }
+
+        /** The same URL again, which the server now has whole, at the target. */
+        private fun reopen() {
+            if (chaseMs < 0 || url.isEmpty()) return
+            if (++chaseTries > CHASE_TRIES) {
+                endChase()
+                return
+            }
+            chaseReopened = true
+            complete = false
+            player.volume = 0f
+            proc.startAt = chaseMs / 1000.0
+            player.setMediaItem(MediaItem.fromUri(url), chaseMs)
+            prepared = false
+            prepare()
+        }
+
+        private fun onSourceRead(u: String) {
+            if (released || u != url) return
+            complete = true
+            if (chaseMs >= 0) reopen()
+        }
+
+        private fun cancelChase() {
+            if (chaseMs < 0) return
+            chaseMs = -1
+            chaseReopened = false
+            main.removeCallbacks(chaseTimeout)
+            player.volume = vol
+        }
+
+        /** Gave up: the position is where the sound really is. */
+        private fun endChase() {
+            if (chaseMs < 0) return
+            cancelChase()
+            send("seeked")
+        }
+
+        /** The page names the track that follows; this player goes on to it by itself. */
+        private fun advance(n: Next) {
+            next = next.drop(1)
+            cancelChase()
+            url = n.url
+            complete = false
+            pendingSeek = false
+            vol = n.vol
+            player.volume = vol
+            proc.startAt = n.atMs / 1000.0
+            player.setMediaItem(MediaItem.fromUri(n.url), n.atMs)
+            hasItem = true
+            prepared = false
+            prepare()
+            curKey = n.key.ifEmpty { "-" }
+            send("adv")
+            onAdvance(n.meta)
+        }
+
         private fun rate(r: Double): Float =
             if (r.isNaN()) 1f else r.toFloat().coerceIn(0.25f, 4f)
 
@@ -337,6 +507,7 @@ class NativeAudio(
             if (released) return
             released = true
             main.removeCallbacks(tick)
+            main.removeCallbacks(chaseTimeout)
             pausedByFocus.remove(id)
             live.decrementAndGet()
             try {
@@ -349,13 +520,19 @@ class NativeAudio(
 
         private fun send(ev: String?) {
             if (released) return
+            val chasing = chaseMs >= 0
             val o = JSONObject()
                 .put("c", lastCmd)
                 .put("st", player.playbackState)
                 .put("p", player.playWhenReady)
-                .put("t", player.currentPosition / 1000.0)
+                // A held seek reads as the element's would: at its target.
+                .put("t", (if (chasing) chaseMs else player.currentPosition) / 1000.0)
                 .put("b", player.bufferedPosition / 1000.0)
                 .put("sk", hasItem && player.isCurrentMediaItemSeekable)
+                // Any position can be asked for: a stream with no length is chased.
+                .put("sc", true)
+            // Every state says it, so a page that missed the first (frozen) still learns it.
+            if (curKey.isNotEmpty()) o.put("k", curKey).put("u", url)
             val d = player.duration
             if (hasItem && d != C.TIME_UNSET && d > 0) o.put("d", d / 1000.0)
             if (ev != null) o.put("ev", ev)
@@ -368,6 +545,34 @@ class NativeAudio(
         }
 
         override fun onPlaybackStateChanged(state: Int) {
+            if (chaseMs >= 0) {
+                if (chaseReopened && state == Player.STATE_READY) {
+                    if (knownUnseekable()) {
+                        // Still generated as it is sent: muted, read it whole again.
+                        if (complete) reopen()
+                        return
+                    }
+                    if (kotlin.math.abs(player.currentPosition - chaseMs) > 1_000) player.seekTo(chaseMs)
+                    cancelChase()
+                    send("seeked")
+                    return
+                }
+                if (state == Player.STATE_ENDED) {
+                    // Read to its end, so the server has it whole.
+                    complete = true
+                    reopen()
+                    return
+                }
+                send(null)
+                return
+            }
+            if (state == Player.STATE_ENDED) {
+                val n = next.firstOrNull()
+                if (n != null && id == lastPlayed && player.playWhenReady) {
+                    advance(n)
+                    return
+                }
+            }
             if (state == Player.STATE_READY && pendingSeek) {
                 pendingSeek = false
                 send("seeked")
@@ -382,6 +587,7 @@ class NativeAudio(
         }
 
         override fun onPlayerError(e: PlaybackException) {
+            cancelChase()
             pendingSeek = false
             prepared = false // a play() after an error prepares again
             // HTMLMediaElement's codes: 2 network, 3 decode, 4 source not supported.
@@ -408,6 +614,14 @@ class NativeAudio(
     companion object {
         private const val MAX_PLAYERS = 6
         private const val TICK_MS = 250L
+        // The buffer: a whole track of anything but a very long lossless one.
+        private const val BUFFER_MS = 30 * 60 * 1000
+        private const val BUFFER_BYTES = 32 * 1024 * 1024
+        // A held seek gives up after this, or after this many reopenings.
+        private const val CHASE_MAX_MS = 60_000L
+        private const val CHASE_TRIES = 4
+        // How many tracks ahead the page may name.
+        private const val MAX_NEXT = 12
     }
 }
 
@@ -422,8 +636,11 @@ class ServerDataSource(
     private val prefs: Prefs,
     private val cookieFor: (String) -> String?,
     private val localFile: (String) -> File? = { null },
+    // The URL was read from its first byte to its last (NativeAudio's chase).
+    private val onWhole: (String) -> Unit = {},
 ) : BaseDataSource(true) {
     private var conn: HttpURLConnection? = null
+    private var fromStart = false
     private var input: InputStream? = null
     private var uri: Uri? = null
     private var remaining = C.LENGTH_UNSET.toLong()
@@ -431,6 +648,7 @@ class ServerDataSource(
 
     override fun open(dataSpec: DataSpec): Long {
         uri = dataSpec.uri
+        fromStart = dataSpec.position == 0L && dataSpec.length == C.LENGTH_UNSET.toLong()
         transferInitializing(dataSpec)
         val url = dataSpec.uri.toString()
         if (!prefs.isServerUrl(url)) throw IOException("not the server")
@@ -480,16 +698,24 @@ class ServerDataSource(
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
         val unset = C.LENGTH_UNSET.toLong()
-        if (remaining == 0L) return C.RESULT_END_OF_INPUT
+        if (remaining == 0L) return whole()
         val want = if (remaining == unset) length else minOf(length.toLong(), remaining).toInt()
         val n = input?.read(buffer, offset, want) ?: return C.RESULT_END_OF_INPUT
         if (n < 0) {
             if (remaining != unset) throw EOFException()
-            return C.RESULT_END_OF_INPUT
+            return whole()
         }
         if (remaining != unset) remaining -= n
         bytesTransferred(n)
         return n
+    }
+
+    private fun whole(): Int {
+        if (fromStart) {
+            fromStart = false
+            uri?.let { onWhole(it.toString()) }
+        }
+        return C.RESULT_END_OF_INPUT
     }
 
     override fun getUri(): Uri? = uri

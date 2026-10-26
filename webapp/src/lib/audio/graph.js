@@ -1165,6 +1165,16 @@ function applyVol(el, now = performance.now()) {
   if (!v.ramp || Math.abs(el.volume - g) > 1e-4) el.volume = g;
 }
 
+/**
+ * The volume a direct element playing a track of gain `db` gets at full fade:
+ * what the Android app is told to start the next track at when it goes on to
+ * it by itself (Player.svelte#updateNativeNext).
+ */
+export function directVolumeFor(db) {
+  const n = typeof db === "number" ? db : parseFloat(db);
+  return clamp01(baseVolume * Math.min(1, normLinearFor(Number.isFinite(n) ? n : null)));
+}
+
 function applyDirectVolumes() {
   const now = performance.now();
   for (const el of vols.keys()) applyVol(el, now);
