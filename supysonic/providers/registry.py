@@ -219,23 +219,31 @@ class Registry:
             ids, key=lambda pid: (self._best_first(pid), place.get(pid, len(place)), ids.index(pid))
         )
 
-    def set_sources(self, order=None, enabled=None):
-        """What Réglages → Sources saves: the sources in order (main first) and
-        which are on. Ids that are not sources are ignored; switching one that
-        has no switch, or leaving no source able to lead first, raises
-        ValueError. Nothing is written unless all of it is valid."""
+    def check_sources(self, order=None, enabled=None):
+        """Why ``set_sources(order, enabled)`` would refuse, in French for the
+        person, or ``""``. The route answers with THIS, never with an
+        exception's text (which can carry a stack trace to a browser)."""
         sound = {p.id: p for p in self.sound()}
         if order is not None:
-            ids = [pid for pid in order if pid in sound]
-            ids = list(dict.fromkeys(ids))
+            ids = list(dict.fromkeys(pid for pid in order if pid in sound))
             if ids and sound[ids[0]].role != MAIN:
-                raise ValueError(f"{sound[ids[0]].name} ne peut pas être la source principale")
-        for pid, on in (enabled or {}).items():
-            if pid not in sound:
-                continue
-            if not sound[pid].switchable:
-                raise ValueError(f"{sound[pid].name} n'a pas d'interrupteur")
+                return f"{sound[ids[0]].name} ne peut pas être la source principale"
+        for pid in enabled or {}:
+            if pid in sound and not sound[pid].switchable:
+                return f"{sound[pid].name} n'a pas d'interrupteur"
+        return ""
+
+    def set_sources(self, order=None, enabled=None):
+        """What Réglages → Sources saves: the sources in order (main first) and
+        which are on. Ids that are not sources are ignored; what
+        ``check_sources`` refuses raises ValueError. Nothing is written unless
+        all of it is valid."""
+        refused = self.check_sources(order, enabled)
+        if refused:
+            raise ValueError(refused)
+        sound = {p.id: p for p in self.sound()}
         if order is not None:
+            ids = list(dict.fromkeys(pid for pid in order if pid in sound))
             rest = [p.id for p in self.ordered() if p.id not in ids]
             self.set_order(ids + rest)
         for pid, on in (enabled or {}).items():

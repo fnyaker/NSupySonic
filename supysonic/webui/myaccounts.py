@@ -137,7 +137,10 @@ def _safe_account_json(row, default_id):
             "mode": row.mode,
             "server": row.mode == access.SERVER,
             "status": "broken",
-            "error": f"{type(exc).__name__}: {exc}"[:200],
+            # The KIND of failure only: an exception's own text can carry a
+            # path or a connection string, and this is shown in a browser.
+            # The traceback is in the server's log, where it belongs.
+            "error": type(exc).__name__,
             "auto": {},
             "last": None,
             "lossless": None,

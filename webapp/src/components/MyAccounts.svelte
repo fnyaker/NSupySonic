@@ -124,7 +124,8 @@
   function statusLine(a) {
     if (a.running) return "";
     if (a.status === "auth") return "Le compte refuse la connexion : reliez-le à nouveau.";
-    if (a.status === "broken") return `Compte illisible sur le serveur (${a.error}) : déliez-le puis reliez-le.`;
+    if (a.status === "broken")
+      return `Compte illisible sur le serveur (${a.error}, détail dans le journal) : déliez-le puis reliez-le.`;
     const last = a.last;
     if (!last) return "Pas encore importé";
     if (last.reason === "network") return `Service injoignable ${ago(last.at)} : nouvel essai dans l'heure`;

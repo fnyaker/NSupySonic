@@ -238,7 +238,8 @@ class UnreadableAccountTestCase(_ImportCase):
         self.assertEqual(rv.status_code, 200)
         (acc,) = rv.get_json()["accounts"]
         self.assertEqual(acc["status"], "broken")
-        self.assertIn("RuntimeError: boom", acc["error"])
+        self.assertEqual(acc["error"], "RuntimeError")  # the kind only: no traceback in a browser
+        self.assertNotIn("boom", rv.get_data(as_text=True))
         self.assertEqual(acc["kinds"], [])
 
 

@@ -19,10 +19,14 @@ nothing.
 
 from __future__ import annotations
 
+import logging
+
 from flask import current_app, jsonify, request
 
 from ..providers import quality
 from . import admin_required, login_required, webapi
+
+logger = logging.getLogger(__name__)
 
 ORDER_MAX = 16  # what Meta can hold (registry.set_order) and more than will exist
 
@@ -136,8 +140,14 @@ def sources_put():
         or not all(isinstance(k, str) and isinstance(v, bool) for k, v in enabled.items())
     ):
         return jsonify({"error": "interrupteurs invalides"}), 400
+    # The reason is asked for FIRST, so what is sent back is a sentence this
+    # module wrote; an exception's own text never reaches a browser.
+    refused = reg.check_sources(order=order, enabled=enabled)
+    if refused:
+        return jsonify({"error": refused}), 400
     try:
         reg.set_sources(order=order, enabled=enabled)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except ValueError:
+        logger.exception("sources refused")
+        return jsonify({"error": "réglage refusé"}), 400
     return jsonify(sources_payload())
