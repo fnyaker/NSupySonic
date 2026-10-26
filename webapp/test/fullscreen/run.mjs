@@ -31,6 +31,7 @@ await page.waitForTimeout(1000);
 await page.locator('button[aria-label="Plein écran"]').first().click();
 await page.waitForSelector(".d .controls .pp");
 
+async function sweep(page, label) {
 for (const [w, h] of SIZES) {
   await page.setViewportSize({ width: w, height: h });
   await page.waitForTimeout(400);
@@ -63,9 +64,32 @@ for (const [w, h] of SIZES) {
     }
     return [...new Set(out)];
   });
-  check(bad.length === 0, `${w}x${h}: every control on screen and clickable`, bad.join("; "));
-  if (process.env.SHOTS) await page.screenshot({ path: join(process.env.SHOTS, `fullscreen-${w}x${h}.png`) });
+  check(bad.length === 0, `${label}${w}x${h}: every control on screen and clickable`, bad.join("; "));
+  if (process.env.SHOTS) await page.screenshot({ path: join(process.env.SHOTS, `fullscreen-${label.replace(/\W+/g, "")}${w}x${h}.png`) });
 }
+}
+
+await sweep(page, "");
+
+// The Flow adds its steering row ("moins / plus comme ça", the energy notch)
+// under the controls: it must fit too. Its picks are the playlist's titles
+// (the bench library has no listening history to choose from).
+const pool = (await page.evaluate(async (id) => (await fetch("/api/playlist/" + id)).json(), ids.big)).tracks.slice(0, 100);
+let k = 0;
+await ctx.route(/\/api\/flow\/next/, (r) => {
+  const n = JSON.parse(r.request().postData() || "{}").n || 1;
+  r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ tracks: Array.from({ length: n }, () => pool[k++ % pool.length]) }) });
+});
+const flowPage = await ctx.newPage();
+flowPage.on("pageerror", (e) => console.log("pageerror:", e.message));
+await page.close();
+await flowPage.setViewportSize({ width: 1440, height: 900 });
+await flowPage.goto(base + "/app/#/");
+await flowPage.locator('button:has-text("Lancer mon Flow")').click();
+await flowPage.waitForTimeout(1000);
+await flowPage.locator('button[aria-label="Plein écran"]').first().click();
+await flowPage.waitForSelector(".d .flowctl");
+await sweep(flowPage, "Flow ");
 
 await browser.close();
 stop();

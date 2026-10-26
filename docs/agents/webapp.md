@@ -35,7 +35,7 @@ one-word labels); podcasts live IN the library. **A title on its own plays and t
 artist}` and `Player.svelte#ensureUpcoming` tops it up from `/api/radio/next` at once — no request before the sound;
 `artist` lets the server radio on the artist while a catalogue title's row does not exist yet. Inside a collection
 (album, playlist, favourites, the Nouveautés page) a tap plays the collection from there. The home is: the Flow (the
-discovery level behind one chip), **Nouveautés as TITLES** (one per release, `/api/releases` `tracks`, read from
+discovery level behind one chip, the energy notches under it — `EnergyPicker.svelte`), **Nouveautés as TITLES** (one per release, `/api/releases` `tracks`, read from
 `artist_release.tracks`, which the releases watcher fills when it finds a release — `releases._fill_tracklists`,
 `TRACKLISTS_PER_RUN` a run, an outage leaves it for the next run, Deezer answering "gone" keeps `[]`), the favourite
 artists (`/me/artists`: stars + library count + the person's listens, three statements), Pour toi (titles), recently
@@ -229,3 +229,13 @@ main bundle **656 kB → 457 kB** (223 → 158 kB gzipped), CSS **128 kB → 85 
   `securitypolicyviolation`), and a cached cover is only ever dropped once `createImageBitmap` —
   which no CSP governs — confirms the bytes do not decode (`imagebytes.js#blobDecodes`); covers
   the old behaviour deleted are re-fetched in the background (`offline.js#repairMissingCovers`).
+
+**The Flow holds the playing title and AT MOST the next** (`lib/flow.js`): the next is chosen `PICK_AHEAD` (20) s
+before the transition, crossfade counted (`Player.svelte` calls `tick` on every position update), with what the
+session said (heard seconds, the `FlowControls.svelte` buttons, the notch); one request per title, a few hundred
+bytes. A reserve title asked 6 s into each track makes "suivant" instant and covers a failed pick; a hidden page
+picks at once (its timers are throttled, and the app's own player must know the next). A feedback press after the
+pick picks again (`replaceUpcoming`). `ensureUpcoming` leaves the Flow alone. A Flow queue saved by an older SPA (no
+`context.id`) is adopted into a new session. The steering row costs the full-screen cover its height
+(`.main.steer .cover`; `test/fullscreen/run.mjs` sweeps 9 sizes WITH it); on a phone the cover carousel sits in a
+size container and shrinks instead of being cut (360x640: 194 px square, 109 with the Flow row).

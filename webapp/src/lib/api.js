@@ -284,21 +284,11 @@ export const api = {
   // discovery
   home: () => req("/home"),
   homeMix: (id) => req("/home/mix/" + encodeURIComponent(id)),
-  // The Flow at a discovery level (0 = what you know, 1 = far from it); a new
-  // seed is a new draw.
-  flow: (level, seed) => {
-    const q = [];
-    if (level != null) q.push("d=" + encodeURIComponent(Number(level).toFixed(2)));
-    if (seed) q.push("seed=" + encodeURIComponent(seed));
-    return req("/flow" + (q.length ? "?" + q.join("&") : ""));
-  },
-  // A Flow refill: what the queue holds and what this session skipped go with
-  // it, so nothing comes back twice and the skips steer the rest.
-  flowNext: (level, { exclude = [], skipped = [] } = {}) =>
-    req("/flow", {
-      method: "POST",
-      body: body({ d: level, exclude: exclude.map(String), skipped: skipped.map(String) }),
-    }),
+  // The Flow's next title(s), chosen now with what the session said
+  // (lib/flow.js builds the body).
+  flowPick: (payload) => req("/flow/next", { method: "POST", body: body(payload) }),
+  // The Flow's starting energy notch (null: "Libre").
+  setFlowEnergy: (energy) => req("/discover/prefs", { method: "PUT", body: body({ energy }) }),
   recommend: (level, seed) =>
     req(
       "/recommend?d=" + encodeURIComponent(Number(level).toFixed(2)) +

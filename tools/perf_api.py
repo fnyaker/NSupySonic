@@ -202,8 +202,13 @@ def make_archived(app, clusters=40):
             last = base - datetime.timedelta(days=r.randint(0, 400)) if plays else None
             c = r.randrange(clusters)
             rows.append((t, plays, last, base - datetime.timedelta(days=r.randint(0, 300))))
+            loud = (c % 10) / 9 * 0.8 + r.random() * 0.2  # the energy's measures
             analyses.append({"track": t.id, "bpm": 80 + (c % 12) * 10 + r.random() * 3,
-                             "style": styles[c % len(styles)]})
+                             "bpm_confidence": 0.8, "style": styles[c % len(styles)],
+                             "data": json.dumps({"lufs": -20 + 14 * loud, "lra": 14 - 10 * loud,
+                                                 "centroid": 1200 + 2500 * loud,
+                                                 "fluxPeak": 0.2 + 0.7 * loud,
+                                                 "entropy": 0.5 + 0.3 * loud})})
             vec = centres[c] + rs.randn(emb.V2_EMBED_DIM) * 0.4
             os.makedirs(os.path.dirname(t.path), exist_ok=True)
             emb.save_embedding(t, [float(x) for x in vec])
@@ -331,6 +336,11 @@ def main():
             ("GET", f"/api/radio/track/{seed}", None),
             ("GET", f"/api/radio/artist/{artist}", None),
             ("GET", "/api/flow", None),
+            # the Flow one title at a time: the first call builds the session's
+            # pool (and, after a boot, the energy map), the others reuse them
+            ("POST", "/api/flow/next", {"sid": "bench", "d": 0.35, "energy": 0.7, "n": 2}),
+            ("POST", "/api/flow/next", {"sid": "bench", "d": 0.35, "energy": 0.7,
+                                        "heard": [{"id": seed, "s": 200}], "more": [seed]}),
         ]
         close_connection()
     print(f"{'route':42s} {'median':>9s} {'min':>8s} {'sql':>5s} {'bytes':>9s} {'gzip':>8s}  status")

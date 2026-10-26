@@ -55,6 +55,9 @@
   import PartyButton from "./PartyButton.svelte";
   import RemoteButton from "./RemoteButton.svelte";
   import Icon from "./Icon.svelte";
+  import FlowControls from "./FlowControls.svelte";
+  import FlowUpNext from "./FlowUpNext.svelte";
+  import { flowLive } from "../lib/flow.js";
   import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
   import QueueList from "./QueueList.svelte";
@@ -863,6 +866,7 @@
       {/if}
     </div>
 
+    <div class="stagebox">
     <div
       class="scroller"
       bind:this={scroller}
@@ -876,6 +880,7 @@
       {#each slots as s (s.key)}
         <div class="slide"><Cover src={hiResCover(s.track.album?.cover, 1000)} alt={s.track.title} kind={s.track.podcast ? "podcast" : "album"} fallbackId={trackRef(s.track)} eager /></div>
       {/each}
+    </div>
     </div>
 
     <div class="info">
@@ -919,6 +924,8 @@
       <button on:click={() => player.next()} aria-label="Suivant"><Icon name="next" size={30} /></button>
       <button class="sm" class:on={$player.repeat !== "off"} class:gone={!CAN_BROWSE} disabled={!CAN_BROWSE} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
     </div>
+
+    {#if CAN_KEEP && $flowLive}<div class="flow-steer"><FlowControls /></div>{/if}
 
     {#if stripViz}
       <div class="viz">
@@ -1008,6 +1015,7 @@
       </div>
       <div class="queue">
         <QueueList items={q} {idx} bind:this={queueVL} onPick={() => (showQueue = false)} />
+        <FlowUpNext />
       </div>
     </div>
   {/if}
@@ -1114,13 +1122,24 @@
     color: transparent;
   }
 
+  /* The carousel's box: as tall as a full-width cover when the screen has the
+     room, shorter when it has not (a 360x640 phone, or the Flow's steering row
+     below), and then the covers shrink to fit it instead of being cut. */
+  .stagebox {
+    flex: 0 1 calc(72vw + 20px);
+    min-height: 120px;
+    container-type: size;
+  }
+
   /* native scroll-snap cover carousel */
   .scroller {
-    /* Sized off the viewport so the slide width and the side padding share one
-       base and can be made to total exactly 100 (see the padding below). The
-       sheet is `position: fixed; inset: 0`, so the scroller spans the viewport. */
-    --slide-w: 72vw;
-    --slide-pad: 14vw;
+    height: 100%;
+    box-sizing: border-box;
+    /* Sized off the box above (container units) so the slide width and the
+       side padding share one base and total exactly 100 (see the padding
+       below); the slide is also never taller than the box. */
+    --slide-w: min(72cqw, 100cqh - 20px);
+    --slide-pad: calc((100cqw - var(--slide-w)) / 2);
     display: flex;
     gap: 14px;
     overflow-x: auto;
@@ -1140,7 +1159,7 @@
        scroll simply clamps short of them. It did — `flex-basis: 85%` resolves
        against the scroller's CONTENT box while `padding: 7.5%` resolves against
        its containing block, so the two never added up to a full width. Both are
-       in vw here so they're guaranteed to: 72 + 14 + 14 = 100. */
+       in the box's units here so they're guaranteed to: w + 2·(100 − w)/2. */
     padding: 10px var(--slide-pad);
     overscroll-behavior-x: contain;
     /* The gesture is ours (see onCoverStart): the browser must not scroll,
@@ -1156,6 +1175,7 @@
   }
   .slide {
     flex: 0 0 var(--slide-w);
+    align-self: center;
     scroll-snap-align: center;
     scroll-snap-stop: always;
     aspect-ratio: 1 / 1;
@@ -1264,6 +1284,9 @@
     background: #fff;
   }
 
+  .flow-steer {
+    padding: 4px 16px 0;
+  }
   .controls {
     display: flex;
     align-items: center;
@@ -1324,8 +1347,9 @@
   .footer {
     display: flex;
     align-items: center;
-    gap: 14px;
-    padding: 6px 22px 26px;
+    /* eight controls: on a 360 px phone the spacing gives way, not the edge */
+    gap: clamp(6px, 3.6vw - 4px, 14px);
+    padding: 6px clamp(12px, 5.6vw, 22px) 26px;
   }
   .footer .sm {
     color: rgba(255, 255, 255, 0.7);

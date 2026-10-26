@@ -619,6 +619,13 @@ export const favorites = createFavorites();
 // leave the Flow, the radios and the mixes (supysonic/dislikes.py).
 export const disliked = createFavorites();
 
+// Asked by player.next() at the end of the queue: a track to append and play,
+// or null (lib/flow.js holds the Flow's reserve title there).
+let queueEndHook = null;
+export function setQueueEndHook(fn) {
+  queueEndHook = fn;
+}
+
 // Full favorite tracks (with metadata), cached so re-opening the library is
 // instant. null = never loaded yet. See actions.loadMyFavorites.
 export const favTracks = writable(null);
@@ -1000,6 +1007,12 @@ function createPlayer() {
       this.playQueue([track], 0, context);
     },
 
+    // Re-label what is playing without touching the queue (a Flow queue saved
+    // by an older app gets a session of its own: lib/flow.js#session).
+    setContext(context) {
+      update((s) => ({ ...s, context }));
+    },
+
     shufflePlay(tracks, context = null) {
       const q = filterQueue(clean(tracks));
       if (!q.length) return;
@@ -1177,6 +1190,21 @@ function createPlayer() {
           return { ...s, index: s.index + 1, playing: true, seq: s.seq + 1 };
         if (s.repeat === "all" && s.queue.length)
           return { ...s, index: 0, playing: true, seq: s.seq + 1 };
+        // A queue that is chosen one title at a time (the Flow) may hold the
+        // next one off the queue: it plays at once.
+        const more = queueEndHook ? queueEndHook(s) : null;
+        if (more) {
+          const extra = clean([more]);
+          if (extra.length)
+            return {
+              ...s,
+              queue: [...s.queue, ...extra],
+              _orig: s._orig ? [...s._orig, ...extra] : null,
+              index: s.index + 1,
+              playing: true,
+              seq: s.seq + 1,
+            };
+        }
         return { ...s, playing: false };
       });
     },

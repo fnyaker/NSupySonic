@@ -25,7 +25,7 @@
     trimThresholdDb,
   } from "../lib/stores.js";
   import { api } from "../lib/api.js";
-  import { discoveryLevel } from "../lib/discovery.js";
+  import { tick as flowTick, noteHeard as flowHeard, nextNow as flowNextNow } from "../lib/flow.js";
   import { online } from "../lib/net.js";
   import { logInfo } from "../lib/log.js";
   import { isDownloaded, getObjectURL, touch } from "../lib/offline.js";
@@ -662,6 +662,7 @@
       const listened = Math.max(0, Math.round(played / 1000));
       const s = get(player);
       noteSession(s, listenId, listened);
+      if (s.context && s.context.kind === "flow") flowHeard(listenId, listened);
       api.reportListen({
         id: listenId,
         listened,
@@ -2703,11 +2704,9 @@
   async function nextBatch(s) {
     const ss = sessionFor(s);
     const exclude = s.queue.slice(-400).map((t) => trackRef(t));
-    if (s.context && s.context.kind === "flow") {
-      return (
-        (await api.flowNext(get(discoveryLevel), { exclude, skipped: ss.skipped })).tracks || []
-      );
-    }
+    // The Flow is chosen one title at a time (lib/flow.js): here only when
+    // its choice failed and the queue ran out.
+    if (s.context && s.context.kind === "flow") return flowNextNow();
     const seed = radioSeed(s);
     if (!seed) return [];
     return (
@@ -2741,10 +2740,11 @@
     if (!s.autoplay || s.index < 0) return;
     if (s.index < s.queue.length - 3) return; // still buffered
     if (extending) return;
-    const isFlow = !!(s.context && s.context.kind === "flow");
-    const seed = isFlow ? null : radioSeed(s);
-    if (!isFlow && !seed) return;
-    const key = `${isFlow ? "flow" : seed.kind + ":" + seed.id}|${s.queue.length}`;
+    // The Flow chooses its next title itself, late (lib/flow.js#tick).
+    if (s.context && s.context.kind === "flow") return;
+    const seed = radioSeed(s);
+    if (!seed) return;
+    const key = `${seed.kind + ":" + seed.id}|${s.queue.length}`;
     if (key === exhausted) return;
     if (Date.now() - lastExtendAt < MIN_EXTEND_GAP) return;
     lastExtendAt = Date.now();
@@ -2766,6 +2766,15 @@
 
   // Re-check the buffer each time the playing track changes.
   $: if ($current) ensureUpcoming();
+
+  // The Flow's next title is chosen PICK_AHEAD seconds before the transition
+  // (the crossfade counted), or at once when the page may not wake in time.
+  $: if ($player.context && $player.context.kind === "flow") {
+    const s = $player;
+    const fade = get(crossfadeEnabled) ? +get(crossfadeSeconds) || 0 : 0;
+    const remaining = s.duration > 0 ? s.duration - s.currentTime - fade : Infinity;
+    flowTick(s, { remaining, background: pageHidden || !!audio?.appInBackground });
+  }
 
   // Ask the SERVER to pre-archive only the next track (n+1) so it starts
   // instantly, and re-fire whenever that upcoming track changes — a skip, a
