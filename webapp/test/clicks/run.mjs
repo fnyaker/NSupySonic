@@ -170,7 +170,10 @@ for (let round = 0; round < N; round++) {
   await measure("nav: Accueil", nav("/"));
   await measure("nav: Rechercher", nav("/search"));
   await measure("nav: Bibliothèque", nav("/library"));
-  await measure("nav: Podcasts", nav("/podcasts"));
+  const chip = (name) => () => page.getByRole("tab", { name, exact: true }).first().click();
+  await measure("biblio: Artistes", chip("Artistes"));
+  await measure("biblio: Albums", chip("Albums"));
+  await measure("biblio: Podcasts", chip("Podcasts"));
   await measure("nav: Réglages", nav("/settings"));
   await measure("nav: Accueil (2)", nav("/"));
   const open = PHONE ? ".mini .now, footer.player .now" : "footer.player button.max";
