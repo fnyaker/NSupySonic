@@ -107,6 +107,29 @@ def populate(app, n_tracks, n_playlists, n_fav, big_playlist):
                 ]
             tracks.append(library.upsert_track(raw, root))
         print(f"  {n_tracks} tracks in {time.time() - t0:.1f}s", file=sys.stderr)
+        # Everybody else on the sleeves: two to four people a track out of a
+        # pool of writers and producers, one of them prolific (a credits page
+        # of hundreds of titles), and the first artist writing for others too.
+        from supysonic.db import TrackCredit
+
+        pool = [f"{title(r)} {k}" for k in range(400)]
+        star_writer, artist_writer = "Max Prolific", artists[0][1]
+        rows = []
+        for k, t in enumerate(tracks):
+            people = [("composer", r.choice(pool)), ("author", r.choice(pool))]
+            if r.random() < 0.5:
+                people.append(("producer", r.choice(pool)))
+            if k % 20 == 0:
+                people.append(("composer", star_writer))
+            if k % 25 == 1:
+                people.append(("producer", artist_writer))
+            rows += [
+                {"track": t.id, "source": "deezer", "role": role, "name": name,
+                 "name_key": name.casefold(), "position": pos}
+                for pos, (role, name) in enumerate(people)
+            ]
+        for i in range(0, len(rows), 500):
+            TrackCredit.insert_many(rows[i : i + 500]).execute()
         pls = []
         for p in range(n_playlists):
             pl = Playlist.create(user=admin, name=f"Playlist {p} {title(r)}")
@@ -146,6 +169,7 @@ def populate(app, n_tracks, n_playlists, n_fav, big_playlist):
             "album": albums[0][0],
             "artist": artists[0][0],
             "track": str(tracks[0].deezer_id),
+            "writer": "Max Prolific",
             "ids": [str(t.deezer_id) for t in tracks[:12]],
         }
 
@@ -288,6 +312,8 @@ def main():
         ("GET", "/api/search?q=night%20fire", None),
         ("POST", "/api/gains", {"ids": ids["ids"]}),
         ("GET", f"/api/lyrics/{ids['track']}", None),
+        ("GET", f"/api/track/{ids['track']}/credits", None),
+        ("GET", "/api/credits/person?name=" + ids["writer"].replace(" ", "%20"), None),
         ("GET", "/api/me/local", None),
         ("GET", "/api/podcasts", None),
         ("GET", "/api/deezer/status", None),

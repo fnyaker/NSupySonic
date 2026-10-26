@@ -29,6 +29,7 @@
   import ShareSheet from "./components/ShareSheet.svelte";
   import ReplaceSheet from "./components/ReplaceSheet.svelte";
   import GenreTagSheet from "./components/GenreTagSheet.svelte";
+  import CreditsSheet from "./components/CreditsSheet.svelte";
   import ExportSheet from "./components/ExportSheet.svelte";
   import { maybeResumeHosting } from "./lib/party/hostbridge.js";
   import { partySheet, genreBulkSheet, remoteSheet, immersiveOpen, current } from "./lib/stores.js";
@@ -93,6 +94,8 @@
     "/import": wrap({ asyncComponent: () => import("./routes/Import.svelte") }),
     "/import/:url": wrap({ asyncComponent: () => import("./routes/Import.svelte") }),
     "/releases": wrap({ asyncComponent: () => import("./routes/Releases.svelte") }),
+    // A person's credits: what they wrote, composed, produced in the library.
+    "/credits/:name": wrap({ asyncComponent: () => import("./routes/Credits.svelte") }),
   };
 
   // The projector renders outside the router (it is a screen, not a route), so
@@ -415,6 +418,7 @@
 <ShareSheet />
 <ReplaceSheet />
 <GenreTagSheet />
+<CreditsSheet />
 {#if GenreBulkSheet}<svelte:component this={GenreBulkSheet} />{/if}
 <ExportSheet />
 {#if !partyId}

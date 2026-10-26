@@ -123,16 +123,27 @@ player (a `hashchange` listener). Its requests are keyed on the track's id as a 
 object, handed over again on every progress tick, and a reactive statement reading it asked for the credits four
 times a second (the browser test counts requests).
 
-**Full credits** (`supysonic/webui/credits.py`, `GET /api/track/<id>/credits`): the listing calls only carry the
-performers; everybody else (author, composer, producer, publisher…) is the gateway's `SNG_CONTRIBUTORS`, a
-role → names map, next to the ISRC, the release date, the label and the copyright. Where it comes from, best
-first: the `<track>.json` sidecar of an archived track (`SNG_CONTRIBUTORS` and `LABEL_NAME` are in `_KEEP_FIELDS`
-now); Deezer, asked once, kept a day in memory and — for an archived track — WRITTEN INTO the sidecar, so it is
-the last time anyone asks (an archived track carries its whole identity on disk, including for archives made
-before the field was kept); the database's performers, so the panel still says who is on the record while Deezer
-is out. Deezer not answering is never an answer about the track: the missing credits are simply missing. Known
-roles come in a sleeve's order and French labels (`ROLES`), a role Deezer invents is shown under its own name after
-them, and everything is bounded (40 names a role, 160 characters a string) since it is third-party text.
+**Full credits** (`supysonic/trackcredits.py`, `supysonic/webui/credits.py`, `GET /api/track/<id>/credits`): the
+performers are `TrackArtist` rows; everybody else on the sleeve (author, composer, producer, publisher…) is a
+`track_credit` row (schema `20261030`): one per person, role and SOURCE — `deezer` (the gateway's
+`SNG_CONTRIBUTORS`, stored when a track is archived), `tags` (an upload's composer/lyricist/producer, stored at
+import), `musicbrainz` (stored by the enrich queue). Each source is replaced on its own; `merge` keeps Deezer's and the
+tags' roles whole and lets MusicBrainz only FILL a role neither named (its lyricist is skipped when Deezer named an
+author). The panel reads the database, completes it from the files (sidecar `gw`/`facts`, the upload's tags) and
+stores what only the files said; only a track NOT on disk is worth a question to Deezer (kept a day in memory, and
+stored when the track is a library row, so it answers with Deezer away). Before this, an archive made before the
+sidecar kept `SNG_CONTRIBUTORS` named its main artist and nobody else, forever — what the person reported. The
+library already on a server is completed ONCE by `trackcredits.BackfillJob` (`libjob` with a `page_done` hook, run 45 s
+after a start until it finishes with Deezer answering; Réglages → Archive → "Crédits des titres" shows it): the disk
+first, then Deezer **50 tracks per `song.getListData` call** (falls back to one `song.getData` a track if the list
+call ever comes back without credits), each call behind `quiet_wait`, the answer written into the sidecar too; an
+outage fails those tracks with "Deezer injoignable (…)" and writes nothing. A name links to the library's artist of
+that name (catalogue artists only) or, once credited on 2+ tracks, to `#/credits/<name>` (`routes/Credits.svelte`,
+`GET /api/credits/person?name=`: indexed on the folded `name_key`, performer roles left out, `_visible_tracks`); an
+artist page grows a "Crédits" tab when `credited` > 0. Every track menu has "Voir les crédits"
+(`CreditsSheet.svelte`, same request, kept offline like the panel's). Measured on 8 000 tracks: the panel 8 ms / 6
+statements, a 400-title credits page 31 ms / 4 statements. Known roles come in a sleeve's order and French labels
+(`ROLES`), an invented role under its own name after them, everything bounded (40 names a role, 160 characters).
 
 **Back goes to the SCREEN, not the route** (`lib/nav.js`): hash routing gives real history, but the
 router destroys a page's component state on the way out and rebuilds it empty on the way in — so

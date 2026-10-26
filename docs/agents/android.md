@@ -117,6 +117,24 @@ again — a file with ranges now — at the target, muted until it lands; 60 s o
 `test/nativeplayer.test.mjs` and `node test/native/run.mjs` (the page frozen through two track ends; a seek on a stream
 with no seek map) pin both.
 
+**The app owns the track changes while its activity is stopped** (bridge version 8). Bridge 7 still failed on a phone,
+because a hidden WebView is not FROZEN, it is THROTTLED: Chromium holds a hidden silent page's timers to once a second,
+then once a minute after five minutes (developer.chrome.com, "timer throttling in Chrome 88"), and every event the app
+sends it still runs. So the page heard the app's `timeupdate`s, began a crossfade or a trimmed ending itself, cleared
+the list while arming it, and stalled in its own throttled steps; and the list was only named at the instant the page
+was hidden — an IndexedDB read per track on a page about to stop running. Now: the list is kept up to date while the
+page is VISIBLE too, per element (a quality switch or a crossfade hands the track to a player that was told nothing),
+and is kept while a crossfade is only being armed; each entry carries where its audio ends (`e`, the silence trim; the
+bounds of the next `EDGES_AHEAD` tracks are asked once per session) and the current track's (`end`). `MainActivity`
+tells `NativeAudio` when it starts and stops (`setForeground`); only while it is stopped does a player follow the list
+(`followsList`) — at its file's end, or at the trim, timed on its own clock (`checkTrim`: the 250 ms tick, then a timed
+last stretch; measured in the bench 5.486-5.495 s for a trim at 5.5) — and every state says `bg`. The page reads it
+(`appInBackground`) and starts no transition of its own then (`nativeOwnsTransition`: no crossfade — an armed one is
+dropped — and no trimmed ending), so behind a locked screen tracks cut at their trim with no overlap, and in front of it
+nothing changed. `node test/native/run.mjs` drives it on a hidden page whose timers and frames are held but whose
+events run, crossfade and trim on (`--old` runs that scenario as bridge 7: the page crossfaded by itself, the app never
+advanced).
+
 **When the app's player fails** (lot N6, `nativeplayer.js#noteNativeFault`, `Player.svelte#fallBackToPage`): a player
 error (MEDIA_ERR_DECODE, i.e. ExoPlayer's decoder or audio-track codes, or `naCreate` refusing) is recorded in
 `audio.native.fault` BEFORE the element's error fires, so `nativeAudioWanted` is already false and the playing track moves
