@@ -508,6 +508,12 @@ class PodcastWebUITestCase(unittest.TestCase):
 
         self.app = create_application(Config())
         UserManager.add("alice", "Alic3", admin=True)
+        # The archiving rules are cached per process: a rule another test
+        # saved must not leak into this one.
+        from supysonic.deezer import rules
+
+        rules.invalidate()
+        self.addCleanup(rules.invalidate)
 
         eps = [episode_obj(i, f"Ep {i}", ts=1782660730 + i) for i in range(1, 4)]
         self.provider = MockProvider(self.archive, {"1002156761": (show_data(), eps)})
@@ -576,6 +582,103 @@ class PodcastWebUITestCase(unittest.TestCase):
         self._login()
         self._subscribe()
         self.assertEqual(len(pf.episode_ids), 3)
+
+    # -- the show's own "archive new episodes automatically" switch ----------
+
+    def _prefetch(self):
+        class Prefetch:
+            def __init__(self):
+                self.episode_ids = []
+
+            def download_episode_ids(self, ids):
+                ids = list(ids)
+                self.episode_ids += ids
+                return len(ids)
+
+        pf = Prefetch()
+        self.app.deezer_prefetch = pf
+        return pf
+
+    def _switch(self, cid, on):
+        return self.client.post(
+            "/api/podcast/" + cid + "/auto_archive", json={"on": on}
+        )
+
+    def test_a_new_subscription_takes_the_admins_default(self):
+        from supysonic.deezer import rules
+
+        rules.save({"on_podcast": False})
+        pf = self._prefetch()
+        self._login()
+        body = self._subscribe().get_json()
+        self.assertFalse(body["auto_archive"])
+        self.assertEqual(pf.episode_ids, [])
+
+    def test_the_switch_off_keeps_a_show_out_of_the_archive(self):
+        from supysonic.deezer import backfill
+
+        pf = self._prefetch()
+        self._login()
+        cid = self._subscribe().get_json()["id"]
+        pf.episode_ids.clear()
+        rv = self._switch(cid, False)
+        self.assertEqual(rv.status_code, 200)
+        self.assertFalse(rv.get_json()["auto_archive"])
+        self.assertFalse(PodcastChannel[cid].auto_archive)
+        # Neither the nightly sweep nor a refresh reaches it any more.
+        alice = User.get(User.name == "alice")
+        self.assertEqual(backfill.collect(alice.id, True, "all")[1], [])
+        self.assertEqual(backfill.collect(alice.id, True, "podcasts")[1], [])
+        self.assertEqual(backfill.archive_show(self.app, PodcastChannel[cid]), 0)
+        self.assertEqual(pf.episode_ids, [])
+
+    def test_turning_the_switch_on_queues_what_is_missing_once(self):
+        from supysonic.deezer import rules
+
+        rules.save({"on_podcast": False})
+        pf = self._prefetch()
+        self._login()
+        cid = self._subscribe().get_json()["id"]
+        body = self._switch(cid, True).get_json()
+        self.assertTrue(body["auto_archive"])
+        # 3 listed, none on disk: 3 queued — on the background archiver, never
+        # downloaded in the request.
+        self.assertEqual(body["queued"], 3)
+        self.assertEqual(len(pf.episode_ids), 3)
+        self.assertEqual(body["archived_count"], 0)
+        self.assertEqual(body["episode_count"], 3)
+        self.assertNotIn("episodes", body)  # the answer stays small
+
+    def test_the_refresh_queues_the_new_episodes_of_a_switched_on_show(self):
+        from supysonic.deezer.importer import DeezerImporter
+        from supysonic.deezer import backfill
+
+        pf = self._prefetch()
+        self._login()
+        cid = self._subscribe().get_json()["id"]
+        # A new episode comes out; the nightly refresh lists it.
+        self.provider.shows["1002156761"][1].append(episode_obj(4, "Ep 4", ts=1782660790))
+        DeezerImporter(self.provider, "alice").sync_podcasts(episode_limit=30)
+        alice = User.get(User.name == "alice")
+        missing = {str(e.id) for e in backfill.collect(alice.id, True, "all")[1]}
+        self.assertIn(str(ids.episode_uuid("4")), missing)
+        self.assertEqual(len(missing), 4)
+        self.assertTrue(PodcastChannel[cid].auto_archive)
+
+    def test_the_switch_is_the_admins_and_checks_what_it_is_given(self):
+        self._login()
+        cid = self._subscribe().get_json()["id"]
+        self.assertEqual(self._switch(cid, "yes").status_code, 400)
+        self.assertEqual(self.client.post("/api/podcast/" + cid + "/auto_archive").status_code, 400)
+        self.assertEqual(self._switch("not-a-uuid", True).status_code, 404)
+        self.assertEqual(self._switch(str(ids.show_uuid("1")), True).status_code, 404)
+        UserManager.add("bob", "B0bb", admin=False)
+        self.client.post("/api/logout")
+        self.client.post("/api/login", json={"username": "bob", "password": "B0bb"})
+        self.assertEqual(self._switch(cid, False).status_code, 403)
+        self.assertTrue(PodcastChannel[cid].auto_archive)
+        self.client.post("/api/logout")
+        self.assertEqual(self._switch(cid, False).status_code, 401)
 
     def test_stream_archives_episode(self):
         self._login()

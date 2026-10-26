@@ -1857,7 +1857,21 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(rv.status_code, 200)
         data = rv.get_json()
         self.assertIn("1", [t["deezer_id"] for t in data["tracks"]])
+        # The artists and albums come from the library too: those holding a
+        # title on disk, matched by name.
+        self.assertEqual([a["title"] for a in data["albums"]], ["Archived Album"])
+        self.assertEqual([a["name"] for a in data["artists"]], ["Archived Artist"])
+        self.assertTrue(data["artists"][0]["id"])
+
+    def test_the_library_search_lists_only_what_plays_from_disk(self):
+        # An album whose titles are only imported (nothing on disk) cannot be
+        # played while Deezer is out: it is not offered.
+        self._login()
+        self._make_deezer_track(sng_id="42", title="Ghost Only", archived=False)
+        self._deezer_login_fails()
+        data = self.client.get("/api/search?q=Archived").get_json()
         self.assertEqual(data["albums"], [])
+        self.assertEqual(data["artists"], [])
 
     def test_artist_pages_fall_back_to_the_library_when_login_fails(self):
         self._login()
@@ -2648,7 +2662,8 @@ class WebUITestCase(unittest.TestCase):
 
     def test_favoriting_an_artist_archives_the_whole_discography(self):
         """Every track of every official release — and each one only once, even
-        though gw lists the same record under several tabs/editions."""
+        though gw lists the same record under several tabs/editions. (Off by
+        default since starring an artist means following it: switched on.)"""
         from supysonic.deezer import backfill, rules
 
         rules.save({"on_fav_artist": True})
@@ -2669,6 +2684,9 @@ class WebUITestCase(unittest.TestCase):
             return real(alb_id)
 
         self.app.deezer.get_album_tracks = flaky
+        from supysonic.deezer import rules
+
+        rules.save({"on_fav_artist": True})
         thread = backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
         thread.join(timeout=5)
         # Album 11 still got archived.

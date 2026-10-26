@@ -299,7 +299,61 @@ def discover_mute():
 # -- the releases ---------------------------------------------------------------------
 
 
-def _user_releases(user, limit=RELEASES_MAX):
+#: Titles in the releases' flat list (the home shows the first of each release).
+RELEASE_TRACKS_MAX = 400
+
+
+def _release_tracks(rows, new_refs):
+    """The titles of ``rows`` (ArtistRelease, already ordered newest first),
+    each release's in its own order, as track dicts the player streams by
+    their Deezer id. A title the library already holds is served from its row
+    (archived, its own gain, its own credits); the rest are catalogue titles."""
+    out = []
+    for r in rows:
+        meta = {
+            "deezer_id": r.ref, "title": r.title, "kind": r.kind, "released": r.released,
+            "nb_tracks": r.nb_tracks, "cover": r.cover,
+        }
+        for t in releases.release_tracks(r):
+            artists = [{"deezer_id": a[0], "name": a[1], "role": "Main" if i == 0 else "Featured"}
+                       for i, a in enumerate(t.get("a") or []) if isinstance(a, list) and len(a) == 2]
+            main = artists[0] if artists else {"deezer_id": r.artist_ref, "name": r.artist_name}
+            out.append({
+                "deezer_id": str(t["r"]),
+                "title": str(t.get("t") or ""),
+                "duration": int(t.get("d") or 0),
+                "explicit": bool(t.get("e")),
+                "gain": None,
+                "artist": {"deezer_id": main["deezer_id"], "name": main["name"]},
+                "artists": artists or [dict(main, role="Main")],
+                "display_artist": ", ".join(a["name"] for a in artists) or main["name"],
+                "album": {"deezer_id": r.ref, "title": r.title, "cover": r.cover},
+                "release": meta,
+                "new": r.ref in new_refs,
+            })
+            if len(out) >= RELEASE_TRACKS_MAX:
+                break
+        if len(out) >= RELEASE_TRACKS_MAX:
+            break
+    ids = [t["deezer_id"] for t in out]
+    held = {}
+    for i in range(0, len(ids), 500):
+        held.update({
+            str(dz): tid
+            for tid, dz in Track.select(Track.id, Track.deezer_id)
+            .where(Track.deezer_id.in_(ids[i : i + 500]))
+            .tuples()
+        })
+    if held:
+        rows_ = {r["deezer_id"]: r for r in _tracks_in_order(list(held.values()))}
+        for k, t in enumerate(out):
+            row = rows_.get(t["deezer_id"])
+            if row is not None:
+                out[k] = dict(row, release=t["release"], new=t["new"])
+    return out
+
+
+def _user_releases(user, limit=RELEASES_MAX, with_rows=False):
     conf = releases.settings()
     favs = releases.favourite_refs("deezer", users=[user.id])
     heard = {r: n for r, n in releases.listened_refs("deezer", users=[user.id]).items() if r not in favs}
@@ -307,7 +361,7 @@ def _user_releases(user, limit=RELEASES_MAX):
              if r not in heard}
     refs = list(favs) + list(heard) + [r for r in close if r not in favs]
     if not refs:
-        return [], 0
+        return ([], 0, []) if with_rows else ([], 0)
     since = (now().date() - datetime.timedelta(days=conf["window"])).isoformat()
     row = UserTaste.get_or_none(UserTaste.user == user)
     seen = row.releases_seen if row is not None else None
@@ -325,7 +379,7 @@ def _user_releases(user, limit=RELEASES_MAX):
         ):
             names.setdefault(o, favs.get(a))
         close_to = names
-    out, unseen = [], 0
+    out, unseen, shown = [], 0, []
     rows = []
     for i in range(0, len(refs), 500):
         rows += list(
@@ -340,6 +394,7 @@ def _user_releases(user, limit=RELEASES_MAX):
     tier.update({r: 1 for r in heard if r not in tier})
     rows.sort(key=lambda r: (r.released or "", -tier.get(r.artist_ref, 2), r.found), reverse=True)
     for r in releases.shown_releases(rows)[:limit]:
+        shown.append(r)
         is_close = r.artist_ref not in favs and r.artist_ref not in heard
         new = seen is None or r.found > seen
         unseen += 1 if new else 0
@@ -350,14 +405,22 @@ def _user_releases(user, limit=RELEASES_MAX):
             close_to=close_to.get(r.artist_ref) if is_close else None,
             new=new,
         ))
-    return out, unseen
+    return (out, unseen, shown) if with_rows else (out, unseen)
 
 
 @webapi.route("/releases")
 @login_required
 def my_releases():
-    items, unseen = _user_releases(request.webuser)
-    return jsonify({"releases": items, "unseen": unseen})
+    """The releases as cards, and their TITLES as one list (newest release
+    first): the home lists new titles, not albums to open first."""
+    items, unseen, rows = _user_releases(request.webuser, with_rows=True)
+    new_refs = {c["deezer_id"] for c in items if c["new"]}
+    return jsonify({
+        "releases": items,
+        "unseen": unseen,
+        "tracks": _release_tracks(rows, new_refs),
+        "pending": sum(1 for r in rows if r.tracks is None),
+    })
 
 
 @webapi.route("/releases/seen", methods=["POST"])

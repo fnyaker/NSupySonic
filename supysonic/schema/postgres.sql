@@ -199,7 +199,8 @@ CREATE TABLE IF NOT EXISTS podcast_channel (
     last_fetched TIMESTAMP,
     error_message VARCHAR(256),
     subscribed BOOLEAN NOT NULL DEFAULT true,
-    gone TIMESTAMP
+    gone TIMESTAMP,
+    auto_archive BOOLEAN NOT NULL DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS index_podcast_channel_user_id_fk ON podcast_channel(user_id);
 
@@ -411,6 +412,7 @@ CREATE TABLE IF NOT EXISTS artist_release (
     kind VARCHAR(12),
     released VARCHAR(10),
     nb_tracks INTEGER,
+    tracks TEXT,
     found TIMESTAMP NOT NULL,
     PRIMARY KEY (provider, ref)
 );

@@ -21,6 +21,7 @@ tests
 docs
 android
 CLAUDE.md
+AGENTS.md
 # The SPA's test suite and benches: vite never reads them.
 webapp/test
 

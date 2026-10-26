@@ -19,6 +19,7 @@ its gzipped size. Nothing here touches the network.
 import argparse
 import collections
 import contextlib
+import datetime
 import gzip
 import json
 import os
@@ -118,6 +119,27 @@ def populate(app, n_tracks, n_playlists, n_fav, big_playlist):
         StarredTrack.insert_many(
             [{"user": admin.id, "starred": t.id} for t in r.sample(tracks, min(n_fav, len(tracks)))]
         ).execute()
+        # Followed artists, kept albums, and what the followed put out lately
+        # (the home's "Nouveautés" and "Tes artistes", the library's chips).
+        from supysonic.db import Album, Artist, ArtistRelease, StarredAlbum, StarredArtist
+
+        rows = list(Artist.select().where(Artist.deezer_id.is_null(False)).limit(300))
+        StarredArtist.insert_many([{"user": admin.id, "starred": a.id} for a in rows]).execute()
+        StarredAlbum.insert_many(
+            [{"user": admin.id, "starred": a.id} for a in Album.select().limit(200)]
+        ).execute()
+        today = datetime.date.today()
+        rel = []
+        for k, a in enumerate(rows[:60]):
+            hits = [{"r": str(9_000_000 + k * 20 + j), "t": title(r), "d": r.randint(120, 300), "e": False,
+                     "a": [[a.deezer_id, a.name]]} for j in range(r.choice((1, 1, 4, 12)))]
+            rel.append({
+                "provider": "deezer", "ref": str(8_000_000 + k), "artist_ref": a.deezer_id,
+                "artist_name": a.name, "title": title(r), "kind": "single" if len(hits) == 1 else "album",
+                "released": (today - datetime.timedelta(days=k)).isoformat(), "nb_tracks": len(hits),
+                "tracks": json.dumps(hits), "found": datetime.datetime.now(),
+            })
+        ArtistRelease.insert_many(rel).execute()
         return {
             "big": str(pls[0].id),
             "small": str(pls[-1].id),
@@ -250,6 +272,10 @@ def main():
     routes = [
         ("GET", "/api/me", None),
         ("GET", "/api/home", None),
+        ("GET", "/api/releases", None),
+        ("GET", "/api/me/artists", None),
+        ("GET", "/api/me/albums", None),
+        ("GET", "/api/recommend?d=0.30", None),
         ("GET", "/api/me/playlists", None),
         ("GET", "/api/genre/tree", None),
         ("GET", "/api/me/favorites", None),

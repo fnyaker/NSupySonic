@@ -204,6 +204,8 @@ POLICY = {
     "my_favorite_ids": "read",
     "my_local": "read",
     "my_favorites": "read",
+    "my_artists": "read",
+    "my_albums": "read",
     "podcasts": "read",
     "podcast": "read",
     "podcast_progress": "read",
@@ -225,6 +227,7 @@ POLICY = {
     # changing what is kept: the owner's own actions
     "subscribe_podcast": "full",
     "unsubscribe_podcast": "full",
+    "podcast_auto_archive": "full",
     "save_podcast_progress": "full",
     "add_episode_marker": "full",
     "delete_episode_marker": "full",

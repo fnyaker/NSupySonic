@@ -258,7 +258,7 @@ const queue = ids.ids.slice(0, 3).map((id, k) => song(id, k + 1));
   // The setting off, mid-song: handed back to a page <audio> at the same place.
   const before = await where(page);
   const tb = Date.now();
-  await page.evaluate(() => (location.hash = "#/settings"));
+  await page.evaluate(() => (location.hash = "#/settings/playback"));
   await page.locator(".native-tg").click();
   await page.waitForTimeout(2500);
   w = await where(page);
@@ -311,7 +311,7 @@ const queue = ids.ids.slice(0, 3).map((id, k) => song(id, k + 1));
   // Réglages says so, with a way back.
   for (const [name, vp] of [["desktop", { width: 1280, height: 900 }], ["phone", { width: 390, height: 844 }]]) {
     await page.setViewportSize(vp);
-    await page.evaluate(() => (location.hash = "#/settings"));
+    await page.evaluate(() => (location.hash = "#/settings/playback"));
     await page.waitForSelector(".native-fail");
     const card = page.locator("section.card", { has: page.locator(".out-seg") });
     const box = await card.boundingBox();
@@ -333,7 +333,7 @@ const queue = ids.ids.slice(0, 3).map((id, k) => song(id, k + 1));
 for (const [name, vp] of [["desktop", { width: 1280, height: 900 }], ["phone", { width: 390, height: 844 }]]) {
   const ctx = await browser.newContext({ viewport: vp, deviceScaleFactor: 2 });
   const page = await open(ctx, { "audio.native": true }, queue);
-  await page.evaluate(() => (location.hash = "#/settings"));
+  await page.evaluate(() => (location.hash = "#/settings/playback"));
   await page.waitForSelector(".out-seg");
   const card = page.locator("section.card", { has: page.locator(".out-seg") });
   const box = await card.boundingBox();

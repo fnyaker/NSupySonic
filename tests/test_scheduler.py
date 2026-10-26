@@ -5,7 +5,7 @@
 
 """The auto-sync scheduler (supysonic/deezer/scheduler.py).
 
-What it must guarantee, from the resilience rules in CLAUDE.md: a sync is
+What it must guarantee, from the resilience rules in docs/agents/server.md: a sync is
 POSTPONED while Deezer is unreachable instead of failing on every entity, the
 local scan still runs (it has nothing to do with Deezer), the postponement is
 bounded, two syncs never run at once, and a sync that blows up never takes the

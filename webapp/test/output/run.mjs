@@ -219,7 +219,7 @@ check(!!verdict && verdict.conn === "c1" && Math.abs(verdict.retryAt - verdict.a
 
 // -- 3. Réglages says so -----------------------------------------------------------
 await page.locator('button[aria-label="Réduire"]').first().click();
-await page.goto(base + "/app/#/settings");
+await page.goto(base + "/app/#/settings/playback");
 await page.waitForTimeout(800);
 await page.getByRole("tab", { name: "Audio" }).click().catch(() => {});
 await page.waitForTimeout(500);

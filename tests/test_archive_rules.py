@@ -192,6 +192,13 @@ class EventRulesTestCase(RulesTestBase):
         thread.join(timeout=5)
         self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"])
 
+    def test_starring_an_artist_archives_nothing_by_default(self):
+        """Starring an artist is following it; its discography is opt-in."""
+        from supysonic.deezer import backfill
+
+        self.assertIsNone(backfill.archive_entity(self.app, self.app.deezer, "artist", "9"))
+        self.assertEqual(self.app.deezer_prefetch.ids, [])
+
     def test_artist_scope_releases_takes_the_most_recent_n(self):
         from supysonic.deezer import backfill
 

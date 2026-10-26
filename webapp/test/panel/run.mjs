@@ -43,7 +43,9 @@ await ctx.route(/\/api\/track\/[^/]+\/credits$/, (r) => {
     info: { isrc: "FRZ111200001", released: "2001-03-12", label: "Un Label", album: "Un Album" },
   });
 });
-await ctx.route(/\/api\/artist\/\d+$/, (r) => {
+// The player names the artist by its library id when it has one (entityRef:
+// `id || deezer_id`), by Deezer's otherwise: both are this artist here.
+await ctx.route(/\/api\/artist\/[^/?]+$/, (r) => {
   asked.push(new URL(r.request().url()).pathname);
   return json(r, {
     artist: { deezer_id: "9", name: "Le Groupe", picture: "", nb_fan: 1234567 },
@@ -105,8 +107,8 @@ if (DESKTOP) {
   await checkOrder(".more");
   await page.waitForTimeout(2500); // the player ticks four times a second meanwhile
   check(asked.filter((u) => /\/credits$/.test(u)).length === 1, "the credits are asked once, not on every tick of the player", `${asked.filter((u) => /\/credits$/.test(u)).length} request(s)`);
-  check(asked.filter((u) => /radio\/track/.test(u)).length === 1 && asked.filter((u) => /artist\/\d+$/.test(u)).length === 1, "and neither is the rest");
-  check(asked.some((u) => /radio\/track\/\d+$/.test(u)), "the tab asks for the mix of the playing track", asked.join(" "));
+  check(asked.filter((u) => /radio\/track/.test(u)).length === 1 && asked.filter((u) => /artist\/[^/]+$/.test(u)).length === 1, "and neither is the rest");
+  check(asked.some((u) => /radio\/track\/[^/]+$/.test(u)), "the tab asks for the mix of the playing track", asked.join(" "));
   check((await page.locator(".more .row.track").count()) >= 5, "and lists similar tracks");
   check((await page.locator(".more .aname").textContent()).trim() === "Le Groupe", "with the artist under them");
   check((await page.locator(".more h4", { hasText: "Artistes similaires" }).count()) === 1, "and related artists");
@@ -205,7 +207,7 @@ if (DESKTOP) {
   await page.waitForTimeout(400);
   await page.locator(".under .artist").click();
   await page.waitForTimeout(600);
-  check((await page.locator(".m").count()) === 0 && page.url().includes("#/artist/9"), "the artist card goes to the artist and leaves the player", page.url().split("#")[1]);
+  check((await page.locator(".m").count()) === 0 && page.url().includes("#/artist/"), "the artist card goes to the artist and leaves the player", page.url().split("#")[1]);
 }
 
 await browser.close();
