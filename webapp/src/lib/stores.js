@@ -515,6 +515,17 @@ export function closeShare() {
   shareSheet.set(null);
 }
 
+// -- credits sheet -----------------------------------------------------------
+// { track } | null — who wrote, composed and produced a track, opened from any
+// track's menu (the full-screen player shows the same under the cover).
+export const creditsSheet = writable(null);
+export function openCredits(track) {
+  if (trackKey(track) && !track.podcast) creditsSheet.set({ track });
+}
+export function closeCredits() {
+  creditsSheet.set(null);
+}
+
 // -- replacement sheet -------------------------------------------------------
 // { track } | null — a track that can no longer be played, and the sheet that
 // finds it a stand-in (a close match, or a file of your own) and swaps it

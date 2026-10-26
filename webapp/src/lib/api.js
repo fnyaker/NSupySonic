@@ -446,6 +446,12 @@ export const api = {
   // radios
   trackRadio: (id) => req("/radio/track/" + id),
   trackCredits: (id) => req("/track/" + id + "/credits"),
+  // Every track of the library a person is credited on (not as performer).
+  personCreditsPath: (name) => "/credits/person?name=" + encodeURIComponent(name),
+  // The credits of the library completed in the background (admin, worker + poll).
+  creditsBackfill: (force = false) =>
+    req("/credits/backfill" + (force ? "?force=1" : ""), { method: "POST" }),
+  creditsBackfillStatus: () => req("/credits/backfill"),
   artistRadio: (id) => req("/radio/artist/" + id),
   // The next titles of a radio already playing: its ORIGINAL seed and the
   // session (heard through, skipped, queued) — never the queue's last title,

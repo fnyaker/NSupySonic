@@ -4,7 +4,7 @@
 import { migrateKey, trackKey, trackRef } from "./trackkey.js";
 import { get } from "svelte/store";
 
-import { REMOTE, CAN_KEEP } from "./remote/mode.js";
+import { REMOTE, CAN_KEEP, CAN_BROWSE } from "./remote/mode.js";
 import { api } from "./api.js";
 import {
   favorites,
@@ -20,6 +20,7 @@ import {
   openShare,
   openReplace,
   openGenreTag,
+  openCredits,
 } from "./stores.js";
 import { downloadTrack, removeTrack, isDownloaded } from "./offline.js";
 import { addMarkerAt } from "./markers.js";
@@ -657,6 +658,8 @@ export function buildTrackMenu(track, nav) {
       action: () => toggleFavorite(track),
     });
   items.push("divider");
+  // Who wrote, composed and produced it — over the current screen.
+  if (CAN_BROWSE) items.push({ label: "Voir les crédits", icon: "users", action: () => openCredits(track) });
   // One entry per credited artist. A single credit stays a plain item (the
   // common case shouldn't grow a submenu for nothing); a feat. track opens a
   // submenu so the guest is reachable too.

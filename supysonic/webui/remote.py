@@ -217,6 +217,7 @@ POLICY = {
     "track_analyses": "read",  # a POST, and a read
     "probe_track": "read",
     "track_credits": "read",
+    "person_credits": "read",
     "unavailable_tracks": "read",
     "replacement_candidates": "read",
     "replace_status": "read",
@@ -293,6 +294,7 @@ POLICY = {
     "similar_rebuild_status": "admin",
     "enrich_backfill_start": "admin",
     "enrich_backfill_status": "admin",
+    "credits_backfill": "admin",
     "home_mix": "read",
     "genre_tree": "read",
     "genre_tree_edge": "admin",

@@ -31,6 +31,7 @@
   import Icon from "../components/Icon.svelte";
   import HardReload from "../components/HardReload.svelte";
   import EnrichBackfill from "../components/EnrichBackfill.svelte";
+  import CreditsBackfill from "../components/CreditsBackfill.svelte";
   import { youtubeStatus, loadYoutubeStatus, setYoutubeEnabled } from "../lib/youtube.js";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
@@ -857,6 +858,9 @@
 
   <h3>Faits complétés par MusicBrainz</h3>
   <EnrichBackfill />
+
+  <h3>Crédits des titres</h3>
+  <CreditsBackfill />
 </section>
 {/if}
 

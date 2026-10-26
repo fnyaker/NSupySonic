@@ -496,3 +496,14 @@ CREATE TABLE IF NOT EXISTS listen_event (
 CREATE INDEX IF NOT EXISTS index_listen_event_user_at ON listen_event(user_id, at);
 CREATE INDEX IF NOT EXISTS index_listen_event_user_track ON listen_event(user_id, track_id);
 CREATE INDEX IF NOT EXISTS index_listen_event_track_id_fk ON listen_event(track_id);
+CREATE TABLE IF NOT EXISTS track_credit (
+    id SERIAL PRIMARY KEY,
+    track_id UUID NOT NULL REFERENCES track ON DELETE CASCADE,
+    source VARCHAR(16) NOT NULL,
+    role VARCHAR(40) NOT NULL,
+    name VARCHAR(160) NOT NULL,
+    name_key VARCHAR(160) NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS index_track_credit_track_source ON track_credit(track_id, source);
+CREATE INDEX IF NOT EXISTS index_track_credit_name_key ON track_credit(name_key);
