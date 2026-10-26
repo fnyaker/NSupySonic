@@ -417,11 +417,14 @@ function createToasts() {
   let id = 0;
   return {
     subscribe,
-    push(message, kind = "info", ttl = 2600) {
+    // `action` ({ label, run }) puts one button in the toast ("Annuler"); such
+    // a toast stays long enough to reach it.
+    push(message, kind = "info", ttl = 2600, action = null) {
       // Every verdict the app shows the user belongs in the log — a toast is
       // often the ONLY trace of a failure that was handled and swallowed.
       logInfo("toast", `[${kind}] ${message}`, null, { important: kind === "error" });
-      const t = { id: ++id, message, kind };
+      if (action) ttl = Math.max(ttl, 6000);
+      const t = { id: ++id, message, kind, action };
       update((list) => [...list, t]);
       setTimeout(() => update((list) => list.filter((x) => x.id !== t.id)), ttl);
     },
@@ -612,6 +615,9 @@ function createFavorites() {
   };
 }
 export const favorites = createFavorites();
+// The titles the person said they do not like (same keys as the hearts): they
+// leave the Flow, the radios and the mixes (supysonic/dislikes.py).
+export const disliked = createFavorites();
 
 // Full favorite tracks (with metadata), cached so re-opening the library is
 // instant. null = never loaded yet. See actions.loadMyFavorites.

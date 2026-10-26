@@ -36,7 +36,7 @@ from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "20261030"
+SCHEMA_VERSION = "20261031"
 
 
 def now():
@@ -1408,6 +1408,8 @@ class UserTaste(_Model):
     discovery = FloatField(default=0.35)
     releases_seen = DateTimeField(null=True)
     updated = DateTimeField(null=True)
+    # The Flow's starting energy (0 calm .. 1 intense), None for "any".
+    energy = FloatField(null=True)
 
     class Meta:
         table_name = "user_taste"
@@ -1425,6 +1427,20 @@ class ArtistMute(_Model):
     class Meta:
         table_name = "artist_mute"
         primary_key = CompositeKey("user", "provider", "ref")
+
+
+class TrackDislike(_Model):
+    """A title a person does not want to hear again: it and the titles that
+    sound almost the same leave their Flow, radios and mixes
+    (supysonic/dislikes.py). What they play themselves is never touched."""
+
+    user = ForeignKeyField(User, backref="+", on_delete="CASCADE")
+    track = ForeignKeyField(Track, backref="+", on_delete="CASCADE")
+    created = DateTimeField(default=now)
+
+    class Meta:
+        table_name = "track_dislike"
+        primary_key = CompositeKey("user", "track")
 
 
 class ListenEvent(_Model):
@@ -1708,6 +1724,7 @@ def _migration_order():
         ArtistMute,  # after User
         ListenEvent,  # after User and Track
         TrackCredit,  # after Track
+        TrackDislike,  # after User and Track
     ]
 
 

@@ -48,7 +48,7 @@ import random
 import threading
 import time
 
-from . import genretree, listening, mix
+from . import dislikes, genretree, listening, mix
 from .db import (
     Album, Artist, ArtistLink, ArtistMute, ArtistRelease, ArtistTop, StarredAlbum,
     StarredArtist, StarredTrack, Track, TrackAnalysis, TrackNeighbor, UserTaste,
@@ -156,6 +156,7 @@ class Taste:
         self.artist_refs = {}  # artist id -> Deezer id (the provider refs)
         self.muted = set()  # (provider, ref)
         self.history = listening.History()  # skips, last heard
+        self.dislikes = dislikes.Dislikes()
 
     def top_artists(self, n):
         return [a for a, _ in sorted(self.artists.items(), key=lambda p: -p[1])[:n]]
@@ -212,6 +213,7 @@ def _build(user) -> Taste:
     # each title, skips kept apart.
     hist = listening.history(user, today) if user is not None else listening.History()
     t.history = hist
+    t.dislikes = dislikes.load(user) if user is not None else dislikes.Dislikes()
     for tid, a in hist.track.items():
         t.played.add(tid)
         t.tracks[tid] = t.tracks.get(tid, 0.0) + a
@@ -273,6 +275,10 @@ def _build(user) -> Taste:
             .where(ArtistMute.user == user)
             .tuples()
         }
+    # A title the person said they do not like is not part of their taste,
+    # however often it played.
+    for tid in t.dislikes.tracks:
+        t.tracks.pop(tid, None)
     # The genres of what is loved, in ONE statement: the analysis joined to the
     # tracks that carry a weight (played, or starred by this person).
     if t.tracks:
@@ -318,7 +324,7 @@ def _build(user) -> Taste:
 
 class Cand:
     __slots__ = ("key", "track", "provider", "ref", "artist", "artist_ref", "dist",
-                 "rel", "why", "info")
+                 "rel", "why", "info", "mult")
 
     def __init__(self, key, dist, rel, why, track=None, provider=None, ref=None,
                  artist=None, artist_ref=None, info=None):
@@ -332,6 +338,7 @@ class Cand:
         self.rel = rel
         self.why = why
         self.info = info
+        self.mult = 1.0  # what the person's dislikes leave of its score
 
 
 def _recent_cutoff():
@@ -395,7 +402,9 @@ def track_candidates(user, taste, rng, with_catalog=True):
         return w
 
     # Known: the titles the taste rests on.
-    top = sorted(taste.tracks.items(), key=lambda p: -p[1])[:KNOWN_POOL]
+    disliked = taste.dislikes
+    top = [p for p in sorted(taste.tracks.items(), key=lambda p: -p[1])
+           if p[0] not in disliked.excluded][:KNOWN_POOL]
     if top:
         wanted = [k for k, _ in top if not hist.rejected(k)]
         for i in range(0, len(wanted), 500):
@@ -514,7 +523,23 @@ def track_candidates(user, taste, rng, with_catalog=True):
             styles[style] = g
         _offer(pool, Cand(tid, 0.45 + 0.5 * g, max(0.1, 1.0 - g), f"Un peu de {style}",
                           track=tid, artist=aid))
+    if disliked:
+        apply_dislikes(pool, disliked)
     return pool
+
+
+def apply_dislikes(pool, disliked):
+    """Out of ``pool``: what the person dislikes and what sounds almost the
+    same; the farther neighbours keep a share of their score (dislikes.py)."""
+    for key, c in list(pool.items()):
+        if c.track is not None:
+            f = disliked.factor(c.track)
+        else:
+            f = 0.0 if c.provider == "deezer" and str(c.ref) in disliked.deezer else 1.0
+        if f <= 0.0:
+            pool.pop(key, None)
+        else:
+            c.mult = f
 
 
 def _sample_unplayed(fresh, taste, rng):
@@ -588,7 +613,7 @@ def pick(pool, level, n, rng, known_share=0.0, exclude=()):
     n_known = min(len(known), int(round(n * known_share)))
 
     def item(c, score):
-        return mix.Item(c.key, score, artist=_artist_key(c), track=c.track, payload=c)
+        return mix.Item(c.key, score * c.mult, artist=_artist_key(c), track=c.track, payload=c)
 
     def near(c):
         return math.exp(-8.0 * abs(c.dist - level))

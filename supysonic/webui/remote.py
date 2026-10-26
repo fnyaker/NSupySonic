@@ -194,6 +194,8 @@ POLICY = {
     "discover_prefs": "read",
     "discover_prefs_set": "full",
     "discover_mute": "full",
+    "dislike": "full",
+    "my_dislikes": "read",
     "my_releases": "read",
     "releases_seen": "full",
     "releases_settings": "admin",

@@ -448,6 +448,7 @@ CREATE TABLE IF NOT EXISTS user_taste (
     discovery FLOAT NOT NULL DEFAULT 0.35,
     releases_seen DATETIME,
     updated DATETIME,
+    energy FLOAT,
     CONSTRAINT user_taste_user_fk FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
     PRIMARY KEY (user_id)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -509,4 +510,12 @@ CREATE TABLE IF NOT EXISTS track_credit (
     CONSTRAINT track_credit_track_fk FOREIGN KEY (track_id) REFERENCES track(id) ON DELETE CASCADE,
     INDEX index_track_credit_track_source (track_id, source),
     INDEX index_track_credit_name_key (name_key)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS track_dislike (
+    user_id CHAR(32) NOT NULL,
+    track_id CHAR(32) NOT NULL,
+    created DATETIME NOT NULL,
+    CONSTRAINT track_dislike_user_fk FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
+    CONSTRAINT track_dislike_track_fk FOREIGN KEY (track_id) REFERENCES track(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, track_id)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

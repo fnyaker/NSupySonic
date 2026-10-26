@@ -109,7 +109,8 @@ class TasteTestCase(_Library):
 
     def test_the_profile_costs_a_bounded_number_of_statements(self):
         n = count_statements(lambda: discover.profile(self.user, fresh=True))
-        self.assertLessEqual(n, 10)
+        # 10, plus the person's dislikes (one statement when there are none)
+        self.assertLessEqual(n, 11)
 
 
 class LevelTestCase(_Library):
@@ -260,7 +261,7 @@ class RoutesTestCase(_Library):
         self.app.deezer = None  # whatever Deezer is doing, the screens answer
         discover.invalidate()
         n = count_statements(lambda: self.client.get("/api/recommend?d=0.5&seed=q"))
-        self.assertLessEqual(n, 40)
+        self.assertLessEqual(n, 41)  # 40, plus the dislikes
         n = count_statements(lambda: self.client.get("/api/flow?d=0.5&seed=q"))
         self.assertLessEqual(n, 30)
         self.assertEqual(self.client.get("/api/releases").status_code, 200)

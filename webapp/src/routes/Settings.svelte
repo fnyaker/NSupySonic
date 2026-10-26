@@ -40,6 +40,7 @@
   import MyAccounts from "../components/MyAccounts.svelte";
   import ServicesSettings from "../components/ServicesSettings.svelte";
   import DiscoverySlider from "../components/DiscoverySlider.svelte";
+  import DislikedTracks from "../components/DislikedTracks.svelte";
 
   const QUALITIES = [
     { id: "FLAC", label: "FLAC", hint: "Sans perte — lourd" },
@@ -78,7 +79,7 @@
     ...(CAN_KEEP ? [{ id: "playback", label: "Lecture", icon: "speaker", hint: "Sortie audio, volume, égaliseur, transitions" }] : []),
     { id: "viz", label: "Animations", icon: "sparkles", hint: "Ce qui s'anime pendant la lecture" },
     ...(REMOTE ? [] : [{ id: "downloads", label: "Téléchargements", icon: "download", hint: "Qualité, hors-ligne, préchargement" }]),
-    { id: "discovery", label: "Découverte", icon: "compass", hint: "Flow, nouveautés de vos artistes" },
+    { id: "discovery", label: "Découverte", icon: "compass", hint: "Flow, titres que vous n'aimez pas, nouveautés" },
     ...(REMOTE ? [] : [{ id: "sources", label: "Sources", icon: "link", hint: "Ordre des sources, vos comptes, et qui peut s'en servir" }]),
     { id: "account", label: REMOTE ? "Contrôle" : "Compte", icon: "user", hint: REMOTE ? "Le lecteur que vous pilotez" : "Votre compte, l'export vers d'autres services" },
     ...($user?.admin && ADMIN() ? [{ id: "server", label: "Serveur", icon: "archive", hint: "Archive, nettoyage, stockage, quotas" }] : []),
@@ -1103,6 +1104,8 @@
   </p>
   <DiscoverySlider bare />
 </section>
+
+{#if CAN_KEEP}<DislikedTracks />{/if}
 
 {#if $user?.admin && CAN_ADMIN && rel}
   <section class="card">

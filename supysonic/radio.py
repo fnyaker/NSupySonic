@@ -22,7 +22,9 @@ titles in the same order. Now (design and sources:
   is something to vary between.
 * **Personal, lightly.** The person's own affinity lifts an artist a little,
   their skips push a title or an artist down, a title they skipped twice and
-  never heard through is not offered at all.
+  never heard through is not offered at all, nor one they said they do not
+  like or one that sounds almost the same (``dislikes.py``: its farther
+  neighbours are pushed down, so a seed right next to them still reaches them).
 * **Assembled** by ``mix.assemble``: a draw proportional to the score, MMR over
   the last titles, at most three of one artist, never two within three.
 
@@ -33,7 +35,7 @@ import datetime
 import math
 import random
 
-from . import listening, mix
+from . import dislikes, listening, mix
 from .db import Track, TrackAnalysis, TrackNeighbor, now
 
 #: The session's positive anchors weigh this share of the seed, together.
@@ -193,7 +195,9 @@ def build(user, seeds, n=40, recent=(), skipped=(), exclude=(), rng=None,
     if sum(1 for v in scores.values() if v > 0) < n * 2 and seeds:
         _fallback(scores, seeds, user, rng)
     hist = listening.history(user) if user is not None else listening.History()
+    disliked = dislikes.load(user) if user is not None else dislikes.Dislikes()
     blocked = set(exclude) | set(skipped) | set(recent) | (set(seeds) if block_seeds else set())
+    blocked |= disliked.excluded - set(seeds)
     ranked = [
         (t, s) for t, s in sorted(scores.items(), key=lambda p: -p[1])
         if s > 0 and t not in blocked and not hist.rejected(t)
@@ -226,6 +230,7 @@ def build(user, seeds, n=40, recent=(), skipped=(), exclude=(), rng=None,
         w *= 1.0 - 0.5 * hist.artist_skip_ratio(aid)
         if aid in session_skipped_artists and aid != seed_artist:
             w *= 0.5
+        w *= disliked.factors.get(tid, 1.0)
         items.append(mix.Item(tid, max(w, 1e-300), artist=aid, album=alid, style=style, track=tid))
     caps = {seed_artist: seed_artist_cap} if seed_artist is not None else None
     picked = mix.assemble(items, n, rng, temperature=1.0, caps=caps)

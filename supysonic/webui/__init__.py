@@ -1932,6 +1932,11 @@ def home_mix(slug):
         .order_by(Track.play_count.desc(), Track.id)
         .tuples()
     ]
+    from .. import dislikes
+
+    gone = dislikes.load(request.webuser).excluded
+    if gone:
+        ids = [i for i in ids if i not in gone]
     rest = ids[1:]
     random.Random(f"{slug}:{now().date().isoformat()}").shuffle(rest)
     picked = ids[:1] + rest[: _MIX_SIZE - 1]
@@ -2870,6 +2875,17 @@ def my_favorite_ids():
             .where(star.user == request.webuser)
             .tuples()
         ]
+    # The titles the person said they do not like, by the same key, so the
+    # menus show "Je n'aime plus" without asking again.
+    from ..db import TrackDislike
+
+    out["disliked"] = [
+        str(dz) if dz else _uuid_text(tid)
+        for tid, dz in Track.select(_raw(Track.id), Track.deezer_id)
+        .join(TrackDislike, on=(TrackDislike.track == Track.id))
+        .where(TrackDislike.user == request.webuser)
+        .tuples()
+    ]
     return jsonify(out)
 
 
