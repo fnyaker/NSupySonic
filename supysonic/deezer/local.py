@@ -28,6 +28,7 @@ from datetime import datetime
 
 import mediafile
 
+from .. import trackcredits
 from ..db import Album, Artist, Track, User
 from ..filetags import read_file_facts
 from . import ids, library
@@ -143,6 +144,14 @@ def import_local_file(path: str, root, owner=None) -> Track | None:
             library.update_track_facts(track, carried, "tags")
         except Exception:
             logger.debug("Could not write the facts of %s", path, exc_info=True)
+        # Who the owner credited (composer, lyricist, producer): a database
+        # read for the credits panel and for each person's credits page.
+        people = {k: trackcredits.split_names(facts[k]) for k in ("composer", "lyricist", "producer") if facts.get(k)}
+        if people:
+            try:
+                trackcredits.store(track.id, people, "tags")
+            except Exception:
+                logger.debug("Could not store the credits of %s", path, exc_info=True)
     return track
 
 

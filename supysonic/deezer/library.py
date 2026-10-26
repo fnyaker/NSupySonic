@@ -401,6 +401,24 @@ def update_track_facts(
     return _write_sidecar(metadata_path(track), data)
 
 
+def add_sidecar_fields(track, fields: dict) -> bool:
+    """Complete the sidecar's ``gw`` block with ``fields`` (whitelisted, see
+    ``_KEEP_FIELDS``) learnt after the archive was written — the credits of a
+    track archived before they were kept. Returns True when the file changed.
+    """
+    if not track.path:
+        return False
+    data = read_track_metadata(track)
+    if data is None:
+        return False
+    gw = data.get("gw") if isinstance(data.get("gw"), dict) else {}
+    new = {**gw, **{k: v for k, v in fields.items() if k in _KEEP_FIELDS}}
+    if new == gw:
+        return False
+    data["gw"] = new
+    return _write_sidecar(metadata_path(track), data)
+
+
 def read_track_facts(track) -> dict:
     """``{key: {value, source}}`` from the sidecar; empty when there is none."""
     if not track.path:

@@ -87,6 +87,10 @@ def setup_deezer(app):
             from .deezer import diskmigrate as _dm
 
             _dm.resume_if_interrupted(app)
+
+            from . import trackcredits
+
+            trackcredits.start_if_needed(app)
     return app.deezer
 
 

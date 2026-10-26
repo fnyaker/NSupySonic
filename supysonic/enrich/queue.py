@@ -16,6 +16,7 @@ import logging
 import queue
 import threading
 
+from .. import trackcredits
 from ..db import Track, TrackEnrichment, close_connection, now, open_connection
 from . import acoustid, cover, musicbrainz as mb, search, settings as _settings
 from .http import HttpError, Unavailable
@@ -183,6 +184,7 @@ def enrich_track(track, *, http=None, force=False):
         # What the fingerprint says is weaker than what an ISRC says.
         source = "acoustid" if method == "acoustid" else "musicbrainz"
         library.update_track_facts(track, mb.facts_of(found, extra), source)
+        trackcredits.store(track.id, trackcredits.from_musicbrainz(extra), "musicbrainz")
         _cover(track, found, http)
         _record(track, "done", method, found["mbid"])
         return "done", method, None

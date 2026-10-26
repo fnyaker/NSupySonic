@@ -39,7 +39,7 @@ class LibraryJob:
     """
 
     def __init__(self, name, select_query, work_fn, *, cursor_key, force=False,
-                 page_size=PAGE_SIZE):
+                 page_size=PAGE_SIZE, page_done=None):
         if len(cursor_key) > 32:
             raise ValueError("cursor_key must fit Meta.key (32 characters)")
         self.name = name
@@ -48,10 +48,15 @@ class LibraryJob:
         self.cursor_key = cursor_key
         self.force = bool(force)
         self.page_size = page_size
+        # Called with the page's rows once they are all worked and BEFORE its
+        # checkpoint: the place for work batched across rows (one network call
+        # for a page), so a restart never skips what was only queued.
+        self.page_done = page_done
         self._lock = threading.Lock()
         self._stats = {
             "name": name, "running": False, "done": 0, "failed": 0,
             "failures": [], "failure_reasons": {}, "error": None,
+            "finished": False,
         }
         self._stop = False
 
@@ -83,6 +88,14 @@ class LibraryJob:
                 f"{name}: {reason}" if st["failed"] <= 1
                 else f"{st['failed']} failed, {count}x: {top}"
             )
+
+    def fail(self, row, reason):
+        """A row the work counted as done turned out to fail (its batched part
+        did, in ``page_done``)."""
+        with self._lock:
+            if self._stats["done"] > 0:
+                self._stats["done"] -= 1
+        self._record_failure(row, reason)
 
     # -- checkpoint -----------------------------------------------------
 
@@ -139,6 +152,8 @@ class LibraryJob:
                 rows = list(query.order_by(pk).limit(self.page_size))
                 if not rows:
                     self._checkpoint_clear()
+                    with self._lock:
+                        self._stats["finished"] = True
                     return self.snapshot()
                 for row in rows:
                     try:
@@ -151,6 +166,8 @@ class LibraryJob:
                     else:
                         with self._lock:
                             self._stats["done"] += 1
+                if self.page_done is not None:
+                    self.page_done(rows)
                 after = getattr(rows[-1], pk.name)
                 self._checkpoint_write(after)
                 if self._stop or (limit is not None and self._stats["done"] >= limit):

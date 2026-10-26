@@ -560,6 +560,9 @@ DEEZER_FEATURE = {
     "replace_track": None,
     "delete_track": None,
     "genre_share_import": None,
+    # the database's own credits: no Deezer behind them
+    "person_credits": None,
+    "credits_backfill": None,
 }
 
 
@@ -1484,7 +1487,30 @@ def _db_artist_response(ar: Artist) -> dict:
         "albums": cards,
         "related": _related_artists(ar),
         "library": True,  # ``/artist/<id>/on-deezer`` completes it
+        # How many tracks of the library credit this artist as anything but a
+        # performer (composer, author, producer…): the page's "Crédits" tab
+        # shows when there is one. One indexed count.
+        "credited": _credited_count(ar.name),
     }
+
+
+def _credited_count(name) -> int:
+    from .. import trackcredits
+    from ..db import TrackCredit
+
+    key = trackcredits.name_key(name)
+    if not key:
+        return 0
+    try:
+        return (
+            trackcredits.credited_query_many([key])
+            .select(TrackCredit.track)
+            .distinct()
+            .count()
+        )
+    except Exception:  # the tab is a nicety: the page answers anyway
+        logger.debug("credited count failed for %s", name, exc_info=True)
+        return 0
 
 
 def _deezer_starred():

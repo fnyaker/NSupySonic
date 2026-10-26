@@ -7,6 +7,7 @@
   import Cover from "../components/Cover.svelte";
   import Card from "../components/Card.svelte";
   import TrackList from "../components/TrackList.svelte";
+  import PersonCredits from "../components/PersonCredits.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import LoadFailed from "../components/LoadFailed.svelte";
@@ -184,9 +185,16 @@
     <div class="tabs">
       <button class:active={tab === "overview"} on:click={() => (tab = "overview")}>Aperçu</button>
       <button class:active={tab === "tracks"} on:click={() => (tab = "tracks")}>Titres</button>
+      <!-- What this artist wrote, composed or produced for other titles of the
+           library: shown only when there is some. -->
+      {#if data.credited}
+        <button class:active={tab === "credits"} on:click={() => (tab = "credits")}>Crédits</button>
+      {/if}
     </div>
 
-    {#if tab === "tracks"}
+    {#if tab === "credits" && data.credited}
+      <PersonCredits name={data.artist.name} />
+    {:else if tab === "tracks"}
       {#if tracksLoading && allTracks === null}
         <Skeleton kind="list" />
       {:else if !allTracks?.length}

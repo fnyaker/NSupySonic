@@ -49,14 +49,20 @@ const CACHE_PREFIXES = [
   // Lyrics are fetched on every track change — caching them makes the Paroles
   // panel work offline and skips the doomed refetch for known tracks.
   "/lyrics/",
+  // A person's credits page (who wrote, composed, produced what).
+  "/credits/person",
 ];
+
+// A track's credits (the full-screen player's panel, the track menu's sheet):
+// small, asked again on every visit, and worth having on the device offline.
+const CREDITS = /^\/track\/[^/]+\/credits$/;
 
 export function isCacheable(path) {
   // A remote control reads somebody else's library: never into this device's
   // offline copy of its own.
   if (REMOTE) return false;
   const p = String(path).split("?")[0];
-  return CACHE_PREFIXES.some((pre) => p === pre || p.startsWith(pre));
+  return CREDITS.test(p) || CACHE_PREFIXES.some((pre) => p === pre || p.startsWith(pre));
 }
 
 // A record holds the response's JSON TEXT (`text`), or — written by an older

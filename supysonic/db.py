@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261029"
+SCHEMA_VERSION = "20261030"
 
 
 def now():
@@ -1443,6 +1443,27 @@ class ListenEvent(_Model):
         indexes = ((("user", "at"), False), (("user", "track"), False))
 
 
+class TrackCredit(_Model):
+    """One person credited on a track under one role (composer, author,
+    producer…), as one source states it (supysonic/trackcredits.py). The
+    performers live in ``TrackArtist``; this is everybody else on the sleeve,
+    kept so the credits panel and a person's own credits page are database
+    reads, with Deezer away. ``name_key`` is the folded name a page is asked by.
+    """
+
+    id = AutoField()
+    track = ForeignKeyField(Track, backref="+", on_delete="CASCADE")
+    source = CharField(16)
+    role = CharField(40)
+    name = CharField(160)
+    name_key = CharField(160)
+    position = IntegerField(default=0)
+
+    class Meta:
+        table_name = "track_credit"
+        indexes = ((("track", "source"), False), (("name_key",), False))
+
+
 def get_resource_text(respath):
     return importlib.resources.files(__package__).joinpath(respath).read_text("utf-8")
 
@@ -1608,6 +1629,7 @@ def _migration_order():
         UserTaste,  # after User
         ArtistMute,  # after User
         ListenEvent,  # after User and Track
+        TrackCredit,  # after Track
     ]
 
 

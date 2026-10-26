@@ -207,6 +207,15 @@ def _finalize_archive(provider, track: Track, fmt: str, info: dict, cover=None) 
         library.update_track_facts(track, library.deezer_facts(track, info), "deezer")
     except Exception as exc:
         logger.debug("Saving the metadata sidecar failed for %s: %s", track.path, exc)
+    # And who wrote, composed and produced it, in the database: the credits
+    # panel and each person's credits page read them there.
+    if "SNG_CONTRIBUTORS" in info:
+        try:
+            from .. import trackcredits
+
+            trackcredits.store(track.id, info["SNG_CONTRIBUTORS"], "deezer")
+        except Exception:
+            logger.debug("Storing the credits failed for %s", track.path, exc_info=True)
 
     # MusicBrainz completes what Deezer does not state, later and politely: a
     # queue entry here, never a wait.
