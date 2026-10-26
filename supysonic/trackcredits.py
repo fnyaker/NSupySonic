@@ -460,7 +460,7 @@ def _run(app, job):
             try:
                 close_connection()
             except Exception:
-                pass
+                logger.debug("credits: closing the connection failed", exc_info=True)
 
 
 def start(app, force=False, *, wait=False):
@@ -498,7 +498,7 @@ def start_if_needed(app):
                 try:
                     close_connection()
                 except Exception:
-                    pass
+                    logger.debug("credits: closing the connection failed", exc_info=True)
         if needed:
             logger.info("Filling the credits of the library in the background")
             start(app)

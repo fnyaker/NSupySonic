@@ -349,7 +349,7 @@ def track_credits(track_id):
     try:
         links = _links(contrib)
     except Exception:  # a link is a nicety: the names are the answer
-        logger.debug("credits: no links for %s", track_id, exc_info=True)
+        logger.debug("credits: no links for this track", exc_info=True)
         links = {}
     return jsonify(build(gw, performers, contrib, links))
 
