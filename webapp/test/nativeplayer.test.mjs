@@ -273,3 +273,93 @@ test("an app that cannot make a player is not asked again on every element", () 
   assert.equal(get(N.nativeAudioWanted), false);
   S.nativeFault.set(null);
 });
+
+test("a stream with no length is seekable: the seek goes to the app, which holds it", async () => {
+  const sent = app({ version: 7 });
+  const el = N.createNativeElement();
+  el.src = "/api/stream/a?q=OPUS_128";
+  el.load();
+  el.play();
+  let c = sent.at(-1).c;
+  // A first play: no seek map, no duration.
+  report(el, { c, st: 3, p: true, t: 5, b: 40, sk: false });
+  assert.equal(el.seekable.length, 0, "an older app says nothing it cannot do");
+  report(el, { c, st: 3, p: true, t: 5, b: 40, sk: false, sc: true });
+  assert.equal(el.seekable.length, 1);
+  assert.equal(el.seekable.end(0), Infinity);
+  const seen = events(el);
+  el.currentTime = 120;
+  c = sent.at(-1).c;
+  assert.deepEqual([sent.at(-1).op, sent.at(-1).t], ["seek", 120]);
+  // Held: the app reports the target, the sound is still elsewhere.
+  report(el, { c, ev: "tick", st: 3, p: true, t: 120, sk: false, sc: true });
+  assert.equal(el.seeking, true);
+  assert.ok(!seen.includes("timeupdate"), "nothing moves the bar while the seek is held");
+  // Landed on the whole copy.
+  report(el, { c, ev: "seeked", st: 3, p: true, t: 120, d: 250, sk: true, sc: true });
+  await flush();
+  assert.equal(el.seeking, false);
+  assert.ok(seen.includes("seeked"));
+  assert.ok(Math.abs(el.currentTime - 120) < 1e-6);
+});
+
+test("the next tracks go to the app only from bridge 7, and only when they change", () => {
+  let sent = app({ version: 6 });
+  let el = N.createNativeElement();
+  el.setNext([{ url: "http://srv/api/stream/b", at: 0.5, v: 0.8, k: "b" }]);
+  assert.equal(sent.filter((m) => m.op === "next").length, 0);
+  sent = app({ version: 7 });
+  el = N.createNativeElement();
+  const list = [{ url: "http://srv/api/stream/b", at: 0.5, v: 0.8, k: "b", meta: { title: "B" } }];
+  el.setNext(list);
+  el.setNext(list.map((x) => ({ ...x })));
+  const nexts = sent.filter((m) => m.op === "next");
+  assert.equal(nexts.length, 1);
+  assert.deepEqual(nexts[0].q, [{ url: "http://srv/api/stream/b", at: 0.5, v: 0.8, k: "b", meta: { title: "B" } }]);
+  el.setNext([]);
+  assert.deepEqual(sent.at(-1), { id: el._id, c: sent.at(-1).c, op: "next", q: [] });
+  // A new source forgets what was sent (the app forgets it too).
+  el.setNext(list);
+  el.src = "/api/stream/c";
+  el.load();
+  el.setNext(list);
+  assert.equal(sent.filter((m) => m.op === "next").length, 4);
+});
+
+test("the app going on by itself: one nsadvance, nothing else until the page adopts", async () => {
+  const sent = app({ version: 7 });
+  const el = N.createNativeElement();
+  el.src = "/api/stream/a";
+  el.load();
+  el.play();
+  const c = sent.at(-1).c;
+  report(el, { c, st: 3, p: true, t: 199, d: 200, sk: true, sc: true });
+  await flush();
+  const seen = [];
+  for (const t of ["nsadvance", "ended", "pause", "canplay", "playing", "loadedmetadata", "durationchange", "timeupdate", "loadstart"])
+    el.addEventListener(t, () => seen.push(t));
+  // A page frozen through the end of the track: the first thing it hears is the app already on "b".
+  report(el, { c, st: 3, p: true, t: 12, d: 180, sk: true, sc: true, k: "b", u: "http://srv/api/stream/b" });
+  report(el, { c, ev: "tick", st: 3, p: true, t: 12.25, d: 180, sk: true, sc: true, k: "b", u: "http://srv/api/stream/b" });
+  assert.deepEqual(seen, ["nsadvance"], "not an end, and nothing about a track the page does not know yet");
+  assert.equal(el.advancedKey, "b");
+  assert.equal(el.src, "http://srv/api/stream/b");
+  assert.equal(el.paused, false);
+  assert.equal(el.duration, 180);
+  assert.equal(el.adopt("x"), false);
+  assert.equal(el.adopt("b"), true);
+  await flush();
+  assert.deepEqual(seen.slice(1), ["loadstart", "durationchange", "loadedmetadata", "canplay", "playing"]);
+  assert.equal(el.advancedKey, "");
+  // Its position is the app's, not a restart.
+  assert.ok(el.currentTime >= 12.25 - 1e-9);
+  // Going on again (the next one on the list) is news again.
+  report(el, { c, st: 2, p: true, t: 0, sk: true, sc: true, k: "c", u: "http://srv/api/stream/c" });
+  assert.equal(seen.filter((t) => t === "nsadvance").length, 2);
+  // A page that loads its own source instead takes the element back entirely.
+  el.dropAdvance();
+  el.src = "/api/stream/d";
+  el.load();
+  await flush();
+  assert.ok(seen.includes("loadstart"));
+});

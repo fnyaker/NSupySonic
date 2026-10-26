@@ -54,6 +54,7 @@
     pathState,
     tickVolumes,
     requestContextReset,
+    directVolumeFor,
   } from "../lib/audio/graph.js";
   import {
     directOutput,
@@ -114,6 +115,7 @@
   const EL_EVENTS = [
     ["timeupdate", onTime],
     ["ended", onEnded],
+    ["nsadvance", onNativeAdvance],
     ["play", onElPlay],
     ["pause", onElPause],
     ["error", onElError],
@@ -248,6 +250,7 @@
     wakeLock = null;
   }
   function onVisibility() {
+    pageHidden = document.visibilityState === "hidden";
     const s = get(player);
     logInfo("player", `visibility=${document.visibilityState} index=${s.index} playing=${s.playing} t=${(s.currentTime || 0).toFixed(1)}`,
             null, { important: true });
@@ -927,8 +930,17 @@
     //  - a podcast episode always resumes from its own saved position, whenever
     //    it's loaded (replaying it days later still picks up where you stopped);
     //  - otherwise, only the very first (session-restored) load resumes.
+    // The Android app already went on to this track by itself, while the page
+    // was frozen behind a locked screen (onNativeAdvance): take its source over
+    // where it has reached, instead of loading it again from the start.
+    const adopt =
+      adoptKey !== null && adoptKey === trackKey(track) && isNativeEl(audio) && !stale(audio)
+      && audio.advancedKey === adoptKey;
+    adoptKey = null;
     let resumeAt = 0;
-    if (track.podcast) {
+    if (adopt) {
+      resumeAt = audio.currentTime || 0;
+    } else if (track.podcast) {
       const p = getEpisodeProgress(trackKey(track));
       // A finished episode restarts from the top instead of the credits.
       if (p && !p.done && p.t > 1) resumeAt = p.t;
@@ -938,7 +950,7 @@
     // Skip the file's leading silence, when the server has measured it and the
     // user asked for it. Only past a quarter of a second: below that the seek
     // costs more than the silence it saves.
-    if (!resumeAt) {
+    if (!resumeAt && !adopt) {
       const e = edgesFor(track);
       if (e && e.start > 0.25) resumeAt = e.start;
     }
@@ -980,7 +992,7 @@
     // (short, user-set) skip duration. Where that cannot be done — no Web Audio
     // to blend through, a podcast, nothing audible yet, a duration of 0 — it
     // falls through to the softened cut below.
-    if (!opts.hard && skipOverlapWanted(track, firstLoad)) {
+    if (!adopt && !opts.hard && skipOverlapWanted(track, firstLoad)) {
       const fade = skipFadeSeconds();
       const done = await startSkipCrossfade(track, fade, token);
       if (done) return;
@@ -993,8 +1005,8 @@
     // click of a cut mid-waveform. Deliberately NOT an overlap — a skip is
     // meant to be immediate; the overlap is for the end of a track.
     const soften =
-      !firstLoad && get(crossfadeEnabled) && get(crossfadeOnSkip) && get(player).playing;
-    const srcPromise = resolveSource(track, curQ);
+      !adopt && !firstLoad && get(crossfadeEnabled) && get(crossfadeOnSkip) && get(player).playing;
+    const srcPromise = adopt ? Promise.resolve({ url: audio.src, blob: false }) : resolveSource(track, curQ);
     if (soften) {
       fadeElement(audio, 0, SKIP_FADE);
       // On the fade's own clock, never a bare timer: in the background a
@@ -1020,7 +1032,7 @@
     // measured fault, once its retry is due (lib/audio/output.js): the source
     // is being replaced anyway, so routing the element now is inaudible, and
     // the context it goes into is a fresh one.
-    retryIfDue();
+    if (!adopt) retryIfDue();
     // The path went direct while this element was routed through Web Audio,
     // which it can never leave: the new track goes onto a fresh element. The
     // outgoing sound is being cut here anyway (a new source), so this is the
@@ -1032,8 +1044,11 @@
     audio.preload = firstLoad && !get(player).playing ? "none" : "auto";
     if (detachLadder) detachLadder();
     detachLadder = watchAudio(audio, trackKey(track));
-    audio.src = src.url;
-    audio.load();
+    if (!(adopt && audio.adopt(trackKey(track)))) {
+      if (isNativeEl(audio)) audio.dropAdvance();
+      audio.src = src.url;
+      audio.load();
+    }
     // The element is silent from here until it buffers, so the fade gain can be
     // set without a click: a softened skip rises over the same short ramp it
     // fell on, anything else simply goes back to unity (a cancelled crossfade
@@ -1057,7 +1072,7 @@
     setTrackGain(gainFor(track));
     if (src.blob) touch(trackKey(track)); // bump LRU recency
 
-    if (resumeAt > 0) seekOnceLoaded(resumeAt);
+    if (resumeAt > 0 && !adopt) seekOnceLoaded(resumeAt);
     if ($player.playing) startPlayback("load");
     // Seed duration from metadata right away so the seek bar is correct before
     // the first timeupdate (live transcodes report no duration).
@@ -2387,6 +2402,138 @@
     // fade may already have ducked it — and it keeps playing either way, so a
     // snap here would be an audible step.
     if (restore) fadeElement(audio, 1, 0.25);
+  }
+
+  // -- the Android app going on by itself ------------------------------------
+  // Behind a locked screen the page is silent to Chromium (the app plays the
+  // sound), so it is throttled and then frozen: a track's `ended` used to
+  // reach it only once the phone was unlocked, and nothing played meanwhile.
+  // So while the page is hidden it tells the app's player which tracks follow
+  // (those onEnded would go to, where loadTrack would start each, at the
+  // volume it would get), and the app starts them by itself. The page catches
+  // up when it runs again: the queue moves to the track the app is on and
+  // loadTrack ADOPTS the element's source. Visible, nothing is named and
+  // nothing changes.
+  const HINT_AHEAD = 10;
+  let pageHidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+  let adoptKey = null; // the track loadTrack is to take over rather than load
+  let hinted = []; // [{ key, index }]: what the app was told follows
+  let hintSig = "";
+  let hintSeq = 0;
+
+  function nextHintTargets() {
+    if (!pageHidden || !curId || loadingTrack || switching || chasing || xfade || recovering) return [];
+    if (sleepStopsAtTrackEnd()) return [];
+    const s = get(player);
+    if (s.repeat === "one" || repeatsItself(s) || !s.queue.length) return [];
+    const out = [];
+    let prev = curId;
+    for (let i = 1; i <= HINT_AHEAD; i++) {
+      let index = s.index + i;
+      if (index >= s.queue.length) {
+        if (s.repeat !== "all") break;
+        index %= s.queue.length;
+      }
+      if (index === s.index) break; // round the whole queue
+      const track = s.queue[index];
+      // The same track twice in a row is a restart of the element, not a new source.
+      if (!track || trackKey(track) === prev) break;
+      out.push({ track, index });
+      prev = trackKey(track);
+    }
+    return out;
+  }
+
+  async function hintUrl(track) {
+    const key = trackKey(track);
+    const abs = (u) => new URL(u, window.location.href).href;
+    if (isDownloaded(key)) {
+      try {
+        const u = await getObjectURL(key);
+        if (u && u.startsWith("blob:")) URL.revokeObjectURL(u);
+        else if (u) return abs(u); // kept by the app itself
+      } catch {
+        /* below */
+      }
+    }
+    // Offline, the page would play its own copy, which the app cannot read.
+    if (!get(online)) return null;
+    return abs(api.streamUrl(trackRef(track), get(quality)));
+  }
+
+  async function updateNativeNext() {
+    const el = audio;
+    if (!isNativeEl(el) || !el.canChain) return;
+    const want = nextHintTargets().map(({ track, index }) => {
+      const e = edgesFor(track);
+      return { track, index, at: e && e.start > 0.25 ? e.start : 0, v: directVolumeFor(gainFor(track)) };
+    });
+    const sig = want.length
+      ? get(quality) + "|" + want.map((w) => `${trackKey(w.track)}@${w.index}:${w.at}:${w.v.toFixed(3)}`).join(",")
+      : "";
+    if (sig === hintSig) return;
+    hintSig = sig;
+    const seq = ++hintSeq;
+    const list = [];
+    const keys = [];
+    for (const w of want) {
+      const url = await hintUrl(w.track);
+      if (seq !== hintSeq || el !== audio) return;
+      if (!url) break; // the app cannot play this one: it stops there
+      const t = w.track;
+      let cover = "";
+      try {
+        cover = new URL(api.coverUrl(trackRef(t)), window.location.href).href;
+      } catch {
+        /* none */
+      }
+      list.push({
+        url,
+        at: w.at,
+        v: w.v,
+        k: trackKey(t),
+        meta: {
+          title: String(t.title || "").slice(0, 200),
+          artist: String(artistLine(t) || "").slice(0, 200),
+          album: String(t.album?.title || "").slice(0, 200),
+          cover,
+          duration: t.duration || 0,
+        },
+      });
+      keys.push({ key: trackKey(t), index: w.index });
+    }
+    hinted = keys;
+    el.setNext(list);
+  }
+  // Every input of the decision; the signature keeps a progress tick from
+  // sending anything.
+  $: audio, $player, $current, $quality, pageHidden, loadingTrack, xfade, chasing, updateNativeNext();
+
+  function onNativeAdvance(e) {
+    const el = e && e.target;
+    if (!el || !isNativeEl(el)) return;
+    const key = el.advancedKey;
+    logInfo("audio", `the app went on to ${key} by itself`, null, { important: true });
+    const at = hinted.findIndex((h) => h.key === key);
+    const h = at >= 0 ? hinted[at] : null;
+    // What is left of the list is what the app still has.
+    hinted = h ? hinted.slice(at + 1) : [];
+    const s = get(player);
+    if (el !== audio || !h || loadingTrack || trackKey(s.queue[h.index] || {}) !== key) {
+      // Not a track the queue expects (it moved meanwhile): the page plays
+      // what it decides, from a source of its own.
+      hintSig = "";
+      el.dropAdvance();
+      if (el === audio && !loadingTrack) {
+        if (s.repeat === "one" && $current) loadTrack($current, { hard: true });
+        else onEnded({ target: el });
+      }
+      return;
+    }
+    const cur = $current;
+    if (cur && cur.podcast) markEpisodeFinished(trackKey(cur), cur.duration || 0);
+    adoptKey = key;
+    player.jump(h.index);
   }
 
   async function onEnded(e) {

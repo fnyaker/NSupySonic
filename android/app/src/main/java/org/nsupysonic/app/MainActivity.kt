@@ -50,6 +50,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.concurrent.Executors
+import org.json.JSONObject
 
 /**
  * Full-screen WebView hosting the NSupySonic SPA (<server>/app/), bridged to
@@ -66,15 +67,17 @@ class MainActivity : AppCompatActivity() {
          * Bridge.bridgeVersion: what the page may ask of this APK (2 installUpdate,
          * 3 nativeCore, 4 the native player: nativeAudio / naCreate / naCmd,
          * 5 downloads in the app's storage: off*, 6 the native player's
-         * analysis and effects: naAnalysis / naFx).
+         * analysis and effects: naAnalysis / naFx, 7 the native player goes on
+         * to the next track by itself (op `next`) and seeks in a stream with
+         * no length).
          */
-        private const val BRIDGE_VERSION = 6
+        private const val BRIDGE_VERSION = 7
         /** Upper bound on one analyser command (the family table is ~16 kB). */
         private const val MAX_ANALYSIS_CMD = 64 * 1024
         /** Upper bound on one piece of a download moved into the app (base64 chars). */
         private const val MAX_OFF_PIECE = 2 * 1024 * 1024
-        /** Upper bound on one native player command (they are a few dozen bytes). */
-        private const val MAX_AUDIO_CMD = 4096
+        /** Upper bound on one native player command (a few dozen bytes; the list of what follows, a few kB). */
+        private const val MAX_AUDIO_CMD = 32 * 1024
         /** Upper bound on a single Bridge.saveText payload (16 MB of chars). */
         private const val MAX_SAVE_TEXT = 16 * 1024 * 1024
         /** How long away counts as "long enough that the page may be gone". */
@@ -187,6 +190,7 @@ class MainActivity : AppCompatActivity() {
             emit = { id, json -> pushNativeAudio(id, json) },
             localFile = { url -> store.fileFor(url)?.first },
             emitFrames = { json -> pushFrames(json) },
+            onAdvance = { meta -> nativeAdvanced(meta) },
         )
         if (!prefs.configured) {
             startActivity(Intent(this, SetupActivity::class.java))
@@ -924,6 +928,30 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
             /* WebView torn down under us */
         }
+    }
+
+    /**
+     * A native player went on to the next track while the page may be frozen:
+     * the notification names it now, from what the page said of it, instead of
+     * whenever the page runs again. The page's own publish replaces it then.
+     */
+    private fun nativeAdvanced(meta: JSONObject?) {
+        val base = pendingState ?: return
+        if (meta == null || !base.active) return
+        fun text(k: String) = meta.optString(k).take(300)
+        val cover = meta.optString("cover").let { if (isServerUrl(it)) it else "" }
+        val d = meta.optDouble("duration", 0.0)
+        handleState(
+            base.copy(
+                playing = true,
+                title = text("title"),
+                artist = text("artist"),
+                album = text("album"),
+                cover = cover,
+                position = 0.0,
+                duration = if (d.isFinite() && d > 0) d else 0.0,
+            )
+        )
     }
 
     private fun handleState(state: PlayerService.State) {

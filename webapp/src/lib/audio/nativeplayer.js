@@ -20,6 +20,17 @@
 // state that has seen the last command which could have changed it — a tick
 // sent just before a pause or a seek reached the native side must not undo it.
 //
+// Two things only the app can do, because the page may not be running (a
+// hidden page whose sound comes out of the app is silent to Chromium, so it is
+// throttled and then frozen behind a locked screen), from bridge version 7:
+//  - while the page is hidden, Player.svelte names the tracks that follow
+//    (`setNext`), and the player goes on to each by itself at the end of the last.
+//    It reports that (`k`, the key it was given, on every state until the next
+//    source) and the element dispatches `nsadvance` and nothing else until the
+//    page adopts the new source (`adopt`) or loads its own;
+//  - a seek in a stream with no length (a first play) is held by the app until
+//    it can land (`sc` in its state), so the element is seekable everywhere.
+//
 // Only what the player uses is here. A `blob:` source (a track downloaded into
 // IndexedDB) cannot be read by the native side, so the element plays it on a
 // real <audio> inside it, re-dispatching its events: until downloads move to
@@ -37,6 +48,8 @@ export const ST_ENDED = 4;
 
 // The bridge version that has naCreate / naCmd.
 export const NATIVE_AUDIO_BRIDGE = 4;
+// ...and the one whose players go on to the next track by themselves.
+export const NATIVE_NEXT_BRIDGE = 7;
 
 // A reading of the position that goes back by less than this is taken for the
 // tick arriving a little behind the interpolation, not for a move.
@@ -278,6 +291,11 @@ export class NativeAudioElement extends EventTarget {
     this.webkitPreservesPitch = true;
     this.defaultPlaybackRate = 1;
     this._plays = [];
+    this._chase = false;
+    this._nextSent = "";
+    this._advKey = ""; // the key of the track the app went on to by itself
+    this._advPending = false; // ...which the page has not taken over yet
+    this._advFired = false;
     this._clear();
   }
 
@@ -311,6 +329,9 @@ export class NativeAudioElement extends EventTarget {
   }
 
   _fire(type) {
+    // Until the page takes over a track the app went on to, every event would
+    // be read as being about the track the page still thinks is playing.
+    if (this._advPending && type !== "nsadvance") return;
     this.dispatchEvent(new Event(type));
   }
 
@@ -338,6 +359,27 @@ export class NativeAudioElement extends EventTarget {
       this._fire("error");
       return;
     }
+    if (typeof s.k === "string" && s.k && s.k !== this._advKey) {
+      // The app went on to the track the page named (its first state about it,
+      // or the first one the page hears after a freeze).
+      this._advKey = s.k;
+      this._advPending = true;
+      if (typeof s.u === "string" && s.u) this._src = s.u;
+      // The app still holds the rest of the list: whatever is sent next goes.
+      this._nextSent = null;
+      this._d = NaN;
+      this._ended = false;
+      this._meta = false;
+      this._everReady = false;
+      this._err = null;
+      this._seeking = false;
+      this._lastOut = 0;
+      this._advFired = true;
+      // Player.svelte moves its queue on now; it takes the source over (adopt)
+      // once this state has been read, before the next one arrives.
+      this._fire("nsadvance");
+    }
+    if (typeof s.sc === "boolean") this._chase = s.sc;
     const prevSt = this._st;
     const prevD = this._d;
     const prevBuf = this._buf;
@@ -405,6 +447,68 @@ export class NativeAudioElement extends EventTarget {
     if (s.ev === "tick" && !this._paused && this._st === ST_READY && !this._seeking) this._fire("timeupdate");
   }
 
+  // --- the next track, played by the app on its own --------------------------
+
+  /** Whether the app can go on to a next track by itself. */
+  get canChain() {
+    if (this._released || this._webOn || !this._id) return false;
+    try {
+      return this._b.bridgeVersion() >= NATIVE_NEXT_BRIDGE;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The tracks that follow, in order, played by the app as each one ends:
+   * `[{url, at, v, k, meta}]` (`at` where it starts, `v` its volume, `k` its
+   * key, `meta` what the notification shows); empty for none.
+   */
+  setNext(list) {
+    if (!this.canChain) return;
+    const q = (Array.isArray(list) ? list : [])
+      .filter((n) => n && n.url)
+      .map((n) => ({ url: n.url, at: +n.at || 0, v: +n.v || 0, k: String(n.k || ""), meta: n.meta || null }));
+    const msg = q.length ? JSON.stringify(q) : "";
+    if (msg === this._nextSent) return;
+    this._nextSent = msg;
+    this._send("next", { q });
+  }
+
+  /** The key of the track the app went on to and the page has not taken over, or "". */
+  get advancedKey() {
+    return this._advPending ? this._advKey : "";
+  }
+
+  /**
+   * The page takes over the track the app went on to: the element is now
+   * about it, and says so the way a load would, at the point it has reached.
+   */
+  adopt(key) {
+    if (!this._advPending || key !== this._advKey) return false;
+    this._advPending = false;
+    this._advFired = false;
+    this._dirty = false;
+    const types = ["loadstart"];
+    if (isFinite(this._d) || this._st === ST_READY) {
+      this._meta = true;
+      types.push("durationchange", "loadedmetadata");
+    }
+    if (this._st === ST_READY) {
+      this._everReady = true;
+      types.push("loadeddata", "canplay", "canplaythrough");
+      if (!this._paused) types.push("playing");
+    }
+    this._later(...types);
+    return true;
+  }
+
+  /** The page will not take it over (it loads a source of its own instead). */
+  dropAdvance() {
+    this._advPending = false;
+    this._advFired = false;
+  }
+
   // --- the element -----------------------------------------------------------
 
   // Played in the page rather than by the app: a local object (an offline
@@ -454,6 +558,9 @@ export class NativeAudioElement extends EventTarget {
   load() {
     this._dirty = false;
     if (this._released) return;
+    this.dropAdvance();
+    this._advKey = "";
+    this._nextSent = "";
     this._settlePlays(abortError("the source changed"));
     const hadSomething = this._st !== 0 || this._webOn;
     const web = this._isWebSrc(this._src);
@@ -624,6 +731,8 @@ export class NativeAudioElement extends EventTarget {
   }
   get seekable() {
     if (this._webOn) return this._web.seekable;
+    // A stream with no length is still seekable: the app holds the seek until it can land.
+    if (this._chase && this._st !== 0) return ranges([[0, isFinite(this._d) ? this._d : Infinity]]);
     return ranges(this._seekable && isFinite(this._d) ? [[0, this._d]] : []);
   }
 
