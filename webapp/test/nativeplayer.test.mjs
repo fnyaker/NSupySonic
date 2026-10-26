@@ -326,6 +326,41 @@ test("the next tracks go to the app only from bridge 7, and only when they chang
   assert.equal(sent.filter((m) => m.op === "next").length, 4);
 });
 
+test("bridge 8: where each track's audio ends goes with the list, and the app says when it is in the background", () => {
+  let sent = app({ version: 7 });
+  let el = N.createNativeElement();
+  const list = [{ url: "http://srv/api/stream/b", at: 0.5, e: 181.25, v: 0.8, k: "b" }];
+  el.setNext(list, 200.5);
+  // Bridge 7 knows no trim: the list as it was, nothing more.
+  assert.deepEqual(sent.filter((m) => m.op === "next")[0].q, [{ url: "http://srv/api/stream/b", at: 0.5, v: 0.8, k: "b", meta: null }]);
+  assert.equal("end" in sent.filter((m) => m.op === "next")[0], false);
+  assert.equal(el.ownsBackground, false);
+  sent = app({ version: 8 });
+  el = N.createNativeElement();
+  assert.equal(el.ownsBackground, true);
+  el.setNext(list, 200.5);
+  let n = sent.filter((m) => m.op === "next");
+  assert.deepEqual(n[0].q, [{ url: "http://srv/api/stream/b", at: 0.5, v: 0.8, k: "b", meta: null, e: 181.25 }]);
+  assert.equal(n[0].end, 200.5);
+  // The current track's end moving is a change, the same list again is not.
+  el.setNext(list, 200.5);
+  el.setNext(list, 199);
+  n = sent.filter((m) => m.op === "next");
+  assert.equal(n.length, 2);
+  assert.equal(n[1].end, 199);
+  // A nonsense end is no trim at all.
+  el.setNext([{ ...list[0], e: -3 }], NaN);
+  n = sent.filter((m) => m.op === "next");
+  assert.equal(n[2].q[0].e, 0);
+  assert.equal(n[2].end, 0);
+  // Every state says whether the activity is stopped.
+  assert.equal(el.appInBackground, false);
+  report(el, { c: 0, st: 3, p: false, t: 0, sk: true, sc: true, bg: true });
+  assert.equal(el.appInBackground, true);
+  report(el, { c: 0, st: 3, p: false, t: 0, sk: true, sc: true, bg: false });
+  assert.equal(el.appInBackground, false);
+});
+
 test("the app going on by itself: one nsadvance, nothing else until the page adopts", async () => {
   const sent = app({ version: 7 });
   const el = N.createNativeElement();

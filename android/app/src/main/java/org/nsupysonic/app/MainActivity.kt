@@ -69,9 +69,11 @@ class MainActivity : AppCompatActivity() {
          * 5 downloads in the app's storage: off*, 6 the native player's
          * analysis and effects: naAnalysis / naFx, 7 the native player goes on
          * to the next track by itself (op `next`) and seeks in a stream with
-         * no length).
+         * no length, 8 it keeps that list while the page is shown, follows it
+         * only while the activity is stopped, cuts a trimmed track there itself
+         * and says `bg` in every state).
          */
-        private const val BRIDGE_VERSION = 7
+        private const val BRIDGE_VERSION = 8
         /** Upper bound on one analyser command (the family table is ~16 kB). */
         private const val MAX_ANALYSIS_CMD = 64 * 1024
         /** Upper bound on one piece of a download moved into the app (base64 chars). */
@@ -541,9 +543,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        nativeAudio?.setForeground(true)
+    }
+
     override fun onStop() {
         super.onStop()
         leftAt = SystemClock.elapsedRealtime()
+        // From here the page may be throttled or stopped: the app's player
+        // makes the track changes itself (NativeAudio.followsList).
+        nativeAudio?.setForeground(false)
     }
 
     override fun onResume() {

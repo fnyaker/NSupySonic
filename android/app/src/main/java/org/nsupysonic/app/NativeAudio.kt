@@ -132,6 +132,20 @@ class NativeAudio(
     private val pausedByFocus = HashSet<Int>()
     // The player the page told to play last: the one that goes on by itself.
     private var lastPlayed = 0
+    // Whether the activity is started. Only while it is stopped do the players
+    // follow the page's list and cut a trimmed track themselves: then the page
+    // may be throttled or stopped by the OS, and a transition it starts there
+    // stalls; while it is shown, the page does them as it always has.
+    private var foreground = true
+
+    /** The activity was started (true) or stopped (false). */
+    fun setForeground(fg: Boolean) {
+        main.post {
+            if (fg == foreground) return@post
+            foreground = fg
+            for (s in slots.values) s.onForeground()
+        }
+    }
 
     /** A new player's id; one the app cannot make answers with an error at once. */
     fun create(page: String): Int {
@@ -236,7 +250,9 @@ class NativeAudio(
     // --- one player ----------------------------------------------------------
 
     /** What follows the current track, as the page named it (op `next`). */
-    private class Next(val url: String, val atMs: Long, val vol: Float, val key: String, val meta: JSONObject?)
+    private class Next(
+        val url: String, val atMs: Long, val endMs: Long, val vol: Float, val key: String, val meta: JSONObject?
+    )
 
     private inner class Slot(val id: Int) : Player.Listener {
         val proc = NsProcessor(id, analysis) { fx }
@@ -284,11 +300,16 @@ class NativeAudio(
         private var next: List<Next> = emptyList()
         // The key of the track this player went on to by itself, until the next source.
         private var curKey = ""
+        // Where the current track's audio ends (the page's silence trim), 0 for its file's end.
+        private var curEndMs = 0L
         private val window = Timeline.Window()
         private val chaseTimeout = Runnable { endChase() }
+        private val trimCheck = Runnable { checkTrim() }
         private val tick = object : Runnable {
             override fun run() {
                 if (released || !player.isPlaying) return
+                checkTrim()
+                if (released) return
                 send("tick")
                 main.postDelayed(this, TICK_MS)
             }
@@ -307,6 +328,8 @@ class NativeAudio(
                     cancelChase()
                     next = emptyList()
                     curKey = ""
+                    curEndMs = 0
+                    main.removeCallbacks(trimCheck)
                     complete = false
                     this.url = url
                     pendingSeek = false
@@ -331,6 +354,8 @@ class NativeAudio(
                     cancelChase()
                     next = emptyList()
                     curKey = ""
+                    curEndMs = 0
+                    main.removeCallbacks(trimCheck)
                     complete = false
                     url = ""
                     pendingSeek = false
@@ -382,7 +407,11 @@ class NativeAudio(
                     } else send(null)
                 }
                 "volume" -> setVol(o.optDouble("v", 1.0))
-                "next" -> next = parseNext(o)
+                "next" -> {
+                    next = parseNext(o)
+                    curEndMs = msOf(o.optDouble("end", 0.0))
+                    checkTrim()
+                }
                 "rate" -> {
                     player.setPlaybackSpeed(rate(o.optDouble("r", 1.0)))
                     send(null)
@@ -413,11 +442,44 @@ class NativeAudio(
                 val e = a.optJSONObject(i) ?: break
                 val u = e.optString("url")
                 if (u.isEmpty() || !prefs.isServerUrl(u)) break
-                val at = e.optDouble("at", 0.0).let { if (it.isFinite() && it > 0) (it * 1000).toLong() else 0L }
+                val at = msOf(e.optDouble("at", 0.0))
+                val end = msOf(e.optDouble("e", 0.0)).let { if (it > at) it else 0L }
                 val v = e.optDouble("v", 1.0).let { if (it.isFinite()) it.toFloat().coerceIn(0f, 1f) else 1f }
-                out.add(Next(u, at, v, e.optString("k").take(128), e.optJSONObject("meta")))
+                out.add(Next(u, at, end, v, e.optString("k").take(128), e.optJSONObject("meta")))
             }
             return out
+        }
+
+        private fun msOf(s: Double): Long = if (s.isFinite() && s > 0) (s * 1000).toLong() else 0L
+
+        /** The activity's state changed: the page learns it, a trim may now be ours. */
+        fun onForeground() {
+            if (released) return
+            if (foreground) main.removeCallbacks(trimCheck) else checkTrim()
+            send(null)
+        }
+
+        /**
+         * Whether this player goes on by itself now: the activity is stopped,
+         * it is the one playing, and the page named what follows.
+         */
+        private fun followsList(): Boolean =
+            !foreground && !released && id == lastPlayed && player.playWhenReady && chaseMs < 0 && next.isNotEmpty()
+
+        /** In the background, a trimmed track ends where its audio does, on this player's own clock. */
+        private fun checkTrim() {
+            main.removeCallbacks(trimCheck)
+            if (curEndMs <= 0 || !followsList() || player.playbackState != Player.STATE_READY) return
+            val rem = curEndMs - player.currentPosition
+            if (rem <= TRIM_EARLY_MS) {
+                advance(next.first())
+                return
+            }
+            // The tick is 250 ms: the last stretch is timed, so the cut lands on the trim.
+            if (rem < TICK_MS * 2) {
+                val speed = player.playbackParameters.speed.takeIf { it > 0f } ?: 1f
+                main.postDelayed(trimCheck, (rem / speed).toLong().coerceAtLeast(1))
+            }
         }
 
         /** Whether the current source is known to have no seek map. */
@@ -484,6 +546,8 @@ class NativeAudio(
         /** The page names the track that follows; this player goes on to it by itself. */
         private fun advance(n: Next) {
             next = next.drop(1)
+            main.removeCallbacks(trimCheck)
+            curEndMs = n.endMs
             cancelChase()
             url = n.url
             complete = false
@@ -508,6 +572,7 @@ class NativeAudio(
             released = true
             main.removeCallbacks(tick)
             main.removeCallbacks(chaseTimeout)
+            main.removeCallbacks(trimCheck)
             pausedByFocus.remove(id)
             live.decrementAndGet()
             try {
@@ -531,6 +596,8 @@ class NativeAudio(
                 .put("sk", hasItem && player.isCurrentMediaItemSeekable)
                 // Any position can be asked for: a stream with no length is chased.
                 .put("sc", true)
+                // The activity is stopped: the transitions are this player's (bridge 8).
+                .put("bg", !foreground)
             // Every state says it, so a page that missed the first (frozen) still learns it.
             if (curKey.isNotEmpty()) o.put("k", curKey).put("u", url)
             val d = player.duration
@@ -566,13 +633,11 @@ class NativeAudio(
                 send(null)
                 return
             }
-            if (state == Player.STATE_ENDED) {
-                val n = next.firstOrNull()
-                if (n != null && id == lastPlayed && player.playWhenReady) {
-                    advance(n)
-                    return
-                }
+            if (state == Player.STATE_ENDED && followsList()) {
+                advance(next.first())
+                return
             }
+            if (state == Player.STATE_READY) checkTrim()
             if (state == Player.STATE_READY && pendingSeek) {
                 pendingSeek = false
                 send("seeked")
@@ -614,6 +679,8 @@ class NativeAudio(
     companion object {
         private const val MAX_PLAYERS = 6
         private const val TICK_MS = 250L
+        // A trimmed end this close is reached: the cut is in the silence anyway.
+        private const val TRIM_EARLY_MS = 15L
         // The buffer: a whole track of anything but a very long lossless one.
         private const val BUFFER_MS = 30 * 60 * 1000
         private const val BUFFER_BYTES = 32 * 1024 * 1024
