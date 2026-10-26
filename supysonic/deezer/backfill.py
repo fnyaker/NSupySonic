@@ -86,8 +86,12 @@ def collect(user_id, admin: bool, scope: str = "all"):
             add(t)
 
     if scope in ("all", "podcasts"):
-        q = PodcastEpisode.select().join(
-            PodcastChannel, on=(PodcastEpisode.channel == PodcastChannel.id)
+        # Only the shows whose "archive new episodes automatically" switch is
+        # on: that switch IS what the archive keeps of a show.
+        q = (
+            PodcastEpisode.select()
+            .join(PodcastChannel, on=(PodcastEpisode.channel == PodcastChannel.id))
+            .where(PodcastChannel.auto_archive == True)  # noqa: E712
         )
         if not admin:
             q = q.where(PodcastChannel.user == user_id)
@@ -415,10 +419,11 @@ def archive_entity(app, provider, kind: str, deezer_id):
 
 
 def archive_show(app, channel) -> int:
-    """Queue every episode of a show that isn't on disk yet."""
-    from . import rules
-
-    if channel is None or not rules.enabled(app, "on_podcast"):
+    """Queue every episode of a show that isn't on disk yet, when the show's own
+    "archive new episodes automatically" switch is on. That switch is the one
+    authority: the admin's "on_podcast" rule only picks its value for a NEW
+    subscription, so what a show's page shows is what happens."""
+    if channel is None or not getattr(channel, "auto_archive", False):
         return 0
     try:
         missing = [str(e.id) for e in channel.episodes if _needs_file(e)]

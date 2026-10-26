@@ -311,7 +311,15 @@ that outlives the session.
   downloads while the rest is still being listed, and deduplicated across editions;
 - *adding tracks to a playlist* or creating one (`/api/playlists`, `/api/playlist/<id>/tracks`, and
   Subsonic's `createPlaylist`/`updatePlaylist`);
-- *subscribing to a show* (`/api/podcasts` POST → `backfill.archive_show`, every episode).
+- *subscribing to a show* (`/api/podcasts` POST → `backfill.archive_show`, every episode) — **only
+  when that show's own switch is on**. `PodcastChannel.auto_archive` ("Archiver automatiquement les
+  nouveaux épisodes", on the show's page, admin; `POST /api/podcast/<id>/auto_archive`) is the ONE
+  authority over what the archive keeps of a show: `archive_show`, the sweep's `collect` and the
+  Subsonic `refreshPodcasts` all read it. The `on_podcast` rule only picks its value for a NEW
+  subscription, so the page never shows a switch that something else overrides. Turning it on queues
+  what the show is missing (BULK, one at a time); the page then re-reads the show every 6 s while the
+  count moves and stops after ~30 s without progress or when hidden. Migration 20261029 set every
+  existing show ON: before it, the sweep archived every show whole, and an upgrade must not quietly stop.
 
 Everything goes through the bounded, **priority-ordered** background download queue
 (`prefetch.download_ids` / `download_episode_ids`, see the priority section below) and is fail-soft:

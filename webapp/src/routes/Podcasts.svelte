@@ -132,6 +132,7 @@
             <div class="title">{c.title}</div>
             <div class="sub muted">
               {c.episode_count} épisode{c.episode_count > 1 ? "s" : ""}
+              {#if c.auto_archive}<span class="auto" title="Nouveaux épisodes archivés automatiquement"><Icon name="archive" size={12} /> auto</span>{/if}
             </div>
           </div>
         </div>
@@ -198,6 +199,19 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .auto {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 0.72rem;
+    font-weight: 700;
+    vertical-align: 1px;
   }
   .sub {
     font-size: 0.85rem;
