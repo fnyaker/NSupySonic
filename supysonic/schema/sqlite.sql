@@ -448,6 +448,7 @@ CREATE TABLE IF NOT EXISTS user_taste (
     discovery REAL NOT NULL DEFAULT 0.35,
     releases_seen DATETIME,
     updated DATETIME,
+    energy REAL,
     PRIMARY KEY (user_id)
 );
 CREATE TABLE IF NOT EXISTS artist_mute (
@@ -505,3 +506,10 @@ CREATE TABLE IF NOT EXISTS track_credit (
 );
 CREATE INDEX IF NOT EXISTS index_track_credit_track_source ON track_credit(track_id, source);
 CREATE INDEX IF NOT EXISTS index_track_credit_name_key ON track_credit(name_key);
+CREATE TABLE IF NOT EXISTS track_dislike (
+    user_id CHAR(36) NOT NULL REFERENCES user ON DELETE CASCADE,
+    track_id CHAR(36) NOT NULL REFERENCES track ON DELETE CASCADE,
+    created DATETIME NOT NULL,
+    PRIMARY KEY (user_id, track_id)
+);
+CREATE INDEX IF NOT EXISTS index_track_dislike_track_id_fk ON track_dislike(track_id);

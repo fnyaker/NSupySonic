@@ -249,9 +249,10 @@ class RouteTest(Base):
         with count_statements() as n:
             titles = self.titles(f"/api/radio/track/{a[0].id}")
         # The seed's neighbours and their neighbours (2), the person's history
-        # (1), the candidates' rows (1), the pairs among them for the order (1)
-        # and the answer's rows: a fixed count, whatever the library's size.
-        self.assertLessEqual(sum(n.values()), AUTH + 11, n)
+        # (1), their dislikes (1), the candidates' rows (1), the pairs among
+        # them for the order (1) and the answer's rows: a fixed count,
+        # whatever the library's size.
+        self.assertLessEqual(sum(n.values()), AUTH + 12, n)
         self.assertEqual(set(titles), {f"A{i}" for i in range(1, 14)})
         # The Deezer id of the same row works too (a new draw: the same titles).
         self.assertEqual(set(self.titles(f"/api/radio/track/{a[0].deezer_id}")), set(titles))

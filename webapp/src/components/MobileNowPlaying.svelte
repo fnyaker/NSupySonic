@@ -14,6 +14,7 @@
     current,
     playing,
     favorites,
+    disliked,
     immersiveOpen,
     seekTo,
     buffered,
@@ -23,7 +24,7 @@
     isAdmin,
     openGenreTag,
   } from "../lib/stores.js";
-  import { toggleFavorite, buildTrackMenu } from "../lib/actions.js";
+  import { toggleFavorite, toggleDislike, buildTrackMenu } from "../lib/actions.js";
   import { addMarkerAt } from "../lib/markers.js";
   import { duration as fmtDuration, hiResCover, resolveCover, cssUrl } from "../lib/format.js";
   import { playbackLabel, playbackBusy } from "../lib/playback.js";
@@ -127,6 +128,7 @@
   $: prevT = idx > 0 ? q[idx - 1] : null;
   $: nextT = idx >= 0 && idx < q.length - 1 ? q[idx + 1] : null;
   $: fav = $current && $favorites.has(trackKey($current));
+  $: no = !!($current && $disliked.has(trackKey($current)));
   $: progress = $player.duration ? ($player.currentTime / $player.duration) * 100 : 0;
   $: bufferedPct = $player.duration
     ? Math.min(100, Math.max(progress, ($buffered / $player.duration) * 100))
@@ -881,6 +883,13 @@
         <button class="t" on:click={() => trackEntityRef($current, "album", $current.album) && go("/album/" + trackEntityRef($current, "album", $current.album))}>{$current.title}</button>
         <span class="a" class:status={$playbackLabel}>{#if $playbackLabel}{$playbackLabel}{:else}<ArtistLine track={$current} navigate={go} />{/if}</span>
       </div>
+      {#if CAN_KEEP && !$current.podcast}
+        <!-- Beside the heart, quieter: "not this one" is said less often than
+             "more of this", and must never be hit for the other. -->
+        <button class="fav no" class:on={no} on:click={() => toggleDislike($current)} aria-label={no ? "Retirer de « Je n'aime pas »" : "Je n'aime pas"} aria-pressed={no} title={no ? "Retirer de « Je n'aime pas »" : "Je n'aime pas"}>
+          <Icon name={no ? "thumbsDownFilled" : "thumbsDown"} size={21} />
+        </button>
+      {/if}
       {#if CAN_KEEP}
         <button class="fav" class:on={fav} on:click={() => toggleFavorite($current)} aria-label="Favori">
           <Icon name={fav ? "heartFilled" : "heart"} size={24} />
@@ -1158,8 +1167,12 @@
   .info {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
     padding: 16px 22px 4px;
+  }
+  /* Three quiet buttons after the title: the room is the title's. */
+  .info .fav + .fav {
+    margin-left: -2px;
   }
   .txt {
     flex: 1;
@@ -1193,6 +1206,15 @@
   }
   .fav.on {
     color: var(--accent-2);
+  }
+  .fav.no {
+    color: rgba(255, 255, 255, 0.5);
+  }
+  .fav.no:hover {
+    color: rgba(255, 255, 255, 0.85);
+  }
+  .fav.no.on {
+    color: #fff;
   }
   /* Dimmer than the heart: present for the admin, invisible to everyone else's
      attention. */

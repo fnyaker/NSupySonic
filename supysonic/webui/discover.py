@@ -20,7 +20,7 @@ import time
 
 from flask import current_app, jsonify, request
 
-from .. import discover, releases
+from .. import discover, dislikes, releases
 from ..db import (
     Album, Artist, ArtistMute, ArtistRelease, Track, UserTaste, now,
 )
@@ -289,11 +289,61 @@ def discover_mute():
         ).execute()
     else:
         ArtistMute.insert(user=user, provider=provider, ref=ref, created=now()).on_conflict_ignore().execute()
+    _forget_reco(user)
+    return jsonify({"ok": True})
+
+
+# -- the titles a person does not like ---------------------------------------------
+
+
+def _forget_reco(user):
     discover.invalidate(user)
     with _reco_lock:
         for k in [k for k in _reco if k[0] == user.id]:
             _reco.pop(k, None)
-    return jsonify({"ok": True})
+
+
+@webapi.route("/dislike", methods=["POST"])
+@login_required
+def dislike():
+    """``{id, on}``: the title (a row UUID, a Deezer id or ``provider:ref``)
+    leaves this person's Flow, radios and mixes, with what sounds almost the
+    same (``on`` true), or comes back (false). Only the database: a catalogue
+    title the library never imported cannot be disliked offline, and is
+    imported first (its metadata), like a star."""
+    from . import _deezer_disabled, _provider, _valid_id, refs
+
+    data = request.get_json(silent=True) or {}
+    raw = str(data.get("id") or "")[:64]
+    on = bool(data.get("on", True))
+    track = refs.resolve_track(raw, materialize=True)
+    if track is None:
+        if not _valid_id(raw):
+            return jsonify({"error": "invalid id"}), 400
+        if not on:
+            return jsonify({"disliked": False})
+        from ..deezer import archive
+
+        provider = _provider()
+        if provider is None:
+            return _deezer_disabled()
+        try:
+            track = archive.import_track(provider, raw)
+        except Exception:
+            current_app.logger.warning("dislike: metadata fetch failed for %s", int(raw), exc_info=True)
+            return jsonify({"error": "track unavailable"}), 502
+    user = request.webuser
+    out = dislikes.set_disliked(user, track, on)
+    _forget_reco(user)
+    out["id"] = str(track.id)
+    return jsonify(out)
+
+
+@webapi.route("/me/dislikes")
+@login_required
+def my_dislikes():
+    """The titles this person said they do not like, newest first (Réglages)."""
+    return jsonify({"tracks": _tracks_in_order(dislikes.ids(request.webuser))})
 
 
 # -- the releases ---------------------------------------------------------------------

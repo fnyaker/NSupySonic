@@ -8,6 +8,7 @@ import { REMOTE, CAN_KEEP, CAN_BROWSE } from "./remote/mode.js";
 import { api } from "./api.js";
 import {
   favorites,
+  disliked,
   favTracks,
   player,
   playlists,
@@ -223,6 +224,7 @@ export function loadFavorites(force = false) {
       const r = await api.favoriteIds();
       // The server may still name a track by its Deezer id: a key is a key.
       favorites.set(new Set((r.ids || []).map(migrateKey)));
+      disliked.set(new Set((r.disliked || []).map(migrateKey)));
       favoritesLoaded = true;
     } catch {
       /* ignore */
@@ -306,6 +308,63 @@ export async function toggleFavorite(track) {
     else favorites.add(id);
     updateFavTracksCache(track, !on);
     toasts.push("Échec de la mise à jour du favori", "error");
+  }
+}
+
+// The queues the server generates: disliking the title playing there means
+// "not this one", so it is skipped at once (Pandora's thumbs down). In an album
+// or a playlist the person chose it: the dislike only concerns what is
+// recommended (Deezer, Spotify), and the title plays on.
+const GENERATED = new Set(["flow", "radio", "artist-radio", "reco", "mix"]);
+
+// "Je n'aime pas" / back. Optimistic, with "Annuler" in the toast; a third
+// title of one artist offers to stop recommending the artist (Deezer does).
+export async function toggleDislike(track, { quiet = false } = {}) {
+  if (!CAN_KEEP) {
+    toasts.push("Ce lien est en lecture seule", "info");
+    return;
+  }
+  const id = trackKey(track);
+  if (!id) return;
+  const on = !get(disliked).has(id);
+  if (on) disliked.add(id);
+  else disliked.remove(id);
+  let skipped = false;
+  if (on) {
+    const s = get(player);
+    const cur = s.index >= 0 ? s.queue[s.index] : null;
+    if (cur && trackKey(cur) === id && GENERATED.has(s.context?.kind)) {
+      player.next();
+      skipped = true;
+    }
+  }
+  try {
+    const r = await api.dislike(trackRef(track), on);
+    if (quiet) return;
+    if (on && r && r.artist_hint) {
+      const h = r.artist_hint;
+      toasts.push(`${h.count} titres de ${h.name} que vous n'aimez pas`, "info", 8000, {
+        label: "Ne plus le recommander",
+        run: () =>
+          api
+            .muteArtist(h.provider, h.id)
+            .then(() => toasts.push(`${h.name} ne sera plus recommandé`))
+            .catch(() => toasts.push("Échec, réessayez", "error")),
+      });
+    } else if (on) {
+      toasts.push(
+        skipped ? "Titre passé, il ne sera plus proposé" : "Ce titre ne sera plus proposé",
+        "info",
+        6000,
+        { label: "Annuler", run: () => toggleDislike(track, { quiet: true }) }
+      );
+    } else {
+      toasts.push("Ce titre peut de nouveau être proposé");
+    }
+  } catch {
+    if (on) disliked.remove(id);
+    else disliked.add(id);
+    toasts.push("Échec, réessayez", "error");
   }
 }
 
@@ -657,6 +716,14 @@ export function buildTrackMenu(track, nav) {
       icon: fav ? "heartFilled" : "heart",
       action: () => toggleFavorite(track),
     });
+  if (CAN_KEEP) {
+    const no = get(disliked).has(trackKey(track));
+    items.push({
+      label: no ? "Retirer de « Je n'aime pas »" : "Je n'aime pas",
+      icon: no ? "thumbsDownFilled" : "thumbsDown",
+      action: () => toggleDislike(track),
+    });
+  }
   items.push("divider");
   // Who wrote, composed and produced it — over the current screen.
   if (CAN_BROWSE) items.push({ label: "Voir les crédits", icon: "users", action: () => openCredits(track) });

@@ -575,6 +575,10 @@ export const api = {
   myAlbums: () => req("/me/albums"),
   myLocal: () => req("/me/local"),
   favoriteIds: () => req("/me/favorite-ids"),
+  // "Je n'aime pas": the title leaves the Flow, the radios and the mixes, with
+  // what sounds almost the same; `on` false brings it back.
+  dislike: (ref, on) => req("/dislike", { method: "POST", body: body({ id: ref, on }) }),
+  myDislikes: () => req("/me/dislikes"),
 
   // mutations
   // `ref` names the track the way the server resolves it (trackkey.js#trackRef).

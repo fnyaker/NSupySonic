@@ -463,6 +463,14 @@ app looked untouched — and the cleanup decides what to drop from exactly this 
 - **The Flow** keeps the distance model and the slider (`tests/test_discover.py` pins the mean distance MONOTONE in
   the level); known titles come from the top 600 by activation (heard in the last 3 h: x0.25), the genre pool is
   sampled from random keyset starts, refills post the queue and the session's skips (a skipped artist halved).
+- **"Je n'aime pas"** (`supysonic/dislikes.py`, `track_dislike`, schema `20261031`, `POST /api/dislike`) is about
+  RECOMMENDATIONS only (Deezer's "Ne pas recommander", Spotify's taste-profile exclusion): the title, its other rows
+  (`match_key`) and the neighbours at >= 0.9 among the first 3 of EITHER list leave the radios, the Flow and the
+  genre mixes; its first 20 neighbours are pushed by RANK (x0.3 for the nearest up to x1 at rank 20 — by rank
+  because stored scores sit at 0.9 throughout a dense genre, measured in the test graph). A radio seeded on a
+  disliked title still plays; albums, playlists and search never filter. In a generated queue the playing title is
+  skipped at once. A third title of one artist offers muting it (`artist_hint`). Cached 120 s per person, one
+  statement when the list is empty (the profile bound went 10 -> 11).
 - **Releases** follow favourites AND each person's most-listened artists (`rel.listened`, 30 by default, Réglages
   -> Compte; the shared play-count fallback is the admin's only), plus close artists of favourites; compilations
   are dropped and a single later released on an album under the same title shows once. Writes are portable
