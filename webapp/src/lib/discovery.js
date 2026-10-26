@@ -4,14 +4,14 @@
 // agree; a copy on the device paints the slider at once before the server
 // answers.
 //
-// Moving the slider while the Flow plays re-tunes it: what comes AFTER the
-// playing track is replaced by a draw at the new level (the track you are
-// hearing is never cut). Both the save and the re-tune wait for the hand to
+// Moving the slider while the Flow plays re-tunes it: the next title is chosen
+// again at the new level (the track you are hearing is never cut). Both the save and the re-tune wait for the hand to
 // settle, so dragging the slider costs one request, not one per pixel.
 
 import { get, writable } from "svelte/store";
 import { api } from "./api.js";
 import { player } from "./stores.js";
+import { adoptPrefs, retune } from "./flow.js";
 
 const KEY = "discover.level";
 export const DEFAULT_LEVEL = 0.35;
@@ -46,6 +46,7 @@ export async function loadDiscovery() {
   loaded = true;
   try {
     const r = await api.discoverPrefs();
+    adoptPrefs(r);
     if (r && Number.isFinite(r.level)) {
       discoveryLevel.set(r.level);
       try {
@@ -89,13 +90,7 @@ async function settle(v) {
       /* one listener never stops the others */
     }
   }
+  // The Flow playing chooses its next title again at the new level.
   const s = get(player);
-  if (s.context && s.context.kind === "flow" && s.index >= 0) {
-    try {
-      const r = await api.flow(v, String(Date.now()));
-      if (get(discoveryLevel) === v && r.tracks?.length) player.replaceUpcoming(r.tracks);
-    } catch {
-      /* the next top-up asks at the new level anyway */
-    }
-  }
+  if (s.context && s.context.kind === "flow" && s.index >= 0) retune();
 }

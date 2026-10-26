@@ -68,6 +68,9 @@
   import PartyButton from "./PartyButton.svelte";
   import RemoteButton from "./RemoteButton.svelte";
   import Icon from "./Icon.svelte";
+  import FlowControls from "./FlowControls.svelte";
+  import FlowUpNext from "./FlowUpNext.svelte";
+  import { flowLive } from "../lib/flow.js";
   import ArtistLine from "./ArtistLine.svelte";
   import QualityMenu from "./QualityMenu.svelte";
   import QueueList from "./QueueList.svelte";
@@ -209,7 +212,7 @@
   </header>
 
   <div class="stage">
-    <section class="main">
+    <section class="main" class:steer={CAN_KEEP && $flowLive}>
       <div class="cur-lyric" aria-hidden="true">
         {#if $currentLyricLine && !$ecoMode}
           {#key $currentLyricLine}
@@ -262,6 +265,8 @@
         <button on:click={() => player.next()} aria-label="Suivant"><Icon name="next" size={30} /></button>
         <button class="sm" class:on={$player.repeat !== "off"} class:gone={!CAN_BROWSE} disabled={!CAN_BROWSE} on:click={() => player.cycleRepeat()} aria-label="Répéter"><Icon name={repeatIcon} size={22} /></button>
       </div>
+
+    {#if CAN_KEEP && $flowLive}<div class="flow-steer"><FlowControls /></div>{/if}
 
       {#if stripViz}
         <div class="viz">
@@ -326,6 +331,7 @@
         {#if tab === "queue"}
           <div class="queue">
             <QueueList items={q} {idx} bind:this={queueVL} showDuration />
+            <FlowUpNext />
           </div>
         {:else if tab === "more"}
           <NowPlayingMore track={$current} />
@@ -584,6 +590,15 @@
     background: #fff;
   }
 
+  /* The Flow's steering row (one line in a full column, two when narrow):
+     the cover gives up that height so nothing below is pushed off screen
+     (test/fullscreen/run.mjs, "Flow" sizes). */
+  .flow-steer {
+    margin-top: -6px;
+  }
+  .main.steer .cover {
+    width: min(calc(46vh - 64px), 100%);
+  }
   .controls {
     display: flex;
     align-items: center;
@@ -759,6 +774,9 @@
     .cover {
       width: min(34vh, 100%);
     }
+    .main.steer .cover {
+      width: min(calc(34vh - 56px), 100%);
+    }
     .t {
       font-size: 1.3rem;
     }
@@ -779,6 +797,9 @@
     }
     .cover {
       width: min(26vh, 100%);
+    }
+    .main.steer .cover {
+      width: min(calc(26vh - 48px), 100%);
     }
   }
 </style>

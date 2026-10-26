@@ -12,7 +12,7 @@
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
   import { entityRef, trackEntityRef } from "../lib/entity.js";
-  import { player, recent } from "../lib/stores.js";
+  import { player, recent, toasts } from "../lib/stores.js";
   import Card from "../components/Card.svelte";
   import Cover from "../components/Cover.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -20,6 +20,8 @@
   import TrackList from "../components/TrackList.svelte";
   import ArtistTile from "../components/ArtistTile.svelte";
   import DiscoverySlider from "../components/DiscoverySlider.svelte";
+  import EnergyPicker from "../components/EnergyPicker.svelte";
+  import { startFlow } from "../lib/flow.js";
   import { discoveryLevel, loadDiscovery, onDiscoverySettled, stepOf } from "../lib/discovery.js";
 
   const NEW_ROWS = 6;
@@ -113,10 +115,9 @@
   async function playFlow() {
     flowLoading = true;
     try {
-      const r = await api.flow(get(discoveryLevel));
-      player.playQueue(r.tracks, 0, { kind: "flow" });
+      await startFlow();
     } catch {
-      /* ignore */
+      toasts.push("Le Flow ne répond pas, réessayez", "error");
     } finally {
       flowLoading = false;
     }
@@ -167,6 +168,10 @@
     </button>
   </div>
 </header>
+<div class="energy-row fade-in">
+  <span class="energy-label">Énergie</span>
+  <EnergyPicker />
+</div>
 {#if tuneOpen}
   <div class="flow-tune">
     <DiscoverySlider />
@@ -290,6 +295,24 @@
   .tune.open {
     color: var(--text);
     border-color: var(--text-dim);
+  }
+  .energy-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 14px;
+    min-width: 0;
+  }
+  .energy-label {
+    flex: none;
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .energy-row :global(.energy) {
+    min-width: 0;
   }
   .flow-tune {
     margin: 14px 0 4px;
@@ -428,7 +451,25 @@
     .actions .lbl {
       display: none;
     }
-    .flow-tune {
+    .energy-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 14px;
+    min-width: 0;
+  }
+  .energy-label {
+    flex: none;
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .energy-row :global(.energy) {
+    min-width: 0;
+  }
+  .flow-tune {
       justify-content: stretch;
     }
     .shortcuts {

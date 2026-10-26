@@ -190,6 +190,7 @@ POLICY = {
     "track_gain": "read",
     "track_gains": "read",  # a POST, and a read
     "flow": "read",
+    "flow_next": "read",
     "recommend": "read",
     "discover_prefs": "read",
     "discover_prefs_set": "full",

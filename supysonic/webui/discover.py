@@ -20,7 +20,7 @@ import time
 
 from flask import current_app, jsonify, request
 
-from .. import discover, dislikes, releases
+from .. import discover, dislikes, energy, listening, releases
 from ..db import (
     Album, Artist, ArtistMute, ArtistRelease, Track, UserTaste, now,
 )
@@ -92,32 +92,62 @@ def _serialise_tracks(cands):
                 out.append(dict(row, why=c.why))
         elif c.provider == "deezer":
             out.append(_catalog_track(c))
+        else:
+            continue
+        if c.energy is not None:
+            out[-1]["energy"] = round(c.energy, 3)
     return out
 
 
 # -- the level ----------------------------------------------------------------------
 
 
+def _energy_value(raw):
+    """None ("Libre") or a number from 0 to 1; ValueError otherwise."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        raise ValueError("energy")
+    return discover.clamp(raw)
+
+
 @webapi.route("/discover/prefs")
 @login_required
 def discover_prefs():
     level = discover.level_of(request.webuser)
+    row = UserTaste.get_or_none(UserTaste.user == request.webuser)
+    aim = row.energy if row is not None else None
     return jsonify({
         "level": level,
         "step": discover.step_name(level),
         "steps": [{"name": n, "from": f} for n, f in discover.STEPS],
+        "energy": aim,
+        "energy_step": energy.step_name(aim),
+        "energy_steps": [{"name": n, "value": v} for n, v in energy.STEPS],
     })
 
 
 @webapi.route("/discover/prefs", methods=["PUT"])
 @login_required
 def discover_prefs_set():
+    """``level`` (the discovery slider) and/or ``energy`` (the Flow's
+    starting notch, null for "Libre"), each only when sent."""
     data = request.get_json(silent=True) or {}
-    try:
-        level = discover.set_level(request.webuser, data.get("level"))
-    except ValueError:
-        return jsonify({"error": "invalid level"}), 400
-    return jsonify({"level": level, "step": discover.step_name(level)})
+    out = {}
+    if "level" in data or "energy" not in data:
+        try:
+            level = discover.set_level(request.webuser, data.get("level"))
+        except ValueError:
+            return jsonify({"error": "invalid level"}), 400
+        out.update(level=level, step=discover.step_name(level))
+    if "energy" in data:
+        try:
+            aim = _energy_value(data.get("energy"))
+        except ValueError:
+            return jsonify({"error": "invalid energy"}), 400
+        discover.save_taste(request.webuser, energy=aim)
+        out.update(energy=aim, energy_step=energy.step_name(aim))
+    return jsonify(out)
 
 
 # -- the Flow and the recommendations -------------------------------------------------
@@ -151,6 +181,66 @@ def flow():
     picked = discover.flow(request.webuser, level, FLOW_SIZE, seed=seed,
                            exclude=exclude, skipped=skipped)
     return jsonify({"tracks": _serialise_tracks(picked)})
+
+
+#: Titles a session sends at most: heard, and each button's.
+SESSION_HEARD = 40
+SESSION_PRESSES = 20
+
+
+@webapi.route("/flow/next", methods=["POST"])
+@login_required
+def flow_next():
+    """The Flow's next title, chosen now with everything the session said
+    (supysonic/discover.py#flow_next). Body: ``sid`` (the session's own id),
+    ``d`` the discovery level, ``energy`` the aim (null: any), ``heard``
+    [{id, s: seconds played}] oldest first, ``more`` / ``less`` [id] oldest
+    first, ``exclude`` [id] what the queue holds, ``n`` 1 or 2 (the second is
+    held in reserve by the player, for a skip before the next choice)."""
+    from . import _ref_list, refs
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "invalid body"}), 400
+    try:
+        level = discover.clamp(data.get("d")) if data.get("d") not in (None, "") \
+            else discover.level_of(request.webuser)
+        aim = _energy_value(data.get("energy"))
+    except ValueError:
+        return jsonify({"error": "invalid level"}), 400
+    sid = "".join(ch for ch in str(data.get("sid") or "")[:32] if ch.isalnum()) or None
+    try:
+        n = max(1, min(int(data.get("n") or 1), 2))
+    except (TypeError, ValueError):
+        n = 1
+    heard_raw = data.get("heard") if isinstance(data.get("heard"), list) else []
+    heard_raw = [h for h in heard_raw[-SESSION_HEARD:] if isinstance(h, dict)]
+    rows = refs.resolve_tracks([str(h.get("id") or "")[:64] for h in heard_raw])
+    heard = []
+    for h, row in zip(heard_raw, rows):
+        if row is None:
+            continue
+        try:
+            secs = max(0, min(int(float(h.get("s") or 0)), 86400))
+        except (TypeError, ValueError):
+            secs = 0
+        heard.append((row.id, listening.outcome(secs, row.duration)))
+    session = discover.Session(
+        heard=heard,
+        more=_ref_list(data, "more", SESSION_PRESSES),
+        less=_ref_list(data, "less", SESSION_PRESSES),
+        energy=aim,
+    )
+    queued = _ref_list(data, "exclude", 400)
+    exclude = set(queued)
+    raw = data.get("exclude") if isinstance(data.get("exclude"), list) else []
+    exclude |= {f"deezer:{x}" for x in raw[-400:] if isinstance(x, str) and x.isdigit()}
+    # the queue's tail, the title playing last: what the next must not repeat
+    recent = queued[-6:]
+    picked = discover.flow_next(request.webuser, level, session, n=n, exclude=exclude,
+                                recent=recent, sid=sid)
+    return jsonify({"tracks": _serialise_tracks(picked), "energy": aim,
+                    "energy_step": energy.step_name(aim)})
 
 
 def _album_cards(entries):
@@ -298,6 +388,7 @@ def discover_mute():
 
 def _forget_reco(user):
     discover.invalidate(user)
+    discover.forget_sessions(user)
     with _reco_lock:
         for k in [k for k in _reco if k[0] == user.id]:
             _reco.pop(k, None)

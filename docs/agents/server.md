@@ -462,7 +462,22 @@ app looked untouched — and the cleanup decides what to drop from exactly this 
   sends what is queued, heard and skipped (`Player.svelte#nextBatch`, also the end-of-queue autoplay).
 - **The Flow** keeps the distance model and the slider (`tests/test_discover.py` pins the mean distance MONOTONE in
   the level); known titles come from the top 600 by activation (heard in the last 3 h: x0.25), the genre pool is
-  sampled from random keyset starts, refills post the queue and the session's skips (a skipped artist halved).
+  sampled from random keyset starts. It is chosen ONE TITLE AT A TIME (`discover.flow_next`, `POST /api/flow/next`):
+  the pool is built once per session (`sid`, kept 15 min), then each pick weighs the session (heard through +0.4,
+  skipped under 30 s −0.35, "plus comme ça" +1, "moins comme ça" −0.75, older events fading ×0.85/×0.9) as
+  `exp(1.5·affinity)` over the stored neighbours (Rocchio: the negative weaker than the positive). Skips IN A ROW
+  count more and widen the distance band (x1.5 per skip after the first, max x3; Spotify's sequential-skip work,
+  Meggetto et al. CIKM 2021): without that, five skips in a row left 90-97 % of the same genre, because a near genre
+  only falls to x0.19 and a far one is outside the band; measured 97 / 90 / 80 / 27 % after 1 / 2 / 3 / 5. One title
+  heard through ends the streak. "Plus comme ça" also adds its own neighbours. Cost on 8 000 titles
+  (`tools/perf_api.py --archived`): the first pick of a session 284 ms cold (pool + energy map), then 18-22 ms,
+  11 statements, ~400 B gzip; the old `/api/flow` (kept for older apps) was 220 ms and 4.7 KB every refill.
+- **Energy** (`supysonic/energy.py`, `user_taste.energy`): a 0..1 RANK in the library from the analysis (LUFS,
+  −LRA, centroid, flux peak, entropy, the tempo only when its confidence >= 0.3 — Spotify's energy, re-built from
+  what we measure), cached 10 min and rebuilt on a background thread. The notch (Très calme 0.1 … Intense 0.9, or
+  Libre) is a Gaussian fit of width 0.12 with the distance band widened ×2, so it HOLDS (measured 100 % of 40 picks
+  in the right cluster) instead of nudging; an unmeasured title weighs 0.3. With Libre, four titles heard through
+  set a soft aim.
 - **"Je n'aime pas"** (`supysonic/dislikes.py`, `track_dislike`, schema `20261031`, `POST /api/dislike`) is about
   RECOMMENDATIONS only (Deezer's "Ne pas recommander", Spotify's taste-profile exclusion): the title, its other rows
   (`match_key`) and the neighbours at >= 0.9 among the first 3 of EITHER list leave the radios, the Flow and the

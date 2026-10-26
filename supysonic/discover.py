@@ -324,7 +324,7 @@ def _build(user) -> Taste:
 
 class Cand:
     __slots__ = ("key", "track", "provider", "ref", "artist", "artist_ref", "dist",
-                 "rel", "why", "info", "mult")
+                 "rel", "why", "info", "mult", "energy")
 
     def __init__(self, key, dist, rel, why, track=None, provider=None, ref=None,
                  artist=None, artist_ref=None, info=None):
@@ -339,6 +339,7 @@ class Cand:
         self.why = why
         self.info = info
         self.mult = 1.0  # what the person's dislikes leave of its score
+        self.energy = None  # 0 calm .. 1 intense, when the Flow told it
 
 
 def _recent_cutoff():
@@ -735,6 +736,283 @@ def _dedupe_library(pool):
         keep, drop = (have, c) if have.dist <= c.dist else (c, have)
         best[k] = keep
         pool.pop(drop.key, None)
+
+
+# -- the Flow, one title at a time ---------------------------------------------------
+#
+# The Flow used to hand the player forty titles at once; whatever the person
+# then said or did only reached the NEXT forty. Now the player asks for ONE
+# title, about twenty seconds before the end of the one playing, and sends
+# everything the session has said so far (design and sources:
+# /mnt/project-files/algos/flow-personnalise.md):
+#
+# * what was heard and for how long: a listen (listening.outcome: half the
+#   track or 4 min) is a positive anchor, a skip (< 30 s) a negative one —
+#   implicit, so weaker than a button (Hanna 2017; Brost et al. 2019);
+# * "plus comme ça" / "moins comme ça": explicit anchors, the positive
+#   stronger than the negative (Rocchio: beta 0.75 > gamma 0.15; Pandora's
+#   thumbs up "more songs similar to this", thumbs down "narrows the DNA");
+# * the energy aimed at (energy.py), a notch the person chose and moves.
+#
+# Each anchor fades the further back it is (``SESSION_FADE``), so the Flow
+# turns little by little and a single skip does not swing it. A candidate's
+# score is multiplied by ``exp(GAIN * sum(weight * similarity))`` over the
+# anchors, similarity from the stored sound neighbours (or the same artist).
+# The candidate pool is the Flow's own (``track_candidates``), kept per
+# session for ``SESSION_TTL`` so a pick costs a handful of statements.
+
+#: Anchor weights: listened through, skipped, "plus comme ça", "moins comme ça".
+HEARD_W, SKIP_W, MORE_W, LESS_W = 0.4, -0.35, 1.0, -0.75
+#: Each implicit anchor fades by this per title back; each explicit one by
+#: ``EXPLICIT_FADE`` per press back (a button is meant for longer).
+SESSION_FADE = 0.85
+EXPLICIT_FADE = 0.9
+GAIN = 1.5
+MULT_MIN, MULT_MAX = 0.05, 20.0
+#: An anchor's artist counts as this similar when no neighbour is stored.
+SAME_ARTIST_SIM = 0.5
+#: Drawn before the order is taken (the first is played, the second kept).
+PICK_DRAW = 8
+SESSION_TTL = 15 * 60
+SESSION_MAX = 64
+#: With no notch chosen, this many titles heard through set a soft aim at
+#: their mean energy, this much wider than a notch's.
+IMPLICIT_AFTER = 3
+IMPLICIT_WIDEN = 1.6
+#: The discovery band is this much wider while an energy notch is asked.
+AIMED_BAND_WIDEN = 2.0
+#: Skips IN A ROW are a session going wrong, not titles disliked one by one
+#: (Spotify's sequential skip challenge, WSDM Cup 2019; Meggetto et al.,
+#: "On skipping behaviour types in music streaming sessions", CIKM 2021): from
+#: the second, each widens the distance band by this much, up to STREAK_MAX,
+#: and weighs the streak's skips as much more, so the Flow looks further away
+#: instead of circling the same corner. One title heard through ends it.
+STREAK_WIDEN = 0.5
+STREAK_MAX = 3.0
+
+_sessions = {}
+_sessions_lock = threading.Lock()
+
+
+class Session:
+    """What one Flow session said: ``heard`` [(track id, outcome)] oldest
+    first, ``more`` / ``less`` [track id] oldest first, ``energy`` the aim
+    (None: any)."""
+
+    def __init__(self, heard=(), more=(), less=(), energy=None):
+        self.heard = list(heard)
+        self.more = list(more)
+        self.less = list(less)
+        self.energy = energy
+
+    def skip_streak(self):
+        """Skips in a row at the end of what was heard."""
+        n = 0
+        for _tid, outcome in reversed(self.heard):
+            if outcome >= 0:
+                break
+            n += 1
+        return n
+
+    def anchors(self):
+        """``{track id: weight}``."""
+        out = {}
+        streak = self.skip_streak()
+        louder = min(STREAK_MAX, 1.0 + STREAK_WIDEN * max(0, streak - 1))
+        for i, (tid, outcome) in enumerate(reversed(self.heard)):
+            w = HEARD_W if outcome > 0 else SKIP_W if outcome < 0 else 0.0
+            if i < streak:
+                w *= louder
+            if w:
+                out[tid] = out.get(tid, 0.0) + w * SESSION_FADE ** i
+        for ids, base in ((self.more, MORE_W), (self.less, LESS_W)):
+            for j, tid in enumerate(reversed(ids)):
+                out[tid] = out.get(tid, 0.0) + base * EXPLICIT_FADE ** j
+        return out
+
+
+def _session_pool(user, level, sid, rng):
+    key = (getattr(user, "id", None), sid, round(level, 2))
+    with _sessions_lock:
+        hit = _sessions.get(key)
+    if hit is not None and time.monotonic() - hit[0] < SESSION_TTL:
+        return hit[1]
+    taste = profile(user)
+    pool = track_candidates(user, taste, rng)
+    _dedupe_library(pool)
+    with _sessions_lock:
+        if len(_sessions) >= SESSION_MAX:
+            for k, _v in sorted(_sessions.items(), key=lambda p: p[1][0])[: SESSION_MAX // 4]:
+                _sessions.pop(k, None)
+        _sessions[key] = (time.monotonic(), pool)
+    return pool
+
+
+def forget_sessions(user=None):
+    with _sessions_lock:
+        if user is None:
+            _sessions.clear()
+        else:
+            for k in [k for k in _sessions if k[0] == getattr(user, "id", user)]:
+                _sessions.pop(k, None)
+
+
+def session_affinity(anchors, cand_ids):
+    """``({(candidate, anchor): similarity}, {anchor: artist})``: the stored
+    neighbours in both directions (one statement) and the anchors' artists
+    (one more), for what has no neighbour stored."""
+    if not anchors or not cand_ids:
+        return {}, {}
+    ids = list(anchors)
+    sims = {}
+    for a, b, score in (
+        TrackNeighbor.select(TrackNeighbor.track, TrackNeighbor.neighbor, TrackNeighbor.score)
+        .where(TrackNeighbor.track.in_(ids) | TrackNeighbor.neighbor.in_(ids))
+        .tuples()
+    ):
+        anchor, other = (a, b) if a in anchors else (b, a)
+        if other not in cand_ids:
+            continue
+        k = (other, anchor)
+        if float(score) > sims.get(k, 0.0):
+            sims[k] = float(score)
+    artist_of = dict(Track.select(Track.id, Track.artist).where(Track.id.in_(ids)).tuples())
+    return sims, artist_of
+
+
+def _energy_aim(session, energies):
+    """The aim and the band it is held to: the notch, else — once enough was
+    heard through — a softer aim at what was."""
+    from . import energy as en
+
+    if session.energy is not None:
+        return session.energy, en.BAND
+    liked = [energies.get(t) for t, o in session.heard if o > 0]
+    liked = [e for e in liked if e is not None]
+    if len(liked) >= IMPLICIT_AFTER:
+        recent = liked[-8:]
+        return sum(recent) / len(recent), en.BAND * IMPLICIT_WIDEN
+    return None, en.BAND
+
+
+def flow_next(user, level, session, n=1, exclude=(), recent=(), sid=None, rng=None):
+    """The next ``n`` titles of a Flow session (Cand objects, each with
+    ``energy`` set): the first to queue, the rest held in reserve."""
+    from . import energy as en
+
+    rng = rng or random.Random()  # nosec B311 - a draw for variety, not a secret
+    pool = _session_pool(user, level, sid or "-", rng)
+    taste = profile(user)
+    exclude = set(exclude)
+    for tid, _o in session.heard:
+        exclude.add(tid)
+    exclude |= set(session.less)
+    # "Plus comme ça": its own neighbours join the pool, at their distance.
+    if session.more:
+        for a, nid, score, aid in (
+            TrackNeighbor.select(TrackNeighbor.track, TrackNeighbor.neighbor,
+                                 TrackNeighbor.score, Track.artist)
+            .join(Track, on=(TrackNeighbor.neighbor == Track.id))
+            .where(TrackNeighbor.track.in_(session.more[-8:]) & (TrackNeighbor.rank < 25)
+                   & Track.unavailable.is_null(True) & (Track.last_modification > 0))
+            .tuples()
+        ):
+            if nid in exclude:
+                continue
+            dist = min(0.45, 0.08 + 1.1 * max(0.0, 1.0 - float(score)))
+            got = pool.get(nid)
+            if got is not None and got.dist <= dist:
+                continue
+            # kept in the session's pool, at the distance the person just
+            # asked for: it stays a candidate for what follows
+            pool[nid] = Cand(nid, dist, max(0.6, got.rel if got else 0.0),
+                             "Comme ce que vous avez aimé", track=nid, artist=aid)
+    cands = {k: c for k, c in pool.items() if k not in exclude and c.track not in exclude}
+    disliked = taste.dislikes
+    if disliked:
+        apply_dislikes(cands, disliked)
+    if not cands:
+        return []
+    anchors = session.anchors()
+    mult = {}
+    if anchors:
+        track_ids = {c.track for c in cands.values() if c.track is not None}
+        sims, artist_of = session_affinity(anchors, track_ids)
+        anchor_artists = {}
+        for a, w in anchors.items():
+            ar = artist_of.get(a)
+            if ar is not None:
+                anchor_artists[ar] = anchor_artists.get(ar, 0.0) + w
+        for c in cands.values():
+            aff = 0.0
+            if c.track is not None:
+                for a, w in anchors.items():
+                    s = sims.get((c.track, a))
+                    if s:
+                        aff += w * s
+            w_art = anchor_artists.get(c.artist)
+            if w_art:
+                aff += w_art * SAME_ARTIST_SIM
+            if aff:
+                mult[c.key] = min(MULT_MAX, max(MULT_MIN, math.exp(GAIN * aff)))
+    energies = en.energies()
+    aim, band = _energy_aim(session, energies)
+
+    def e_fit(c):
+        e = energies.get(c.track) if c.track is not None else None
+        if aim is None:
+            return 1.0
+        if e is None:
+            return en.UNKNOWN
+        x = (e - aim) / band
+        # No floor worth the name: the notch is what the person asked for, it
+        # outweighs the distance (Flow Moods only plays above the mood's
+        # threshold); a library with nothing at that energy still answers.
+        return max(1e-12, math.exp(-x * x))
+
+    # A notch asked for this session outweighs the standing discovery level:
+    # with an energy aimed at, the distance band is twice as wide (Flow
+    # Moods plays only what passes the mood, from the Flow's candidates).
+    widen = AIMED_BAND_WIDEN if aim is not None else 1.0
+    widen *= min(STREAK_MAX, 1.0 + STREAK_WIDEN * max(0, session.skip_streak() - 1))
+
+    def base(c):
+        if c.dist == 0.0:
+            return 0.05 + c.rel
+        x = (c.dist - level) / (BAND * widen)
+        return math.exp(-x * x) * (0.35 + 0.65 * c.rel)
+
+    def score(c):
+        return max(1e-300, base(c) * c.mult * mult.get(c.key, 1.0) * e_fit(c))
+
+    # Known titles keep their share of the Flow (known_share), times how much
+    # of each group the session and the notch leave standing: with "Intense"
+    # asked of a person who plays calm records, their own titles mostly drop
+    # out instead of taking half the picks.
+    share = known_share(level)
+    known = [c for c in cands.values() if c.dist == 0.0]
+    other = _one_per_title([c for c in cands.values() if c.dist > 0.0])
+
+    def kept(group):
+        b = sum(base(c) for c in group)
+        return sum(score(c) for c in group) / b if b > 0 else 0.0
+
+    wk = share * kept(known) if known else 0.0
+    wo = (1.0 - share) * kept(other) if other else 0.0
+    group = known if wk + wo > 0 and rng.random() * (wk + wo) < wk else (other or known)
+
+    items = [mix.Item(c.key, score(c), artist=_artist_key(c), track=c.track, payload=c)
+             for c in group]
+    fixed = []
+    if recent:
+        rows = dict(Track.select(Track.id, Track.artist).where(Track.id.in_(list(recent)[-6:])).tuples())
+        fixed = [mix.Item(t, 1.0, artist=rows.get(t), track=t) for t in list(recent)[-6:] if t in rows]
+    picked = mix.assemble(items, max(n, min(PICK_DRAW, len(items))), rng,
+                          temperature=BAND_TEMPERATURE, cap=PER_ARTIST, gap=3, fixed=fixed)
+    out = [it.payload for it in picked[:n]]
+    for c in out:
+        c.energy = energies.get(c.track) if c.track is not None else None
+    return out
 
 
 # -- albums and artists ------------------------------------------------------------
