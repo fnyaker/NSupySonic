@@ -986,6 +986,53 @@ def _local_search_tracks(query: str, limit: int) -> list:
     return _db_tracks(q)
 
 
+def _on_disk_tracks():
+    """The visible tracks that play without asking anyone: uploads and archives."""
+    return _visible_tracks(
+        Track.select(Track.id).where(
+            (Track.deezer_id.is_null(True) & Track.youtube_id.is_null(True))
+            | (Track.last_modification > 0)
+        )
+    )
+
+
+def _local_search_entities(query: str, limit: int) -> tuple:
+    """Artists and albums of the library whose NAME matches, each holding at
+    least one title on disk: what the search shows while Deezer is out (the
+    catalogue's artists and albums are its own answer otherwise). Two
+    statements, plus the album grid's count."""
+    like = like_term(query)
+    if like is None:
+        return [], []
+    held = _on_disk_tracks()
+    artists = [
+        {
+            "id": _uuid_text(rid),
+            "deezer_id": str(dz or ""),
+            "name": name,
+            "picture": f"/api/cover/{_uuid_text(rid)}" if dz else None,
+        }
+        for rid, name, dz in (
+            Artist.select(_raw(Artist.id), Artist.name, Artist.deezer_id)
+            .where(
+                Artist.name.contains(like)
+                & Artist.id.in_(held.select(Track.artist))
+            )
+            .order_by(Artist.name)
+            .limit(limit)
+            .tuples()
+        )
+    ]
+    albums = _db_album_cards(
+        Album.select(Album, Artist)
+        .join(Artist)
+        .where(Album.name.contains(like) & Album.id.in_(held.select(Track.album)))
+        .order_by(Album.name)
+        .limit(limit)
+    )
+    return artists, albums
+
+
 def _local_starred() -> list:
     """The current user's locally-starred (non-Deezer) tracks."""
     return list(
@@ -2040,7 +2087,12 @@ def search():
     # None when Deezer is off or unreachable — the local hits still go out.
     dzapi = _dz_api()
     if dzapi is None:
-        return jsonify({**empty, "tracks": local()})
+        try:
+            artists, albums = _local_search_entities(query, limit)
+        except Exception:
+            logger.warning("Local search failed", exc_info=True)
+            artists, albums = [], []
+        return jsonify({**empty, "tracks": local(), "artists": artists, "albums": albums})
     # The five searches run side by side (they were five round trips one after
     # the other), and the database is read on this thread while they are out.
     calls = (

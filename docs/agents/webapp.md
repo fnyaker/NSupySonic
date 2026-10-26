@@ -44,10 +44,15 @@ Podcasts, Téléchargés, Mes fichiers, Indisponibles), its adding actions one "
 title too (the whole row is the target), and without a number the play glyph sits on the cover. Starring an artist
 FOLLOWS it; archiving its discography (`on_fav_artist`) is off by default.
 
-**Search leads with the titles**: the "Tout" tab is ten tracks, then a shelf of albums, then
-artists, playlists and podcasts — a search is usually for a song, and the shortlist has to be the
-first thing on screen rather than something you scroll past two shelves to reach. Each section
-carries a "Tout afficher" that switches to its own tab (the track one shows the full count).
+**Search leads with the titles** (`routes/Search.svelte`, `lib/searchrank.js`, `components/TopResult.svelte`).
+Tabs Tout · Titres · Artistes · Albums · Playlists; there is no Podcasts tab (the user's ask): the shows are mixed
+into the albums after the first two, each card saying "Podcast". "Tout" opens on a **best result** only when the query
+plainly names it — an artist (or, for the admin, a show) named exactly among the first three, or the first artist
+whose name the query starts (three letters at least) — beside the ten titles on a wide screen, above them on a
+phone; a title search gets no artist on top. Then the artists, the albums with the shows, the playlists. A title
+tapped here plays and then its radio (`TrackList radio`). With Deezer out (or nobody's account serving the search)
+the library answers alone: titles, and the artists and albums by NAME that hold a title on disk
+(`webui._local_search_entities`, two statements). Each section carries a "Tout afficher" that switches to its tab.
 
 **Swipe a track row right to queue it next** (`components/TrackRow.svelte`, touch only). Same
 gesture language as the now-playing sheet: arm on touchstart, commit to an axis after ~10px, and
