@@ -86,7 +86,9 @@
     "/library/:tab": Library,
     "/podcasts": Podcasts,
     "/podcast/:id": Show,
-    "/settings": wrap({ asyncComponent: () => import("./routes/Settings.svelte") }),
+    // One route for the list and every category, so moving between them
+    // updates `params` instead of remounting the page (and refetching it all).
+    "/settings/:section?": wrap({ asyncComponent: () => import("./routes/Settings.svelte") }),
     "/genres": wrap({ asyncComponent: () => import("./routes/Genres.svelte") }),
     "/import": wrap({ asyncComponent: () => import("./routes/Import.svelte") }),
     "/import/:url": wrap({ asyncComponent: () => import("./routes/Import.svelte") }),

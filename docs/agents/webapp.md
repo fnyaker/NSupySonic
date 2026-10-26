@@ -54,6 +54,13 @@ tapped here plays and then its radio (`TrackList radio`). With Deezer out (or no
 the library answers alone: titles, and the artists and albums by NAME that hold a title on disk
 (`webui._local_search_entities`, two statements). Each section carries a "Tout afficher" that switches to its tab.
 
+**Réglages is two levels** (`routes/Settings.svelte`): a list of categories (Lecture, Animations, Téléchargements,
+Découverte, Sources, Compte, Serveur for an admin, Assistance), each a page — the iOS/Android settings pattern. ONE route
+`/settings/:section?`, so switching category updates `params` instead of remounting the page and refetching every card. A
+phone shows the list OR a category (back returns to the list, `replace` on a deep link); ≥ 900 px shows a column beside the
+open category. A link into a setting names its category (`/settings/sources`, `/settings/account`); old `fx`/`quality`
+names are mapped. Benches open the category they test (`#/settings/playback`, `#/settings/downloads`), never bare `#/settings`.
+
 **Swipe a track row right to queue it next** (`components/TrackRow.svelte`, touch only). Same
 gesture language as the now-playing sheet: arm on touchstart, commit to an axis after ~10px, and
 leave a gesture that locks to "y" entirely to the scroller. The row slides and the strip it vacates

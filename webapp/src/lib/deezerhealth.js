@@ -65,7 +65,7 @@ export async function checkDeezer({ force = false } = {}) {
         kind: "error",
         message: status.message || "Le compte Deezer n'est plus accessible.",
         actionLabel: status.admin ? "Réglages" : undefined,
-        action: status.admin ? () => push("/settings") : undefined,
+        action: status.admin ? () => push("/settings/sources") : undefined,
       });
       return status;
     })
