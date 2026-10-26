@@ -19,6 +19,7 @@ import { logInfo } from "./log.js";
 import { online } from "./net.js";
 import { primeGain } from "./gaincache.js";
 import { migrateKey, trackKey, trackRef } from "./trackkey.js";
+import { isYielding, trickle, whenClear } from "./netyield.js";
 import {
   nativeAdopt,
   nativeClear,
@@ -405,6 +406,69 @@ function setDownloading(id, on) {
   });
 }
 
+// The body of a download, read so that it gives the link back while the player
+// needs it (lib/netyield.js). A file the server can resume (an archived track:
+// its length known, byte ranges served) steps aside ENTIRELY — the request
+// aborted, nothing left in flight to compete with the track — and is picked up
+// at the same byte once the link is free. A body that cannot be resumed (a live
+// transcode) is read at a trickle instead. A connection that drops under a
+// download (a phone changing networks) resumes too, rather than failing it.
+async function fetchYielding(url, onProgress) {
+  const chunks = [];
+  let received = 0;
+  let total = 0;
+  let type = "audio/flac";
+  let failures = 0;
+  for (;;) {
+    const headers = received ? { Range: `bytes=${received}-` } : {};
+    const ctl = new AbortController();
+    let res;
+    try {
+      res = await fetch(url, { credentials: "include", headers, signal: ctl.signal });
+    } catch (e) {
+      if (!received || ++failures > RESUMES) throw e;
+      await whenClear();
+      continue;
+    }
+    if (received) {
+      const m = /^bytes (\d+)-/.exec(res.headers.get("Content-Range") || "");
+      if (res.status !== 206 || !m || +m[1] !== received) {
+        chunks.length = 0; // not a resume: the file starts again
+        received = 0;
+      }
+    }
+    if (!res.ok) throw new Error("stream " + res.status);
+    if (!received) {
+      total = +res.headers.get("Content-Length") || 0;
+      type = res.headers.get("Content-Type") || type;
+    }
+    const resumable = total > 0 && /bytes/i.test(res.headers.get("Accept-Ranges") || "");
+    if (!res.body || !res.body.getReader) {
+      const b = await res.blob();
+      return { blob: new Blob([...chunks, b], { type }) };
+    }
+    const reader = res.body.getReader();
+    try {
+      for (;;) {
+        if (resumable && isYielding()) {
+          ctl.abort();
+          break;
+        }
+        const { done: rdone, value } = await reader.read();
+        if (rdone) return { blob: new Blob(chunks, { type }) };
+        chunks.push(value);
+        received += value.length;
+        if (onProgress) onProgress(total ? received / total : null);
+        if (isYielding() && !resumable) await trickle(value.length);
+      }
+    } catch (e) {
+      if (!received || ++failures > RESUMES) throw e;
+    }
+    await whenClear();
+  }
+}
+const RESUMES = 3;
+
 // Download `track` to the device at `quality` (e.g. "FLAC", "OPUS_320").
 // Returns true on success. Idempotent: a track already stored is skipped.
 export async function downloadTrack(track, quality, onProgress = null) {
@@ -414,6 +478,9 @@ export async function downloadTrack(track, quality, onProgress = null) {
   const t0 = Date.now();
   logInfo("download", `start ${id} "${track.title || ""}" q=${quality || "default"}`);
   try {
+    // What is playing has the link: a download starts once it is free
+    // (lib/netyield.js). The app's own downloads also wait on their side.
+    await whenClear();
     if (nativeOfflineAvailable()) {
       const { size } = await nativeDownload(id, api.streamUrl(trackRef(track), quality), onProgress);
       await primeGain(track).catch(() => {});
@@ -435,29 +502,7 @@ export async function downloadTrack(track, quality, onProgress = null) {
       logInfo("download", `ok ${id} ${(size / 1048576).toFixed(1)} MB in ${Date.now() - t0}ms (app storage)`);
       return true;
     }
-    const res = await fetch(api.streamUrl(trackRef(track), quality), { credentials: "include" });
-    if (!res.ok) throw new Error("stream " + res.status);
-
-    // Stream the body so we can report progress (live transcodes have no
-    // Content-Length, so progress is indeterminate then).
-    const total = +res.headers.get("Content-Length") || 0;
-    const type = res.headers.get("Content-Type") || "audio/flac";
-    let blob;
-    if (res.body && res.body.getReader) {
-      const reader = res.body.getReader();
-      const chunks = [];
-      let received = 0;
-      for (;;) {
-        const { done: rdone, value } = await reader.read();
-        if (rdone) break;
-        chunks.push(value);
-        received += value.length;
-        if (onProgress) onProgress(total ? received / total : null);
-      }
-      blob = new Blob(chunks, { type });
-    } else {
-      blob = await res.blob();
-    }
+    const { blob } = await fetchYielding(api.streamUrl(trackRef(track), quality), onProgress);
     // An empty body is not a download: it would be listed, and never play.
     if (!blob.size) throw new Error("empty body");
 

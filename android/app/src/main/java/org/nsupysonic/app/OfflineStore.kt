@@ -45,6 +45,7 @@ class OfflineStore private constructor(
     private val pool = Executors.newFixedThreadPool(PARALLEL)
     private val running = ConcurrentHashMap<String, Boolean>()
     private val cancelled = ConcurrentHashMap.newKeySet<String>()
+    private val gate = YieldGate()
 
     private fun name(key: String): String {
         val d = MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))
@@ -78,39 +79,88 @@ class OfflineStore private constructor(
     }
 
     private fun fetch(key: String, url: String) {
-        val c = Net.get(prefs, url, cookieFor(url), CONNECT_MS, READ_MS, mapOf("Accept-Encoding" to "identity"))
-        val type = (c.contentType ?: "audio/flac").substringBefore(';').trim().take(64)
-        val total = c.contentLengthLong
+        // The person's music first: a download waits for the link to be free
+        // before it even connects (see YieldGate).
+        if (!gate.awaitClear { key in cancelled }) throw IOException("cancelled")
         val tmp = part(key)
+        tmp.delete()
         var got = 0L
+        var total = -1L
+        var type = "audio/flac"
         var lastSent = 0L
-        try {
-            c.inputStream.use { input ->
-                FileOutputStream(tmp).use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    while (true) {
-                        if (key in cancelled) throw IOException("cancelled")
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        got += n
-                        val now = System.currentTimeMillis()
-                        if (now - lastSent >= PROGRESS_MS) {
-                            lastSent = now
-                            send(key, "progress", JSONObject().put("r", got).put("t", total))
-                        }
+        var failures = 0
+        while (true) {
+            val headers = HashMap<String, String>()
+            headers["Accept-Encoding"] = "identity"
+            if (got > 0) headers["Range"] = "bytes=$got-"
+            val c = Net.get(prefs, url, cookieFor(url), CONNECT_MS, READ_MS, headers)
+            var paused = false
+            try {
+                if (got > 0) {
+                    // A resume is only a resume when the server says where it
+                    // starts; anything else starts the file again.
+                    val from = Regex("bytes (\\d+)-").find(c.getHeaderField("Content-Range") ?: "")
+                        ?.groupValues?.get(1)?.toLongOrNull()
+                    if (c.responseCode != 206 || from != got) {
+                        got = 0L
+                        tmp.delete()
                     }
-                    out.fd.sync()
                 }
+                if (got == 0L) {
+                    type = (c.contentType ?: "audio/flac").substringBefore(';').trim().take(64)
+                    total = c.contentLengthLong
+                }
+                // A file the server can resume (an archived track: its length
+                // known, byte ranges served) steps aside ENTIRELY while the
+                // player needs the link — the connection closed, nothing in
+                // flight — and picks up at the same byte. One it could not
+                // resume (a live transcode) trickles instead.
+                val resumable = total > 0 &&
+                    (c.getHeaderField("Accept-Ranges") ?: "").contains("bytes", ignoreCase = true)
+                c.inputStream.use { input ->
+                    FileOutputStream(tmp, got > 0).use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            if (key in cancelled) throw IOException("cancelled")
+                            val slow = gate.yielding()
+                            if (slow && resumable) {
+                                paused = true
+                                break
+                            }
+                            val n = input.read(buf, 0, if (slow) YieldGate.TRICKLE_BYTES else buf.size)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            got += n
+                            if (slow) gate.trickle(n)
+                            val now = System.currentTimeMillis()
+                            if (now - lastSent >= PROGRESS_MS) {
+                                lastSent = now
+                                send(key, "progress", JSONObject().put("r", got).put("t", total))
+                            }
+                        }
+                        out.fd.sync()
+                    }
+                }
+            } catch (e: IOException) {
+                // A connection that dropped under a download (a proxy timing
+                // out a trickle, a phone changing networks) picks up where it
+                // stopped rather than failing the track.
+                if (key in cancelled || got == 0L || ++failures > RESUMES) throw e
+                paused = true
+            } finally {
+                c.disconnect()
             }
-        } finally {
-            c.disconnect()
+            if (!paused) break
+            if (!gate.awaitClear { key in cancelled }) throw IOException("cancelled")
         }
         if (got == 0L) throw IOException("empty body")
         if (total > 0 && got != total) throw IOException("cut short ($got of $total)")
         publish(key, type)
         send(key, "done", JSONObject().put("size", got).put("type", type))
     }
+
+    /** The page's lease on the link (see YieldGate); 0 ends it. */
+    fun yieldFor(ms: Long) = gate.hold(ms)
 
     private fun publish(key: String, type: String) {
         val tmp = part(key)
@@ -264,6 +314,7 @@ class OfflineStore private constructor(
         private const val PROGRESS_MS = 250L
         private const val CONNECT_MS = 15000
         private const val READ_MS = 60000
+        private const val RESUMES = 3
         private val KEY = Regex("[A-Za-z0-9:_-]{1,96}")
         fun keyOk(key: String) = KEY.matches(key)
     }

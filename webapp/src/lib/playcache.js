@@ -23,6 +23,7 @@ import { logInfo } from "./log.js";
 import { primeGain } from "./gaincache.js";
 import { primeAnalyses } from "./analysis.js";
 import { migrateKey, trackKey, trackRef } from "./trackkey.js";
+import { holding } from "./netyield.js";
 
 const DB_NAME = "nsupy-playcache";
 const DB_VERSION = 1;
@@ -210,7 +211,11 @@ export async function prefetchUpcoming(tracks, quality, stillWanted = () => true
     if (isDownloaded(id) || isCached(id)) continue;
     if (!stillWanted(track)) return;
     const before = get(playCacheSize);
-    await prefetchTrack(track, quality);
+    // The NEXT track is part of what the person is doing (it plays the moment
+    // this one ends), so its preload holds the link against downloads; the
+    // ones after it are background like them (lib/netyield.js).
+    if (track === tracks[0]) await holding(() => prefetchTrack(track, quality));
+    else await prefetchTrack(track, quality);
     spent += Math.max(0, get(playCacheSize) - before);
     if (spent >= budget) return;
   }

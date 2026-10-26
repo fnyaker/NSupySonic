@@ -126,6 +126,8 @@ cd webapp && node test/clicks/run.mjs               # what a click costs before 
                                                      # its heaviest functions (build with `npx vite build --minify false` to read them)
 cd webapp && node test/vizdirect/run.mjs [FADE=1]   # the animations on the DIRECT output through pauses, skips and a reopening: they
                                                      # must still hear the music (the copy's dead-track bug)
+cd webapp && node test/download/run.mjs              # a playlist downloading on a shared 256 kbit/s link (LINK=bytes/s) while a track is
+                                                     # launched: it must start as fast as on an idle link, play without a stall, and the downloads finish
 cd webapp && node test/import/run.mjs [--phone]       # a shared playlist link: pasted into the search, read, played, kept
 cd webapp && node test/requests/run.mjs             # what playing costs in requests: a track the server refuses (Deezer off) is
                                                      # retried at a human pace, not 70 times a second; a missing cover is asked once
@@ -674,6 +676,20 @@ user's own requests for thirty seconds behind work they never asked for:
   play count wait until the element can play and then run **one at a time**; the prefetch of the
   next track waits for the same signal. Caching the artwork before telling the media session about
   it is also what stopped the same cover being fetched twice per track change.
+- **Bandwidth on the device** (`lib/netyield.js`, `YieldGate.kt`). A playlist downloading on a
+  phone took the link from the track the person had just pressed (four FLACs at full speed against
+  one stream: measured on a shared 256 kbit/s link, the track took 30 s to start against 7 s idle).
+  The playing element holds the link while it plays from the network with under 15 s in hand
+  (released at 30 s, or once the file is all in; every `makeEl` element is watched, so crossfades
+  and fresh elements count), and so does the preload of the NEXT track; while held, a download does
+  not start, and one in progress steps aside — a resumable body (length known, `Accept-Ranges`) is
+  aborted and picked up with a `Range` at the same byte, a live transcode is read at a 4 KB/s
+  trickle (the receive window holds the server to it, and the connection never idles into a
+  proxy's 60 s send timeout). A dropped connection resumes too (3 times). The app's own downloads
+  hear it as a LEASE (`NSNative.offYield(ms)`, 45 s renewed on the element's events, which keep
+  coming in a hidden page; capped at 60 s natively, so a dead page cannot stop them). Same idea as
+  Media3's `PriorityTaskManager` and Chromium's `ResourceScheduler`. `node test/download/run.mjs`:
+  6.1 s to start with eight downloading, 0 stalls, every download finished once paused.
 - **Artwork** (`lib/coverqueue.js`): six covers in flight (three at most for covers not on screen
   yet), each freed slot going to whichever waiting cover is closest to the viewport — sideways too,
   for a shelf — with the scroll direction counted as closer. A cover more than two screens away is

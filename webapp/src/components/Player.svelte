@@ -76,6 +76,7 @@
     watchAudio,
     whenReady,
   } from "../lib/ladder.js";
+  import { watchElement } from "../lib/netyield.js";
   import { trackKey, trackRef } from "../lib/trackkey.js";
   import {
     getEpisodeProgress,
@@ -145,6 +146,9 @@
     el.defaultPlaybackRate = wantedRate || 1;
     el.playbackRate = wantedRate || 1;
     for (const [ev, fn] of EL_EVENTS) el.addEventListener(ev, fn);
+    // While it plays from the network with little in hand, downloads give it
+    // the link (lib/netyield.js).
+    watchElement(el);
     return el;
   }
   onMount(() => {
