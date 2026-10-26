@@ -129,7 +129,7 @@
 
   function toSettings() {
     closeExport();
-    push("/settings");
+    push("/settings/account");
   }
 
   async function connectSpotify() {
