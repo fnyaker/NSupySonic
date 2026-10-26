@@ -2658,9 +2658,18 @@ def radio_next():
                           block_seeds=False)
     elif kind == "track":
         track = refs.resolve_track(sid)
-        if track is None:
+        # A catalogue title the library does not hold yet (a new release, a
+        # search result: its row is made by its first play, which may still
+        # be under way) radios on its artist, which the caller names.
+        ar = _artist_row(str(seed.get("artist") or "")[:64]) if track is None and seed.get("artist") else None
+        if track is not None:
+            ids = radio.build(user, [track.id], n, recent, skipped, exclude)
+        elif ar is not None:
+            seeds, own = radio.artist_seeds(user, ar.id)
+            ids = radio.build(user, seeds, n, recent, skipped, exclude, seed_artist=ar.id, own=own,
+                              block_seeds=False)
+        else:
             return jsonify({"tracks": []})
-        ids = radio.build(user, [track.id], n, recent, skipped, exclude)
     else:
         return jsonify({"error": "invalid seed"}), 400
     return jsonify({"tracks": _tracks_in_order(ids)})
@@ -2789,6 +2798,74 @@ def my_favorites():
     # The database is the library: every star, local or imported, in one query.
     # Deezer is never asked (importing the account is a separate, one-off action).
     return jsonify({"tracks": _db_tracks(_user_starred_query())})
+
+
+@webapi.route("/me/artists")
+@login_required
+def my_artists():
+    """The artists the person starred, each with what the library holds of
+    them and how much the person listened to them: the "Artistes" list of the
+    library and the home's row. Three statements whatever the count."""
+    from ..db import ListenEvent, StarredArtist
+
+    user = request.webuser
+    stars = list(
+        Artist.select(_raw(Artist.id), Artist.name, Artist.deezer_id, StarredArtist.date)
+        .join(StarredArtist, on=(StarredArtist.starred == Artist.id))
+        .where(StarredArtist.user == user)
+        .tuples()
+    )
+    ids = [r[0] for r in stars]
+    counts, plays = {}, {}
+    if ids:
+        id_col = _raw(Track.artist)
+        for i in range(0, len(ids), _IN_CHUNK):
+            chunk = [uuid.UUID(x) for x in ids[i : i + _IN_CHUNK]]
+            for aid, n in (
+                _visible_tracks(Track.select(id_col, fn.COUNT(Track.id)).where(Track.artist.in_(chunk)))
+                .group_by(Track.artist)
+                .tuples()
+            ):
+                counts[_uuid_text(aid)] = n
+            for aid, n in (
+                ListenEvent.select(id_col, fn.COUNT(ListenEvent.id))
+                .join(Track, on=(ListenEvent.track == Track.id))
+                .where((ListenEvent.user == user) & (ListenEvent.outcome > 0) & Track.artist.in_(chunk))
+                .group_by(Track.artist)
+                .tuples()
+            ):
+                plays[_uuid_text(aid)] = n
+    out = []
+    for rid, name, dz, date in stars:
+        key = _uuid_text(rid)
+        out.append({
+            "id": key,
+            "deezer_id": str(dz or ""),
+            "name": name,
+            "picture": f"/api/cover/{key}" if dz else None,
+            "tracks": counts.get(key, 0),
+            "plays": plays.get(key, 0),
+            "starred": date.isoformat() if hasattr(date, "isoformat") else str(date or ""),
+        })
+    out.sort(key=lambda a: (-a["plays"], (a["name"] or "").lower()))
+    return jsonify({"artists": out})
+
+
+@webapi.route("/me/albums")
+@login_required
+def my_albums():
+    """The albums the person starred, newest star first, as album cards."""
+    from ..db import StarredAlbum
+
+    q = (
+        Album.select(Album, Artist)
+        .join(Artist)
+        .switch(Album)
+        .join(StarredAlbum, on=(StarredAlbum.starred == Album.id))
+        .where(StarredAlbum.user == request.webuser)
+        .order_by(StarredAlbum.date.desc())
+    )
+    return jsonify({"albums": _db_album_cards(q)})
 
 
 # -- podcasts ---------------------------------------------------------------

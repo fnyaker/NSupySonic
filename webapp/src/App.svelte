@@ -83,6 +83,7 @@
     "/playlist/:id": Playlist,
     "/mix/:id": Mix,
     "/library": Library,
+    "/library/:tab": Library,
     "/podcasts": Podcasts,
     "/podcast/:id": Show,
     "/settings": wrap({ asyncComponent: () => import("./routes/Settings.svelte") }),

@@ -142,7 +142,7 @@ Every browser bench and the rest: [commands.md](docs/agents/commands.md).
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261027`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261028`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported (PostgreSQL has no REPLACE: write portable
 upserts). A migration script is split on `;` AFTER its `--` comment lines are dropped

@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261027"
+SCHEMA_VERSION = "20261028"
 
 
 def now():
@@ -1015,6 +1015,9 @@ class PodcastChannel(_Model):
     # stops asking Deezer about it. A timestamp, not a flag, for the same reason
     # as Track.unavailable — a show can come back, so the verdict expires.
     gone = DateTimeField(null=True)
+    # Archive every NEW episode as the subscription refresh finds it (the
+    # show's own switch, off by default: a daily show is a lot of disk).
+    auto_archive = BooleanField(default=False)
 
     def as_subsonic_channel(self, user, prefs=None, include_episodes=True):
         info = {
@@ -1345,6 +1348,10 @@ class ArtistRelease(_Model):
     kind = CharField(12, null=True)
     released = CharField(10, null=True)
     nb_tracks = IntegerField(null=True)
+    # The release's titles (JSON list, ``releases.release_tracks``), fetched
+    # once by the watcher when it finds the release, so the home can list new
+    # TITLES from the database alone. NULL: not fetched (yet).
+    tracks = TextField(null=True)
     found = DateTimeField(default=now)
 
     class Meta:

@@ -2638,9 +2638,11 @@ class WebUITestCase(unittest.TestCase):
 
     def test_favoriting_an_artist_archives_the_whole_discography(self):
         """Every track of every official release — and each one only once, even
-        though gw lists the same record under several tabs/editions."""
-        from supysonic.deezer import backfill
+        though gw lists the same record under several tabs/editions. (Off by
+        default since starring an artist means following it: switched on.)"""
+        from supysonic.deezer import backfill, rules
 
+        rules.save({"on_fav_artist": True})
         thread = backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
         thread.join(timeout=5)
         # Albums 10 and 11 (10 listed twice), 5 tracks each, same ids: one pass.
@@ -2657,6 +2659,9 @@ class WebUITestCase(unittest.TestCase):
             return real(alb_id)
 
         self.app.deezer.get_album_tracks = flaky
+        from supysonic.deezer import rules
+
+        rules.save({"on_fav_artist": True})
         thread = backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
         thread.join(timeout=5)
         # Album 11 still got archived.

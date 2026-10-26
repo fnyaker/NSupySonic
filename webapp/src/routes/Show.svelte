@@ -116,7 +116,7 @@
     try {
       await api.unsubscribePodcast(id);
       toasts.push("Désabonné");
-      push("/podcasts");
+      push("/library/podcasts");
     } catch (e) {
       toasts.push(e?.message || "Échec", "error");
     }
