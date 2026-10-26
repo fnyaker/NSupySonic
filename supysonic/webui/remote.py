@@ -226,6 +226,7 @@ POLICY = {
     # changing what is kept: the owner's own actions
     "subscribe_podcast": "full",
     "unsubscribe_podcast": "full",
+    "podcast_auto_archive": "full",
     "save_podcast_progress": "full",
     "add_episode_marker": "full",
     "delete_episode_marker": "full",

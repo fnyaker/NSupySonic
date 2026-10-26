@@ -2980,6 +2980,9 @@ def _channel(c, with_episodes=False, counts=None):
         # disk, cover included. Nothing about it depends on Deezer any more.
         "local": c.gone is not None,
         "archived_count": counts[1],
+        # The show's own "archive new episodes automatically" switch: what the
+        # archive keeps of it (backfill.collect / archive_show).
+        "auto_archive": bool(c.auto_archive),
     }
     if with_episodes:
         info["episodes"] = [
@@ -3095,6 +3098,8 @@ def subscribe_podcast():
             return jsonify({"error": "could not resolve show"}), 400
 
     cfg = current_app.config["DEEZER"]
+    known = PodcastChannel.get_or_none(PodcastChannel.deezer_id == str(show_id))
+    fresh = known is None or not known.subscribed
     try:
         c = import_show(
             provider, _podcast_owner(), show_id,
@@ -3103,12 +3108,45 @@ def subscribe_podcast():
     except Exception:
         logger.warning("Podcast import failed for %s", show_id, exc_info=True)
         return jsonify({"error": "import failed"}), 502
-    # Subscribing is the event: every episode we just imported gets archived,
-    # so the show survives leaving Deezer without anyone pressing play first.
-    from ..deezer import backfill
+    from ..deezer import backfill, rules
 
-    backfill.archive_show(current_app._get_current_object(), c)
+    app = current_app._get_current_object()
+    if fresh:
+        # A new subscription starts with the admin's default ("Abonnement à un
+        # podcast" in the archiving rules); a show already followed keeps the
+        # switch someone set on its page.
+        c.auto_archive = rules.enabled(app, "on_podcast")
+        c.save()
+    # Subscribing is the event: with the switch on, every episode we just
+    # imported gets archived, so the show survives leaving Deezer.
+    backfill.archive_show(app, c)
     return jsonify(_channel(c, with_episodes=True))
+
+
+@webapi.route("/podcast/<pid>/auto_archive", methods=["POST"])
+@login_required
+def podcast_auto_archive(pid):
+    """A show's "archive new episodes automatically" switch. Turning it on also
+    queues the episodes already listed that have no file yet: they go through
+    the archiver's background queue one at a time (BULK, behind anything
+    played), so a show of 40 episodes never competes with listening."""
+    if not _is_admin():
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        c = PodcastChannel[uuid.UUID(str(pid))]
+    except (ValueError, PodcastChannel.DoesNotExist):
+        return jsonify({"error": "not found"}), 404
+    on = (request.get_json(silent=True) or {}).get("on")
+    if not isinstance(on, bool):
+        return jsonify({"error": "on must be true or false"}), 400
+    c.auto_archive = on
+    c.save()
+    queued = 0
+    if on:
+        from ..deezer import backfill
+
+        queued = backfill.archive_show(current_app._get_current_object(), c)
+    return jsonify({**_channel(c), "queued": queued})
 
 
 @webapi.route("/podcast/<pid>", methods=["DELETE"])

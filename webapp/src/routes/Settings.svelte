@@ -429,7 +429,7 @@
     on_fav_playlist: "Playlist mise en favori",
     on_fav_artist: "Artiste mis en favori",
     on_playlist_add: "Titre ajouté à une playlist",
-    on_podcast: "Abonnement à un podcast",
+    on_podcast: "Nouveau podcast : archivage automatique activé (réglable sur sa page)",
   };
   const SCOPE_LABELS = {
     all: "Toute la discographie",
