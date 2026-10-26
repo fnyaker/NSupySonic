@@ -153,6 +153,7 @@ POLICY = {
     "my_accounts_link_deezer": NEVER,
     "my_accounts_unlink": NEVER,
     "my_accounts_options": NEVER,
+    "my_accounts_default": NEVER,
     "my_accounts_import": NEVER,
     "my_accounts_library": NEVER,
     "my_accounts_library_set": NEVER,
@@ -269,8 +270,6 @@ POLICY = {
     # administration
     "trigger_sync": "admin",
     "sync_status": "admin",
-    "import_account": "admin",
-    "import_account_status": "admin",
     "get_settings": "admin",
     "youtube_settings": "admin",
     "set_settings": "admin",

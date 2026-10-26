@@ -106,7 +106,6 @@ class UpgradeTestCase(TestBase):
             Playlist.create(id=ids.playlist_uuid(key), user=alice, name=name)
         imp = importer.DeezerImporter(self.provider, "alice")
         imp.sync({"sync_podcasts": True, "podcast_episodes": 30, **IniConfig([self.conf]).DEEZER})
-        imp.import_account()
         self.assertEqual(
             sorted(p.name for p in Playlist.select()),
             ["Deezer · Découverte", "Deezer · Flow", "Deezer · Nouveautés en vrac"],

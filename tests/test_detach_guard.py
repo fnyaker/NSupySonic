@@ -15,7 +15,6 @@ or writing to it again, and fails here by name.
 """
 
 import re
-import time
 import unittest
 from unittest import mock
 
@@ -85,7 +84,7 @@ ALLOWED = {
 #: The one-off import of the account (Réglages → Compte Deezer) is the only
 #: place the account is read, and only by these calls. It runs on a worker
 #: thread, so it is driven on its own rather than attributed by route.
-IMPORT_ENDPOINT = "webapi.import_account"
+IMPORT_ENDPOINT = "webapi.my_accounts_import"
 IMPORT_READS = {"gw.get_user_playlists", "gw.get_user_favorite_ids", "gw.get_playlist_tracks", "gw.get_tracks"}
 #: The holder's own library (LIBRARY, plan multi-provider §15): the import's
 #: reads plus the profile page's tabs (favourite artists and albums).
@@ -178,20 +177,20 @@ class DeezerGuardTestCase(_AppCase):
         offending = [c for c in offending if not c.endswith(("_page", "_tracks", "_playlist"))]
         self.assertEqual(sorted(offending), [])
 
-    def test_the_one_off_import_is_the_only_reader_of_the_account(self):
-        from supysonic import webui
+    def test_the_account_import_is_the_only_reader_of_the_account(self):
+        # Mes comptes (libraryimport) on the server's account: what it may read
+        # of the account is its lists, and the records of what it imports.
+        from supysonic import access, libraryimport
+        from supysonic.db import ProviderAccount, User
 
-        webui._import_job.clear()  # another test's worker may have left it running
-        webui._import_job.update(running=False)
-        rv = self.client.post("/api/deezer/import-account", json={})
-        self.assertTrue(rv.get_json()["ok"])
-        deadline = time.monotonic() + 30  # a worker thread: wait for its end
-        while webui._import_job.get("running") and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.assertFalse(webui._import_job.get("running"))
+        row = access.ensure_server_account(owner=User.select().first().id)
+        ProviderAccount.update(user=User.select().first().id).where(ProviderAccount.id == row.id).execute()
+        # (the spy answers every call with the same empty page, which the
+        # playlists' listing does not take for a list: the run ends there)
+        libraryimport.run(self.app, row.id, kinds=list(libraryimport.KINDS))
         heard = {c for _w, c in self.calls}
-        self.assertLessEqual(heard, IMPORT_READS)
-        self.assertIn("gw.get_user_playlists", heard)
+        self.assertLessEqual(heard, LIBRARY_READS)
+        self.assertLessEqual({"gw.get_user_favorite_ids", "gw.get_user_playlists"}, heard)
 
     def test_the_things_the_user_does_stay_on_this_server(self):
         track = Track.select().first()

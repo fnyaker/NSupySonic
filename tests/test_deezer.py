@@ -21,7 +21,6 @@ from supysonic.db import (
     Folder,
     Playlist,
     PlaylistTrack,
-    StarredTrack,
     User,
 )
 from supysonic.deezer import ids
@@ -736,34 +735,6 @@ class DeezerTestCase(TestBase):
         self.assertEqual(back.artist.name, "Other")
         self.assertEqual(back.album.name, "Elsewhere")
 
-    # -- importer: favorites + unstar ------------------------------------
-
-    def test_sync_favorites_and_unlove(self):
-        gw = self.provider._dz.gw
-        gw.tracks_by_id = {"1": raw_track(1, "A"), "2": raw_track(2, "B")}
-        gw.fav_ids = [1, 2]
-
-        imp = importer.DeezerImporter(self.provider, "alice")
-        self.assertEqual(imp.sync_favorites(), 2)
-        alice = User.get(name="alice")
-        self.assertEqual(
-            StarredTrack.select().where(StarredTrack.user == alice).count(), 2
-        )
-
-        # Unlove track 2 on Deezer: an import keeps our star, only prune=True drops it.
-        gw.fav_ids = [1]
-        imp.sync_favorites()
-        starred = {
-            s.starred_id for s in StarredTrack.select().where(StarredTrack.user == alice)
-        }
-        self.assertIn(ids.track_uuid("1"), starred)
-        self.assertIn(ids.track_uuid("2"), starred)
-        imp.sync_favorites(prune=True)
-        starred = {
-            s.starred_id for s in StarredTrack.select().where(StarredTrack.user == alice)
-        }
-        self.assertNotIn(ids.track_uuid("2"), starred)
-
     # -- what the nightly sync runs ---------------------------------------
 
     # The shape of "Nouveautés pour toi" as the web app received it (a HAR
@@ -781,10 +752,9 @@ class DeezerTestCase(TestBase):
         # The scheduled refresh is the subscribed podcasts and nothing else.
         imp.sync({"sync_podcasts": True, "podcast_episodes": "12"})
         self.assertEqual(calls, [("sync_podcasts", (12,), {})])
-
-        calls.clear()
-        imp.import_account()
-        self.assertEqual(calls, [("sync_playlists", (), {}), ("sync_favorites", (), {"prune": False})])
+        # The account's own lists are the library import's (libraryimport),
+        # which remembers what it took: there is no second, forgetful path.
+        self.assertFalse(hasattr(imp, "import_account"))
 
     # -- archive: fetch + extension fix ----------------------------------
 

@@ -306,7 +306,8 @@ that outlives the session.
 - *starring a track* (`/api/favorite`, and Subsonic's `star` via `annotation._archive_starred`);
 - *favouriting an album, a playlist or an artist* (`/api/favorite/<kind>` and Subsonic's `star` →
   `backfill.archive_entity`, in a worker thread, always the FULL tracklist — never the ~10-track
-  page). An **artist means the whole discography**: `_archive_discography` walks Deezer's `all` tab
+  page). An artist is OFF by default (`on_fav_artist`: starring one is how you follow it), and then
+  **means the whole discography**: `_archive_discography` walks Deezer's `all` tab
   (official releases + "more", not the guest appearances), fed release by release so the first album
   downloads while the rest is still being listed, and deduplicated across editions;
 - *adding tracks to a playlist* or creating one (`/api/playlists`, `/api/playlist/<id>/tracks`, and

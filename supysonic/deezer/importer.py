@@ -8,7 +8,8 @@
 Everything is materialized as regular DB rows so the existing Subsonic
 endpoints expose it unchanged:
   * Deezer playlists  -> supysonic Playlist + PlaylistTrack
-  * Deezer favorites  -> StarredTrack for the configured user
+  * (the account's favourites are imported by supysonic/libraryimport.py,
+    which remembers what it took so a star removed here never comes back)
   * New releases/Flow -> synthetic "Deezer · ..." playlists
 
 Writes go straight to the DB (not through the REST endpoints), so importing
@@ -28,7 +29,6 @@ from ..db import (
     Playlist,
     PlaylistTrack,
     PodcastChannel,
-    StarredTrack,
     Track,
     User,
     db,
@@ -212,53 +212,6 @@ class DeezerImporter:
                 self._progress(f"  ! playlist {did} failed: {exc}")
         return count
 
-    # -- favorites -------------------------------------------------------
-
-    def sync_favorites(self, prune=False) -> int:
-        self._progress("Fetching your Deezer favorites...")
-        raw_ids = self.provider.dz.gw.get_user_favorite_ids(limit=100000)
-        sng_ids = [x["SNG_ID"] for x in raw_ids.get("data", [])]
-        self._progress(f"  {len(sng_ids)} favorite track(s); fetching metadata...")
-
-        raw = []
-        for i in range(0, len(sng_ids), _FAV_CHUNK):
-            raw.extend(self.provider.dz.gw.get_tracks(sng_ids[i : i + _FAV_CHUNK]))
-            self._progress(f"  ...{min(i + _FAV_CHUNK, len(sng_ids))}/{len(sng_ids)}")
-
-        with db.atomic():
-            tracks = self._upsert_tracks(raw)
-            wanted = {t.id for t in tracks}
-
-            existing = {
-                s.starred_id
-                for s in StarredTrack.select(StarredTrack.starred).where(
-                    StarredTrack.user == self.user
-                )
-            }
-            new_rows = [
-                {"user": self.user.id, "starred": t.id, "date": now()}
-                for t in tracks
-                if t.id not in existing
-            ]
-            if new_rows:
-                StarredTrack.insert_many(new_rows).execute()
-
-            # Drop stars on Deezer tracks that are no longer loved (only when
-            # asked: an import never removes anything we already hold).
-            deezer_starred = set() if not prune else {
-                s.starred_id
-                for s in StarredTrack.select(StarredTrack.starred)
-                .join(Track, on=(StarredTrack.starred == Track.id))
-                .where(StarredTrack.user == self.user, Track.deezer_id.is_null(False))
-            }
-            stale = deezer_starred - wanted
-            if stale:
-                StarredTrack.delete().where(
-                    StarredTrack.user == self.user,
-                    StarredTrack.starred.in_(list(stale)),
-                ).execute()
-        return len(tracks)
-
     # -- podcasts --------------------------------------------------------
 
     def sync_podcasts(self, episode_limit=30) -> int:
@@ -322,21 +275,6 @@ class DeezerImporter:
         return count
 
     # -- orchestration ---------------------------------------------------
-
-    def import_account(self) -> dict:
-        """One-off import of the Deezer account: playlists and favourites are
-        added to what we hold, never removed from it."""
-        out = {"playlists": 0, "favorites": 0, "failed": []}
-        for key, fn_ in (
-            ("playlists", self.sync_playlists),
-            ("favorites", lambda: self.sync_favorites(prune=False)),
-        ):
-            try:
-                out[key] = fn_()
-            except Exception as exc:
-                logger.warning("Deezer account import (%s) failed: %s", key, exc)
-                out["failed"].append(f"{key}: {exc}")
-        return out
 
     def sync(self, cfg: dict) -> dict:
         """The scheduled refresh: subscribed podcasts only."""

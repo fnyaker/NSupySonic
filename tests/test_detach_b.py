@@ -5,18 +5,17 @@
 
 """Lot B of the Deezer detachment: the account is imported once, never mirrored.
 
-The scheduled sync reads no part of the Deezer account; the one-off import only
-adds to what we hold (a favourite removed on Deezer stays, a local playlist is
-never emptied, a second import duplicates nothing); the favourites list is the
-database's own.
+The scheduled sync reads no part of the Deezer account; the account is imported
+by Mes comptes (tests/test_library_import.py: a favourite removed on Deezer
+stays, one removed HERE never comes back, a local playlist is never emptied);
+the favourites list is the database's own.
 """
 
-import time
 import unittest
 from unittest import mock
 
 from supysonic.db import Playlist, PlaylistTrack, StarredTrack, Track, User
-from supysonic.deezer import ids, importer, scheduler
+from supysonic.deezer import importer, scheduler
 
 from . import test_deezer, test_webui
 
@@ -30,59 +29,6 @@ ACCOUNT_READS = (
     "get_module_page",
     "get_user_shows",
 )
-
-
-class ImportAccountTestCase(test_deezer.DeezerTestCase):
-    def _gw(self):
-        gw = self.provider._dz.gw
-        gw.tracks_by_id = {str(i): raw_track(i, f"T{i}", num=i) for i in (1, 2, 3)}
-        gw.playlists = [{"id": "100", "title": "Mix", "description": None}]
-        gw.playlist_tracks["100"] = [raw_track(1, "T1", num=1), raw_track(2, "T2", num=2)]
-        gw.fav_ids = [1, 2]
-        return gw
-
-    def test_two_imports_in_a_row_duplicate_nothing(self):
-        self._gw()
-        imp = importer.DeezerImporter(self.provider, "alice")
-        first = imp.import_account()
-        self.assertEqual((first["playlists"], first["favorites"], first["failed"]), (1, 2, []))
-        imp.import_account()
-        self.assertEqual(Playlist.select().count(), 1)
-        self.assertEqual(PlaylistTrack.select().count(), 2)
-        self.assertEqual(StarredTrack.select().count(), 2)
-        self.assertEqual(Track.select().count(), 3 - 1)
-
-    def test_a_favourite_removed_on_deezer_stays_here(self):
-        gw = self._gw()
-        imp = importer.DeezerImporter(self.provider, "alice")
-        imp.import_account()
-        gw.fav_ids = [1]
-        imp.import_account()
-        starred = {s.starred_id for s in StarredTrack.select()}
-        self.assertEqual(starred, {ids.track_uuid("1"), ids.track_uuid("2")})
-
-    def test_a_local_playlist_is_extended_never_emptied_or_renamed(self):
-        gw = self._gw()
-        imp = importer.DeezerImporter(self.provider, "alice")
-        imp.import_account()
-        pl = Playlist[ids.playlist_uuid("100")]
-        pl.name = "Renamed here"
-        pl.save()
-        # Deezer now lists only track 3: ours keeps 1 and 2, gains 3 at the end.
-        gw.playlist_tracks["100"] = [raw_track(3, "T3", num=3)]
-        imp.import_account()
-        pl = Playlist[ids.playlist_uuid("100")]
-        self.assertEqual(pl.name, "Renamed here")
-        self.assertEqual([t.deezer_id for t in pl.get_tracks()], ["1", "2", "3"])
-
-    def test_one_failing_half_is_reported_and_the_other_still_runs(self):
-        self._gw()
-        imp = importer.DeezerImporter(self.provider, "alice")
-        with mock.patch.object(imp, "sync_playlists", side_effect=RuntimeError("down")):
-            out = imp.import_account()
-        self.assertEqual(out["favorites"], 2)
-        self.assertEqual(len(out["failed"]), 1)
-        self.assertIn("playlists", out["failed"][0])
 
 
 class ScheduledSyncReadsNoAccountTestCase(test_deezer.DeezerTestCase):
@@ -123,37 +69,13 @@ class ScheduledSyncReadsNoAccountTestCase(test_deezer.DeezerTestCase):
 
 
 class ImportRouteTestCase(test_webui.WebUITestCase):
-    def test_import_is_admin_only_and_reports_its_progress(self):
-        self.assertEqual(self.client.post("/api/deezer/import-account").status_code, 401)
+    def test_the_forgetful_import_route_is_gone(self):
+        """The account is imported by Mes comptes (libraryimport), which
+        remembers what it took. The old one-off route re-added every favourite
+        removed here; it is gone, for everybody."""
         self._login()
-
-        def fake(self_):
-            self_._progress("working")
-            return {"playlists": 3, "favorites": 7, "failed": []}
-
-        with mock.patch.object(importer.DeezerImporter, "import_account", fake), mock.patch(
-            "supysonic.webui._dz_live", return_value=self.app.deezer
-        ):
-            self.app.config["DEEZER"]["sync_user"] = "alice"
-            rv = self.client.post("/api/deezer/import-account")
-            self.assertEqual(rv.status_code, 200)
-            deadline = time.time() + 10
-            status = {}
-            while time.time() < deadline:
-                status = self.client.get("/api/deezer/import-account").get_json()
-                if not status["running"]:
-                    break
-                time.sleep(0.05)
-        self.assertFalse(status["running"])
-        self.assertEqual((status["playlists"], status["favorites"]), (3, 7))
-
-    def test_a_guest_cannot_import(self):
-        from supysonic.managers.user import UserManager
-
-        UserManager.add("bob", "B0bpass", admin=False)
-        self.client.post("/api/login", json={"username": "bob", "password": "B0bpass"})
-        self.assertEqual(self.client.post("/api/deezer/import-account").status_code, 403)
-        self.assertEqual(self.client.get("/api/deezer/import-account").status_code, 403)
+        self.assertEqual(self.client.post("/api/deezer/import-account").status_code, 404)
+        self.assertEqual(self.client.get("/api/deezer/import-account").status_code, 404)
 
     def test_the_explorer_is_gone(self):
         self._login()
@@ -172,7 +94,11 @@ class UpgradeOfAnExistingServerTestCase(test_deezer.DeezerTestCase):
         gw.playlist_tracks["100"] = [raw_track(1, "T1", num=1), raw_track(2, "T2", num=2)]
         gw.fav_ids = [1, 2]
         imp = importer.DeezerImporter(self.provider, "alice")
-        imp.import_account()
+        imp.sync_playlists()
+        alice = User.get(name="alice")
+        StarredTrack.insert_many(
+            [{"user": alice.id, "starred": t.id} for t in Track.select()]
+        ).execute()
         before = (Playlist.select().count(), PlaylistTrack.select().count(),
                   StarredTrack.select().count(), Track.select().count())
         # Deezer now shows an empty account (as after the user left it).
@@ -202,11 +128,10 @@ def _only_own_tests(cls, *own):
 
 _only_own_tests(
     ImportRouteTestCase,
-    "test_import_is_admin_only_and_reports_its_progress",
-    "test_a_guest_cannot_import",
+    "test_the_forgetful_import_route_is_gone",
     "test_the_explorer_is_gone",
 )
-for _c in (ImportAccountTestCase, ScheduledSyncReadsNoAccountTestCase,
+for _c in (ScheduledSyncReadsNoAccountTestCase,
            UpgradeOfAnExistingServerTestCase):
     _only_own_tests(_c, *[n for n in vars(_c) if n.startswith("test_")])
 

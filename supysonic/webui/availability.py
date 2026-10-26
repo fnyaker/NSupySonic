@@ -502,7 +502,8 @@ def replace_everywhere(app, source, target, user_id, admin):
                 & (StarredTrack.starred == target.id)
             )
             if exists is None:
-                StarredTrack.create(user=star.user_id, starred=target.id)
+                # Its place in the favourites too: the date it was starred.
+                StarredTrack.create(user=star.user_id, starred=target.id, date=star.date)
             star.delete_instance()
             favorites += 1
 

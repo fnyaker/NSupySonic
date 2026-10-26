@@ -552,7 +552,6 @@ DEEZER_FEATURE = {
     "set_settings": None,
     "deezer_status": None,
     "trigger_sync": None,
-    "import_account": None,
     "report_listen": None,
     "cover": None,
     "services_status": None,
@@ -3930,67 +3929,6 @@ def trigger_sync():
         )
         _sync_thread.start()
     return jsonify({"ok": True, "running": True})
-
-
-_import_job: dict = {"running": False}
-_import_lock = threading.Lock()
-
-
-def _import_account_worker(app, user_name):
-    from ..db import close_connection, open_connection
-    from ..deezer.importer import DeezerImporter
-
-    job = _import_job
-    try:
-        open_connection(reuse=True)
-
-        def progress(msg):
-            job["message"] = msg
-
-        res = DeezerImporter(app.deezer, user_name, progress=progress).import_account()
-        job.update(res)
-    except Exception as exc:
-        logger.warning("Deezer account import failed: %s", exc)
-        job["failed"] = [str(exc)]
-    finally:
-        try:
-            close_connection()
-        except Exception:
-            pass
-        job["running"] = False
-
-
-@webapi.route("/deezer/import-account", methods=["POST"])
-@login_required
-@admin_required
-def import_account():
-    provider, err = _need_provider()
-    if err:
-        return err
-    if _dz_live() is None:
-        return _deezer_unreachable()
-    with _import_lock:
-        if _import_job.get("running"):
-            return jsonify({"ok": True, **_import_job})
-        _import_job.clear()
-        _import_job.update(
-            running=True, message="", playlists=0, favorites=0, failed=[]
-        )
-        app = current_app._get_current_object()
-        threading.Thread(
-            target=_import_account_worker,
-            args=(app, request.webuser.name),
-            name="deezer-import-account",
-            daemon=True,
-        ).start()
-    return jsonify({"ok": True, **_import_job})
-
-
-@webapi.route("/deezer/import-account")
-@login_required
-@admin_required
-def import_account_status():
-    return jsonify(dict(_import_job))
 
 
 @webapi.route("/sync/status")

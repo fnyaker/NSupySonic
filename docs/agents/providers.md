@@ -73,9 +73,20 @@ THEIR rows: artists starred (so followed for Nouveautés; a YouTube channel matc
 ref kept in `entity_ref`, which `youtube._artist_row` then reuses), tracks starred, albums with their tracklist,
 playlists merged (one of the same id that is somebody else's is never touched). Rules: each item is imported ONCE
 (`library_item`), so the local library counts after that; one unticked in the picker (`excluded`) is never imported and
-an artist's or album's star comes off; nothing is written to the account and nothing is downloaded. Runs on linking,
-from the button, and daily (`start_watcher`; an hour after an outage; stopped by a refused credential until relinked;
-never under test unless `LIBRARY_IMPORT_INLINE`). Options and the last report live in `provider_account.options` (schema
+an artist's or album's star comes off; nothing is written to the account and nothing is downloaded. **One DEFAULT
+platform per person** (`options.primary`, `PUT /me/accounts/default`, Réglages → Mes comptes): only that account is
+re-read daily (`start_watcher` → `run_due`; an hour after an outage; stopped by a refused credential until relinked;
+never under test unless `LIBRARY_IMPORT_INLINE`); choosing it imports at once, any other account imports only from its
+button; never chosen = their Deezer, and linking a second account writes the current choice down (`keep_default`) so
+it does not take over. **An upgrade never re-creates what was removed here**: the server account's first run, for a
+kind its holder already holds Deezer rows of (what the old nightly sync mirrored), is a BASELINE (`_mirrored_before`):
+everything listed is recorded as seen, nothing imported (`last.kept`). A run is batches (`BATCH`), each its own short
+transaction and remembered as done, reniced, with `workload.quiet_wait` between two; `status` carries `phase`, `kind`,
+`done`, `total` for the progress bar. There is ONE account import: the old forgetful one-off
+(`/deezer/import-account`, `DeezerImporter.import_account` / `sync_favorites`, one transaction over thousands of rows)
+is gone — `api.js` once held two `importAccount` keys and the later, old one won, so "Importer maintenant" put every
+removed favourite back; `test/dupkeys.test.mjs` refuses a key named twice in any object of the web app. The CLI
+`deezer import-account` runs this import on the server account. Options and the last report live in `provider_account.options` (schema
 `20261027`). Every route is the holder's own and `NEVER` for a remote session. `tests/test_library_import.py`.
 
 **Which Deezer serves a person (lot P3)** (`supysonic/deezer/accounts.py`, `access.Snapshot.serving`,

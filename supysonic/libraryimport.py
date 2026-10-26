@@ -25,8 +25,26 @@ Rules, each of which answers a way this goes wrong:
 - **Nothing is downloaded to import.** Rows are made from the provider's own
   listing; a starred track is archived the way every starred track is.
 
-Runs happen when an account is linked, from the person's button, and once a
-day from the watcher (never under test).
+- **One platform syncs a person's favourites: their DEFAULT one** (``primary``
+  in the account's options). Only that account is read again every day; any
+  other linked account imports when its holder presses its button or ticks an
+  item. Choosing a default imports from it at once. A person who never chose
+  has their Deezer as default (what the old nightly sync mirrored).
+- **An upgrade never re-creates what was removed here.** The old nightly sync
+  mirrored the server account's favourites; the first run on that account, for
+  a kind its holder already holds Deezer rows of, is a BASELINE: everything
+  the account lists is recorded as seen, and only what is still here counts
+  (``_baseline_wanted``). What the account lists and the library does not hold
+  was taken off here, and stays off.
+- **A run never holds the database for long and never competes with a
+  person.** Each batch is its own short transaction, the thread is reniced, and
+  between batches it waits for any foreground work to finish
+  (``workload.quiet_wait``). Its progress (which list, how many of how many) is
+  live in ``status``.
+
+Runs happen when an account is linked, when it is made the default, from the
+person's button, and once a day from the watcher for the default account
+(never under test).
 """
 
 from __future__ import annotations
@@ -99,12 +117,19 @@ def options(row) -> dict:
             auto[k] = bool(v)
     last = raw.get("last") if isinstance(raw.get("last"), dict) else None
     lossless = raw.get("lossless") if isinstance(raw.get("lossless"), bool) else None
-    return {"auto": auto, "last": last, "lossless": lossless}
+    # None: its holder never chose a default platform (see ``default_account``).
+    primary = raw.get("primary") if isinstance(raw.get("primary"), bool) else None
+    return {"auto": auto, "last": last, "lossless": lossless, "primary": primary}
 
 
 def _save_options(row, opts):
     row.options = json.dumps(
-        {"auto": opts["auto"], "last": opts.get("last"), "lossless": opts.get("lossless")}
+        {
+            "auto": opts["auto"],
+            "last": opts.get("last"),
+            "lossless": opts.get("lossless"),
+            "primary": opts.get("primary"),
+        }
     )
     ProviderAccount.update(options=row.options).where(ProviderAccount.id == row.id).execute()
 
@@ -116,6 +141,76 @@ def set_auto(row, changes: dict) -> dict:
             opts["auto"][k] = bool(v)
     _save_options(row, opts)
     return opts
+
+
+# -- the default platform ------------------------------------------------------
+
+
+def _default_of(rows):
+    """The default account among one person's ``rows``: the one they chose; none
+    when they chose none; their Deezer (else their first account) when they
+    never chose — what the old nightly sync mirrored, kept on an upgrade."""
+    chosen = [(r, options(r)["primary"]) for r in rows]
+    for r, flag in chosen:
+        if flag is True:
+            return r
+    if any(flag is False for _, flag in chosen):
+        return None
+    for r in rows:
+        if r.provider == "deezer":
+            return r
+    return rows[0] if rows else None
+
+
+def _rows_of(user_id):
+    return list(
+        ProviderAccount.select()
+        .where((ProviderAccount.user == user_id) & ProviderAccount.provider.in_(list(SOURCES)))
+        .order_by(ProviderAccount.created, ProviderAccount.provider)
+    )
+
+
+def default_account(user_id):
+    return _default_of(_rows_of(user_id))
+
+
+def keep_default(user_id, new_account_id):
+    """A person links another account: their default stays the one it was. When
+    they never chose, the choice the rule made for them is written down, so the
+    new account (a Deezer next to a YouTube Music, say) does not take over."""
+    rows = _rows_of(user_id)
+    others = [r for r in rows if str(r.id) != str(new_account_id)]
+    if not others or any(options(r)["primary"] is not None for r in others):
+        for r in rows:
+            if str(r.id) == str(new_account_id) and options(r)["primary"] is None and others:
+                opts = options(r)
+                opts["primary"] = False
+                _save_options(r, opts)
+        return
+    current = _default_of(others)
+    for r in rows:
+        opts = options(r)
+        opts["primary"] = current is not None and r.id == current.id
+        _save_options(r, opts)
+
+
+def set_default(app, user_id, account_id) -> bool:
+    """Make ``account_id`` the person's default platform (None: none of them).
+    Every one of their accounts records the choice, so a later link does not
+    take it over. The new default imports at once. Returns whether it started."""
+    rows = _rows_of(user_id)
+    target = None
+    for r in rows:
+        on = account_id is not None and str(r.id) == str(account_id)
+        if on:
+            target = r
+        opts = options(r)
+        if opts["primary"] is not on:
+            opts["primary"] = on
+            _save_options(r, opts)
+    if target is None or target.status == "auth":
+        return False
+    return start(app, target.id)
 
 
 # -- credentials --------------------------------------------------------------
@@ -324,7 +419,8 @@ class DeezerSource:
         if kind == "playlists":
             for item in items:
                 raw = self._call(self.client.dz.gw.get_playlist_tracks, item["ref"])
-                tracks = self._upsert(raw)
+                with db.atomic():
+                    tracks = self._upsert(raw)
                 _save_playlist(
                     user, ids.playlist_uuid(item["ref"]), item.get("title"),
                     item.get("description"), tracks, deezer_ref=str(item["ref"]),
@@ -507,11 +603,53 @@ def _note(account_id, **fields):
             live.update(fields)
 
 
+BATCH = {"tracks": CHUNK, "artists": CHUNK, "albums": 5, "playlists": 1}
+PAUSE = 0.05  # between two batches: the server's other threads get the database
+
+
+def _mirrored_before(row, kind) -> bool:
+    """Whether the OLD nightly sync mirrored this account's ``kind`` into its
+    holder's library: the server account, whose holder already holds Deezer rows
+    of that kind. Its first run is then a baseline (see the module's rules)."""
+    from .access import SERVER
+
+    if row.provider != "deezer" or row.mode != SERVER:
+        return False
+    uid = row.user_id
+    if kind == "tracks":
+        q = StarredTrack.select().join(Track, on=(StarredTrack.starred == Track.id)).where(
+            (StarredTrack.user == uid) & Track.deezer_id.is_null(False)
+        )
+    elif kind == "artists":
+        q = StarredArtist.select().join(Artist, on=(StarredArtist.starred == Artist.id)).where(
+            (StarredArtist.user == uid) & Artist.deezer_id.is_null(False)
+        )
+    elif kind == "albums":
+        q = StarredAlbum.select().join(Album, on=(StarredAlbum.starred == Album.id)).where(
+            (StarredAlbum.user == uid) & Album.deezer_id.is_null(False)
+        )
+    else:
+        q = Playlist.select().where((Playlist.user == uid) & Playlist.deezer_id.is_null(False))
+    return q.exists()
+
+
+def _yield():
+    """Between two batches: let whatever a person is waiting on go first."""
+    try:
+        from .deezer import workload
+
+        workload.quiet_wait(2.0)
+    except Exception:
+        logger.debug("library import: quiet_wait failed", exc_info=True)
+    time.sleep(PAUSE)
+
+
 def run(app, account_id, kinds=None, only=None) -> dict:
     """Import what is new in the account (``kinds``: those asked, else the ones
     its options import automatically; ``only``: ``{kind: [item]}``, those very
     items, ticked by the person). Synchronous; returns the run's report and
-    writes it into the account's options."""
+    writes it into the account's options. Each batch is remembered as it is
+    done, so a run cut short (a restart, an outage) resumes where it stopped."""
     row = ProviderAccount.get_or_none(ProviderAccount.id == account_id)
     if row is None or row.user_id is None:
         return {"error": "compte inconnu"}
@@ -522,20 +660,36 @@ def run(app, account_id, kinds=None, only=None) -> dict:
     else:
         todo = [k for k in KINDS if (kinds is None and opts["auto"][k]) or (kinds and k in kinds)]
     report = {"at": now().isoformat(), "added": {}, "error": None, "reason": None}
+    kept = {}  # kind -> refs a baseline recorded without importing
     try:
+        _note(account_id, kind=None, phase="connect", done=0, total=None)
         source = source_for(app, row)
         for kind in todo:
-            _note(account_id, kind=kind)
+            _note(account_id, kind=kind, phase="list", done=0, total=None)
             known = _known(row.id, kind)
             if only:
                 items = [i for i in only[kind] if not known.get(str(i["ref"]))]
             else:
-                items = [i for i in source.listing(kind)[:MAX_ITEMS] if str(i["ref"]) not in known]
-            if items:
-                report["added"][kind] = source.apply(kind, items, user)
-                _remember(row.id, kind, [i["ref"] for i in items])
-            else:
-                report["added"][kind] = 0
+                listed = source.listing(kind)[:MAX_ITEMS]
+                if not known and _mirrored_before(row, kind):
+                    refs = [str(i["ref"]) for i in listed]
+                    _remember(row.id, kind, refs)
+                    kept[kind] = len(refs)
+                    report["added"][kind] = 0
+                    continue
+                items = [i for i in listed if str(i["ref"]) not in known]
+            added = 0
+            step = BATCH[kind]
+            _note(account_id, phase="import", done=0, total=len(items))
+            for i in range(0, len(items), step):
+                batch = items[i : i + step]
+                added += source.apply(kind, batch, user) or 0
+                _remember(row.id, kind, [x["ref"] for x in batch])
+                report["added"][kind] = added
+                _note(account_id, done=min(i + step, len(items)), added=dict(report["added"]))
+                if i + step < len(items):
+                    _yield()
+            report["added"][kind] = added
             _note(account_id, added=dict(report["added"]))
         row.status = "ok"
     except ProviderAuth as exc:
@@ -547,10 +701,13 @@ def run(app, account_id, kinds=None, only=None) -> dict:
     except Exception as exc:  # a run must end with a report, whatever happened
         logger.warning("Library import of account %s failed", row.id, exc_info=True)
         report["error"], report["reason"] = (str(exc) or exc.__class__.__name__)[:200], "error"
+    if kept:
+        report["kept"] = kept
     ProviderAccount.update(status=row.status, checked=now()).where(
         ProviderAccount.id == row.id
     ).execute()
     if not only:
+        opts = options(ProviderAccount.get_by_id(row.id))  # the default may have moved meanwhile
         opts["last"] = report
         _save_options(row, opts)
     if any(report["added"].values()):
@@ -566,12 +723,18 @@ def start(app, account_id, kinds=None, only=None) -> bool:
     with _runs_lock:
         if key in _runs:
             return False
-        _runs[key] = {"running": True, "kind": None, "added": {}}
+        _runs[key] = {"running": True, "kind": None, "phase": "connect", "done": 0, "total": None, "added": {}}
 
     def work(own_connection=True):
         try:
             if own_connection:
                 open_connection(reuse=True)
+                try:
+                    from .deezer import workload
+
+                    workload.renice()  # this thread only: behind every request
+                except Exception:
+                    logger.debug("library import: renice failed", exc_info=True)
             run(app, account_id, kinds=kinds, only=only)
         finally:
             with _runs_lock:
@@ -721,10 +884,18 @@ def due(row, at=None) -> bool:
 
 
 def run_due(app):
-    for row in ProviderAccount.select().where(
-        ProviderAccount.provider.in_(list(SOURCES)) & ProviderAccount.user.is_null(False)
+    """Each person's DEFAULT account, when it is due. Their other accounts are
+    imported only when they ask."""
+    rows = {}
+    for row in (
+        ProviderAccount.select()
+        .where(ProviderAccount.provider.in_(list(SOURCES)) & ProviderAccount.user.is_null(False))
+        .order_by(ProviderAccount.created, ProviderAccount.provider)
     ):
-        if due(row):
+        rows.setdefault(row.user_id, []).append(row)
+    for mine in rows.values():
+        row = _default_of(mine)
+        if row is not None and due(row):
             start(app, row.id)
 
 
