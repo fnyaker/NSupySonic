@@ -166,6 +166,7 @@
       class="qitem"
       class:now={index === idx}
       class:past={index < idx}
+      class:edit={editable && index > idx}
       class:dragging={drag && drag.from === index}
       class:before={drag && drag.to === index && drag.to < drag.from}
       class:after={drag && drag.to === index && drag.to > drag.from}
@@ -194,6 +195,10 @@
         >
           <Icon name="grip" size={18} />
         </span>
+      {:else if editable}
+        <!-- The playing and played rows have no controls: an empty slot keeps
+             their duration in the same column as everyone else's. -->
+        <span class="qslot" aria-hidden="true"></span>
       {/if}
     </div>
   </VirtualList>
@@ -364,13 +369,29 @@
   }
   /* Hover is the desktop's way of keeping a row calm until it is wanted; a
      touch screen has no hover, so there the controls are simply always there. */
+  .qslot {
+    flex: none;
+    width: 80px;
+  }
   @media (hover: hover) {
+    /* The remove button takes the duration's place while the row is hovered,
+       instead of keeping a blank 40 px column on every row for it. */
     .qx {
+      position: absolute;
+      top: 0;
+      right: 40px;
       opacity: 0;
     }
     .qitem:hover .qx,
     .qx:focus-visible {
       opacity: 1;
+    }
+    .qitem.edit:hover .qd,
+    .qitem.edit:focus-within .qd {
+      visibility: hidden;
+    }
+    .qslot {
+      width: 40px;
     }
   }
 

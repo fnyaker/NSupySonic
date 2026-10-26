@@ -61,6 +61,14 @@ phone shows the list OR a category (back returns to the list, `replace` on a dee
 open category. A link into a setting names its category (`/settings/sources`, `/settings/account`); old `fx`/`quality`
 names are mapped. Benches open the category they test (`#/settings/playback`, `#/settings/downloads`), never bare `#/settings`.
 
+**Long grids grow as they scroll** (`lib/grow.js`: `STEP`, `use:nearEnd` on a sentinel after the last tile;
+Library's Artistes, Albums, Playlists). 300 followed artists mounted at once cost 1.2 s of main thread on the
+4x-throttled desktop (0.9 s phone) before the chip answered; mounting 36 then the next 36 as the end comes
+within 800 px: 0.18 s / 0.11 s (`test/clicks/run.mjs`, *biblio: Artistes*; Albums 0.63 s → 0.06 s). The
+observer's ROOT must be the scrolling `<main>`: against the viewport the margin is clipped by `<main>` and the
+grid never grows. An observer only reports changes, so after each step it is re-observed (a tall screen
+that still shows the sentinel asks for the next step).
+
 **Swipe a track row right to queue it next** (`components/TrackRow.svelte`, touch only). Same
 gesture language as the now-playing sheet: arm on touchstart, commit to an axis after ~10px, and
 leave a gesture that locks to "y" entirely to the scroller. The row slides and the strip it vacates

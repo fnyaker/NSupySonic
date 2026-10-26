@@ -28,6 +28,7 @@
   import UnavailableList from "../components/UnavailableList.svelte";
   import ArtistTile from "../components/ArtistTile.svelte";
   import Podcasts from "./Podcasts.svelte";
+  import { STEP, nearEnd } from "../lib/grow.js";
 
   // One library, filtered by chips (Spotify's "Your Library", 2021): what you
   // keep is in one place whatever it is — titles, artists, albums, playlists,
@@ -115,6 +116,15 @@
     else if (arSort === "recent") list.sort((a, b) => (b.starred || "").localeCompare(a.starred || ""));
     return list; // "plays" is the server's own order
   })();
+  // The grids mount one screenful at a time (lib/grow.js); a new filter or
+  // query starts again from the top.
+  let arLimit = STEP;
+  let alLimit = STEP;
+  let plLimit = STEP;
+  let arKey, alKey, plKey;
+  $: if (arKey !== (arKey = `${tab}\0${arQuery}\0${arSort}`)) arLimit = STEP;
+  $: if (alKey !== (alKey = tab)) alLimit = STEP;
+  $: if (plKey !== (plKey = `${tab}\0${plQuery}`)) plLimit = STEP;
   const titles = (n) => (n ? `${n} titre${n > 1 ? "s" : ""}` : "Aucun titre gardé");
 
   let local = null;
@@ -320,8 +330,9 @@
       <p class="muted hint">Aucun artiste ne correspond à « {arQuery} ».</p>
     {:else}
       <div class="artist-grid">
-        {#each shownArtists as a (a.id)}<ArtistTile artist={a} detail={titles(a.tracks)} />{/each}
+        {#each shownArtists.slice(0, arLimit) as a (a.id)}<ArtistTile artist={a} detail={titles(a.tracks)} />{/each}
       </div>
+      {#if shownArtists.length > arLimit}<div class="grow" use:nearEnd={() => (arLimit += STEP)}></div>{/if}
     {/if}
   {/if}
 {:else if tab === "albums"}
@@ -331,8 +342,9 @@
     <p class="muted hint">Aucun album favori. Touche le cœur sur la page d'un album pour le garder ici.</p>
   {:else}
     <div class="grid">
-      {#each albums as a (a.id)}<Card item={a} kind="album" />{/each}
+      {#each albums.slice(0, alLimit) as a (a.id)}<Card item={a} kind="album" />{/each}
     </div>
+    {#if albums.length > alLimit}<div class="grow" use:nearEnd={() => (alLimit += STEP)}></div>{/if}
   {/if}
 {:else if tab === "podcasts"}
   <Podcasts embedded />
@@ -350,8 +362,9 @@
       <p class="muted hint">Aucune playlist ne correspond à « {plQuery} ».</p>
     {:else}
       <div class="grid">
-        {#each shownPlaylists as p (p.id)}<Card item={p} kind="playlist" />{/each}
+        {#each shownPlaylists.slice(0, plLimit) as p (p.id)}<Card item={p} kind="playlist" />{/each}
       </div>
+      {#if shownPlaylists.length > plLimit}<div class="grow" use:nearEnd={() => (plLimit += STEP)}></div>{/if}
     {/if}
   {/if}
 {:else if tab === "downloaded"}
@@ -399,6 +412,9 @@
 {/if}
 
 <style>
+  .grow {
+    height: 1px;
+  }
   .head {
     display: flex;
     align-items: center;
