@@ -8,11 +8,13 @@
 // ending into the next, the crossfade (two players at once), the setting
 // switched off mid-song (handed back to the page's <audio>), the screen locked
 // through two track ends (bridge 7: the app goes on by itself, the page frozen
-// meanwhile — nothing it is sent is delivered — catches up when it wakes), a
-// seek in a first-play stream with no length, and the Réglages card at the
-// widths it lives in.
+// meanwhile — nothing it is sent is delivered — catches up when it wakes), the
+// same with the page only throttled and the crossfade and trim on (bridge 8:
+// the app holds the list before the screen locks and cuts each song itself;
+// `--old` runs that scenario as bridge 7), a seek in a first-play stream with
+// no length, and the Réglages card at the widths it lives in.
 //
-//   npm run build && node test/native/run.mjs [--shots <dir>]
+//   npm run build && node test/native/run.mjs [--shots <dir>] [--old]
 import { writeFileSync, mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,20 +44,33 @@ function fakeApp() {
   const DELAY = 15; // binder + evaluateJavascript
   const slots = new Map();
   let next = 1;
-  window.__fake = { cmds: [], made: 0, released: 0, slots, frozen: false, held: [], lastPlayed: 0 };
+  window.__fake = { cmds: [], made: 0, released: 0, slots, frozen: false, held: [], lastPlayed: 0, bg: false, throttled: false, advAt: [] };
   // A frozen page runs nothing it is sent: the messages wait, in order, for it to wake.
   const deliver = (id, s) => window.__nsAudio && window.__nsAudio(id, s);
   const emit = (id, s) =>
     setTimeout(() => (window.__fake.frozen ? window.__fake.held.push([id, s]) : deliver(id, s)), DELAY);
   // The page's timers: a frozen page runs none of them; they run on waking.
+  // A THROTTLED page (what a hidden WebView really is: Chromium throttles a
+  // hidden silent page's timers to once a minute, and every event the app sends
+  // still runs) is the same for its timers and animation frames, harsher than
+  // a minute but the same story: whatever the page starts there waits.
   const parked = [];
+  const asleep = () => window.__fake.frozen || window.__fake.throttled;
   window.setTimeout = (fn, ms, ...a) =>
-    setTimeout(() => (window.__fake.frozen ? parked.push(() => fn(...a)) : fn(...a)), ms);
-  window.setInterval = (fn, ms, ...a) => setInterval(() => !window.__fake.frozen && fn(...a), ms);
+    setTimeout(() => (asleep() ? parked.push(() => fn(...a)) : fn(...a)), ms);
+  window.setInterval = (fn, ms, ...a) => setInterval(() => !asleep() && fn(...a), ms);
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (fn) => raf((t) => (asleep() ? parked.push(() => raf(fn)) : fn(t)));
   window.__fake.thaw = () => {
     window.__fake.frozen = false;
+    window.__fake.throttled = false;
     for (const [id, s] of window.__fake.held.splice(0)) deliver(id, s);
     for (const f of parked.splice(0)) f();
+  };
+  // MainActivity.onStop / onStart: the app's players learn it and say it.
+  window.__fake.setBg = (bg) => {
+    window.__fake.bg = bg;
+    for (const sl of slots.values()) sl.send(null);
   };
   // The screen: a hidden page, as the WebView behind a locked phone is.
   window.__hidden = false;
@@ -76,6 +91,7 @@ function fakeApp() {
       const bridge7 = version() >= 7;
       const s = { c: sl.c, st: st(), p: sl.pwr, t: el.currentTime, b: el.buffered.length ? el.buffered.end(el.buffered.length - 1) : 0, sk: sl.item && !unseekable() };
       if (bridge7) s.sc = true;
+      if (version() >= 8) s.bg = window.__fake.bg;
       if (sl.chase != null) s.t = sl.chase;
       if (sl.key) Object.assign(s, { k: sl.key, u: sl.url });
       if (sl.item && isFinite(el.duration) && el.duration > 0 && !unseekable()) s.d = el.duration;
@@ -100,29 +116,40 @@ function fakeApp() {
         sl.send("seeked");
       }
     });
-    el.addEventListener("ended", () => {
+    // NativeAudio.kt#followsList: bridge 8 follows the list only while the activity is stopped.
+    const follows = () =>
+      sl.next.length && sl.id === window.__fake.lastPlayed && sl.pwr && (version() < 8 || window.__fake.bg);
+    // NativeAudio.kt#advance: on to the next one, by itself.
+    const advance = () => {
       const n = sl.next[0];
-      if (n && sl.id === window.__fake.lastPlayed && sl.pwr) {
-        // NativeAudio.kt#advance: on to the next one, by itself.
-        sl.next = sl.next.slice(1);
-        sl.key = n.k || "-";
-        sl.url = n.url;
-        window.__fake.advanced = (window.__fake.advanced || 0) + 1;
-        el.src = n.url;
-        el.volume = n.v;
-        el.load();
-        if (n.at > 0) el.addEventListener("loadedmetadata", () => (el.currentTime = n.at), { once: true });
-        el.play().catch(() => {});
-        lastSt = 2;
-        sl.send("adv");
-        return;
-      }
+      window.__fake.advAt.push(+el.currentTime.toFixed(3));
+      sl.next = sl.next.slice(1);
+      sl.end = n.e || 0;
+      sl.key = n.k || "-";
+      sl.url = n.url;
+      window.__fake.advanced = (window.__fake.advanced || 0) + 1;
+      el.src = n.url;
+      el.volume = n.v;
+      el.load();
+      if (n.at > 0) el.addEventListener("loadedmetadata", () => (el.currentTime = n.at), { once: true });
+      el.play().catch(() => {});
+      lastSt = 2;
+      sl.send("adv");
+    };
+    sl.checkTrim = () => {
+      if (version() >= 8 && sl.end > 0 && follows() && st() === 3 && el.currentTime >= sl.end - 0.015) advance();
+    };
+    el.addEventListener("ended", () => {
+      if (follows()) return advance();
       sl.ended = true;
       onChange();
     });
     el.addEventListener("playing", () => {
       clearInterval(sl.tick);
       sl.tick = setInterval(() => !el.paused && sl.send("tick"), 250);
+      // The trimmed end, timed on the player's own clock (NativeAudio.kt#checkTrim).
+      clearInterval(sl.trim);
+      sl.trim = setInterval(() => !el.paused && sl.checkTrim(), 10);
     });
     el.addEventListener("pause", () => clearInterval(sl.tick));
     el.addEventListener("error", () => emit(id, { c: sl.c, ev: "error", code: 2, msg: "fake" }));
@@ -165,9 +192,13 @@ function fakeApp() {
         switch (o.op) {
           case "next":
             sl.next = o.q || [];
+            sl.end = +o.end || 0;
+            sl.lists = (sl.lists || 0) + 1;
             break;
           case "src":
+            sl.srcs = (sl.srcs || 0) + 1;
             sl.next = [];
+            sl.end = 0;
             sl.key = "";
             sl.url = o.url;
             sl.whole = false;
@@ -437,6 +468,89 @@ const queue = ids.ids.slice(0, 3).map((id, k) => song(id, k + 1));
   check(srcAfter === srcBefore, "and took its source over instead of loading the track again", `${srcAfter - srcBefore} new loads`);
   const nexts = await page.evaluate(() => [...window.__fake.slots.values()].map((s) => s.next.length));
   check(nexts.every((n) => n === 0), "visible again: the app has nothing left to go on to by itself", JSON.stringify(nexts));
+  await ctx.close();
+}
+
+{
+  // Bridge 8, what a locked phone really does: the activity stops, the page is
+  // hidden and THROTTLED — its timers and frames wait, every event the app
+  // sends still runs — with the crossfade and the silence trim on (each song's
+  // audio ends at 5.5 s of 8). The page used to start the crossfade itself on
+  // a timeupdate and stall in it. `--old` runs it as bridge 7 did, to see that.
+  const BR = process.argv.includes("--old") ? 7 : 8;
+  const END = 5.5;
+  const q5 = ids.ids.slice(0, 4).map((id, k) => song(id, k + 1));
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await ctx.route("**/api/audio/edges/**", (r) =>
+    r.fulfill({ contentType: "application/json", body: JSON.stringify({ ready: true, start: 0, end: END, duration: LEN }) }));
+  const page = await open(ctx, { __bridge: BR, "fade.enabled": true, "fade.seconds": 3 }, q5);
+  await page.locator("footer.player .pp").click();
+  await page.waitForTimeout(1500);
+  if (BR >= 8) {
+    const known = await page.evaluate(() =>
+      [...window.__fake.slots.values()].filter((s) => !s.el.paused).map((s) => ({ n: s.next.length, end: s.end, e: s.next.map((x) => x.e), lists: s.lists || 0 })));
+    // A song further on carries its trim once its bounds have been asked
+    // (EDGES_AHEAD of them, as the list is made).
+    check(known.length === 1 && known[0].n === 3 && known[0].end === END && known[0].e[0] === END,
+      "visible: the app already holds what follows, with where the songs' audio ends", JSON.stringify(known));
+  }
+  const srcBefore = await page.evaluate(() => window.__fake.cmds.filter((c) => c === "src").length);
+  const srcsBefore = await page.evaluate(() => [...window.__fake.slots.values()].find((s) => !s.el.paused)?.srcs || 0);
+  await page.evaluate(() => {
+    window.__fake.setBg(true);
+    window.__hidden = true;
+    window.__fake.throttled = true;
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  let both = 0;
+  const t0 = Date.now();
+  while (Date.now() - t0 < (END - 1.5 + END + 1) * 1000) {
+    await page.waitForTimeout(200);
+    both += await page.evaluate(() => ([...window.__fake.slots.values()].filter((s) => !s.el.paused).length > 1 ? 1 : 0));
+  }
+  const r = await page.evaluate(() => ({
+    sounding: [...window.__fake.slots.values()].filter((s) => !s.el.paused).map((s) => s.el.src),
+    adv: window.__fake.advanced || 0,
+    at: window.__fake.advAt,
+    src: window.__fake.cmds.filter((c) => c === "src").length,
+  }));
+  check(r.sounding.length === 1 && r.sounding[0].includes(String(ids.ids[2])) && r.adv === 2,
+    "locked screen, throttled page: the app went on by itself, twice, and plays Song 3", JSON.stringify({ ...r, both }));
+  check(r.at.length === 2 && r.at.every((t) => Math.abs(t - END) < 0.1),
+    "each song cut where its audio ends, by the app", JSON.stringify(r.at));
+  check(r.src === srcBefore && both === 0, "and the page started no transition of its own (no load, no overlap)",
+    `${r.src - srcBefore} loads, ${(both * 0.2).toFixed(1)} s with two players`);
+  await page.evaluate(() => {
+    window.__fake.setBg(false);
+    window.__hidden = false;
+    window.__fake.thaw();
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  // Read at once: with songs this short the page arms its crossfade into Song 4
+  // a moment later, as it should when it is shown.
+  await page.waitForTimeout(300);
+  const w = await where(page);
+  // The player sounding was given no source since the screen locked (the
+  // crossfade into Song 4 may already be loading on the other one).
+  const { real, srcs } = await page.evaluate(() => {
+    const sl = [...window.__fake.slots.values()].find((s) => !s.el.paused);
+    return { real: sl?.el.currentTime, srcs: sl?.srcs || 0 };
+  });
+  check(w.title === "Song 3" && !w.paused && Math.abs(w.t - real) < 0.4 && srcs === srcsBefore,
+    "back in front of it: the page is on Song 3 where the app is, its source taken over",
+    `${w.title} at ${w.t?.toFixed(2)} (app ${real?.toFixed(2)}), ${srcs - srcsBefore} loads on it`);
+  // Shown again, the page does its own transitions as it always has: the
+  // crossfade into Song 4, two players heard together.
+  let both2 = 0;
+  const t1 = Date.now();
+  let w4;
+  while (Date.now() - t1 < (END - (w.t || 0) + 3.5) * 1000) {
+    await page.waitForTimeout(200);
+    w4 = await where(page);
+    if (w4.playing === 2) both2++;
+  }
+  check(both2 >= 3 && w4.title === "Song 4", "visible again: the page crossfades into Song 4 itself",
+    `${(both2 * 0.2).toFixed(1)} s overlap, now ${w4.title}`);
   await ctx.close();
 }
 

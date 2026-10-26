@@ -1801,6 +1801,9 @@
     // A direct crossfade's envelope steps on the media pipeline's clock too
     // (graph.js#tickVolumes): timers may be throttled in the background.
     tickVolumes();
+    // Behind a locked screen a crossfade not yet begun is dropped: the app cuts
+    // to the next track itself (nativeOwnsTransition).
+    if (xfade && xfade.phase === "arming" && nativeOwnsTransition()) cancelCrossfade();
     xfadeTick();
     if (e && e.target !== audio) return; // ignore the idle/preloading element
     if (loadingTrack) return; // a track change is mid-flight — position is stale
@@ -1843,6 +1846,7 @@
   // timeupdates a second would otherwise advance it four times.
   function maybeTrimEnding(d) {
     if (xfade || !get(trimSilence) || trimmedId === curId) return;
+    if (nativeOwnsTransition()) return; // the app cuts it there itself
     if (loadingTrack || chasing || switching) return;
     // Stopping at the end of this track: let the file end, do not cut it short.
     if (sleepStopsAtTrackEnd()) return;
@@ -2055,6 +2059,9 @@
 
   function maybeCrossfade() {
     if (xfade || !get(crossfadeEnabled)) return;
+    // Behind a locked screen the app goes on by itself, with no overlap: a
+    // fade stepped by a throttled page is the transition that never ended.
+    if (nativeOwnsTransition()) return;
     if (switching || chasing || loadingTrack || recovering) return;
     // Nothing to blend into when the player stops at the end of this track.
     if (sleepStopsAtTrackEnd()) return;
@@ -2410,23 +2417,59 @@
 
   // -- the Android app going on by itself ------------------------------------
   // Behind a locked screen the page is silent to Chromium (the app plays the
-  // sound), so it is throttled and then frozen: a track's `ended` used to
-  // reach it only once the phone was unlocked, and nothing played meanwhile.
+  // sound), so its timers are throttled (once a minute after five minutes) and
+  // the OS may stop it altogether, while the app's events still reach it: a
+  // track change it started there (on `ended`, a trimmed ending, a crossfade)
+  // stalled, and nothing played until the phone was unlocked.
   // So while the page is hidden it tells the app's player which tracks follow
   // (those onEnded would go to, where loadTrack would start each, at the
   // volume it would get), and the app starts them by itself. The page catches
   // up when it runs again: the queue moves to the track the app is on and
-  // loadTrack ADOPTS the element's source. Visible, nothing is named and
-  // nothing changes.
+  // loadTrack ADOPTS the element's source. On bridge 8 the list is kept while
+  // visible too, with where each track's audio ends, and the app follows it
+  // only while its activity is stopped (cutting a trimmed track itself); the
+  // page then starts no transition of its own (nativeOwnsTransition). Visible,
+  // nothing the app does changes.
   const HINT_AHEAD = 10;
+  const EDGES_AHEAD = 5;
+  const edgesAsked = new Set();
   let pageHidden = typeof document !== "undefined" && document.visibilityState === "hidden";
   let adoptKey = null; // the track loadTrack is to take over rather than load
   let hinted = []; // [{ key, index }]: what the app was told follows
   let hintSig = "";
+  let hintEl = null; // the element hintSig was sent to
   let hintSeq = 0;
 
+  // From bridge 8 the app keeps the list while the page is VISIBLE too: naming
+  // it only once the page was hidden raced the page being throttled (an
+  // IndexedDB read per track, on a page about to stop running), and the app
+  // only follows it while its activity is stopped anyway.
+  function nativeOwnsBackground() {
+    return isNativeEl(audio) && !stale(audio) && audio.ownsBackground;
+  }
+  // The app ends this track and goes on by itself: the page must not start a
+  // crossfade or a trimmed ending of its own. A hidden page still runs the
+  // events the app sends it (only its timers are throttled), so it used to
+  // start one on a timeupdate and stall halfway through it.
+  function nativeOwnsTransition() {
+    return nativeOwnsBackground() && (pageHidden || audio.appInBackground) && hinted.length > 0;
+  }
+  // Where a track's audio ends, for the app to cut there (0: its file's end).
+  function trimEndFor(track) {
+    const e = edgesFor(track);
+    if (!e || !(e.end > 0)) return 0;
+    const d = +e.duration || +track.duration || 0;
+    if (!d || e.end > d - 0.2) return 0;
+    return e.end;
+  }
+
   function nextHintTargets() {
-    if (!pageHidden || !curId || loadingTrack || switching || chasing || xfade || recovering) return [];
+    if (!pageHidden && !nativeOwnsBackground()) return [];
+    // A crossfade being armed (its incoming track preloading, XFADE_PRELOAD
+    // before the fade) keeps the list: the screen may lock right then, and the
+    // fade is the page's own to give up (onTime). Once fading, the list is the
+    // incoming element's, which is `audio` by then.
+    if (!curId || loadingTrack || switching || chasing || recovering) return [];
     if (sleepStopsAtTrackEnd()) return [];
     const s = get(player);
     if (s.repeat === "one" || repeatsItself(s) || !s.queue.length) return [];
@@ -2468,15 +2511,37 @@
   async function updateNativeNext() {
     const el = audio;
     if (!isNativeEl(el) || !el.canChain) return;
-    const want = nextHintTargets().map(({ track, index }) => {
+    const targets = nextHintTargets();
+    // Where the first few end is asked now (once per track, kept on the device):
+    // the server only says it for the current and the next one otherwise, and
+    // the app cuts a song it was given no bounds for at its file's end.
+    if (el.ownsBackground && get(trimSilence)) {
+      const db = get(trimThresholdDb);
+      for (const { track } of targets.slice(0, EDGES_AHEAD)) {
+        // This runs on every progress tick, and a miss (not archived yet) is
+        // not kept by edges.js: one ask per track and threshold per session.
+        const ask = trackKey(track) + "@" + db;
+        if (track.podcast || edgesAsked.has(ask)) continue;
+        edgesAsked.add(ask);
+        primeEdges(trackKey(track), db);
+      }
+    }
+    const want = targets.map(({ track, index }) => {
       const e = edgesFor(track);
-      return { track, index, at: e && e.start > 0.25 ? e.start : 0, v: directVolumeFor(gainFor(track)) };
+      return {
+        track, index, at: e && e.start > 0.25 ? e.start : 0, e: trimEndFor(track), v: directVolumeFor(gainFor(track)),
+      };
     });
+    const end = want.length && $current ? trimEndFor($current) : 0;
     const sig = want.length
-      ? get(quality) + "|" + want.map((w) => `${trackKey(w.track)}@${w.index}:${w.at}:${w.v.toFixed(3)}`).join(",")
+      ? get(quality) + "|" + end + "|" +
+        want.map((w) => `${trackKey(w.track)}@${w.index}:${w.at}:${w.e}:${w.v.toFixed(3)}`).join(",")
       : "";
-    if (sig === hintSig) return;
+    // Per element: a quality switch or a crossfade hands the track to the other
+    // player, which has been told nothing, whatever the list looks like.
+    if (sig === hintSig && el === hintEl) return;
     hintSig = sig;
+    hintEl = el;
     const seq = ++hintSeq;
     const list = [];
     const keys = [];
@@ -2494,6 +2559,7 @@
       list.push({
         url,
         at: w.at,
+        e: w.e,
         v: w.v,
         k: trackKey(t),
         meta: {
@@ -2507,7 +2573,7 @@
       keys.push({ key: trackKey(t), index: w.index });
     }
     hinted = keys;
-    el.setNext(list);
+    el.setNext(list, list.length ? end : 0);
   }
   // Every input of the decision; the signature keeps a progress tick from
   // sending anything.

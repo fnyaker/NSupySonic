@@ -30,6 +30,12 @@
 //    page adopts the new source (`adopt`) or loads its own;
 //  - a seek in a stream with no length (a first play) is held by the app until
 //    it can land (`sc` in its state), so the element is seekable everywhere.
+// From bridge version 8 the list is kept up to date while the page is VISIBLE
+// too (naming it at the moment the page is hidden raced the page being
+// throttled), each entry carries where its audio ends (`e`, the silence trim)
+// and so does the current track (`end`); the app follows the list only while
+// its activity is stopped, ends a trimmed track there itself, and says so in
+// every state (`bg`) so that the page leaves those transitions to it.
 //
 // Only what the player uses is here. A `blob:` source (a track downloaded into
 // IndexedDB) cannot be read by the native side, so the element plays it on a
@@ -50,6 +56,9 @@ export const ST_ENDED = 4;
 export const NATIVE_AUDIO_BRIDGE = 4;
 // ...and the one whose players go on to the next track by themselves.
 export const NATIVE_NEXT_BRIDGE = 7;
+// ...and the one that keeps the list while visible and owns the transitions in
+// the background (the trimmed end included).
+export const NATIVE_OWN_BRIDGE = 8;
 
 // A reading of the position that goes back by less than this is taken for the
 // tick arriving a little behind the interpolation, not for a move.
@@ -292,6 +301,7 @@ export class NativeAudioElement extends EventTarget {
     this.defaultPlaybackRate = 1;
     this._plays = [];
     this._chase = false;
+    this._appBg = false; // the app's activity is stopped (bridge 8: `bg` on every state)
     this._nextSent = "";
     this._advKey = ""; // the key of the track the app went on to by itself
     this._advPending = false; // ...which the page has not taken over yet
@@ -380,6 +390,7 @@ export class NativeAudioElement extends EventTarget {
       this._fire("nsadvance");
     }
     if (typeof s.sc === "boolean") this._chase = s.sc;
+    if (typeof s.bg === "boolean") this._appBg = s.bg;
     const prevSt = this._st;
     const prevD = this._d;
     const prevBuf = this._buf;
@@ -459,20 +470,43 @@ export class NativeAudioElement extends EventTarget {
     }
   }
 
+  /** Whether the app keeps the list while visible and owns the background transitions. */
+  get ownsBackground() {
+    if (!this.canChain) return false;
+    try {
+      return this._b.bridgeVersion() >= NATIVE_OWN_BRIDGE;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether the app's activity is stopped (screen off, another app), as its last state said. */
+  get appInBackground() {
+    return !!this._appBg && this.ownsBackground;
+  }
+
   /**
    * The tracks that follow, in order, played by the app as each one ends:
-   * `[{url, at, v, k, meta}]` (`at` where it starts, `v` its volume, `k` its
-   * key, `meta` what the notification shows); empty for none.
+   * `[{url, at, e, v, k, meta}]` (`at` where it starts, `e` where its audio
+   * ends — 0 for the file's end —, `v` its volume, `k` its key, `meta` what the
+   * notification shows); empty for none. `end` is where the CURRENT track's
+   * audio ends (0: its file's end).
    */
-  setNext(list) {
+  setNext(list, end = 0) {
     if (!this.canChain) return;
+    const own = this.ownsBackground;
     const q = (Array.isArray(list) ? list : [])
       .filter((n) => n && n.url)
-      .map((n) => ({ url: n.url, at: +n.at || 0, v: +n.v || 0, k: String(n.k || ""), meta: n.meta || null }));
-    const msg = q.length ? JSON.stringify(q) : "";
+      .map((n) => {
+        const o = { url: n.url, at: +n.at || 0, v: +n.v || 0, k: String(n.k || ""), meta: n.meta || null };
+        if (own) o.e = +n.e > 0 ? +n.e : 0;
+        return o;
+      });
+    const cut = own && +end > 0 ? +end : 0;
+    const msg = q.length ? JSON.stringify(q) + "|" + cut : "";
     if (msg === this._nextSent) return;
     this._nextSent = msg;
-    this._send("next", { q });
+    this._send("next", own ? { q, end: cut } : { q });
   }
 
   /** The key of the track the app went on to and the page has not taken over, or "". */
