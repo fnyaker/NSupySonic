@@ -104,7 +104,7 @@ const song = (id, k) => ({
 
 async function run({ downloads }) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
-  await ctx.route((u) => /deezer\.com|dzcdn\.net/.test(new URL(u).hostname), (r) => r.abort());
+  await ctx.route((u) => /(^|\.)(deezer\.com|dzcdn\.net)$/.test(new URL(u).hostname), (r) => r.abort());
   await ctx.addInitScript(() => {
     // An app whose downloads are not in its storage, but that hears the lease:
     // the page's own downloads run (the web path), and offYield is recorded.
