@@ -1665,8 +1665,18 @@ def login():
     session["epoch"] = user.session_epoch or 0
     session.permanent = True
     from .accessapi import me_access
+    from .sourcesapi import sources_brief
 
-    return jsonify({"user": {"name": user.name, "admin": user.admin, "access": me_access(user)}})
+    return jsonify(
+        {
+            "user": {
+                "name": user.name,
+                "admin": user.admin,
+                "access": me_access(user),
+                "sources": sources_brief(),
+            }
+        }
+    )
 
 
 @webapi.route("/logout", methods=["POST"])
@@ -1687,10 +1697,19 @@ def logout():
 def me():
     u = request.webuser
     from .accessapi import me_access
+    from .sourcesapi import sources_brief
 
     # What this person may use of each provider (plan multi-provider §15), so
-    # the web app offers nothing that would be refused.
-    out = {"user": {"name": u.name, "admin": u.admin, "access": me_access(u)}}
+    # the web app offers nothing that would be refused; and the sources in
+    # their order, so that no screen writes a source's name itself.
+    out = {
+        "user": {
+            "name": u.name,
+            "admin": u.admin,
+            "access": me_access(u),
+            "sources": sources_brief(),
+        }
+    }
     # A remote-control session is logged in as the owner, with a narrower
     # grant; the web app needs both to know whose player it is driving.
     link = getattr(request, "rc", None)
@@ -4812,3 +4831,4 @@ from . import androidapk  # noqa: E402,F401  isort:skip
 from . import discover as _discover_routes  # noqa: E402,F401  isort:skip
 from . import accessapi  # noqa: E402,F401  isort:skip
 from . import myaccounts  # noqa: E402,F401  isort:skip
+from . import sourcesapi  # noqa: E402,F401  isort:skip

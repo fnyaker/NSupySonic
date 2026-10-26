@@ -12,6 +12,7 @@
   import { toasts, unavailableChanged } from "../lib/stores.js";
   import { invalidatePlaylists, loadFavorites } from "../lib/actions.js";
   import Icon from "./Icon.svelte";
+  import { chain, nameOf, sources } from "../lib/sources.js";
 
   /** How many tracks the list holds (what a run would go through). */
   export let count = 0;
@@ -41,7 +42,9 @@
     "the Deezer proxy is off": "le proxy Deezer est désactivé",
     "no candidate could be heard": "aucun candidat n'a pu être écouté",
   };
-  const SOURCE = { local: "fichier local", deezer: "Deezer", youtube: "YouTube" };
+  // Where the candidates are looked for: the files, then the sources in their
+  // order (Réglages → Sources).
+  $: looked = chain($sources.filter((x) => x.place !== "off"));
 
   function reasonText(r) {
     if (!r) return "";
@@ -163,8 +166,8 @@
             Comparaison audio indisponible sur ce serveur (numpy et ffmpeg sont nécessaires,
             tous deux dans l'image Docker).
           {:else}
-            L'extrait Deezer du titre perdu est comparé à l'audio des candidats (fichiers,
-            Deezer{status.youtube ? ", puis YouTube" : ""}). À 99&nbsp;% ou plus, c'est le même
+            L'extrait du titre perdu, servi par sa source, est comparé à l'audio des candidats
+            (fichiers{looked ? `, puis ${looked}` : ""}). À 99&nbsp;% ou plus, c'est le même
             enregistrement : il est remplacé partout, sans rien demander.
           {/if}
         </span>
@@ -222,7 +225,7 @@
                   <Icon name="chevronRight" size={13} />
                   <span class="to">
                     {r.by.album || r.by.title}
-                    <span class="muted">· {SOURCE[r.by.source] || r.by.source}</span>
+                    <span class="muted">· {r.by.source === "local" ? "fichier local" : nameOf(r.by.source)}</span>
                   </span>
                   <span class="score">{pct(r.score)}</span>
                 </li>

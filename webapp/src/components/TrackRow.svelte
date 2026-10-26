@@ -16,6 +16,7 @@
   import { duration as fmtDuration } from "../lib/format.js";
   import { playbackIdle } from "../lib/playback.js";
   import Icon from "./Icon.svelte";
+  import { iconOf, offMain, sourceTitle } from "../lib/sources.js";
   import Cover from "./Cover.svelte";
   import ArtistLine from "./ArtistLine.svelte";
 
@@ -229,7 +230,7 @@
               aria-label="Titre indisponible, remplacer"
               on:click|stopPropagation={() => openReplace(track)}><Icon name="alert" size={13} /></button>
           {/if}
-          {#if track.source === "youtube"}<span class="local" title="Source YouTube (pas sur Deezer)"><Icon name="youtube" size={13} /></span>{:else if track.local}<span class="local" title="Fichier local (pas sur Deezer)"><Icon name="cloudOff" size={13} /></span>{/if}
+          {#if offMain(track.source)}<span class="local" title={sourceTitle(track.source)}><Icon name={iconOf(track.source)} size={13} /></span>{:else if track.local}<span class="local" title={sourceTitle("local")}><Icon name="cloudOff" size={13} /></span>{/if}
           {#if downloaded}<span class="dlbadge" title="Disponible hors-ligne"><Icon name="downloaded" size={13} /></span>{/if}
           {track.title}
           {#if track.explicit}<span class="explicit">E</span>{/if}

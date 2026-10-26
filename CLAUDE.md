@@ -147,6 +147,9 @@ and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` 
 schema. SQLite by default; Postgres/MySQL supported (PostgreSQL has no REPLACE: write portable
 upserts). A migration script is split on `;` AFTER its `--` comment lines are dropped
 (`db.split_sql_script`); `tests/test_schema.py` requires each piece to be a statement.
+Every migration since `20260808` is idempotent: each boot checks the models against the database (one
+query) and replays them if a column or table is missing (`db._repair_skipped_migrations`; a data-only one,
+`DATA_MIGRATIONS`, only with its column). Keep new migrations idempotent.
 
 ## Config & secrets
 

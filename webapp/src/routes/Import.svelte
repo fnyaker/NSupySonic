@@ -3,6 +3,7 @@
   // finds each title (your library first, then Deezer, then YouTube), and the
   // result plays at once. It is TEMPORARY until "Enregistrer" makes it one of
   // your playlists. See supysonic/webui/playlist_import.py.
+  import { nameOf } from "../lib/sources.js";
   import { onDestroy } from "svelte";
   import { push } from "svelte-spa-router";
   import { api } from "../lib/api.js";
@@ -22,7 +23,8 @@
 
   const POLL_MS = 700;
   const RUNNING = new Set(["reading", "matching", "saving"]);
-  const VIA = { local: "dans ta bibliothèque", deezer: "sur Deezer", youtube: "sur YouTube" };
+  // Where each title was found: the library, or a source by its name.
+  const viaText = (v) => (v === "local" ? "dans ta bibliothèque" : v ? `sur ${nameOf(v)}` : "");
 
   const saved = recallScreen();
   let link = saved?.link ?? "";
@@ -233,7 +235,7 @@
         {#if job.counts}
           <span class="chips">
             {#each Object.entries(job.counts) as [via, n]}
-              <span class="chip">{n} {VIA[via] || via}</span>
+              <span class="chip">{n} {viaText(via)}</span>
             {/each}
             {#if missing.length}<span class="chip warn">{missing.length} introuvable{missing.length > 1 ? "s" : ""}</span>{/if}
           </span>
@@ -296,7 +298,7 @@
             <span class="arrow muted" aria-hidden="true">→</span>
             <span class="l-main">
               <span class="l-title">{it.track.title}</span>
-              <span class="muted l-sub">{it.track.display_artist || it.track.artist?.name || ""} · {VIA[it.via]}</span>
+              <span class="muted l-sub">{it.track.display_artist || it.track.artist?.name || ""} · {viaText(it.via)}</span>
             </span>
           </div>
         </VirtualList>

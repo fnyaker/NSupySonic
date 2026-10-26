@@ -100,3 +100,22 @@ is granted to `all` ONCE (`access.LATER_ANONYMOUS`, Meta `acc.anon.deezer`) so a
 no account the album, playlist and discography pages are built from the public API (`_public_album_page`, paged by
 `next`); what needs the gateway is a 403 `deezer-denied`, never an outage. Deezer switched off on the server is no
 public API either. `tests/test_multi_p3.py`.
+
+**Order of the sources: main, then fallbacks** (`registry.sound/main/fallbacks/by_quality/set_sources`,
+`webui/sourcesapi.py`, `webapp/src/lib/sources.js`, `SourceOrder.svelte`). The main source is the first one ON that
+can lead (`role == main`: a whole catalogue); the others ON are the fallbacks, asked in order, ONE at a time, the next
+only when the one before had nothing (`availability._fallback_closest`, `FALLBACK_SEARCH` maps a source to how it is
+searched: a source without an entry is not asked). Nobody ordered: those that can lead first, then the best
+`ceiling` (the best offer a provider can deliver, `quality.py`). Between two equally safe matches the better quality
+wins and the order only breaks ties (Sonarr's "quality trumps all", indexer priority as tie-breaker; Music
+Assistant has no such rule and its users complain of lossy picked over FLAC). A provider whose switch would change
+nothing (`switchable = False`, Deezer) has none in Réglages. **No screen writes a source's name for the role it
+plays**: the names and places come with the person (`user.sources` in `/me` and the login, no request of its own,
+kept for an offline launch) and `nameOf`/`sourceTitle`/`chain` say them; an icon per id is the only per-provider
+table in the web app. The old answers (`youtube=1`, `youtube`, `youtube_auto`) are kept beside the new ones
+(`fallbacks=1`, `fallback`, `fallback_auto`). `tests/test_source_order.py`.
+
+**Mes comptes never fails whole**: each account is built on its own (`myaccounts._safe_account_json`: an unreadable
+one is listed `broken` with its cause, logged), `li.options` reads anything that is not a JSON object as the
+defaults, and the page says WHY it could not load (`api.failureCause`: network, session, HTTP status and the
+server's message), never a bare "Impossible de lire".

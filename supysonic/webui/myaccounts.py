@@ -122,6 +122,35 @@ def _account_json(row, default_id=None):
     }
 
 
+def _safe_account_json(row, default_id):
+    """One unreadable account is that account's problem, not the page's: it is
+    listed with its cause, and the others stay usable."""
+    try:
+        return _account_json(row, default_id)
+    except Exception as exc:
+        logger.exception("account %s unreadable", row.id)
+        return {
+            "id": str(row.id),
+            "provider": row.provider,
+            "name": NAMES.get(row.provider, row.provider),
+            "label": row.label,
+            "mode": row.mode,
+            "server": row.mode == access.SERVER,
+            "status": "broken",
+            # The KIND of failure only: an exception's own text can carry a
+            # path or a connection string, and this is shown in a browser.
+            # The traceback is in the server's log, where it belongs.
+            "error": type(exc).__name__,
+            "auto": {},
+            "last": None,
+            "lossless": None,
+            "running": None,
+            "default": default_id is not None and str(default_id) == str(row.id),
+            "kinds": [],
+            "pickable": [],
+        }
+
+
 @webapi.route("/me/accounts")
 @login_required
 def my_accounts():
@@ -148,7 +177,7 @@ def my_accounts_payload(**extra):
     default_id = default.id if default is not None else None
     return jsonify(
         {
-            "accounts": [_account_json(r, default_id) for r in rows],
+            "accounts": [_safe_account_json(r, default_id) for r in rows],
             "default": str(default_id) if default_id is not None else None,
             # A personal Deezer next to the server's is one account too many:
             # whoever holds the server's imports from it.

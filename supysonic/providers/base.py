@@ -157,6 +157,23 @@ class Provider:
     # Whether the adapter can serve its anonymous features without any
     # account (Deezer's needs the server's for now: plan §15, lot P3).
     anonymous_use = True
+    # The best the provider can deliver (an ``OfferDict``, quality.py): what
+    # Réglages → Sources shows, and what orders the sources nobody ordered.
+    ceiling = {}
+    # Whether the on/off switch in Réglages decides anything. A provider the
+    # code reaches whenever it is configured (Deezer, the catalogue) has none:
+    # a switch that changes nothing would lie.
+    switchable = True
+
+    def setup_hint(self) -> str:
+        """What is missing when ``configured()`` is False, in French, for the
+        person who can fix it."""
+        return ""
+
+    def resting(self):
+        """``(seconds left, why)`` while the provider asked to be left alone
+        (YouTube's ``held``); ``(0, "")`` otherwise. Instant, no network."""
+        return 0, ""
 
     def available(self) -> bool:
         """Instant, no network: is it worth calling this provider at all?"""

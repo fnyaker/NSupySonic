@@ -4,6 +4,7 @@
   import { toasts } from "../lib/stores.js";
   import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import Icon from "./Icon.svelte";
+  import { iconOf, offMain, sourceTitle } from "../lib/sources.js";
   import Cover from "./Cover.svelte";
 
   // Modal (desktop) / bottom-sheet (mobile) to add tracks to a playlist. Search
@@ -95,7 +96,7 @@
           <div class="thumb"><Cover src={t.album?.cover} alt={t.title} size={42} kind="track" fallbackId={trackRef(t)} /></div>
           <div class="meta">
             <div class="t">
-              {#if t.source === "youtube"}<span class="local" title="Source YouTube (pas sur Deezer)"><Icon name="youtube" size={12} /></span>{:else if t.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
+              {#if offMain(t.source)}<span class="local" title={sourceTitle(t.source)}><Icon name={iconOf(t.source)} size={12} /></span>{:else if t.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
               {t.title}
             </div>
             <div class="sub muted">{artistLine(t)}{t.album?.title ? " · " + t.album.title : ""}</div>
