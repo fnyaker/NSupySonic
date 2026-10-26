@@ -221,6 +221,31 @@ class RoutesTestCase(_Library):
         album_titles = {a["title"] for a in r.json["albums"]}
         self.assertNotIn("Fav LP", album_titles)  # played: not a recommendation
 
+    def test_my_artists_lists_the_stars_with_what_the_library_holds(self):
+        from supysonic.db import ListenEvent
+
+        other = Artist.get(Artist.name == "Other")
+        StarredArtist.create(user=self.user, starred=other)
+        for t in self.tracks["Other"][:3]:
+            ListenEvent.create(user=self.user, track=t, listened=200, outcome=1)
+        ListenEvent.create(user=self.user, track=self.tracks["Fav"][0], listened=5, outcome=-1)
+        n = count_statements(lambda: self.client.get("/api/me/artists"))
+        self.assertLessEqual(n, 6)  # the stars, the counts, the listens: not per artist
+        got = self.client.get("/api/me/artists").json["artists"]
+        # The most listened first; a skip is not a listen.
+        self.assertEqual([a["name"] for a in got], ["Other", "Fav"])
+        self.assertEqual([a["plays"] for a in got], [3, 0])
+        self.assertEqual(got[1]["tracks"], 6)
+        self.assertEqual(got[1]["deezer_id"], DEEZER_IDS["Fav"])
+        self.assertEqual(got[1]["picture"], "/api/cover/" + got[1]["id"])
+        # Somebody else's stars are theirs.
+        from supysonic.managers.user import UserManager
+
+        UserManager.add("bob", "B0bpass", admin=False)
+        bob = self.app.test_client()
+        bob.post("/api/login", json={"username": "bob", "password": "B0bpass"})
+        self.assertEqual(bob.get("/api/me/artists").json["artists"], [])
+
     def test_a_muted_artist_is_never_recommended(self):
         self.client.post("/api/discover/mute", json={"provider": "deezer", "id": "700"})
         names = [a["name"] for a in self.client.get("/api/recommend?d=0.4&seed=b").json["artists"]]
@@ -312,15 +337,49 @@ class ReleasesTestCase(_Library):
     def test_each_artist_is_asked_once_per_period(self):
         stats = self.run_job()
         # one favourite: its similar artists, the tops of its 3 links, then
-        # the releases of the favourite and its 2 closest.
-        self.assertEqual(dict(self.fake.calls), {"similar_artists": 1, "artist_top": 3, "artist_releases": 3})
-        self.assertEqual(stats["asked"], 7)
+        # the releases of the favourite and its 2 closest, then the tracklist
+        # of each of the two releases found (the fake knows neither: NotFound,
+        # kept as an empty list and never asked again).
+        self.assertEqual(dict(self.fake.calls),
+                         {"similar_artists": 1, "artist_top": 3, "artist_releases": 3, "get_album": 2})
+        self.assertEqual(stats["asked"], 9)
         self.fake.calls.clear()
         self.run_job()
         self.assertEqual(sum(self.fake.calls.values()), 0)  # nothing is due yet
         ArtistWatch.update(checked=dbmod.now() - datetime.timedelta(hours=7)).execute()
         self.run_job()
         self.assertEqual(dict(self.fake.calls), {"artist_releases": 3})
+
+    def test_the_releases_titles_are_listed_from_the_database(self):
+        self.fake.albums = {"1001": {"title": "Fav new", "tracks": ["t1", "t2"]}}
+        self.fake.catalog = {
+            "t1": {"title": "Opener", "artists": [{"ref": "100", "name": "Fav"}], "duration": 200},
+            "t2": {"title": "Closer", "artists": [{"ref": "100", "name": "Fav"}, {"ref": "9", "name": "Guest"}],
+                   "duration": 180, "explicit": True},
+        }
+        self.run_job()
+        self.fake.calls.clear()
+        r = self.client.get("/api/releases").json
+        self.assertEqual(sum(self.fake.calls.values()), 0)  # a click asks nobody
+        self.assertEqual([t["title"] for t in r["tracks"]], ["Opener", "Closer"])
+        first, second = r["tracks"]
+        self.assertEqual(first["deezer_id"], "t1")
+        self.assertEqual(first["release"]["title"], "Fav new")
+        self.assertTrue(first["new"])
+        self.assertEqual(second["display_artist"], "Fav, Guest")
+        self.assertTrue(second["explicit"])
+        # Near single's tracklist: NotFound, an empty list, never asked again.
+        self.assertEqual(r["pending"], 0)
+        self.run_job(force=True)
+        self.assertNotIn("get_album", self.fake.calls)
+
+    def test_an_outage_leaves_the_tracklist_to_the_next_run(self):
+        self.fake.fail = {"get_album": ProviderUnavailable("down", provider="deezer")}
+        self.run_job()
+        self.assertEqual(ArtistRelease.select().where(ArtistRelease.tracks.is_null(True)).count(), 2)
+        self.fake.fail = None
+        self.run_job()
+        self.assertEqual(ArtistRelease.select().where(ArtistRelease.tracks.is_null(True)).count(), 0)
 
     def test_running_twice_never_duplicates_a_release(self):
         self.run_job()

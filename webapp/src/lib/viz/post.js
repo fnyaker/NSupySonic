@@ -20,7 +20,7 @@
 //   GRAIN — sparse noise over everything, at a couple of levels out of 255.
 //   Banding first, mood second: an 8-bit canvas cannot hold a smooth dark
 //   gradient, and this project already knew that (the countable ring trails in
-//   CLAUDE.md are the same problem from the other side). Noise below the eye's
+//   docs/agents/animations.md are the same problem from the other side). Noise below the eye's
 //   integration threshold is a dither.
 //
 // NOT a vignette, deliberately. Darkening the edges is the other half of the

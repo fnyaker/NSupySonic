@@ -71,7 +71,11 @@ DEFAULTS = {
     "on_fav_track": True,
     "on_fav_album": True,
     "on_fav_playlist": True,
-    "on_fav_artist": True,
+    # OFF by default: starring an artist is how you FOLLOW them (their new
+    # releases reach the home), and a whole discography per star filled disks
+    # with music nobody had chosen yet (the user's call, 2026-10-25). Anyone
+    # who wants it ticks it in Réglages; a value set before is kept.
+    "on_fav_artist": False,
     "on_playlist_add": True,
     "on_podcast": True,
     # artists

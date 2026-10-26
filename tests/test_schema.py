@@ -263,5 +263,52 @@ class MigrationRepairTestCase(unittest.TestCase):
         self.assertEqual(PodcastChannel.select().count(), 0)
 
 
+class ShowArchiveSwitchUpgradeTestCase(unittest.TestCase):
+    """20261029: each show's switch now decides what the archive keeps. Before
+    it, every show was archived whole, so a server that upgrades must find all
+    its shows switched ON — not silently stop archiving their new episodes."""
+
+    def setUp(self):
+        self.fd, self.path = tempfile.mkstemp(suffix=".db")
+        self.uri = "sqlite:///" + self.path
+
+    def tearDown(self):
+        release_database()
+        os.close(self.fd)
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def test_an_upgraded_server_keeps_archiving_every_show(self):
+        import sqlite3
+
+        from supysonic.db import User
+        from supysonic.managers.user import UserManager
+
+        init_database(self.uri)
+        UserManager.add("alice", "Alic3", admin=True)
+        alice = User.get(User.name == "alice")
+        for n in ("1", "2"):
+            # As 20261028 left them: the column there, every show at its default.
+            PodcastChannel.create(user=alice, url=f"u{n}", title=f"Show {n}", status="completed")
+        release_database()
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE meta SET value = '20261028' WHERE key = 'schema_version'")
+        conn.commit()
+        conn.close()
+
+        init_database(self.uri)
+
+        conn = sqlite3.connect(self.path)
+        switched = [r[0] for r in conn.execute("SELECT auto_archive FROM podcast_channel")]
+        version = conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(switched, [1, 1])
+        self.assertEqual(version, SCHEMA_VERSION)
+
+
 if __name__ == "__main__":
     unittest.main()

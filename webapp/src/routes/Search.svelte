@@ -11,6 +11,9 @@
   import { youtubeStatus, loadYoutubeStatus } from "../lib/youtube.js";
   import { access } from "../lib/access.js";
   import { playlistLink, importRoute } from "../lib/linkimport.js";
+  import { entityRef } from "../lib/entity.js";
+  import { topResult, mixPodcasts } from "../lib/searchrank.js";
+  import TopResult from "../components/TopResult.svelte";
 
   export let params = {};
 
@@ -25,7 +28,7 @@
   let q = saved?.q ?? "";
   let results = saved?.results ?? EMPTY;
   let loading = false;
-  let tab = saved?.tab ?? "all"; // all | tracks | albums | artists | playlists | podcasts
+  let tab = saved?.tab ?? "all"; // all | tracks | artists | albums | playlists
   let timer;
   let seq = 0;
   // Don't pop the soft keyboard over a restored screen: you came back to read
@@ -147,13 +150,23 @@
     results.playlists?.length ||
     (results.podcasts?.length && $isAdmin);
 
-  // "Tout" leads with the titles, because that is what a search is usually for:
-  // the top handful, then one row of albums, then one of artists. Ten is the
-  // most that still reads as a shortlist on a phone rather than a page you have
-  // to scroll past to reach anything else — the rest is one tap away on the
-  // Titres tab.
   // A pasted playlist link is not a search: offer to import it instead.
   $: shared = playlistLink(q);
+
+  // "Tout" leads with what a search is usually for: the artist the query
+  // plainly names (only then — lib/searchrank.js), the titles, then the
+  // artists, then the albums with the shows mixed in under a small "Podcast"
+  // label, then the playlists. Ten titles is the most that still reads as a
+  // shortlist on a phone; the rest is one tap away on the Titres tab. An old
+  // saved "podcasts" tab lands on the albums, where the shows are now.
+  $: if (tab === "podcasts") tab = "albums";
+  $: podcasts = $isAdmin ? results.podcasts || [] : [];
+  $: top = tab === "all" ? topResult(q, results, $isAdmin) : null;
+  $: shelfArtists = (results.artists || []).filter((a) => !(top?.kind === "artist" && a === top.item));
+  $: albumsAndShows = mixPodcasts(
+    results.albums || [],
+    podcasts.filter((p) => !(top?.kind === "podcast" && p === top.item)),
+  );
 
   const TOP_TRACKS = 10;
   $: topTracks =
@@ -166,7 +179,7 @@
   <input
     type="search"
     enterkeyhint="search"
-    placeholder="Artistes, titres, albums, playlists…"
+    placeholder="Titres, artistes, albums, podcasts…"
     bind:value={q}
     on:input={onInput}
     on:keydown={onKey}
@@ -199,15 +212,10 @@
 {/if}
 
 {#if q.trim() && !shared}
-  <div class="tabs">
-    <button class:active={tab === "all"} on:click={() => (tab = "all")}>Tout</button>
-    <button class:active={tab === "tracks"} on:click={() => (tab = "tracks")}>Titres</button>
-    <button class:active={tab === "albums"} on:click={() => (tab = "albums")}>Albums</button>
-    <button class:active={tab === "artists"} on:click={() => (tab = "artists")}>Artistes</button>
-    <button class:active={tab === "playlists"} on:click={() => (tab = "playlists")}>Playlists</button>
-    {#if $isAdmin}
-      <button class:active={tab === "podcasts"} on:click={() => (tab = "podcasts")}>Podcasts</button>
-    {/if}
+  <div class="tabs" role="tablist">
+    {#each [["all", "Tout"], ["tracks", "Titres"], ["artists", "Artistes"], ["albums", "Albums"], ["playlists", "Playlists"]] as [id, label]}
+      <button role="tab" aria-selected={tab === id} class:active={tab === id} on:click={() => (tab = id)}>{label}</button>
+    {/each}
   </div>
 {/if}
 
@@ -221,17 +229,27 @@
     <p class="muted hint">Aucun résultat pour « {q} ».</p>
   {/if}
 {:else}
-  {#if (tab === "all" || tab === "tracks") && results.tracks?.length}
-    <div class="sechead">
-      <h2>Titres</h2>
-      {#if tab === "all" && moreTracks}
-        <button class="seeall" on:click={() => (tab = "tracks")}>
-          Tout afficher<span class="count">{results.tracks.length}</span>
-        </button>
-      {/if}
-    </div>
-    <TrackList tracks={topTracks} />
-  {/if}
+  <div class="leadwrap"><div class="lead" class:withtop={!!top}>
+    {#if top}
+      <section class="topcol">
+        <h2>Meilleur résultat</h2>
+        <TopResult kind={top.kind} item={top.item} />
+      </section>
+    {/if}
+    {#if (tab === "all" || tab === "tracks") && results.tracks?.length}
+      <section class="trackcol">
+        <div class="sechead">
+          <h2>Titres</h2>
+          {#if tab === "all" && moreTracks}
+            <button class="seeall" on:click={() => (tab = "tracks")}>
+              Tout afficher<span class="count">{results.tracks.length}</span>
+            </button>
+          {/if}
+        </div>
+        <TrackList tracks={topTracks} radio />
+      </section>
+    {/if}
+  </div></div>
 {/if}
 
 {#if !loading && q.trim() && !shared && yt && ytAvailable && (tab === "all" || tab === "tracks")}
@@ -256,27 +274,29 @@
 
 {#if !loading && q.trim() && hasResults}
 
-  {#if (tab === "all" || tab === "albums") && results.albums?.length}
-    <div class="sechead">
-      <h2>Albums</h2>
-      {#if tab === "all" && results.albums.length > 1}
-        <button class="seeall" on:click={() => (tab = "albums")}>Tout afficher</button>
-      {/if}
-    </div>
-    <div class={tab === "albums" ? "grid" : "shelf"}>
-      {#each results.albums as a (a.deezer_id)}<Card item={a} kind="album" />{/each}
-    </div>
-  {/if}
-
-  {#if (tab === "all" || tab === "artists") && results.artists?.length}
+  {#if (tab === "all" || tab === "artists") && shelfArtists.length}
     <div class="sechead">
       <h2>Artistes</h2>
-      {#if tab === "all" && results.artists.length > 1}
+      {#if tab === "all" && shelfArtists.length > 1}
         <button class="seeall" on:click={() => (tab = "artists")}>Tout afficher</button>
       {/if}
     </div>
     <div class={tab === "artists" ? "grid" : "shelf"}>
-      {#each results.artists as a (a.deezer_id)}<Card item={a} kind="artist" />{/each}
+      {#each shelfArtists as a (entityRef(a))}<Card item={a} kind="artist" />{/each}
+    </div>
+  {/if}
+
+  {#if (tab === "all" || tab === "albums") && albumsAndShows.length}
+    <div class="sechead">
+      <h2>Albums</h2>
+      {#if tab === "all" && albumsAndShows.length > 1}
+        <button class="seeall" on:click={() => (tab = "albums")}>Tout afficher</button>
+      {/if}
+    </div>
+    <div class={tab === "albums" ? "grid" : "shelf"}>
+      {#each albumsAndShows as a ((a.podcast ? "p" : "a") + entityRef(a))}
+        {#if a.podcast}<PodcastCard item={a} />{:else}<Card item={a} kind="album" />{/if}
+      {/each}
     </div>
   {/if}
 
@@ -288,19 +308,7 @@
       {/if}
     </div>
     <div class={tab === "playlists" ? "grid" : "shelf"}>
-      {#each results.playlists as p (p.deezer_id)}<Card item={p} kind="playlist" />{/each}
-    </div>
-  {/if}
-
-  {#if $isAdmin && (tab === "all" || tab === "podcasts") && results.podcasts?.length}
-    <div class="sechead">
-      <h2>Podcasts</h2>
-      {#if tab === "all" && results.podcasts.length > 1}
-        <button class="seeall" on:click={() => (tab = "podcasts")}>Tout afficher</button>
-      {/if}
-    </div>
-    <div class={tab === "podcasts" ? "grid" : "shelf"}>
-      {#each results.podcasts as p (p.deezer_id)}<PodcastCard item={p} />{/each}
+      {#each results.playlists as p (entityRef(p))}<Card item={p} kind="playlist" />{/each}
     </div>
   {/if}
 {/if}
@@ -433,13 +441,21 @@
     flex: 1;
     font-size: 0.9rem;
   }
+  /* One row of chips that scrolls sideways on a phone rather than wrapping
+     to a second line (Material 3's filter chips). */
   .tabs {
     display: flex;
     gap: 8px;
-    margin: 18px 0 4px;
-    flex-wrap: wrap;
+    margin: 18px -16px 4px;
+    padding: 0 16px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar {
+    display: none;
   }
   .tabs button {
+    flex: none;
     padding: 7px 16px;
     border-radius: 999px;
     background: var(--bg-card);
@@ -453,6 +469,25 @@
   }
   .hint {
     margin-top: 28px;
+  }
+  /* The best result beside the titles where there is room for both (the way
+     Spotify and YouTube Music lay it out), above them on a phone. */
+  .leadwrap {
+    container-type: inline-size;
+  }
+  .lead.withtop {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px 28px;
+  }
+  @container (min-width: 860px) {
+    .lead.withtop {
+      grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+      align-items: start;
+    }
+  }
+  .lead section {
+    min-width: 0;
   }
   /* The section title and its "tout afficher" share a baseline: the link sits
      at the end of the row rather than under the heading, so the eye reads

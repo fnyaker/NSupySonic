@@ -3,7 +3,7 @@
   import { onMount, onDestroy } from "svelte";
   import { REMOTE, CAN_KEEP, CAN_ADMIN, LEVEL_INFO } from "../lib/remote/mode.js";
   import { leaveRemote } from "../lib/remote/controller.js";
-  import { push } from "svelte-spa-router";
+  import { push, replace } from "svelte-spa-router";
   import {
     user,
     downloadQuality,
@@ -62,22 +62,63 @@
     { v: 4 * 1024 ** 3, label: "4 Go" },
   ];
 
-  // The page had grown into one long scroll, so it's split into tabs. Sound
-  // effects lead because they're what gets tweaked most often outside the
-  // player; quality/storage and account sit behind their own tabs.
+  export let params = {};
+
+  // Réglages is a list of CATEGORIES, each a page of its own (design:
+  // /mnt/project-files/ui/refonte-navigation.md, *Réglages* — the iOS and
+  // Android settings pattern: two levels, every setting where its name says).
+  // On a phone the list is a screen and a category another, with a back
+  // button; on a desktop the list is a column beside the open category.
   // On a remote control these are the DRIVEN player's settings (mirrored, see
   // lib/remote/settings.js), narrowed to what the link lends: the animations
   // from "read", the sound from "full". This device's own storage is not
   // shown there at all — it is not the one playing.
-  const TABS = [
-    ...(CAN_KEEP ? [{ id: "fx", label: "Effets sonores" }] : []),
-    { id: "viz", label: "Animations" },
-    ...(REMOTE ? [] : [{ id: "quality", label: "Qualité sonore" }]),
-    { id: "account", label: REMOTE ? "Contrôle" : "Compte" },
-    ...(REMOTE ? [] : [{ id: "sources", label: "Sources" }]),
+  const ADMIN = () => !REMOTE && CAN_ADMIN && $user?.admin;
+  $: SECTIONS = [
+    ...(CAN_KEEP ? [{ id: "playback", label: "Lecture", icon: "speaker", hint: "Sortie audio, volume, égaliseur, transitions" }] : []),
+    { id: "viz", label: "Animations", icon: "sparkles", hint: "Ce qui s'anime pendant la lecture" },
+    ...(REMOTE ? [] : [{ id: "downloads", label: "Téléchargements", icon: "download", hint: "Qualité, hors-ligne, préchargement" }]),
+    { id: "discovery", label: "Découverte", icon: "compass", hint: "Flow, nouveautés de vos artistes" },
+    ...(REMOTE ? [] : [{ id: "sources", label: "Sources", icon: "link", hint: "Vos comptes Deezer, YouTube, et qui peut s'en servir" }]),
+    { id: "account", label: REMOTE ? "Contrôle" : "Compte", icon: "user", hint: REMOTE ? "Le lecteur que vous pilotez" : "Votre compte, l'export vers d'autres services" },
+    ...($user?.admin && ADMIN() ? [{ id: "server", label: "Serveur", icon: "archive", hint: "Archive, nettoyage, stockage, quotas" }] : []),
+    { id: "help", label: "Assistance", icon: "info", hint: "Recharger l'application, journal de diagnostic" },
   ];
+  // Old links and older builds name the tabs this page used to have.
+  const OLD = { fx: "playback", quality: "downloads" };
   // Back from Spotify's consent page (?svc=…): the services live in "Compte".
-  let tab = /[?&]svc=/.test(window.location.hash) && !REMOTE ? "account" : TABS[0].id;
+  $: wanted = /[?&]svc=/.test(window.location.hash) && !REMOTE ? "account" : OLD[params?.section] || params?.section || null;
+  $: section = SECTIONS.find((x) => x.id === wanted) ? wanted : null;
+  $: current = SECTIONS.find((x) => x.id === section) || null;
+  // The desktop opens on the first category; a phone opens on the list.
+  let wide = typeof matchMedia === "function" && matchMedia("(min-width: 900px)").matches;
+  onMount(() => {
+    if (typeof matchMedia !== "function") return;
+    const mq = matchMedia("(min-width: 900px)");
+    const on = () => (wide = mq.matches);
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  });
+  $: tab = section || (wide ? SECTIONS[0]?.id : null);
+  function open(id) {
+    sub = null;
+    if (id === section) return;
+    // A phone goes INTO a category (back returns to the list); a desktop
+    // switches between columns' contents and replaces the entry.
+    if (wide && section) replace("/settings/" + id);
+    else {
+      fromList = true;
+      push("/settings/" + id);
+    }
+  }
+  // Back goes to the list: the history entry when the list pushed us here,
+  // else (a deep link, a "Réglages > Sources" button elsewhere) the list itself.
+  let fromList = false;
+  function back() {
+    if (fromList) history.back();
+    else replace("/settings");
+    fromList = false;
+  }
   // A settings tab that opens onto a full LIST needs to be a page of its own —
   // otherwise the list buries the settings under it. `sub` is that page; the
   // header turns into a back button while it's up.
@@ -388,7 +429,7 @@
     on_fav_playlist: "Playlist mise en favori",
     on_fav_artist: "Artiste mis en favori",
     on_playlist_add: "Titre ajouté à une playlist",
-    on_podcast: "Abonnement à un podcast",
+    on_podcast: "Nouveau podcast : archivage automatique activé (réglable sur sa page)",
   };
   const SCOPE_LABELS = {
     all: "Toute la discographie",
@@ -598,17 +639,35 @@
     {/if}
   </section>
 {:else}
-<div class="head">
+<div class="settings" class:wide>
+{#if wide || !tab}
+<nav class="cats" aria-label="Catégories des réglages">
   <h1>Réglages</h1>
-</div>
-
-<div class="tabs bleed-x" role="tablist" aria-label="Sections des réglages">
-  {#each TABS as t}
-    <button class="tab" class:sel={tab === t.id} role="tab" aria-selected={tab === t.id} on:click={() => (tab = t.id)}>{t.label}</button>
+  {#each SECTIONS as c (c.id)}
+    <button class="cat" class:sel={tab === c.id} aria-current={tab === c.id ? "page" : undefined} on:click={() => open(c.id)}>
+      <span class="cat-ico"><Icon name={c.icon} size={19} /></span>
+      <span class="cat-txt">
+        <span class="cat-title">{c.label}</span>
+        {#if !wide}<span class="cat-hint muted">{c.hint}</span>{/if}
+      </span>
+      {#if !wide}<Icon name="chevronRight" size={18} />{/if}
+    </button>
   {/each}
-</div>
-
-{#if tab === "fx"}
+</nav>
+{/if}
+{#if tab}
+<div class="pane">
+{#if !wide}
+  <div class="head sub-head">
+    <button class="back" on:click={back} aria-label="Retour aux réglages">
+      <Icon name="chevronLeft" size={22} />
+    </button>
+    <h1>{current?.label || ""}</h1>
+  </div>
+{:else}
+  <h1 class="pane-title">{current?.label || SECTIONS.find((x) => x.id === tab)?.label || ""}</h1>
+{/if}
+{#if tab === "playback"}
   <AudioEffects />
 {/if}
 
@@ -621,7 +680,7 @@
   <AccessSettings />
 {/if}
 
-{#if tab === "quality"}
+{#if tab === "downloads"}
 <section class="card">
   <h2>Qualité de téléchargement par défaut</h2>
   <p class="muted sub">Utilisée pour les nouveaux téléchargements (modifiable au cas par cas).</p>
@@ -750,7 +809,9 @@
 </section>
 <ServicesSettings />
 {/if}
+{/if}
 
+{#if tab === "server"}
 {#if $user?.admin && CAN_ADMIN}
 <section class="card">
   <h2>Archive du serveur</h2>
@@ -759,8 +820,8 @@
     son catalogue, ou si Deezer est injoignable. L'archivage est
     <strong>automatique</strong>&nbsp;: dès que quelque chose entre dans votre
     bibliothèque — vous écoutez un titre, vous l'ajoutez aux favoris, vous mettez
-    un album, une playlist ou un artiste en favori (un artiste&nbsp;: toute sa
-    discographie), vous vous abonnez à un podcast — l'audio part en
+    un album, une playlist ou un artiste en favori (un artiste&nbsp;: selon les règles
+    d'archivage ci-dessous), vous vous abonnez à un podcast — l'audio part en
     téléchargement. Ce bouton est le filet de sécurité, pour rattraper d'un coup
     ce qui manquerait encore.
     <strong>Rien n'est jamais supprimé de l'archive</strong>, et relancer ne
@@ -1073,6 +1134,9 @@
   </section>
 {/if}
 
+{/if}
+
+{#if tab === "discovery"}
 <section class="card">
   <h2>Découverte</h2>
   <p class="muted sub">
@@ -1127,6 +1191,9 @@
   </section>
 {/if}
 
+{/if}
+
+{#if tab === "sources"}
 {#if $user?.admin && CAN_ADMIN && $youtubeStatus}
   <section class="card">
     <h2>Source de secours&nbsp;: YouTube</h2>
@@ -1251,6 +1318,9 @@
   </section>
 {/if}
 
+{/if}
+
+{#if tab === "server"}
 {#if $user?.admin && CAN_ADMIN && quotaGb !== null}
   <section class="card">
     <h2>Quota d'upload (utilisateurs non-admin)</h2>
@@ -1265,6 +1335,9 @@
   </section>
 {/if}
 
+{/if}
+
+{#if tab === "help"}
 <section class="card">
   <h2>Recharger l'application</h2>
   <p class="muted sub">
@@ -1309,6 +1382,9 @@
   {/if}
 </section>
 {/if}
+</div>
+{/if}
+</div>
 {/if}
 
 <style>
@@ -1365,35 +1441,91 @@
   .sub-hint {
     font-size: 0.83rem;
   }
-  .tabs {
-    display: flex;
-    gap: 8px;
+  /* -- categories ------------------------------------------------------ */
+  /* A phone: the list IS the screen, one row per category with what it holds
+     said under its name (rows of at least 56 px, Material's list item). A
+     desktop: a column of names beside the open category. */
+  .cats h1 {
     margin-bottom: 18px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
   }
-  .tabs::-webkit-scrollbar {
-    display: none;
+  .cats {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
-  .tab {
-    flex: none;
-    padding: 9px 16px;
-    border-radius: 999px;
-    background: var(--bg-card);
-    border: 1px solid var(--bg-hover);
+  .cat {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    min-height: 64px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    text-align: left;
     color: var(--text-dim);
-    font-weight: 600;
-    font-size: 0.9rem;
-    white-space: nowrap;
   }
-  .tab:hover {
+  .cat:hover {
+    background: var(--bg-hover);
     color: var(--text);
   }
-  .tab.sel {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+  .cat-ico {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .cat-txt {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+  }
+  .cat-title {
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--text);
+  }
+  .cat-hint {
+    font-size: 0.82rem;
+    line-height: 1.3;
+  }
+  .wide {
+    display: grid;
+    grid-template-columns: 230px minmax(0, 1fr);
+    gap: 32px;
+    align-items: start;
+  }
+  .wide .cats {
+    position: sticky;
+    top: 16px;
+  }
+  .wide .cat {
+    min-height: 44px;
+    padding: 6px 10px;
+    gap: 12px;
+  }
+  .wide .cat-ico {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+  }
+  .wide .cat.sel {
+    background: var(--bg-card);
+  }
+  .wide .cat.sel .cat-title {
+    color: var(--accent);
+  }
+  .pane {
+    min-width: 0;
+    max-width: 860px;
+  }
+  .pane-title {
+    margin-bottom: 18px;
   }
   .acct {
     display: flex;
@@ -2002,6 +2134,7 @@
   }
   .hint {
     margin-top: 8px;
+    font-size: 0.85rem;
   }
   .list {
     display: flex;

@@ -2474,7 +2474,10 @@
   // continuation never wanders off a neighbour of a neighbour at a time.
   function radioSeed(s) {
     const c = s.context || {};
-    if (c.kind === "radio" && c.id) return { kind: "track", id: String(c.id) };
+    if (c.kind === "radio" && c.id)
+      return c.artist
+        ? { kind: "track", id: String(c.id), artist: String(c.artist) }
+        : { kind: "track", id: String(c.id) };
     if ((c.kind === "artist-radio" || c.kind === "artist") && c.id)
       return { kind: "artist", id: String(c.id) };
     const ss = sessionFor(s);

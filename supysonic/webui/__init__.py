@@ -986,6 +986,53 @@ def _local_search_tracks(query: str, limit: int) -> list:
     return _db_tracks(q)
 
 
+def _on_disk_tracks():
+    """The visible tracks that play without asking anyone: uploads and archives."""
+    return _visible_tracks(
+        Track.select(Track.id).where(
+            (Track.deezer_id.is_null(True) & Track.youtube_id.is_null(True))
+            | (Track.last_modification > 0)
+        )
+    )
+
+
+def _local_search_entities(query: str, limit: int) -> tuple:
+    """Artists and albums of the library whose NAME matches, each holding at
+    least one title on disk: what the search shows while Deezer is out (the
+    catalogue's artists and albums are its own answer otherwise). Two
+    statements, plus the album grid's count."""
+    like = like_term(query)
+    if like is None:
+        return [], []
+    held = _on_disk_tracks()
+    artists = [
+        {
+            "id": _uuid_text(rid),
+            "deezer_id": str(dz or ""),
+            "name": name,
+            "picture": f"/api/cover/{_uuid_text(rid)}" if dz else None,
+        }
+        for rid, name, dz in (
+            Artist.select(_raw(Artist.id), Artist.name, Artist.deezer_id)
+            .where(
+                Artist.name.contains(like)
+                & Artist.id.in_(held.select(Track.artist))
+            )
+            .order_by(Artist.name)
+            .limit(limit)
+            .tuples()
+        )
+    ]
+    albums = _db_album_cards(
+        Album.select(Album, Artist)
+        .join(Artist)
+        .where(Album.name.contains(like) & Album.id.in_(held.select(Track.album)))
+        .order_by(Album.name)
+        .limit(limit)
+    )
+    return artists, albums
+
+
 def _local_starred() -> list:
     """The current user's locally-starred (non-Deezer) tracks."""
     return list(
@@ -2040,7 +2087,12 @@ def search():
     # None when Deezer is off or unreachable — the local hits still go out.
     dzapi = _dz_api()
     if dzapi is None:
-        return jsonify({**empty, "tracks": local()})
+        try:
+            artists, albums = _local_search_entities(query, limit)
+        except Exception:
+            logger.warning("Local search failed", exc_info=True)
+            artists, albums = [], []
+        return jsonify({**empty, "tracks": local(), "artists": artists, "albums": albums})
     # The five searches run side by side (they were five round trips one after
     # the other), and the database is read on this thread while they are out.
     calls = (
@@ -2658,9 +2710,18 @@ def radio_next():
                           block_seeds=False)
     elif kind == "track":
         track = refs.resolve_track(sid)
-        if track is None:
+        # A catalogue title the library does not hold yet (a new release, a
+        # search result: its row is made by its first play, which may still
+        # be under way) radios on its artist, which the caller names.
+        ar = _artist_row(str(seed.get("artist") or "")[:64]) if track is None and seed.get("artist") else None
+        if track is not None:
+            ids = radio.build(user, [track.id], n, recent, skipped, exclude)
+        elif ar is not None:
+            seeds, own = radio.artist_seeds(user, ar.id)
+            ids = radio.build(user, seeds, n, recent, skipped, exclude, seed_artist=ar.id, own=own,
+                              block_seeds=False)
+        else:
             return jsonify({"tracks": []})
-        ids = radio.build(user, [track.id], n, recent, skipped, exclude)
     else:
         return jsonify({"error": "invalid seed"}), 400
     return jsonify({"tracks": _tracks_in_order(ids)})
@@ -2791,6 +2852,74 @@ def my_favorites():
     return jsonify({"tracks": _db_tracks(_user_starred_query())})
 
 
+@webapi.route("/me/artists")
+@login_required
+def my_artists():
+    """The artists the person starred, each with what the library holds of
+    them and how much the person listened to them: the "Artistes" list of the
+    library and the home's row. Three statements whatever the count."""
+    from ..db import ListenEvent, StarredArtist
+
+    user = request.webuser
+    stars = list(
+        Artist.select(_raw(Artist.id), Artist.name, Artist.deezer_id, StarredArtist.date)
+        .join(StarredArtist, on=(StarredArtist.starred == Artist.id))
+        .where(StarredArtist.user == user)
+        .tuples()
+    )
+    ids = [r[0] for r in stars]
+    counts, plays = {}, {}
+    if ids:
+        id_col = _raw(Track.artist)
+        for i in range(0, len(ids), _IN_CHUNK):
+            chunk = [uuid.UUID(x) for x in ids[i : i + _IN_CHUNK]]
+            for aid, n in (
+                _visible_tracks(Track.select(id_col, fn.COUNT(Track.id)).where(Track.artist.in_(chunk)))
+                .group_by(Track.artist)
+                .tuples()
+            ):
+                counts[_uuid_text(aid)] = n
+            for aid, n in (
+                ListenEvent.select(id_col, fn.COUNT(ListenEvent.id))
+                .join(Track, on=(ListenEvent.track == Track.id))
+                .where((ListenEvent.user == user) & (ListenEvent.outcome > 0) & Track.artist.in_(chunk))
+                .group_by(Track.artist)
+                .tuples()
+            ):
+                plays[_uuid_text(aid)] = n
+    out = []
+    for rid, name, dz, date in stars:
+        key = _uuid_text(rid)
+        out.append({
+            "id": key,
+            "deezer_id": str(dz or ""),
+            "name": name,
+            "picture": f"/api/cover/{key}" if dz else None,
+            "tracks": counts.get(key, 0),
+            "plays": plays.get(key, 0),
+            "starred": date.isoformat() if hasattr(date, "isoformat") else str(date or ""),
+        })
+    out.sort(key=lambda a: (-a["plays"], (a["name"] or "").lower()))
+    return jsonify({"artists": out})
+
+
+@webapi.route("/me/albums")
+@login_required
+def my_albums():
+    """The albums the person starred, newest star first, as album cards."""
+    from ..db import StarredAlbum
+
+    q = (
+        Album.select(Album, Artist)
+        .join(Artist)
+        .switch(Album)
+        .join(StarredAlbum, on=(StarredAlbum.starred == Album.id))
+        .where(StarredAlbum.user == request.webuser)
+        .order_by(StarredAlbum.date.desc())
+    )
+    return jsonify({"albums": _db_album_cards(q)})
+
+
 # -- podcasts ---------------------------------------------------------------
 
 
@@ -2851,6 +2980,9 @@ def _channel(c, with_episodes=False, counts=None):
         # disk, cover included. Nothing about it depends on Deezer any more.
         "local": c.gone is not None,
         "archived_count": counts[1],
+        # The show's own "archive new episodes automatically" switch: what the
+        # archive keeps of it (backfill.collect / archive_show).
+        "auto_archive": bool(c.auto_archive),
     }
     if with_episodes:
         info["episodes"] = [
@@ -2966,6 +3098,8 @@ def subscribe_podcast():
             return jsonify({"error": "could not resolve show"}), 400
 
     cfg = current_app.config["DEEZER"]
+    known = PodcastChannel.get_or_none(PodcastChannel.deezer_id == str(show_id))
+    fresh = known is None or not known.subscribed
     try:
         c = import_show(
             provider, _podcast_owner(), show_id,
@@ -2974,12 +3108,45 @@ def subscribe_podcast():
     except Exception:
         logger.warning("Podcast import failed for %s", show_id, exc_info=True)
         return jsonify({"error": "import failed"}), 502
-    # Subscribing is the event: every episode we just imported gets archived,
-    # so the show survives leaving Deezer without anyone pressing play first.
-    from ..deezer import backfill
+    from ..deezer import backfill, rules
 
-    backfill.archive_show(current_app._get_current_object(), c)
+    app = current_app._get_current_object()
+    if fresh:
+        # A new subscription starts with the admin's default ("Abonnement à un
+        # podcast" in the archiving rules); a show already followed keeps the
+        # switch someone set on its page.
+        c.auto_archive = rules.enabled(app, "on_podcast")
+        c.save()
+    # Subscribing is the event: with the switch on, every episode we just
+    # imported gets archived, so the show survives leaving Deezer.
+    backfill.archive_show(app, c)
     return jsonify(_channel(c, with_episodes=True))
+
+
+@webapi.route("/podcast/<pid>/auto_archive", methods=["POST"])
+@login_required
+def podcast_auto_archive(pid):
+    """A show's "archive new episodes automatically" switch. Turning it on also
+    queues the episodes already listed that have no file yet: they go through
+    the archiver's background queue one at a time (BULK, behind anything
+    played), so a show of 40 episodes never competes with listening."""
+    if not _is_admin():
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        c = PodcastChannel[uuid.UUID(str(pid))]
+    except (ValueError, PodcastChannel.DoesNotExist):
+        return jsonify({"error": "not found"}), 404
+    on = (request.get_json(silent=True) or {}).get("on")
+    if not isinstance(on, bool):
+        return jsonify({"error": "on must be true or false"}), 400
+    c.auto_archive = on
+    c.save()
+    queued = 0
+    if on:
+        from ..deezer import backfill
+
+        queued = backfill.archive_show(current_app._get_current_object(), c)
+    return jsonify({**_channel(c), "queued": queued})
 
 
 @webapi.route("/podcast/<pid>", methods=["DELETE"])

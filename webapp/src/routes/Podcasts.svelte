@@ -10,6 +10,9 @@
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
 
+  // Inside the library's "Podcasts" chip: the library already says where you are.
+  export let embedded = false;
+
   let channels = [];
   let loading = true;
 
@@ -75,9 +78,11 @@
 </script>
 
 <div class="fade-in">
-  <div class="head">
-    <h1><Icon name="mic" size={26} /> Podcasts</h1>
-  </div>
+  {#if !embedded}
+    <div class="head">
+      <h1><Icon name="mic" size={26} /> Podcasts</h1>
+    </div>
+  {/if}
 
   {#if $isAdmin && CAN_KEEP}
     <form class="search" on:submit|preventDefault={onSubmit}>
@@ -104,7 +109,7 @@
     {/if}
   {/if}
 
-  <h2 class:hidden={$isAdmin && q.trim()}>Mes podcasts</h2>
+  {#if !embedded}<h2 class:hidden={$isAdmin && q.trim()}>Mes podcasts</h2>{/if}
   {#if loading}
     <Skeleton kind="list" />
   {:else if !channels.length}
@@ -127,6 +132,7 @@
             <div class="title">{c.title}</div>
             <div class="sub muted">
               {c.episode_count} épisode{c.episode_count > 1 ? "s" : ""}
+              {#if c.auto_archive}<span class="auto" title="Nouveaux épisodes archivés automatiquement"><Icon name="archive" size={12} /> auto</span>{/if}
             </div>
           </div>
         </div>
@@ -193,6 +199,19 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .auto {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 0.72rem;
+    font-weight: 700;
+    vertical-align: 1px;
   }
   .sub {
     font-size: 0.85rem;
