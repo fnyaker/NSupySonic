@@ -9,6 +9,7 @@
   import { buildTrackMenu } from "../lib/actions.js";
   import { downloadTrack } from "../lib/offline.js";
   import { duration as fmtDuration } from "../lib/format.js";
+  import { onDestroy } from "svelte";
   import Cover from "../components/Cover.svelte";
   import GradientHeader from "../components/GradientHeader.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -29,6 +30,8 @@
   let loadSeq = 0;
   async function load(pid) {
     const mine = ++loadSeq;
+    archiving = false; // another show: its own count, not this one's
+    clearTimeout(pollTimer);
     loading = true;
     data = null;
     loadShowMarkers(pid); // fail-soft, fills the markers store as it lands
@@ -42,6 +45,75 @@
   }
 
   $: episodes = data?.episodes || [];
+
+  // -- "Archiver automatiquement les nouveaux épisodes" ------------------------
+  // The show's own switch (Pocket Casts' per-podcast auto-download, design S16).
+  // The click answers at once; the server then queues what this show is missing
+  // on its background archiver (one file at a time, behind anything played), and
+  // the line under the switch counts it in: "12 sur 40 épisodes archivés". While
+  // that count moves, the page re-reads the show every few seconds — and stops
+  // as soon as it is complete, stalls, or the page is hidden.
+  let autoBusy = false;
+  async function toggleAuto() {
+    if (autoBusy || !data) return;
+    const on = !data.auto_archive;
+    const before = data;
+    data = { ...data, auto_archive: on };
+    autoBusy = true;
+    try {
+      const r = await api.setPodcastAutoArchive(data.id, on);
+      if (data?.id === r.id) data = { ...data, auto_archive: r.auto_archive, archived_count: r.archived_count };
+      if (on && r.queued) {
+        toasts.push(`${r.queued} épisode${r.queued > 1 ? "s" : ""} en file d'archivage`);
+        watchArchive();
+      }
+    } catch (e) {
+      data = before;
+      toasts.push(e?.message || "Réglage non enregistré", "error");
+    } finally {
+      autoBusy = false;
+    }
+  }
+
+  const POLL_MS = 6000;
+  const STALL_POLLS = 5; // ~30 s without a new file: stop asking
+  let pollTimer = null;
+  let stalled = 0;
+  let archiving = false;
+  function watchArchive() {
+    clearTimeout(pollTimer);
+    stalled = 0;
+    archiving = true;
+    pollTimer = setTimeout(pollArchive, POLL_MS);
+  }
+  async function pollArchive() {
+    pollTimer = null;
+    if (!data || !archiving) return;
+    if (document.visibilityState === "hidden") {
+      pollTimer = setTimeout(pollArchive, POLL_MS);
+      return;
+    }
+    const pid = data.id;
+    const was = data.archived_count;
+    try {
+      const r = await api.podcast(pid);
+      if (data?.id !== pid) return;
+      data = r;
+      stalled = r.archived_count > was ? 0 : stalled + 1;
+    } catch {
+      stalled++;
+    }
+    const done = !data.auto_archive || data.archived_count >= reachable(data);
+    if (done || stalled >= STALL_POLLS) archiving = false;
+    else pollTimer = setTimeout(pollArchive, POLL_MS);
+  }
+  // Episodes Deezer no longer serves cannot be archived: they don't count
+  // against "complete".
+  function reachable(d) {
+    const gone = (d?.episodes || []).filter((e) => e.unavailable && !e.archived).length;
+    return Math.max(0, (d?.episode_count || 0) - gone);
+  }
+  onDestroy(() => clearTimeout(pollTimer));
 
   function playFrom(i) {
     if (episodes.length) player.playQueue(episodes, i, { kind: "podcast", id });
@@ -116,7 +188,7 @@
     try {
       await api.unsubscribePodcast(id);
       toasts.push("Désabonné");
-      push("/podcasts");
+      push("/library/podcasts");
     } catch (e) {
       toasts.push(e?.message || "Échec", "error");
     }
@@ -202,6 +274,31 @@
       {/if}
     </div>
 
+    {#if $isAdmin && CAN_ADMIN && !data.local}
+      <button
+        class="auto"
+        role="switch"
+        aria-checked={!!data.auto_archive}
+        disabled={autoBusy}
+        on:click={toggleAuto}
+      >
+        <span class="auto-ico"><Icon name="archive" size={18} /></span>
+        <span class="auto-txt">
+          <span class="auto-title">Archiver automatiquement les nouveaux épisodes</span>
+          <span class="auto-hint muted">
+            {data.auto_archive ? (archiving ? "Archivage en cours" : "Activé") : "Désactivé"}
+            · {Math.min(data.archived_count, data.episode_count)} sur {data.episode_count} épisode{data.episode_count > 1 ? "s" : ""} archivé{data.archived_count > 1 ? "s" : ""} sur le serveur
+          </span>
+          {#if data.auto_archive && data.episode_count}
+            <span class="auto-bar" aria-hidden="true">
+              <span style={`width:${Math.min(100, (data.archived_count / data.episode_count) * 100)}%`}></span>
+            </span>
+          {/if}
+        </span>
+        <span class="sw" class:on={data.auto_archive}><span class="knob"></span></span>
+      </button>
+    {/if}
+
     {#if !episodes.length}
       <p class="muted">Aucun épisode disponible.</p>
     {:else}
@@ -279,6 +376,86 @@
 {/if}
 
 <style>
+  /* The show's archive switch: a row of its own under the actions, the same
+     switch as Réglages, with what it has done said under its name. */
+  .auto {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    margin: 4px 0 18px;
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    text-align: left;
+    color: var(--text);
+  }
+  .auto:hover:not(:disabled) {
+    background: var(--bg-hover);
+  }
+  .auto-ico {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .auto-txt {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+  }
+  .auto-title {
+    font-weight: 650;
+  }
+  .auto-hint {
+    font-size: 0.82rem;
+  }
+  .auto-bar {
+    display: block;
+    height: 3px;
+    margin-top: 4px;
+    border-radius: 2px;
+    background: var(--bg-hover);
+    overflow: hidden;
+  }
+  .auto-bar span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.4s ease;
+  }
+  .sw {
+    flex: none;
+    width: 44px;
+    height: 26px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    position: relative;
+    transition: background 0.15s ease;
+  }
+  .sw.on {
+    background: var(--accent);
+  }
+  .knob {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s ease;
+  }
+  .sw.on .knob {
+    transform: translateX(18px);
+  }
+
   .localnote {
     margin: 10px 0 0;
     max-width: 60ch;

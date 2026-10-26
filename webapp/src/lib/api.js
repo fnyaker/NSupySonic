@@ -483,6 +483,8 @@ export const api = {
   subscribePodcast: (url) =>
     req("/podcasts", { method: "POST", body: body({ url }) }),
   unsubscribePodcast: (id) => req("/podcast/" + id, { method: "DELETE" }),
+  setPodcastAutoArchive: (id, on) =>
+    req("/podcast/" + id + "/auto_archive", { method: "POST", body: body({ on }) }),
 
   // podcasts — per-user progress & markers (server-side, follow you anywhere).
   // Saves are fire-and-forget (keepalive survives a page unload) — losing one
@@ -562,6 +564,8 @@ export const api = {
   // library
   myPlaylists: () => req("/me/playlists"),
   myFavorites: () => req("/me/favorites"),
+  myArtists: () => req("/me/artists"),
+  myAlbums: () => req("/me/albums"),
   myLocal: () => req("/me/local"),
   favoriteIds: () => req("/me/favorite-ids"),
 

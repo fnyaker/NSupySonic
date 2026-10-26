@@ -105,6 +105,13 @@ def refresh_podcasts():
     owner = _podcast_owner()
     importer = DeezerImporter(provider, owner.name)
     importer.sync_podcasts(int(_cfg().get("podcast_episodes") or 30))
+    # The new episodes of the shows whose switch is on go to the archiver's
+    # background queue (the scheduled refresh does the same through its sweep).
+    from ..deezer import backfill
+
+    app = current_app._get_current_object()
+    for channel in PodcastChannel.select().where(PodcastChannel.auto_archive == True):  # noqa: E712
+        backfill.archive_show(app, channel)
     return request.formatter.empty
 
 

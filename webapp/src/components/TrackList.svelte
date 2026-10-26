@@ -1,6 +1,7 @@
 <script>
   import { onMount, tick } from "svelte";
   import { player } from "../lib/stores.js";
+  import { playThenRadio } from "../lib/actions.js";
   import TrackRow from "./TrackRow.svelte";
 
   export let tracks = [];
@@ -8,6 +9,9 @@
   export let showAlbum = true;
   export let showCover = true;
   export let context = null;
+  // Titles that stand on their own (the home, search results, suggestions):
+  // a tap plays THAT title and then its radio, not the rows under it.
+  export let radio = false;
 
   // Windowed rendering (virtual list): only the rows actually on screen (plus a
   // small buffer) are mounted, no matter how long the playlist is. The list
@@ -139,6 +143,7 @@
   }
 
   function playFrom(i) {
+    if (radio) return playThenRadio(tracks[i]);
     player.playQueue(tracks, i, context);
   }
 </script>

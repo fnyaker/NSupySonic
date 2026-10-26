@@ -192,10 +192,17 @@ class EventRulesTestCase(RulesTestBase):
         thread.join(timeout=5)
         self.assertEqual(self.app.deezer_prefetch.ids, ["1", "2", "3", "4", "5"])
 
+    def test_starring_an_artist_archives_nothing_by_default(self):
+        """Starring an artist is following it; its discography is opt-in."""
+        from supysonic.deezer import backfill
+
+        self.assertIsNone(backfill.archive_entity(self.app, self.app.deezer, "artist", "9"))
+        self.assertEqual(self.app.deezer_prefetch.ids, [])
+
     def test_artist_scope_releases_takes_the_most_recent_n(self):
         from supysonic.deezer import backfill
 
-        rules.save({"artist_scope": "releases", "artist_limit": 1})
+        rules.save({"on_fav_artist": True, "artist_scope": "releases", "artist_limit": 1})
         thread = backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
         thread.join(timeout=5)
         # Album 11 is the 2021 release; 10 is 2020. One release means only 11.
@@ -205,7 +212,7 @@ class EventRulesTestCase(RulesTestBase):
     def test_artist_scope_top_takes_tracks_not_releases(self):
         from supysonic.deezer import backfill
 
-        rules.save({"artist_scope": "top", "artist_limit": 2})
+        rules.save({"on_fav_artist": True, "artist_scope": "top", "artist_limit": 2})
         thread = backfill.archive_entity(self.app, self.app.deezer, "artist", "9")
         thread.join(timeout=5)
         self.assertEqual(len(self.app.deezer_prefetch.ids), 2)

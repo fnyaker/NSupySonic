@@ -17,11 +17,8 @@
   <a use:link href="/search" class={active("/search")}>
     <Icon name="search" size={22} /><span class="l">Rechercher</span>
   </a>
-  <a use:link href="/library" class={active("/library")}>
-    <Icon name="library" size={22} /><span class="l">Biblio</span>
-  </a>
-  <a use:link href="/podcasts" class={active("/podcast")}>
-    <Icon name="mic" size={22} /><span class="l">Podcasts</span>
+  <a use:link href="/library" class={active("/library") || active("/podcast")}>
+    <Icon name="library" size={22} /><span class="l">Bibliothèque</span>
   </a>
   <a use:link href="/settings" class={active("/settings")}>
     <Icon name="settings" size={22} /><span class="l">Réglages</span>

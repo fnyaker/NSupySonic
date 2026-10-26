@@ -249,8 +249,7 @@ check((await page.evaluate(() => window.__fakeOff.downloads)) === dlBefore + 1 &
   "a new download: fetched by the app, nothing heavy in IndexedDB", JSON.stringify(third.metas.map((m) => m.size)));
 
 // 4. Réglages → Titres téléchargés, desktop and phone.
-await page.evaluate(() => (location.hash = "#/settings"));
-await page.locator("button.tab", { hasText: "Qualité sonore" }).click();
+await page.evaluate(() => (location.hash = "#/settings/downloads"));
 await page.locator("button.subnav").filter({ hasText: /téléchargés/i }).first().click();
 await page.waitForSelector(".list .row", { timeout: 10000 });
 for (const [w, h, name] of [[1280, 900, "desktop"], [390, 844, "phone"]]) {
