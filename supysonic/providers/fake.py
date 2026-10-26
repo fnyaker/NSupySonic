@@ -59,12 +59,14 @@ class FakeProvider(base.Provider):
         fail=None,
         requires_credentials=False,
         ready=True,
+        ceiling=None,
     ):
         self.id = id
         self.name = name or id.title()
         self.role = role
         self.capabilities = frozenset(capabilities)
         self.requires_credentials = requires_credentials
+        self.ceiling = dict(ceiling or {})
         self.catalog = dict(catalog or {})  # track ref -> TrackHit
         self.albums = {}  # ref -> {"title", "artists", "tracks": [refs]}
         self.artists = {}

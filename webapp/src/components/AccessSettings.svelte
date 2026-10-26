@@ -3,13 +3,14 @@
   // through, and who may use them (plan multi-provider §15). What is archived
   // on the server is everybody's; this screen is about the rest.
   import { onMount } from "svelte";
-  import { api } from "../lib/api.js";
+  import { api, failureCause } from "../lib/api.js";
   import { toasts } from "../lib/stores.js";
   import Icon from "./Icon.svelte";
+  import { iconOf, sources } from "../lib/sources.js";
   import WhoPicker from "./WhoPicker.svelte";
 
   let data = null;
-  let failed = false;
+  let failed = "";
   let busy = false;
   let openFeatures = {}; // provider id -> the per-feature table is open
   let newGroup = "";
@@ -19,9 +20,9 @@
   async function load() {
     try {
       data = await api.access();
-      failed = false;
-    } catch {
-      failed = true;
+      failed = "";
+    } catch (e) {
+      failed = failureCause(e) || "cause inconnue";
     }
   }
   onMount(load);
@@ -101,7 +102,13 @@
     busy = false;
   }
 
-  const glyph = (id) => (id === "youtube" ? "youtube" : "music");
+  const glyph = iconOf;
+  // Its place among the sources (Réglages → Sources, just above).
+  $: placeOf = (id) => {
+    const s = $sources.find((x) => x.id === id);
+    if (!s) return "";
+    return s.place === "main" ? "principale" : s.place === "fallback" ? `secours ${s.rank}` : "coupée";
+  };
 </script>
 
 <section class="card">
@@ -112,7 +119,7 @@
   </p>
 
   {#if failed}
-    <p class="muted">Impossible de lire les accès. <button class="link" on:click={load}>Réessayer</button></p>
+    <p class="muted" role="alert">Impossible de lire les accès&nbsp;: {failed}. <button class="link" on:click={load}>Réessayer</button></p>
   {:else if !data}
     <p class="muted">Chargement…</p>
   {:else}
@@ -121,7 +128,7 @@
         <header>
           <span class="glyph"><Icon name={glyph(p.id)} size={18} /></span>
           <span class="txt">
-            <span class="nm">{p.name}{#if p.role === "fallback"}<span class="tag">secours</span>{/if}</span>
+            <span class="nm">{p.name}{#if placeOf(p.id)}<span class="tag">{placeOf(p.id)}</span>{/if}</span>
             <span class="muted st">
               {#if p.allowed.length}Vous pouvez : {p.features.filter((f) => p.allowed.includes(f.id)).map((f) => f.label.toLowerCase()).join(", ")}
               {:else if !p.accounts.length && !p.anonymous_use}Aucun compte relié{#if data.admin && p.id === "deezer"}{"\u00a0: "}l'ARL du serveur se règle juste en dessous, dans Sources{/if}

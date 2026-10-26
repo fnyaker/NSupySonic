@@ -177,6 +177,8 @@ POLICY = {
     "import_playlist_start": "read",
     "import_playlist_status": "read",
     "youtube_status": "read",
+    # which sources there are and in what order: every screen names them
+    "sources_get": "read",
     "artist": "read",
     "artist_tracks": "read",
     "artist_on_deezer": "read",
@@ -275,6 +277,7 @@ POLICY = {
     "sync_status": "admin",
     "get_settings": "admin",
     "youtube_settings": "admin",
+    "sources_put": "admin",
     "set_settings": "admin",
     "analysis_backfill_start": "admin",
     "analysis_backfill_status": "admin",

@@ -200,6 +200,18 @@ export function isDeezerDenied(err) {
   return !!err && err.code === DEEZER_DENIED;
 }
 
+// Why a request failed, in a few words a person can act on ("Impossible de
+// lire vos comptes" alone told nobody whether to wait, sign in or report it).
+export function failureCause(err) {
+  if (!err) return "";
+  if (err.status === 0) return "le serveur ne répond pas (réseau)";
+  if (err.status === 401) return "session expirée : reconnectez-vous";
+  if (err.status === 403) return "accès refusé";
+  const msg = err.message && err.message !== "network" ? ` : ${err.message}` : "";
+  if (err.status >= 500) return `erreur du serveur (HTTP ${err.status}${msg})`;
+  return err.status ? `HTTP ${err.status}${msg}` : err.message || "";
+}
+
 // The last cached copy of a content GET, read straight from disk with no
 // network at all. Returns null when there's nothing cached (or the path isn't
 // cacheable).
@@ -484,9 +496,9 @@ export const api = {
       method: "POST",
       body: body({ title, keep }),
     }),
-  youtubeStatus: () => req("/youtube/status"),
-  setYoutubeEnabled: (enabled) =>
-    req("/youtube/settings", { method: "PUT", body: body({ enabled }) }),
+  // The sources of sound in their order (lib/sources.js).
+  sources: () => req("/sources"),
+  setSources: (change) => req("/sources", { method: "PUT", body: body(change) }),
   subscribePodcast: (url) =>
     req("/podcasts", { method: "POST", body: body({ url }) }),
   unsubscribePodcast: (id) => req("/podcast/" + id, { method: "DELETE" }),
@@ -677,13 +689,14 @@ export const api = {
   // element can't: is this track dead, or was that just a bad moment?
   probeTrack: (id) => req("/track/" + id + "/probe"),
   unavailableTracks: () => req("/unavailable"),
-  // `youtube`: also ask YouTube (the sheet's opt-in button) — one request
-  // there, cached a day by the server.
-  // `q`: the sheet's search box replaces the query. YouTube is also asked,
-  // unprompted, when Deezer finds nothing (`youtube_auto` in the answer).
-  replacementCandidates: (id, { youtube = false, q = "" } = {}) => {
+  // `fallbacks`: also ask the fallback sources, in their order (the sheet's
+  // opt-in button); the server stops at the first that has something.
+  // `q`: the sheet's search box replaces the query. The fallbacks are also
+  // asked, unprompted, when the main source finds nothing (`fallback_auto`,
+  // the id of the one that answered).
+  replacementCandidates: (id, { fallbacks = false, q = "" } = {}) => {
     const qs = new URLSearchParams();
-    if (youtube) qs.set("youtube", "1");
+    if (fallbacks) qs.set("fallbacks", "1");
     if (q) qs.set("q", q);
     const s = qs.toString();
     return req("/replace/candidates/" + id + (s ? "?" + s : ""));

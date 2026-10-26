@@ -8,7 +8,7 @@
   import TrackList from "../components/TrackList.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import Icon from "../components/Icon.svelte";
-  import { youtubeStatus, loadYoutubeStatus } from "../lib/youtube.js";
+  import { fallbackSources, iconOf } from "../lib/sources.js";
   import { access } from "../lib/access.js";
   import { playlistLink, importRoute } from "../lib/linkimport.js";
   import { entityRef } from "../lib/entity.js";
@@ -35,8 +35,9 @@
   // the results, not to retype the query.
   const autofocusBox = !q;
 
-  // YouTube, the fallback: off unless ticked, on this screen only (a new
-  // search starts with it off again). Asked on Enter or when the box is ticked
+  // The first fallback source that can be searched (Réglages → Sources, in
+  // the admin's order): off unless ticked, on this screen only (a new search
+  // starts with it off again). Asked on Enter or when the box is ticked
   // — never per keystroke: every partial word typed would be a request there,
   // and the server keeps each answer a day, so a search repeated costs nothing.
   let yt = saved?.yt ?? false;
@@ -45,8 +46,11 @@
   let ytLoading = false;
   let ytError = "";
   let ytSeq = 0;
-  loadYoutubeStatus();
-  $: ytAvailable = !!$youtubeStatus?.enabled && $access.can("youtube", "search");
+  // How each fallback source is searched from here; one without an entry is
+  // not offered.
+  const SEARCHERS = { youtube: (term) => api.youtubeSearch(term) };
+  $: fb = $fallbackSources.find((f) => SEARCHERS[f.id] && $access.can(f.id, "search")) || null;
+  $: ytAvailable = !!fb;
   $: ytStale = yt && ytAvailable && q.trim() !== ytFor;
 
   async function runYoutube() {
@@ -57,7 +61,7 @@
     ytLoading = true;
     ytError = "";
     try {
-      const r = await api.youtubeSearch(term);
+      const r = await SEARCHERS[fb.id](term);
       if (mine !== ytSeq) return;
       ytTracks = r.tracks || [];
       ytFor = term;
@@ -65,7 +69,7 @@
       if (mine !== ytSeq) return;
       ytTracks = [];
       ytError =
-        e?.status === 503 ? "YouTube ne répond pas pour le moment." : "La recherche YouTube a échoué.";
+        e?.status === 503 ? `${fb.name} ne répond pas pour le moment.` : `La recherche sur ${fb.name} a échoué.`;
     } finally {
       if (mine === ytSeq) ytLoading = false;
     }
@@ -191,12 +195,12 @@
       class:on={yt}
       role="switch"
       aria-checked={yt}
-      title="Chercher aussi sur YouTube (en dernier recours)"
+      title="Chercher aussi sur {fb.name} (source de secours)"
       on:click={toggleYoutube}
     >
       <span class="tick" aria-hidden="true">{#if yt}<Icon name="check" size={12} />{/if}</span>
-      <Icon name="youtube" size={16} />
-      <span>YouTube</span>
+      <Icon name={iconOf(fb.id)} size={16} />
+      <span>{fb.name}</span>
     </button>
   {/if}
 </div>
@@ -253,20 +257,20 @@
 {/if}
 
 {#if !loading && q.trim() && !shared && yt && ytAvailable && (tab === "all" || tab === "tracks")}
-  <h2 class="ythead"><Icon name="youtube" size={20} /> Sur YouTube</h2>
+  <h2 class="ythead"><Icon name={iconOf(fb.id)} size={20} /> Sur {fb.name}</h2>
   {#if ytTracks.length && !ytStale && !ytLoading}
-    <p class="ytnote muted">Archivé à la première écoute, en Opus ~130 kbit/s (le mieux que YouTube propose).</p>
+    <p class="ytnote muted">Archivé à la première écoute{fb.quality ? `, en ${fb.quality} au mieux (ce que ${fb.name} propose de mieux)` : ""}.</p>
   {/if}
   {#if ytLoading}
     <Skeleton kind="list" />
   {:else if ytStale}
     <button class="ytgo" on:click={runYoutube}>
-      <Icon name="search" size={15} /> Chercher « {q.trim()} » sur YouTube
+      <Icon name="search" size={15} /> Chercher « {q.trim()} » sur {fb.name}
     </button>
   {:else if ytError}
     <p class="muted hint small">{ytError}</p>
   {:else if !ytTracks.length}
-    <p class="muted hint small">Rien sur YouTube pour « {ytFor} ».</p>
+    <p class="muted hint small">Rien sur {fb.name} pour « {ytFor} ».</p>
   {:else}
     <TrackList tracks={ytTracks} />
   {/if}

@@ -7,6 +7,7 @@
 
 import importlib
 import importlib.resources
+import logging
 import mimetypes
 import os.path
 import time
@@ -28,10 +29,12 @@ from peewee import (
     UUIDField,
 )
 from peewee import CompositeKey, DatabaseProxy, Model, MySQLDatabase
-from peewee import PostgresqlDatabase, chunked, fn
+from peewee import PostgresqlDatabase, SqliteDatabase, chunked, fn
 from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "20261031"
 
@@ -1586,6 +1589,81 @@ def init_database(database_uri):
 
         version.value = SCHEMA_VERSION
         version.save()
+
+    _repair_skipped_migrations(provider, args)
+
+
+# Every migration from this date on is idempotent (tests/test_schema.py), so a
+# migration a database skipped can still be applied late.
+IDEMPOTENT_SINCE = "20260808"
+# The ones that change data rather than shape run late only when the column they
+# fill was missing too: the database never went through them.
+DATA_MIGRATIONS = {"20261029": ("podcast_channel", "auto_archive")}
+
+
+def _missing_columns():
+    """``(table, column)`` the models expect and the database lacks."""
+    models = _migration_order()
+    if isinstance(db.obj, SqliteDatabase):
+        have = {}
+        for model in models:
+            table = model._meta.table_name
+            cols = {c.name for c in db.get_columns(table)}
+            if cols:
+                have[table] = cols
+    else:
+        # One query for the whole schema: one per table cost 270 ms of boot on
+        # PostgreSQL.
+        where = "current_schema()" if isinstance(db.obj, PostgresqlDatabase) else "DATABASE()"
+        have = {}
+        for table, column in db.execute_sql(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            f"WHERE table_schema = {where}"  # nosec B608 - a fixed function name
+        ):
+            have.setdefault(table.lower(), set()).add(column.lower())
+    missing = []
+    for model in models:
+        table = model._meta.table_name
+        if table not in have:
+            missing.append((table, None))
+            continue
+        missing.extend(
+            (table, f.column_name)
+            for f in model._meta.sorted_fields
+            if f.column_name.lower() not in have[table]
+        )
+    return missing
+
+
+def _repair_skipped_migrations(provider, args):
+    """A migration is applied once, when the stored version is older than its
+    date. A database that a build from another branch moved past a migration
+    merged later never gets it (P2's ``provider_account.options`` went missing
+    that way, and every account page answered 500). The shape the models expect
+    is checked at each boot, and the idempotent migrations run again if any part
+    of it is absent."""
+    missing = _missing_columns()
+    if not missing:
+        return
+    logger.warning("database schema incomplete, applying skipped migrations: %s", missing)
+    args.pop("pragmas", ())
+    for migration in sorted(list_migrations(provider)):
+        if migration[0] in ("_", "."):
+            continue
+        date, ext = os.path.splitext(migration)
+        if date < IDEMPOTENT_SINCE:
+            continue
+        if date in DATA_MIGRATIONS and DATA_MIGRATIONS[date] not in missing:
+            continue
+        if ext == ".sql":
+            with db.atomic():
+                execute_sql_resource_script(f"schema/migration/{provider}/{migration}")
+        elif ext == ".py":
+            m = importlib.import_module(f".schema.migration.{provider}.{date}", __package__)
+            m.apply(args.copy())
+    still = _missing_columns()
+    if still:
+        logger.error("database schema still incomplete after the repair: %s", still)
 
 
 def release_database():

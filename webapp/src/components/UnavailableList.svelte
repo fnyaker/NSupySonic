@@ -20,6 +20,7 @@
   import { artistLine, duration as fmtDuration } from "../lib/format.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
+  import { iconOf, offMain, sourceTitle } from "../lib/sources.js";
   import AutomatchPanel from "./AutomatchPanel.svelte";
 
   /** The unavailable tracks; rows dealt with here are dropped from it. */
@@ -350,7 +351,7 @@
                   title={`Remplacer par « ${c.title} » — ${artistLine(c)} · ${c.album?.title || ""}`}>
                   <span class="sug-txt">
                     <span class="sug-t">
-                      {#if c.source === "youtube"}<span class="local" title="YouTube (Deezer n'a rien de sûr)"><Icon name="youtube" size={11} /></span>{:else if c.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={11} /></span>{/if}
+                      {#if offMain(c.source)}<span class="local" title={sourceTitle(c.source)}><Icon name={iconOf(c.source)} size={11} /></span>{:else if c.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={11} /></span>{/if}
                       {c.album?.title || c.title}
                     </span>
                     <span class="sug-s">{artistLine(c)}{#if c.duration} · {fmtDuration(c.duration)}{/if}</span>
