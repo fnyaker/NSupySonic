@@ -69,6 +69,8 @@ cd webapp && node test/clicks/run.mjs               # what a click costs before 
                                                      # its heaviest functions (build with `npx vite build --minify false` to read them)
 cd webapp && node test/vizdirect/run.mjs [FADE=1]   # the animations on the DIRECT output through pauses, skips and a reopening: they
                                                      # must still hear the music (the copy's dead-track bug)
+cd webapp && node test/download/run.mjs              # a playlist downloading on a shared 256 kbit/s link (LINK=bytes/s) while a track is
+                                                     # launched: it must start as fast as on an idle link, play without a stall, and the downloads finish
 cd webapp && node test/import/run.mjs [--phone]       # a shared playlist link: pasted into the search, read, played, kept
 cd webapp && node test/requests/run.mjs             # what playing costs in requests: a track the server refuses (Deezer off) is
                                                      # retried at a human pace, not 70 times a second; a missing cover is asked once

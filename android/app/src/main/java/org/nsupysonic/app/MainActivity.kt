@@ -1076,6 +1076,15 @@ class MainActivity : AppCompatActivity() {
         fun offDownload(key: String, url: String): Boolean =
             allowed() && offline?.download(key, url) == true
 
+        /**
+         * The page's lease on the network for what is playing: downloads
+         * trickle for the next [ms] milliseconds (capped), 0 lets them go.
+         */
+        @JavascriptInterface
+        fun offYield(ms: Double) {
+            if (allowed()) offline?.yieldFor(ms.toLong())
+        }
+
         @JavascriptInterface
         fun offCancel(key: String) {
             if (allowed()) offline?.cancel(key)
