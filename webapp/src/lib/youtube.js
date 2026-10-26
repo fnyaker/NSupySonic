@@ -1,37 +1,11 @@
 // The YouTube fallback, client side (server: supysonic/deezer/youtube.py).
 //
 // YouTube is reached only when somebody asks for it — the search screen's box,
-// the replacement sheet's button — so nothing here runs on its own: the status
-// is read once (is it installed, did the admin switch it off) and a track's
+// the replacement sheet's button — so nothing here runs on its own. Whether it
+// is on, and where it stands among the sources, is lib/sources.js; a track's
 // real bitrate is asked of OUR server, never of YouTube.
-import { writable } from "svelte/store";
 import { api } from "./api.js";
 import { trackKey, trackRef } from "./trackkey.js";
-
-export const youtubeStatus = writable(null);
-
-let inflight = null;
-export function loadYoutubeStatus(force = false) {
-  if (inflight && !force) return inflight;
-  inflight = api
-    .youtubeStatus()
-    .then((s) => {
-      youtubeStatus.set(s);
-      return s;
-    })
-    .catch(() => {
-      inflight = null; // a failed read is asked again next time
-      return null;
-    });
-  return inflight;
-}
-
-export async function setYoutubeEnabled(enabled) {
-  const s = await api.setYoutubeEnabled(enabled);
-  youtubeStatus.set(s);
-  inflight = Promise.resolve(s);
-  return s;
-}
 
 export const isYoutube = (t) => t?.source === "youtube";
 

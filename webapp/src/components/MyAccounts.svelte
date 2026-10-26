@@ -6,7 +6,7 @@
   // synced every day. An import runs on the server; this screen only reads its
   // progress (which list, how many of how many) and says when it is done.
   import { onDestroy, onMount } from "svelte";
-  import { api } from "../lib/api.js";
+  import { api, failureCause } from "../lib/api.js";
   import { toasts } from "../lib/stores.js";
   import { invalidatePlaylists, loadFavorites } from "../lib/actions.js";
   import { nativeDeezerLogin, nativeDeezerLoginAvailable } from "../lib/nativeDeezer.js";
@@ -22,7 +22,7 @@
   const COUNT_LABEL = { artists: "artiste", tracks: "titre", albums: "album", playlists: "playlist" };
 
   let data = null;
-  let failed = false;
+  let failed = "";
   let busy = false;
   let linking = false; // the ARL form is open
   let arl = "";
@@ -46,11 +46,11 @@
   async function load() {
     try {
       adopt(await api.myAccounts());
-      failed = false;
-    } catch {
+      failed = "";
+    } catch (e) {
       // Keep what is on screen: a poll lost on a weak link is not a failure
       // worth replacing the accounts with an error.
-      if (!data) failed = true;
+      if (!data) failed = failureCause(e) || "cause inconnue";
     }
     schedule();
   }
@@ -124,6 +124,7 @@
   function statusLine(a) {
     if (a.running) return "";
     if (a.status === "auth") return "Le compte refuse la connexion : reliez-le à nouveau.";
+    if (a.status === "broken") return `Compte illisible sur le serveur (${a.error}) : déliez-le puis reliez-le.`;
     const last = a.last;
     if (!last) return "Pas encore importé";
     if (last.reason === "network") return `Service injoignable ${ago(last.at)} : nouvel essai dans l'heure`;
@@ -157,7 +158,7 @@
 
   // Lot P3: what this account is used for, besides the import.
   function useLine(a) {
-    if (a.provider !== "deezer" || a.server || a.status === "auth") return "";
+    if (a.provider !== "deezer" || a.server || a.status === "auth" || a.status === "broken") return "";
     if (a.lossless === false)
       return "Vos recherches et vos pages Deezer passent par ce compte. Sans FLAC (offre gratuite), la musique est récupérée par un autre compte.";
     return "Vos recherches, vos pages et votre musique Deezer passent par ce compte.";
@@ -264,7 +265,7 @@
   </p>
 
   {#if failed}
-    <p class="muted">Impossible de lire vos comptes. <button class="link" on:click={load}>Réessayer</button></p>
+    <p class="muted" role="alert">Impossible de lire vos comptes&nbsp;: {failed}. <button class="link" on:click={load}>Réessayer</button></p>
   {:else if !data}
     <p class="muted">Chargement…</p>
   {:else}
@@ -274,7 +275,7 @@
         <div class="seg" role="radiogroup" aria-labelledby="def-cap">
           {#each accounts as a (a.id)}
             <button type="button" role="radio" class="opt" class:sel={a.default} aria-checked={a.default}
-              disabled={choosing || a.status === "auth"} on:click={() => chooseDefault(a.id)}>
+              disabled={choosing || a.status === "auth" || a.status === "broken"} on:click={() => chooseDefault(a.id)}>
               <Icon name={glyph(a.provider)} size={15} /><span>{a.name}</span>
             </button>
           {/each}
@@ -304,7 +305,7 @@
               {#if a.default}<span class="badge">Par défaut</span>{/if}
             </span>
             {#if !a.running}
-              <span class="muted st" class:warn={a.status === "auth"}>{statusLine(a)}</span>
+              <span class="muted st" class:warn={a.status === "auth" || a.status === "broken"}>{statusLine(a)}</span>
             {/if}
             {#if useLine(a)}<span class="muted st">{useLine(a)}</span>{/if}
           </span>
@@ -334,10 +335,10 @@
         </div>
 
         <div class="actions">
-          <button class="ghost-btn main" disabled={busy || !!a.running || a.status === "auth"} on:click={() => importNow(a)}>
+          <button class="ghost-btn main" disabled={busy || !!a.running || a.status === "auth" || a.status === "broken"} on:click={() => importNow(a)}>
             <Icon name="download" size={16} /><span>{a.running ? "Import en cours…" : "Importer maintenant"}</span>
           </button>
-          <button class="ghost-btn" disabled={a.status === "auth"} on:click={() => (picker = a)}>
+          <button class="ghost-btn" disabled={a.status === "auth" || a.status === "broken"} on:click={() => (picker = a)}>
             <Icon name="users" size={16} /><span>Choisir les artistes…</span>
           </button>
           {#if !a.server}

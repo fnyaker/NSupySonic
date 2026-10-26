@@ -204,6 +204,14 @@ class DeezerAdapter(base.Provider):
     # Deezer's own facts are exact (dates, ISRC, ids); its genre and BPM are not
     # believed over what is measured (plan §6).
     trust = {"date": 3, "isrc": 3, "artist": 3, "bpm": 1}
+    # Deezer's HiFi stream: FLAC, CD quality.
+    ceiling = {"fmt": "flac", "lossless": True, "bit_depth": 16, "sample_rate": 44100}
+    # The catalogue, the pages and the sound reach Deezer whenever an ARL is
+    # set: an off switch here would change nothing.
+    switchable = False
+
+    def setup_hint(self):
+        return "Aucun ARL : il se règle dans « Compte Deezer (ARL) », juste en dessous."
 
     def __init__(self, get_provider):
         """``get_provider()`` returns the live ``DeezerProvider`` or None (the

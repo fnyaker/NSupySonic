@@ -31,11 +31,11 @@
   import Icon from "../components/Icon.svelte";
   import HardReload from "../components/HardReload.svelte";
   import EnrichBackfill from "../components/EnrichBackfill.svelte";
-  import { youtubeStatus, loadYoutubeStatus, setYoutubeEnabled } from "../lib/youtube.js";
   import Cover from "../components/Cover.svelte";
   import AudioEffects from "../components/AudioEffects.svelte";
   import VisualizerSettings from "../components/VisualizerSettings.svelte";
   import AccessSettings from "../components/AccessSettings.svelte";
+  import SourceOrder from "../components/SourceOrder.svelte";
   import MyAccounts from "../components/MyAccounts.svelte";
   import ServicesSettings from "../components/ServicesSettings.svelte";
   import DiscoverySlider from "../components/DiscoverySlider.svelte";
@@ -78,7 +78,7 @@
     { id: "viz", label: "Animations", icon: "sparkles", hint: "Ce qui s'anime pendant la lecture" },
     ...(REMOTE ? [] : [{ id: "downloads", label: "Téléchargements", icon: "download", hint: "Qualité, hors-ligne, préchargement" }]),
     { id: "discovery", label: "Découverte", icon: "compass", hint: "Flow, nouveautés de vos artistes" },
-    ...(REMOTE ? [] : [{ id: "sources", label: "Sources", icon: "link", hint: "Vos comptes Deezer, YouTube, et qui peut s'en servir" }]),
+    ...(REMOTE ? [] : [{ id: "sources", label: "Sources", icon: "link", hint: "Ordre des sources, vos comptes, et qui peut s'en servir" }]),
     { id: "account", label: REMOTE ? "Contrôle" : "Compte", icon: "user", hint: REMOTE ? "Le lecteur que vous pilotez" : "Votre compte, l'export vers d'autres services" },
     ...($user?.admin && ADMIN() ? [{ id: "server", label: "Serveur", icon: "archive", hint: "Archive, nettoyage, stockage, quotas" }] : []),
     { id: "help", label: "Assistance", icon: "info", hint: "Recharger l'application, journal de diagnostic" },
@@ -411,21 +411,6 @@
     oldest: "Le plus anciennement archivé",
   };
 
-  // -- the YouTube fallback (admin) -------------------------------------------
-  let ytSaving = false;
-  loadYoutubeStatus(true);
-  async function toggleYoutube() {
-    if (ytSaving || !$youtubeStatus?.installed) return;
-    ytSaving = true;
-    try {
-      await setYoutubeEnabled(!$youtubeStatus.enabled);
-    } catch (e) {
-      toasts.push(e?.message || "Réglage non enregistré", "error");
-    } finally {
-      ytSaving = false;
-    }
-  }
-
   async function loadRules() {
     if (!$user?.admin || !CAN_ADMIN) return;
     try {
@@ -644,6 +629,7 @@
 {/if}
 
 {#if tab === "sources"}
+  <SourceOrder />
   <MyAccounts />
   <AccessSettings />
 {/if}
@@ -1162,39 +1148,6 @@
 {/if}
 
 {#if tab === "sources"}
-{#if $user?.admin && CAN_ADMIN && $youtubeStatus}
-  <section class="card">
-    <h2>Source de secours&nbsp;: YouTube</h2>
-    <p class="muted sub">
-      Pour un titre que Deezer n'a pas&nbsp;: une case dans la recherche (décochée
-      par défaut) et un bouton dans la feuille de remplacement d'un titre
-      indisponible. YouTube n'est interrogé que lorsque quelqu'un le demande, et
-      un titre lu est archivé une fois pour toutes, dans le son d'origine
-      (Opus ~130-160&nbsp;kbit/s, YouTube n'a pas mieux).
-    </p>
-    {#if !$youtubeStatus.installed}
-      <p class="muted hint warn">
-        <Icon name="alert" size={14} /> Non installé sur ce serveur
-        (<code>pip install 'supysonic[youtube]'</code>, déjà inclus dans l'image Docker).
-      </p>
-    {:else}
-      <button class="toggle" role="switch" aria-checked={$youtubeStatus.enabled} disabled={ytSaving} on:click={toggleYoutube}>
-        <span class="tg-txt">
-          <span class="tg-title">Proposer YouTube en dernier recours</span>
-          <span class="tg-hint muted">
-            {#if $youtubeStatus.held}
-              YouTube a refusé ou n'a pas répondu&nbsp;: laissé tranquille encore {Math.ceil($youtubeStatus.retry_in / 60)} min.
-            {:else}
-              Pour tous les utilisateurs. Désactivé, ce qui est déjà archivé reste lisible.
-            {/if}
-          </span>
-        </span>
-        <span class="sw" class:on={$youtubeStatus.enabled}><span class="knob"></span></span>
-      </button>
-    {/if}
-  </section>
-{/if}
-
 {#if $user?.admin && CAN_ADMIN && dz}
   <section class="card">
     <h2>Compte Deezer (ARL)</h2>

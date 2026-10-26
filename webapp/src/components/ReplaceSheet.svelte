@@ -27,8 +27,8 @@
   import { duration as fmtDuration, artistLine } from "../lib/format.js";
   import Icon from "./Icon.svelte";
   import Cover from "./Cover.svelte";
-  import { youtubeStatus, loadYoutubeStatus } from "../lib/youtube.js";
   import { access } from "../lib/access.js";
+  import { sources, mainSource, fallbackSources, chain, iconOf, nameOf, sourceTitle } from "../lib/sources.js";
 
   let candidates = [];
   let query = "";
@@ -42,14 +42,22 @@
   $: if (target && loadedFor !== target) load(target);
   $: if (!target) teardown();
 
-  // YouTube is the fallback: asked when somebody presses for it, and by the
-  // server on its own when Deezer finds nothing (`youtube_auto`) — its five
-  // closest songs, one search there (cached a day). A hit costs nothing more
-  // until it is auditioned or chosen, which is when its audio is archived.
+  // The fallback sources (Réglages → Sources, in the admin's order): asked
+  // when somebody presses for it, and by the server on its own when the main
+  // source finds nothing (`fallback_auto`) — the first one with something
+  // gives its five closest songs, one search there (cached a day). A hit costs
+  // nothing more until it is auditioned or chosen, which is when its audio is
+  // archived.
   let yt = "idle"; // idle | loading | done | error
   let ytFound = 0;
   let ytAuto = false;
-  loadYoutubeStatus();
+  let ytFrom = ""; // the fallback that answered
+  $: fbs = $fallbackSources.filter((f) => $access.can(f.id, "search"));
+  $: fbIds = new Set(fbs.map((f) => f.id));
+  $: mainName = $mainSource?.name || "";
+  // Where it was looked for, main first: "Deezer, YouTube".
+  $: everywhere = $sources.filter((x) => x.place !== "off").map((x) => x.name).join(", ");
+  const isFallbackHit = (c) => !!c.source && c.source !== "local" && c.source !== $mainSource?.id;
 
   // The search box: pre-filled with what the server searched for, and a new
   // query replaces it. `activeQ` is the manual query in effect ("" = the
@@ -58,19 +66,18 @@
   let activeQ = "";
   let seq = 0;
 
-  async function searchYoutube() {
+  async function searchFallbacks() {
     const t = target;
     if (!t || yt === "loading") return;
     const mine = seq;
     yt = "loading";
     try {
-      const r = await api.replacementCandidates(trackRef(t), { youtube: true, q: activeQ });
+      const r = await api.replacementCandidates(trackRef(t), { fallbacks: true, q: activeQ });
       if (loadedFor !== t || mine !== seq) return;
       const have = new Set(candidates.map((c) => trackKey(c)));
-      const extra = (r.candidates || []).filter(
-        (c) => c.source === "youtube" && !have.has(trackKey(c))
-      );
+      const extra = (r.candidates || []).filter((c) => isFallbackHit(c) && !have.has(trackKey(c)));
       ytFound = extra.length;
+      ytFrom = extra[0]?.source || "";
       candidates = [...candidates, ...extra];
       yt = "done";
     } catch {
@@ -87,6 +94,7 @@
     yt = "idle";
     ytFound = 0;
     ytAuto = false;
+    ytFrom = "";
     stopPreview();
     try {
       const r = await api.replacementCandidates(trackRef(t), { q });
@@ -94,9 +102,12 @@
       candidates = r.candidates || [];
       query = r.query || "";
       if (!q) searchText = query;
-      if (r.youtube_auto) {
+      // `youtube_auto`: a server from before the source order.
+      const auto = r.fallback_auto || (r.youtube_auto ? "youtube" : null);
+      if (auto) {
         ytAuto = true;
-        ytFound = candidates.filter((c) => c.source === "youtube").length;
+        ytFrom = auto;
+        ytFound = candidates.filter(isFallbackHit).length;
         yt = "done";
       }
     } catch (e) {
@@ -236,9 +247,8 @@
           <p class="muted pad">Recherche de titres proches…</p>
         {:else if !candidates.length}
           <p class="muted pad">
-            Aucun titre proche trouvé{query ? ` pour « ${query} »` : ""}, ni sur
-            Deezer ni sur YouTube. Essayez une autre recherche, ou importez votre
-            propre fichier ci-dessous.
+            Aucun titre proche trouvé{query ? ` pour « ${query} »` : ""}{everywhere ? ` (cherché dans : ${everywhere})` : ""}.
+            Essayez une autre recherche, ou importez votre propre fichier ci-dessous.
           </p>
         {:else}
           <ul class="list">
@@ -256,7 +266,7 @@
                 </div>
                 <div class="meta">
                   <div class="t">
-                    {#if c.source === "youtube"}<span class="local" title="Source YouTube (pas sur Deezer)"><Icon name="youtube" size={12} /></span>{:else if c.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
+                    {#if isFallbackHit(c)}<span class="local" title={sourceTitle(c.source)}><Icon name={iconOf(c.source)} size={12} /></span>{:else if c.local}<span class="local" title="Fichier local"><Icon name="cloudOff" size={12} /></span>{/if}
                     {c.title}
                   </div>
                   <div class="a muted">{artistLine(c)} · {c.album?.title || ""}</div>
@@ -269,30 +279,31 @@
             {/each}
           </ul>
         {/if}
-        {#if !loading && $youtubeStatus?.enabled && $access.can("youtube", "search")}
+        {#if !loading && fbs.length}
+          {@const from = fbs.find((f) => f.id === ytFrom)}
           <div class="yt">
             {#if yt === "done"}
               <p class="muted hint">
                 {#if ytAuto}
-                  Rien sur Deezer : {ytFound > 1 ? `les ${ytFound} titres YouTube les plus proches` : "le titre YouTube le plus proche"},
-                  archivés en Opus (~130 kbit/s) à la première écoute.
+                  Rien sur {mainName || "la source principale"} : {ytFound > 1 ? `les ${ytFound} titres les plus proches sur ${nameOf(ytFrom)}` : `le titre le plus proche sur ${nameOf(ytFrom)}`},
+                  archivés{from?.quality ? ` en ${from.quality}` : ""} à la première écoute.
                 {:else}
                   {ytFound
-                    ? `${ytFound} titre${ytFound > 1 ? "s" : ""} trouvé${ytFound > 1 ? "s" : ""} sur YouTube, ajouté${ytFound > 1 ? "s" : ""} à la liste.`
-                    : "Rien de proche sur YouTube non plus."}
+                    ? `${ytFound} titre${ytFound > 1 ? "s" : ""} trouvé${ytFound > 1 ? "s" : ""} sur ${nameOf(ytFrom)}, ajouté${ytFound > 1 ? "s" : ""} à la liste.`
+                    : `Rien de proche sur ${chain(fbs)} non plus.`}
                 {/if}
               </p>
             {:else}
-              <button class="upload" disabled={busy || yt === "loading"} on:click={searchYoutube}>
-                <Icon name="youtube" size={16} />
-                {yt === "loading" ? "Recherche sur YouTube…" : "Chercher aussi sur YouTube"}
+              <button class="upload" disabled={busy || yt === "loading"} on:click={searchFallbacks}>
+                <Icon name={iconOf(fbs[0].id)} size={16} />
+                {yt === "loading" ? `Recherche sur ${chain(fbs)}…` : `Chercher aussi sur ${chain(fbs)}`}
               </button>
               <p class="muted hint">
                 {#if yt === "error"}
-                  YouTube n'a pas répondu. Réessayez plus tard.
+                  {chain(fbs)} n'a pas répondu. Réessayez plus tard.
                 {:else}
-                  En dernier recours. Un titre YouTube est archivé à la première
-                  écoute, en Opus d'environ 130 kbit/s (YouTube n'a pas mieux).
+                  Source{fbs.length > 1 ? "s" : ""} de secours, dans l'ordre choisi dans Réglages → Sources.
+                  Un titre trouvé est archivé à la première écoute{fbs[0].quality ? `, en ${fbs[0].quality} au mieux` : ""}.
                 {/if}
               </p>
             {/if}

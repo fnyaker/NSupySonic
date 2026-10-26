@@ -310,5 +310,92 @@ class ShowArchiveSwitchUpgradeTestCase(unittest.TestCase):
         self.assertEqual(version, SCHEMA_VERSION)
 
 
+class SkippedMigrationRepairTestCase(unittest.TestCase):
+    """A database a build from another branch moved past a migration merged
+    later is marked up to date without it: the stored version alone never runs
+    it. This happened to ``provider_account.options`` (lot P2): every visit to
+    Mes comptes answered 500 while playback, which never reads it, worked."""
+
+    def setUp(self):
+        self.fd, self.path = tempfile.mkstemp(suffix=".db")
+        self.uri = "sqlite:///" + self.path
+
+    def tearDown(self):
+        release_database()
+        os.close(self.fd)
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def _sql(self, *statements):
+        import sqlite3
+
+        conn = sqlite3.connect(self.path)
+        out = [conn.execute(s).fetchall() for s in statements]
+        conn.commit()
+        conn.close()
+        return out
+
+    def test_a_skipped_column_and_table_are_put_back(self):
+        from supysonic.db import ProviderAccount
+
+        init_database(self.uri)
+        release_database()
+        # The broken state: the version says current, 20261027 never ran.
+        self._sql(
+            "ALTER TABLE provider_account DROP COLUMN options",
+            "DROP TABLE library_item",
+        )
+        self.assertEqual(
+            self._sql("SELECT value FROM meta WHERE key = 'schema_version'")[0][0][0],
+            SCHEMA_VERSION,
+        )
+
+        init_database(self.uri)
+        self.assertEqual(list(ProviderAccount.select()), [])  # the query that 500'd
+        self.assertEqual(dbmod._missing_columns(), [])
+
+    def test_the_data_migrations_are_not_replayed(self):
+        """20261029 switches every show on. Replayed on a server that only
+        missed another migration, it would undo each show a person switched off."""
+        from supysonic.db import User
+        from supysonic.managers.user import UserManager
+
+        init_database(self.uri)
+        UserManager.add("alice", "Alic3", admin=True)
+        alice = User.get(User.name == "alice")
+        PodcastChannel.create(
+            user=alice, url="u", title="Show", status="completed", auto_archive=False
+        )
+        release_database()
+        self._sql("ALTER TABLE provider_account DROP COLUMN options")
+
+        init_database(self.uri)
+        self.assertEqual([c.auto_archive for c in PodcastChannel.select()], [False])
+        self.assertEqual(dbmod._missing_columns(), [])
+
+    def test_a_skipped_data_migration_runs_with_its_column(self):
+        from supysonic.db import User
+        from supysonic.managers.user import UserManager
+
+        init_database(self.uri)
+        UserManager.add("alice", "Alic3", admin=True)
+        alice = User.get(User.name == "alice")
+        PodcastChannel.create(user=alice, url="u", title="Show", status="completed")
+        release_database()
+        self._sql("ALTER TABLE podcast_channel DROP COLUMN auto_archive")
+
+        init_database(self.uri)
+        # As an ordinary upgrade through 20261028 then 20261029 leaves it.
+        self.assertEqual([c.auto_archive for c in PodcastChannel.select()], [True])
+
+    def test_a_complete_database_is_left_alone(self):
+        init_database(self.uri)
+        with self.assertNoLogs("supysonic.db", level="WARNING"):
+            release_database()
+            init_database(self.uri)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,7 +18,8 @@ import threading
 import time
 from importlib import metadata
 
-from .base import Provider, check_declared
+from . import quality
+from .base import AUDIO, INFO_ROLE, MAIN, Provider, check_declared
 from .errors import CapabilityMissing
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,90 @@ class Registry:
     def with_capability(self, capability):
         """The enabled providers, in order, that declare ``capability``."""
         return [p for p in self.enabled() if capability in p.capabilities]
+
+    # -- the sources of sound (Réglages → Sources, plan §3) -------------------
+
+    def ceiling(self, provider_id):
+        """The best note ``provider_id`` can deliver (``quality.Quality``)."""
+        provider = self._providers.get(provider_id)
+        return quality.from_offer(getattr(provider, "ceiling", None) or None)
+
+    def _best_first(self, provider_id):
+        note = self.ceiling(provider_id)
+        return (-note.cls, -note.effective_kbps)
+
+    def sound(self):
+        """Every provider that delivers sound, in the order they are asked: the
+        admin's, and for the ones it does not name (nobody ordered yet, or one
+        installed since), the ones that can lead first, then the best quality.
+        The files already on the server are not a source to order."""
+        order, _ = self._settings()
+        rank = {pid: i for i, pid in enumerate(order)}
+        tail = len(rank)
+        reg = {pid: i for i, pid in enumerate(self._providers)}
+        found = [
+            p
+            for p in self._providers.values()
+            if AUDIO in p.capabilities and p.role != INFO_ROLE and p.id != "local"
+        ]
+        return sorted(
+            found,
+            key=lambda p: (
+                rank.get(p.id, tail),
+                p.role != MAIN,
+                self._best_first(p.id),
+                reg[p.id],
+            ),
+        )
+
+    def main(self):
+        """The main source: the first one switched on that can lead (a whole
+        catalogue: search, pages, sound). None when there is none."""
+        for p in self.sound():
+            if p.role == MAIN and self.is_enabled(p.id):
+                return p
+        return None
+
+    def fallbacks(self):
+        """The other sources switched on, in the order they are asked when the
+        main one has nothing for a title."""
+        lead = self.main()
+        return [p for p in self.sound() if p is not lead and self.is_enabled(p.id)]
+
+    def is_fallback(self, provider_id):
+        return any(p.id == provider_id for p in self.fallbacks())
+
+    def by_quality(self, provider_ids):
+        """``provider_ids`` best quality first; equal notes keep the sources'
+        order (quality trumps the order, the order breaks ties: plan §3)."""
+        place = {p.id: i for i, p in enumerate(self.sound())}
+        ids = list(provider_ids)
+        return sorted(
+            ids, key=lambda pid: (self._best_first(pid), place.get(pid, len(place)), ids.index(pid))
+        )
+
+    def set_sources(self, order=None, enabled=None):
+        """What Réglages → Sources saves: the sources in order (main first) and
+        which are on. Ids that are not sources are ignored; switching one that
+        has no switch, or leaving no source able to lead first, raises
+        ValueError. Nothing is written unless all of it is valid."""
+        sound = {p.id: p for p in self.sound()}
+        if order is not None:
+            ids = [pid for pid in order if pid in sound]
+            ids = list(dict.fromkeys(ids))
+            if ids and sound[ids[0]].role != MAIN:
+                raise ValueError(f"{sound[ids[0]].name} ne peut pas être la source principale")
+        for pid, on in (enabled or {}).items():
+            if pid not in sound:
+                continue
+            if not sound[pid].switchable:
+                raise ValueError(f"{sound[pid].name} n'a pas d'interrupteur")
+        if order is not None:
+            rest = [p.id for p in self.ordered() if p.id not in ids]
+            self.set_order(ids + rest)
+        for pid, on in (enabled or {}).items():
+            if pid in sound:
+                self.set_enabled(pid, bool(on))
 
     # -- settings --------------------------------------------------------------
 

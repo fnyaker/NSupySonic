@@ -212,6 +212,36 @@ class ServerAccountTestCase(_ImportCase):
         self.assertEqual(self.client.delete(f"/api/me/accounts/{acc}").status_code, 409)
 
 
+class UnreadableAccountTestCase(_ImportCase):
+    """One account the server cannot read is that account's problem: Mes
+    comptes lists it with its cause, and the others stay usable."""
+
+    def test_options_that_are_not_an_object_read_as_the_defaults(self):
+        self.as_alice()
+        self.server_account()
+        for raw in ("null", "[]", "12", "{"):
+            ProviderAccount.update(options=raw).where(ProviderAccount.user == self.alice.id).execute()
+            (acc,) = self.my_accounts()
+            self.assertEqual(acc["auto"]["artists"], True, raw)
+            self.assertNotEqual(acc["status"], "broken")
+
+    def test_an_account_that_fails_is_listed_with_its_cause(self):
+        self.as_alice()
+        self.server_account()
+        def status(account_id):
+            raise RuntimeError("boom")
+
+        with mock.patch.object(li, "status", status), self.assertLogs(
+            "supysonic.webui.myaccounts", "ERROR"
+        ):
+            rv = self.client.get("/api/me/accounts")
+        self.assertEqual(rv.status_code, 200)
+        (acc,) = rv.get_json()["accounts"]
+        self.assertEqual(acc["status"], "broken")
+        self.assertIn("RuntimeError: boom", acc["error"])
+        self.assertEqual(acc["kinds"], [])
+
+
 class PickerTestCase(_ImportCase):
     def test_unticking_an_artist_unfollows_it_for_good(self):
         self.as_alice()

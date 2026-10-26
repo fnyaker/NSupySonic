@@ -262,6 +262,35 @@ def _youtube_closest(track, query, seen, n=YOUTUBE_SHOWN, ranked=True) -> list:
     return hits[:n]
 
 
+# How each fallback source is searched for a stand-in. A source without an
+# entry here is skipped until it gets one.
+FALLBACK_SEARCH = {"youtube": _youtube_closest}
+
+
+def _fallbacks():
+    """The fallback sources switched on, in the admin's order (Réglages →
+    Sources), that can be searched for a stand-in."""
+    reg = getattr(current_app, "providers", None)
+    ordered = [p.id for p in reg.fallbacks() if p.id in FALLBACK_SEARCH] if reg is not None else []
+    # One the registry does not know at all (a registry without the built-ins,
+    # as under test) is asked after them, as before the order: its own switch
+    # decides.
+    known = {p.id for p in reg.all()} if reg is not None else set()
+    return ordered + [pid for pid in FALLBACK_SEARCH if pid not in known]
+
+
+def _fallback_closest(track, query, seen, n=YOUTUBE_SHOWN, ranked=True, enough=None):
+    """The fallback sources asked in their order until one has something:
+    ``(hits, source id)``, or ``([], None)``. ``enough(hits)`` says what counts
+    as something (any hit, by default). One source at a time: a slow mobile link
+    pays for the next only when the one before had nothing."""
+    for pid in _fallbacks():
+        hits = FALLBACK_SEARCH[pid](track, query, seen, n=n, ranked=ranked)
+        if hits and (enough is None or enough(hits)):
+            return hits, pid
+    return [], None
+
+
 @webapi.route("/replace/candidates/<track_id>")
 @login_required
 def replacement_candidates(track_id):
@@ -337,29 +366,49 @@ def replacement_candidates(track_id):
         except ValueError:
             n = 2
 
+        # Between two equally safe matches, the better quality first; equal
+        # notes keep the sources' order (plan §3). A file already here is never
+        # behind a source that would have to fetch it.
+        reg = getattr(current_app, "providers", None)
+        place = {}
+        if reg is not None:
+            for pos, pid in enumerate(reg.by_quality([p.id for p in reg.sound()])):
+                place[pid] = pos + 1
+
         def safest(cands):
-            scored = [(match_score(track, c), i, c) for i, c in enumerate(cands)]
+            scored = [
+                (match_score(track, c), 0 if c.get("local") else place.get(c.get("source") or "deezer", len(place) + 1), i, c)
+                for i, c in enumerate(cands)
+            ]
             scored = [x for x in scored if x[0] is not None]
-            scored.sort(key=lambda x: (-x[0], x[1]))
-            return [c for _, _, c in scored[:n]]
+            scored.sort(key=lambda x: (-x[0], x[1], x[2]))
+            return [c for _, _, _, c in scored[:n]]
 
         picked = safest(out)
-        youtube = False
+        fallback = None
         if not picked:
-            picked = safest(_youtube_closest(track, query, seen, n=25))
-            youtube = bool(picked)
-        return jsonify({"query": query, "candidates": picked, "youtube": youtube})
+            found, fallback = _fallback_closest(track, query, seen, n=25, enough=lambda h: bool(safest(h)))
+            picked = safest(found)
+        # ``youtube``: what builds before the source order read.
+        return jsonify(
+            {"query": query, "candidates": picked, "fallback": fallback, "youtube": fallback == "youtube"}
+        )
 
-    asked = request.args.get("youtube") in ("1", "true")
+    # ``fallbacks=1`` (``youtube=1`` from older builds): the sheet's "search the
+    # other sources too".
+    asked = request.args.get("fallbacks") in ("1", "true") or request.args.get("youtube") in ("1", "true")
     # Nothing found: for a typed query, nothing at all; otherwise nothing that
     # looks like the song.
     nothing = not out if manual else not any(closeness(track, c) >= PLAUSIBLE for c in out)
-    youtube = False
+    auto = None
     if asked or nothing:
-        extra = _youtube_closest(track, query, seen, ranked=not manual)
-        youtube = not asked and bool(extra)  # reached for on its own
+        extra, source = _fallback_closest(track, query, seen, ranked=not manual)
+        if not asked and extra:
+            auto = source  # reached for on its own
         out += extra
-    return jsonify({"query": query, "candidates": out, "youtube_auto": youtube})
+    return jsonify(
+        {"query": query, "candidates": out, "fallback_auto": auto, "youtube_auto": auto == "youtube"}
+    )
 
 
 # -- replacement ------------------------------------------------------------

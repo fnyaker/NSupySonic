@@ -111,6 +111,8 @@ def options(row) -> dict:
         raw = json.loads(row.options or "{}")
     except ValueError:
         raw = {}
+    if not isinstance(raw, dict):  # "null", a list: written by hand, or by nobody
+        raw = {}
     auto = dict(DEFAULT_AUTO)
     for k, v in (raw.get("auto") or {}).items():
         if k in auto:

@@ -99,6 +99,16 @@ class YoutubeAdapter(base.Provider):
         },
     )
     trust = {}  # a video's title says little: the file's own tags win
+    # Its best audio stream (itag 251): Opus, about 130-160 kbit/s, archived
+    # as it comes.
+    ceiling = {"fmt": "opus", "bitrate": 160}
+
+    def setup_hint(self):
+        return "Non installé sur ce serveur (pip install 'supysonic[youtube]', déjà inclus dans l'image Docker)."
+
+    def resting(self):
+        is_held, left, why = yt.held()
+        return (max(1, int(left)), why or "") if is_held else (0, "")
 
     def __init__(self):
         self._switch = (0.0, None)

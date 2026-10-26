@@ -44,7 +44,12 @@ def catalogue():
     whose registry is still filling up, the tests). The local files are not a
     provider anybody needs access to."""
     reg = getattr(current_app, "providers", None)
-    found = [p for p in (reg.ordered() if reg is not None else []) if p.id != "local"]
+    if reg is None:
+        found = []
+    else:
+        # The sources of sound in their order (main first), then the rest.
+        found = reg.sound()
+        found += [p for p in reg.ordered() if p not in found and p.id != "local"]
     have = {p.id for p in found}
     for cls in _builtin_classes():
         if cls.id not in have:
