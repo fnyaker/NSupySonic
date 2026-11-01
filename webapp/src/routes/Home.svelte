@@ -21,6 +21,7 @@
   import ArtistTile from "../components/ArtistTile.svelte";
   import DiscoverySlider from "../components/DiscoverySlider.svelte";
   import EnergyPicker from "../components/EnergyPicker.svelte";
+  import StylePicker from "../components/StylePicker.svelte";
   import { startFlow } from "../lib/flow.js";
   import { discoveryLevel, loadDiscovery, onDiscoverySettled, stepOf } from "../lib/discovery.js";
 
@@ -172,6 +173,7 @@
   <span class="energy-label">Énergie</span>
   <EnergyPicker />
 </div>
+<StylePicker />
 {#if tuneOpen}
   <div class="flow-tune">
     <DiscoverySlider />

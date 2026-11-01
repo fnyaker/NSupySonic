@@ -157,6 +157,7 @@ class Taste:
         self.muted = set()  # (provider, ref)
         self.history = listening.History()  # skips, last heard
         self.dislikes = dislikes.Dislikes()
+        self.focus = None  # a style-scoped Flow: the stored spellings of its genres
 
     def top_artists(self, n):
         return [a for a, _ in sorted(self.artists.items(), key=lambda p: -p[1])[:n]]
@@ -198,6 +199,86 @@ def profile(user, fresh=False) -> Taste:
     return taste
 
 
+#: Styles one Flow may be set to, and how long a style profile is kept.
+STYLES_MAX = 6
+_style_profiles = {}
+
+
+def style_names(nodes):
+    """Every spelling ``TrackAnalysis.style`` may hold for these genres and all
+    that sit under them: the names, and the engine's family ids."""
+    from .deezer.analysis import FAMILIES
+
+    tree = genretree.get()
+    names = set(nodes)
+    for n in nodes:
+        names.update(a for a, _h, _f in tree.down(n))
+    names.update(fid for fid, label, _arch, _fn in FAMILIES if label in names)
+    return names
+
+
+def style_taste(user, styles):
+    """The person's taste restricted to a style: what THEY like inside it.
+
+    ``styles`` are genre names (any level of the tree; a branch means all of it).
+    The tracks, artists and albums that carry weight are kept only when their
+    served genre is inside one of the branches, and the genres become the
+    chosen ones — so everything downstream (the known titles, the sound
+    neighbours of those, the library's unplayed titles by TREE DISTANCE from the
+    style, the discovery level's band) works unchanged, only around the style
+    instead of around the whole taste. A style the person never played gives an
+    empty taste: the Flow then rests on the library's titles of that genre."""
+    tree = genretree.get()
+    nodes = []
+    for name in styles or ():
+        n = tree.node(str(name))
+        if n is not None and n not in nodes:
+            nodes.append(n)
+    nodes = nodes[:STYLES_MAX]
+    if not nodes:
+        return profile(user)
+    uid = getattr(user, "id", None)
+    key = (uid, tuple(nodes))
+    hit = _style_profiles.get(key)
+    if hit is not None and time.monotonic() - hit[0] < PROFILE_TTL:
+        return hit[1]
+    base = profile(user)
+    t = Taste()
+    for field in ("played", "starred_tracks", "starred_artists", "starred_albums", "muted"):
+        setattr(t, field, getattr(base, field))
+    t.history, t.dislikes = base.history, base.dislikes
+    keep = set()
+    ids = list(base.tracks)
+    for i in range(0, len(ids), 500):
+        for tid, style in TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.style).where(
+            TrackAnalysis.track.in_(ids[i : i + 500]) & TrackAnalysis.style.is_null(False)
+        ).tuples():
+            if any(genretree.within(style, n) for n in nodes):
+                keep.add(tid)
+    t.tracks = {k: base.tracks[k] for k in keep}
+    artists = set()
+    albums = set()
+    kept = list(keep)
+    for i in range(0, len(kept), 500):
+        for aid, alid in Track.select(Track.artist, Track.album).where(
+            Track.id.in_(kept[i : i + 500])
+        ).tuples():
+            artists.add(aid)
+            albums.add(alid)
+    t.artists = {a: w for a, w in base.artists.items() if a in artists}
+    t.albums = {a: w for a, w in base.albums.items() if a in albums}
+    t.artist_names = {a: n for a, n in base.artist_names.items() if a in t.artists}
+    t.artist_refs = {a: n for a, n in base.artist_refs.items() if a in t.artists}
+    t.genres = {n: 1.0 for n in nodes}
+    t.focus = style_names(nodes)
+    for weights in (t.tracks, t.artists, t.albums):
+        _normalise(weights)
+    if len(_style_profiles) > 64:
+        _style_profiles.clear()
+    _style_profiles[key] = (time.monotonic(), t)
+    return t
+
+
 def invalidate(user=None):
     try:
         from .deezer import explorer
@@ -205,6 +286,7 @@ def invalidate(user=None):
         explorer._forget_pool()
     except Exception:  # nothing to forget
         pass
+    _style_profiles.clear()
     with _cache_lock:
         if user is None:
             _cache.clear()
@@ -514,6 +596,19 @@ def track_candidates(user, taste, rng, with_catalog=True):
     genres = taste.top_genres(6)
     styles = {}
     rows = _sample_unplayed(fresh, taste, rng)
+    if taste.focus:
+        # A style-scoped Flow: the random sample of the whole library holds few
+        # titles of a small genre, so its own unplayed titles are drawn too.
+        have = {r[0] for r in rows}
+        extra = _sampled(
+            fresh(
+                Track.select(Track.id, Track.artist, TrackAnalysis.style)
+                .join(TrackAnalysis, on=(TrackAnalysis.track == Track.id))
+                .where(TrackAnalysis.style.in_(list(taste.focus)))
+            ),
+            rng, GENRE_STARTS * GENRE_RUN, taste.played | have,
+        )
+        rows = rows + extra
     for tid, aid, style in rows:
         if tid in pool or hist.rejected(tid):
             continue
@@ -716,10 +811,11 @@ def known_share(level) -> float:
     return KNOWN_AT_0 + (KNOWN_AT_1 - KNOWN_AT_0) * level
 
 
-def flow(user, level, n=40, seed=None, exclude=(), skipped=()):
+def flow(user, level, n=40, seed=None, exclude=(), skipped=(), styles=()):
     """The Flow: ``exclude`` is what the queue already holds, ``skipped`` what
-    this session skipped (their artists weigh half for the rest of it)."""
-    taste = profile(user)
+    this session skipped (their artists weigh half for the rest of it).
+    ``styles``: genres to stay around (``style_taste``)."""
+    taste = style_taste(user, styles) if styles else profile(user)
     rng = random.Random(f"{getattr(user, 'id', '')}:{seed}")  # nosec B311 - a seeded draw so a suggestion repeats, not a secret
     pool = track_candidates(user, taste, rng)
     _dedupe_library(pool)
@@ -863,13 +959,13 @@ class Session:
         return out
 
 
-def _session_pool(user, level, sid, rng):
-    key = (getattr(user, "id", None), sid, round(level, 2))
+def _session_pool(user, level, sid, rng, styles=()):
+    key = (getattr(user, "id", None), sid, round(level, 2), tuple(styles or ()))
     with _sessions_lock:
         hit = _sessions.get(key)
     if hit is not None and time.monotonic() - hit[0] < SESSION_TTL:
         return hit[1]
-    taste = profile(user)
+    taste = style_taste(user, styles) if styles else profile(user)
     pool = track_candidates(user, taste, rng)
     _dedupe_library(pool)
     with _sessions_lock:
@@ -927,13 +1023,13 @@ def _energy_aim(session, energies):
     return None, en.BAND
 
 
-def flow_next(user, level, session, n=1, exclude=(), recent=(), sid=None, rng=None):
+def flow_next(user, level, session, n=1, exclude=(), recent=(), sid=None, rng=None, styles=()):
     """The next ``n`` titles of a Flow session (Cand objects, each with
     ``energy`` set): the first to queue, the rest held in reserve."""
     from . import energy as en
 
     rng = rng or random.Random()  # nosec B311 - a draw for variety, not a secret
-    pool = _session_pool(user, level, sid or "-", rng)
+    pool = _session_pool(user, level, sid or "-", rng, styles)
     taste = profile(user)
     exclude = set(exclude)
     for tid, _o in session.heard:

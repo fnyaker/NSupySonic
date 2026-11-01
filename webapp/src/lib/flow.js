@@ -66,6 +66,28 @@ function readNotch() {
 }
 export const startEnergy = writable(readNotch());
 
+// The style the Flow starts around (genre names; [] = the whole taste). Kept on the
+// device: it is a mood of the moment, not a setting of the account.
+function readStyles() {
+  try {
+    const v = JSON.parse(localStorage.getItem("flow.styles") || "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string").slice(0, STYLES_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+export const STYLES_MAX = 6;
+export const startStyles = writable(readStyles());
+export function setStartStyles(list) {
+  const v = (list || []).slice(0, STYLES_MAX);
+  startStyles.set(v);
+  try {
+    localStorage.setItem("flow.styles", JSON.stringify(v));
+  } catch {
+    /* a convenience */
+  }
+}
+
 export function setStartEnergy(v) {
   startEnergy.set(v);
   try {
@@ -138,7 +160,7 @@ function session() {
   // A Flow queue saved by an older app (forty titles, no session): it goes on
   // one title at a time, in a session of its own, once that queue runs out.
   if (ctx && ctx.kind === "flow" && !ctx.id) {
-    const sess = { sid: newSid(), energy: get(startEnergy), heard: [], more: [], less: [] };
+    const sess = { sid: newSid(), energy: get(startEnergy), styles: get(startStyles), heard: [], more: [], less: [] };
     flowSession.set(sess);
     player.setContext({ kind: "flow", id: sess.sid });
     return sess;
@@ -152,6 +174,7 @@ function body(sess, n) {
     sid: sess.sid,
     d: Number(get(discoveryLevel).toFixed(2)),
     energy: sess.energy,
+    styles: sess.styles || [],
     heard: sess.heard,
     more: sess.more,
     less: sess.less,
@@ -169,7 +192,7 @@ async function ask(n) {
 
 // Start a Flow: one request, the first title plays, the second is the reserve.
 export async function startFlow(energy = get(startEnergy)) {
-  const sess = { sid: newSid(), energy: energy ?? null, heard: [], more: [], less: [] };
+  const sess = { sid: newSid(), energy: energy ?? null, styles: get(startStyles), heard: [], more: [], less: [] };
   flowSession.set(sess);
   reserve = null;
   gen++;

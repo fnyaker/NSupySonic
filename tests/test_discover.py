@@ -457,3 +457,82 @@ class UpgradeTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StyleFlowTestCase(_Library):
+    """A Flow set to a style: what the person likes INSIDE it, then the level
+    decides how far from it the rest is."""
+
+    def _styles(self, picks, **kw):
+        out = []
+        for c in picks:
+            out.append(Track.get_by_id(c.track).artist.name if c.track else c.key)
+        return out
+
+    def test_the_taste_is_cut_down_to_the_style(self):
+        discover.invalidate()
+        t = discover.style_taste(self.user, ["Hardcore"])
+        fav = Artist.get(Artist.name == "Fav").id
+        self.assertIn(fav, t.artists)  # Frenchcore sits under Hardcore: still loved there
+        self.assertEqual(set(t.genres), {"Hardcore"})
+        # a style the person never played holds no taste but is not an error
+        j = discover.style_taste(self.user, ["Jazz / acoustique"])
+        self.assertEqual(j.tracks, {})
+        self.assertEqual(set(j.genres), {"Jazz / acoustique"})
+        # unknown names fall back to the whole taste, never to nothing
+        self.assertEqual(discover.style_taste(self.user, ["nope"]).genres.keys(),
+                         discover.profile(self.user).genres.keys())
+
+    def test_at_level_zero_the_flow_stays_inside_the_style(self):
+        rng = random.Random(3)
+        taste = discover.style_taste(self.user, ["Hardcore"])
+        pool = discover.track_candidates(self.user, taste, rng, with_catalog=False)
+        picks = discover.pick(pool, 0.0, 12, rng, discover.known_share(0.0))
+        names = set(self._styles(picks))
+        self.assertTrue(names)
+        self.assertTrue(names <= {"Fav", "Near", "Other"}, names)  # frenchcore, uptempo, hardcore
+
+    def test_a_style_the_person_never_played_is_filled_from_the_library(self):
+        rng = random.Random(4)
+        # analysis stores the engine's family id ("jazz"), not a free label
+        TrackAnalysis.update(style="jazz").where(
+            TrackAnalysis.track.in_([t.id for t in self.tracks["Far"]])
+        ).execute()
+        taste = discover.style_taste(self.user, ["Jazz / acoustique"])
+        pool = discover.track_candidates(self.user, taste, rng, with_catalog=False)
+        picks = discover.pick(pool, 0.0, 6, rng, 0.0)
+        self.assertTrue(picks)
+        self.assertIn("Far", set(self._styles(picks)))
+
+    def test_the_level_widens_the_style(self):
+        def share_outside(level):
+            rng = random.Random(5)
+            taste = discover.style_taste(self.user, ["Hardcore"])
+            pool = discover.track_candidates(self.user, taste, rng, with_catalog=False)
+            picks = discover.pick(pool, level, 14, rng, discover.known_share(level))
+            names = self._styles(picks)
+            return sum(n not in ("Fav", "Near", "Other") for n in names) / max(1, len(names))
+
+        self.assertLess(share_outside(0.0), share_outside(0.9))
+
+    def test_the_routes_take_styles_and_refuse_junk(self):
+        r = self.client.post("/api/flow", json={"d": 0.0, "styles": ["Hardcore"]})
+        self.assertEqual(r.status_code, 200)
+        for bad in (["nope"], "Hardcore", 5, [None, 3]):
+            self.assertEqual(self.client.post("/api/flow", json={"styles": bad}).status_code, 400, bad)
+        self.assertEqual(self.client.post("/api/flow", json={"styles": []}).status_code, 200)
+        r = self.client.post("/api/flow/next", json={"sid": "abc", "d": 0.0, "styles": ["Hardcore"]})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.client.post("/api/flow/next", json={"sid": "abc", "styles": ["zzz"]}).status_code, 400)
+        # more than the cap is cut, not refused
+        many = ["Hardcore", "Techno", "House", "Trance", "Rock", "Jazz / acoustique", "Pop", "Metal"]
+        self.assertEqual(self.client.post("/api/flow", json={"styles": many}).status_code, 200)
+
+    def test_the_picker_lists_what_the_library_holds_with_its_branch(self):
+        r = self.client.get("/api/flow/styles")
+        self.assertEqual(r.status_code, 200)
+        rows = {x["name"]: x for x in r.json["styles"]}
+        self.assertEqual(rows["Frenchcore"]["tracks"], 6)
+        self.assertGreaterEqual(rows["Hardcore"]["branch"], 18)  # frenchcore + uptempo + hardcore
+        self.assertEqual(rows["Frenchcore"]["parent"], "Hardcore")
+        self.assertNotIn("Reggae", rows)  # nothing of it in the library

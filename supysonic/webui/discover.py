@@ -20,10 +20,11 @@ import time
 
 from flask import current_app, jsonify, request
 
-from .. import discover, dislikes, energy, listening, releases
+from .. import discover, dislikes, energy, genretree, listening, releases
 from ..db import (
-    Album, Artist, ArtistMute, ArtistRelease, Track, UserTaste, now,
+    Album, Artist, ArtistMute, ArtistRelease, Track, TrackAnalysis, UserTaste, now,
 )
+from ..deezer.analysis import FAMILY_LABEL
 from . import (
     _image, _tracks_in_order, admin_required, login_required, webapi,
 )
@@ -168,6 +169,61 @@ def explorer_settings():
     return jsonify(explorer.status())
 
 
+def _styles_arg(data):
+    """The genres a Flow is set to: names known to the tree, at most
+    ``discover.STYLES_MAX``. ``(styles, error)``: asked-for names that are all
+    unknown are an error (a typo must not silently become "everything")."""
+    raw = data.get("styles") if isinstance(data, dict) else None
+    if raw in (None, "", []):
+        return (), None
+    if not isinstance(raw, list):
+        return (), "invalid styles"
+    tree = genretree.get()
+    out = []
+    for name in raw[: discover.STYLES_MAX * 2]:
+        node = tree.node(name[:64]) if isinstance(name, str) else None
+        if node is not None and node not in out:
+            out.append(node)
+    if not out:
+        return (), "unknown style"
+    return tuple(out[: discover.STYLES_MAX]), None
+
+
+@webapi.route("/flow/styles")
+@login_required
+def flow_styles():
+    """The genres a Flow can be set to: every node of the tree that holds
+    titles in the library (``tracks`` its own, ``branch`` with all under it)
+    with its first parent, so the picker draws families and sub-genres."""
+    from peewee import fn
+
+    tree = genretree.get()
+    own = {}
+    q = (
+        TrackAnalysis.select(TrackAnalysis.style, fn.COUNT(TrackAnalysis.track))
+        .join(Track, on=(TrackAnalysis.track == Track.id))
+        .where(TrackAnalysis.style.is_null(False) & (Track.last_modification > 0)
+               & Track.unavailable.is_null(True))
+        .group_by(TrackAnalysis.style)
+        .tuples()
+    )
+    for style, n in q:
+        node = tree.node(style) or tree.node(FAMILY_LABEL.get(style, style))
+        if node is not None:
+            own[node] = own.get(node, 0) + n
+    branch = dict(own)
+    for node, n in own.items():
+        for up, _h, _f in tree.up(node):
+            branch[up] = branch.get(up, 0) + n
+    rows = []
+    for node, total in branch.items():
+        parents = sorted(tree.parents.get(node, ()), key=lambda p: -p[1])
+        rows.append({"name": node, "parent": parents[0][0] if parents else None,
+                     "tracks": own.get(node, 0), "branch": total})
+    rows.sort(key=lambda r: (-r["branch"], r["name"]))
+    return jsonify({"styles": rows})
+
+
 @webapi.route("/flow", methods=["GET", "POST"])
 @login_required
 def flow():
@@ -183,6 +239,9 @@ def flow():
             level = _level_arg()
     except ValueError:
         return jsonify({"error": "invalid level"}), 400
+    styles, bad = _styles_arg(data)
+    if bad:
+        return jsonify({"error": bad}), 400
     seed = _seed_arg() or secrets.token_hex(4)
     exclude, skipped = (), ()
     if data:
@@ -194,7 +253,7 @@ def flow():
         raw = data.get("exclude") if isinstance(data.get("exclude"), list) else []
         exclude |= {f"deezer:{x}" for x in raw[-400:] if isinstance(x, str) and x.isdigit()}
     picked = discover.flow(request.webuser, level, FLOW_SIZE, seed=seed,
-                           exclude=exclude, skipped=skipped)
+                           exclude=exclude, skipped=skipped, styles=styles)
     return jsonify({"tracks": _serialise_tracks(picked)})
 
 
@@ -223,6 +282,9 @@ def flow_next():
         aim = _energy_value(data.get("energy"))
     except ValueError:
         return jsonify({"error": "invalid level"}), 400
+    styles, bad = _styles_arg(data)
+    if bad:
+        return jsonify({"error": bad}), 400
     sid = "".join(ch for ch in str(data.get("sid") or "")[:32] if ch.isalnum()) or None
     try:
         n = max(1, min(int(data.get("n") or 1), 2))
@@ -253,7 +315,7 @@ def flow_next():
     # the queue's tail, the title playing last: what the next must not repeat
     recent = queued[-6:]
     picked = discover.flow_next(request.webuser, level, session, n=n, exclude=exclude,
-                                recent=recent, sid=sid)
+                                recent=recent, sid=sid, styles=styles)
     return jsonify({"tracks": _serialise_tracks(picked), "energy": aim,
                     "energy_step": energy.step_name(aim)})
 
