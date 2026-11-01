@@ -36,8 +36,8 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   with a beat): the tracker alone is exact on 23, its three misses octaves (dnb 87/174, metal 90/180,
   reggae 152/76); with a perfect Deezer witness 25 (only reggae stays). The server does not need Deezer's
   BPM for hard dance, where Deezer publishes none anyway.
-  Without numpy the envelope estimator below still answers. A version bump re-measures the library
-  on boot (`webui/analysis.reanalyse_if_stale`) instead of waiting for the button.
+  Without numpy the envelope estimator below still answers. A version bump no longer re-measures at boot: the stale rows
+  are picked up by the nightly window (*Library maintenance* below) or the button.
 - The fallback envelope estimator measures a low-passed envelope — ffmpeg decimates to 1 kHz u8 and
   the per-frame peak is a `max`/`min` over a ten-byte slice — **and only when something in
   that band STRIKES** (`_attack_rate`, `ANALYSIS_VERSION` 3). The block peak of a steady note
@@ -448,3 +448,39 @@ lifts the last pick's parent and siblings. Every write bumps the version, tells 
 head is active; the undo log is compact per-key `Meta` rows (256-char limit). The SPA mirrors the tree
 (`refreshTree` on a verdict-generation change) and `genreOf`/`skinId` fall back to the nearest known ancestor.
 `tests/test_multi_o.py` pins statement counts and the unchanged verdicts; `node test/genretree/run.mjs` is the bench.
+
+## Library maintenance: stamped versions, a nightly window, zero impact
+
+**Every stage of a track's analysis carries the generation that produced it**
+(`TrackAnalysis.version` = `ANALYSIS_VERSION`, `embed_version` = `EMBED_VERSION` when the stored
+vector is the current layout, `decided_head` = the genre head the verdict was last decided under,
+"none" for no head). `webui/analysis.plan()` answers "what is out of date, and at which step" with
+SQL counts only (never a file read) — `unmeasured`, `stale_measure`, `stale_embed`, `stale_decide`,
+`todo` (distinct tracks), `current` — served at `GET /api/analysis/plan` with the schedule. Rows
+written before the stamps (0 / NULL) are stamped by the first pass that finds them current
+(`backfill_embeddings`, `redecide`), so they cost no ffmpeg. When the model changes only the LAST
+stage re-runs (`reapply_head`, no audio); when the measure changes, the whole track.
+
+**One entry point, `webui/analysis.start_job`**, is what the button, the boot resume and the nightly
+window all go through, so they cannot disagree. The job runs the stages in order of cost — measure,
+embed, re-decide (`start_relabel`) — each resumable (checkpoint) and each unit gated by a
+`workload.Throttle`:
+
+- **The gate (`Throttle.wait`)** blocks while a download a person waits on is running
+  (`foreground_busy`), while audio was requested in the last 45 s (`touch_listening`, set by a
+  `before_request` hook on `/api/stream/*` and `/rest/stream|download`, prefetches excluded), or
+  while the 1-minute load per core is above the mode's ceiling. It is checked BEFORE each unit, so
+  at most one 3 s ffmpeg is in flight when somebody presses play. Tracks that are already current
+  never touch the gate (a scan of a finished library is not slowed).
+- **The duty cycle (`Throttle.spent`)** rests `elapsed × (1/duty − 1)` after each unit. `night`
+  (scheduled window) is duty 0.9, load ceiling 0.75, workers auto; `now` (the button, mid-day) is
+  duty 0.5, load ceiling 0.6, at most 2 workers.
+- **CPU and disk**: `renice` now also puts the thread in the idle I/O class (`ionice_idle`,
+  ioprio syscall; x86_64/aarch64 only, silent elsewhere) — ffmpeg children inherit both.
+- **Stopping is clean**: `POST /api/analysis/backfill/stop` (or the window closing) makes the gate
+  return False; the walk leaves WITHOUT writing the checkpoint for the page in hand, so the next run
+  re-walks that page (finished tracks are current and skipped).
+- **The nightly window** (`schedule_loop`, Meta `analysis_schedule`, `PUT /api/analysis/schedule`,
+  default 03:00 for 6 h, enabled): once per window-day, polled each minute so a settings change
+  applies at once and a restart inside the window joins it. A window that crosses midnight belongs to
+  the day it opened on. It does nothing when `plan().todo` is 0.
