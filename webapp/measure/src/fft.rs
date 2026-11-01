@@ -21,6 +21,38 @@ impl Fft {
         Fft { n, rev, cos, sin, re: vec![0.0; n], im: vec![0.0; n] }
     }
 
+    /// The forward transform of a complex sequence, in place (`re.len() == n`).
+    pub fn transform(&mut self, re: &mut [f64], im: &mut [f64]) {
+        let n = self.n;
+        for i in 0..n {
+            let j = self.rev[i];
+            if j > i {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+        let mut len = 2;
+        while len <= n {
+            let half = len / 2;
+            let step = n / len;
+            let mut start = 0;
+            while start < n {
+                for k in 0..half {
+                    let (c, s) = (self.cos[k * step], self.sin[k * step]);
+                    let (a, b) = (start + k, start + k + half);
+                    let tr = re[b] * c - im[b] * s;
+                    let ti = re[b] * s + im[b] * c;
+                    re[b] = re[a] - tr;
+                    im[b] = im[a] - ti;
+                    re[a] += tr;
+                    im[a] += ti;
+                }
+                start += len;
+            }
+            len <<= 1;
+        }
+    }
+
     /// `|rfft(x)|` for the first `bins` bins, `x.len() == n`.
     pub fn magnitude(&mut self, x: &[f64], bins: usize, out: &mut [f64]) {
         let n = self.n;

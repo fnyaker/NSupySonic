@@ -521,13 +521,26 @@ ffmpeg and, when a native build exists (`cd webapp/measure && cargo build --rele
 `supysonic-cli deezer measure-compare [--style X]` writes the paired ffmpeg/own descriptors (the image has ffmpeg alone: the rate and channels are read
 from its banner, `analysis.probe_audio`).
 
+**The beat tracker is ported** (`webapp/measure/src/tempo.rs`, from `deezer/beats.py`): same constants, same order of operations,
+streamed (`tp_begin` / `tp_chunk` + `tp_push` / `tp_finish` / `tp_out` / `tp_beat`; 44.1 kHz mono f32 in chunks of at most 2^20
+samples). **Identical to the server on the 28 arranged records (tempo, octave decision and every beat position) and on 14 real tracks**
+(one track differs in 3 of 178 beat positions, same tempo): the numbers are bit-for-bit what `beats.analyse` gives, so the
+tempo-eval figures in this file hold for the client. Native: ~0.1-0.4 s for 40 s of audio. `tests/test_measure.py::RustTempoTestCase`
+(runs with a native build, `cargo build --release --examples` in `webapp/measure`) and `test/measure.test.mjs` (the wasm) pin it.
+
+**The extractor's front-end and aggregation are ported** (`webapp/measure/src/mel.rs`, from `embedding.py`: `patch_offsets`, the Slaney mel
+filterbank, `_log_mel_patches`, `patch_loudness`, `loud_half`, `_aggregate`). Against numpy on 8 real tracks (up to 60 patches each): offsets
+identical, log-mel max |diff| 1e-6 (on values up to 6.5), levels 4e-6, the stored 3840-vector 1.5e-8 — float16 storage resolution is 1e-3, so
+the client's vector is the server's. Page-side protocol: `mel_plan(n)` (how many patches, 0 when too short/long), `mel_offset(k)`,
+`mel_segment(k)` (fill 33024 samples), `mel_run()`, `mel_patches()` (count x 128 x 96 -> the network), `mel_rows()` (write count x 1280 back),
+`mel_aggregate()` (3840 floats). Only the 60 patches' samples are copied in, so wasm memory is ~10 MB whatever the track's length.
+`RustMelTestCase` pins it (native build of `examples/mel`).
+
 ## What remains
 
-1. The beat tracker (port of `deezer/beats.py`, 577 lines of numpy) and the log-mel front-end + patch aggregation
-   (`embedding._log_mel_patches`, `_aggregate`) in the crate, with parity tests against the Python twin.
-2. The embedding network itself through onnxruntime-web on the operator's own `.onnx`, served to the admin only (its licence is non-commercial
+1. The embedding network itself through onnxruntime-web on the operator's own `.onnx`, served to the admin only (its licence is non-commercial
    and no-derivatives: unmodified, operator's copy).
-3. The client runner: Opus 64 k in Range blocks (resumable), decode (the browser resamples; ffmpeg measured the SOURCE rate, so the runner
+2. The client runner: Opus 64 k in Range blocks (resumable), decode (the browser resamples; ffmpeg measured the SOURCE rate, so the runner
    asks the server for the file's rate and decodes at it), worker pool, throttle, results pushed per track
    (`POST /api/analysis/<id>/measures`, version-checked, validated), then the SERVER classifies. A `where` setting (server | client) so the
    nightly window and the client runner never both work. Opus 64 k is lossy and band-limited: measure how its descriptors move against the

@@ -6,7 +6,9 @@
 
 pub mod fft;
 pub mod loudness;
+pub mod mel;
 pub mod spectral;
+pub mod tempo;
 
 /// What `analysis._spectral` returns, from decoded PCM.
 #[derive(Debug, Clone, Default)]
@@ -109,5 +111,195 @@ pub extern "C" fn ms_out(i: u32) -> f64 {
     #[allow(static_mut_refs)]
     unsafe {
         OUT.get(i as usize).copied().unwrap_or(f64::NAN)
+    }
+}
+
+// -- the tempo, as a stream: begin, push chunks of 44.1 kHz mono, finish, read back ---------
+
+static mut ONSETS: Option<tempo::Onsets> = None;
+static mut TEMPO: Option<tempo::Tempo> = None;
+static mut CHUNK: Vec<f32> = Vec::new();
+/// Most samples one pushed chunk may hold (4 MB): a hostile size is refused, not allocated.
+const CHUNK_MAX: u32 = 1 << 20;
+
+#[no_mangle]
+pub extern "C" fn tp_begin() -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        ONSETS = Some(tempo::Onsets::new());
+        TEMPO = None;
+    }
+    1
+}
+
+/// A buffer of `n` samples for the page to fill, then `tp_push`. Null when refused.
+#[no_mangle]
+pub extern "C" fn tp_chunk(n: u32) -> *mut f32 {
+    if n == 0 || n > CHUNK_MAX {
+        return core::ptr::null_mut();
+    }
+    #[allow(static_mut_refs)]
+    unsafe {
+        CHUNK.resize(n as usize, 0.0);
+        CHUNK.as_mut_ptr()
+    }
+}
+
+/// Feed the chunk; returns the onset frames held so far (0 without a `tp_begin`).
+#[no_mangle]
+pub extern "C" fn tp_push() -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        match ONSETS.as_mut() {
+            Some(o) => {
+                o.push(&CHUNK);
+                o.df.len() as u32
+            }
+            None => 0,
+        }
+    }
+}
+
+/// 1 when a tempo was found (then `tp_out` / `tp_beat` read it), else 0.
+#[no_mangle]
+pub extern "C" fn tp_finish() -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        TEMPO = ONSETS.as_ref().and_then(tempo::analyse);
+        TEMPO.is_some() as u32
+    }
+}
+
+/// 0 bpm, 1 confidence, 2 salience, 3 doubled (0/1), 4 alternation, 5 number of beats.
+#[no_mangle]
+pub extern "C" fn tp_out(i: u32) -> f64 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        match TEMPO.as_ref() {
+            Some(t) => match i {
+                0 => t.bpm,
+                1 => t.confidence,
+                2 => t.salience,
+                3 => t.doubled as u32 as f64,
+                4 => t.alternation,
+                5 => t.beats.len() as f64,
+                _ => f64::NAN,
+            },
+            None => f64::NAN,
+        }
+    }
+}
+
+/// The i-th beat, in seconds.
+#[no_mangle]
+pub extern "C" fn tp_beat(i: u32) -> f64 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        TEMPO.as_ref().and_then(|t| t.beats.get(i as usize).copied()).unwrap_or(f64::NAN)
+    }
+}
+
+// -- the extractor's front-end and aggregation (the network runs in the page) ----------------
+//
+// The page decodes the track to 16 kHz mono, asks `mel_plan(n)` how many patches the extractor
+// takes and where, copies each patch's samples into `mel_segment(k)`, calls `mel_run`, feeds
+// `mel_patches()` (count x 128 x 96) to the network, writes its rows (count x 1280) into
+// `mel_rows()` and reads the stored vector back from `mel_aggregate()` (3840 floats).
+
+static mut MEL_OFFSETS: Vec<usize> = Vec::new();
+static mut MEL_SEG: Vec<f32> = Vec::new();
+static mut MEL_PATCHES: Vec<f32> = Vec::new();
+static mut MEL_LOUD: Vec<f64> = Vec::new();
+static mut MEL_ROWS: Vec<f32> = Vec::new();
+static mut MEL_VEC: Vec<f32> = Vec::new();
+/// Longest track the plan accepts (16 kHz samples): a day of audio is refused, not allocated for.
+const MEL_MAX_SAMPLES: u32 = 16000 * 3600 * 4;
+
+/// How many patches a track of `n` samples yields (0: too short or too long).
+#[no_mangle]
+pub extern "C" fn mel_plan(n: u32) -> u32 {
+    if n > MEL_MAX_SAMPLES {
+        return 0;
+    }
+    #[allow(static_mut_refs)]
+    unsafe {
+        MEL_OFFSETS = mel::patch_offsets(n as usize, mel::MAX_PATCHES);
+        let c = MEL_OFFSETS.len();
+        MEL_SEG = vec![0.0; c * mel::PATCH_SAMPLES];
+        MEL_PATCHES = Vec::new();
+        MEL_ROWS = vec![0.0; c * mel::MODEL_DIM];
+        c as u32
+    }
+}
+
+/// Where patch `k` starts in the 16 kHz signal.
+#[no_mangle]
+pub extern "C" fn mel_offset(k: u32) -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        MEL_OFFSETS.get(k as usize).map_or(0, |o| *o as u32)
+    }
+}
+
+/// The buffer patch `k`'s `PATCH_SAMPLES` (33024) samples go into.
+#[no_mangle]
+pub extern "C" fn mel_segment(k: u32) -> *mut f32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        if (k as usize) < MEL_OFFSETS.len() {
+            MEL_SEG.as_mut_ptr().add(k as usize * mel::PATCH_SAMPLES)
+        } else {
+            core::ptr::null_mut()
+        }
+    }
+}
+
+/// Compute the log-mel patches and the patches' levels. 1 on success.
+#[no_mangle]
+pub extern "C" fn mel_run() -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        let c = MEL_OFFSETS.len();
+        let compact: Vec<usize> = (0..c).map(|k| k * mel::PATCH_SAMPLES).collect();
+        match mel::log_mel_patches(&MEL_SEG, &compact) {
+            Some(p) => {
+                MEL_LOUD = mel::patch_loudness(&MEL_SEG, &compact);
+                MEL_PATCHES = p;
+                1
+            }
+            None => 0,
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mel_patches() -> *const f32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        MEL_PATCHES.as_ptr()
+    }
+}
+
+/// Where the network's rows (count x 1280, one per patch) are written.
+#[no_mangle]
+pub extern "C" fn mel_rows() -> *mut f32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        MEL_ROWS.as_mut_ptr()
+    }
+}
+
+/// The stored vector (3840 floats) from the rows, or null.
+#[no_mangle]
+pub extern "C" fn mel_aggregate() -> *const f32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        match mel::aggregate(&MEL_ROWS, MEL_OFFSETS.len(), Some(&MEL_LOUD)) {
+            Some(v) => {
+                MEL_VEC = v;
+                MEL_VEC.as_ptr()
+            }
+            None => core::ptr::null(),
+        }
     }
 }
