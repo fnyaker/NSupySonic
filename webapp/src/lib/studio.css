@@ -1,0 +1,71 @@
+/* Shared look of the genre studio's panels (Genres.svelte and the components it
+   hosts). Namespaced `st-` so it can sit in the global sheet without touching
+   the rest of the app. */
+.st-card {
+  background: var(--surface, #141517);
+  border: 1px solid var(--border, #2a2d33);
+  border-radius: 18px;
+  padding: 20px;
+  margin-bottom: 18px;
+}
+.st-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 14px;
+  font-size: 1.04rem;
+}
+.st-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 12px;
+  font: inherit;
+  font-weight: 600;
+  padding: 10px 16px;
+  min-height: 42px;
+  cursor: pointer;
+  border: 1px solid var(--border, #2a2d33);
+  background: var(--surface-2, #1b1d21);
+  color: inherit;
+}
+.st-btn.primary {
+  background: var(--accent, #22d3ee);
+  border-color: transparent;
+  color: #05171b;
+}
+.st-btn.danger:hover {
+  color: #f87171;
+}
+.st-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.st-btn.sm {
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 0.84rem;
+}
+.st-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid var(--border, #2a2d33);
+  background: var(--surface-2, #1b1d21);
+  border-radius: 14px;
+  padding: 11px 14px;
+  margin: 12px 0;
+  font-size: 0.86rem;
+}
+.st-note.bad {
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+.st-note.ok {
+  border-color: #14532d;
+  color: #86efac;
+}
+.st-dim {
+  color: var(--text-dim, #9aa0a6);
+}

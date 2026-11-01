@@ -1,5 +1,5 @@
 <script>
-  // The genre studio: your own vocabulary, your own labels, your own model.
+  // The genre studio: the engine's genres, your own labels, your own model.
   //
   // The whole point of this screen is that tagging is CONFIRMING, not typing.
   // Every candidate arrives with what the current model already believes, the
@@ -23,29 +23,13 @@
   import { train, release } from "../lib/genre/trainer.js";
   import { rankTags, searchTags, recentTags, noteRecent } from "../lib/genre/rank.js";
   import { MIN_EXAMPLES, prepare, canGroup, vectorKey, assess, suspects as findSuspects } from "../lib/genre/health.js";
-  import { bytes as fmtBytes } from "../lib/format.js";
   import Icon from "../components/Icon.svelte";
-  import JobFailures from "../components/JobFailures.svelte";
-  import SimilarRebuild from "../components/SimilarRebuild.svelte";
+  import GenreLibrary from "../components/GenreLibrary.svelte";
   import GenreTree from "../components/GenreTree.svelte";
   import Cover from "../components/Cover.svelte";
 
-  const ARCHETYPES = [
-    { id: "", label: "—" },
-    { id: "sustain", label: "Nappes" },
-    { id: "voice", label: "Voix" },
-    { id: "groove", label: "Groove" },
-    { id: "hard", label: "Hard" },
-    { id: "rock", label: "Rock" },
-  ];
-  // Enough distinct hues that a vocabulary of a dozen genres never repeats one,
-  // and all of them legible on the dark chrome this app is.
-  const SWATCHES = [
-    "#f43f5e", "#f97316", "#eab308", "#84cc16", "#10b981", "#06b6d4",
-    "#3b82f6", "#8b5cf6", "#d946ef", "#ec4899", "#64748b", "#14b8a6",
-  ];
   const TABS = [
-    { id: "vocab", label: "Genres" },
+    { id: "library", label: "Bibliothèque" },
     { id: "tree", label: "Arbre" },
     { id: "tag", label: "Étiquetage" },
     { id: "model", label: "Modèle" },
@@ -55,13 +39,6 @@
   let status = null;
   let loading = true;
   let error = "";
-
-  // -- vocabulary -------------------------------------------------------------
-  let newName = "";
-  let newColor = SWATCHES[0];
-  let newArchetype = "";
-  let busyTag = 0;
-  let seedingDefaults = false;
 
   // -- tagging ----------------------------------------------------------------
   let candidates = [];
@@ -212,42 +189,16 @@
   let sending = false;
   let trainError = "";
 
-  // -- extractor --------------------------------------------------------------
-  // Installing the frozen ONNX model is an admin, one-off act: pick the .onnx
-  // file, it goes to the server's models directory, and the built-in self-test
-  // then proves it actually measures audio instead of just loading.
-  let extUploading = false;
-  let extRemoving = false;
-  let extTesting = false;
-  let extStatus = null; // { running, ok, result, error, progress }
-  let extPoll = null;
-  let extFileInput = null;
-
-  // -- embedding backfill -----------------------------------------------------
-  // Measuring the whole library is minutes to hours of ffmpeg + inference, so it
-  // runs server-side and this only polls the counters.
-  let embed = null; // { running, total, scanned, done, skipped, failed, error }
-  let embedPoll = null;
-  $: embedPct =
-    embed && embed.total
-      ? Math.min(100, Math.round((embed.scanned / embed.total) * 100))
-      : 0;
-
-  // -- analysis backfill ------------------------------------------------------
-  // Tempo + style (+ embeddings) for the whole library, with a chosen
-  // parallelism. Same worker-and-poll shape as the embed run.
-  let analysis = null; // { running, total, scanned, done, skipped, failed, error }
-  let analysisPoll = null;
-  let analysisWorkers = 0; // 0 = size it from the machine
-  let analysisWorkersAuto = 1;
-  let analysisForce = false;
-  $: analysisPct =
-    analysis && analysis.total
-      ? Math.min(100, Math.round((analysis.scanned / analysis.total) * 100))
-      : 0;
-
   $: eligible = tags.filter((t) => (counts[t.name] || 0) >= MIN_EXAMPLES);
   $: trainable = eligible.length >= 2;
+  // The chart that replaces the old prose: every genre that has examples,
+  // fullest first, with the minimum marked on its bar.
+  const READY_FULL = 30;
+  let readyAll = false;
+  $: readiness = tags
+    .map((t) => ({ name: t.name, n: counts[t.name] || 0 }))
+    .filter((r) => r.n > 0)
+    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
 
   // The extractor check no longer happens on the request thread (loading a
   // 40 MB ONNX graph is seconds), so the first answer may be "vérification…".
@@ -298,74 +249,6 @@
     reviewing = false;
     savedCandidates = null;
     loadCandidates();
-  }
-
-  // -- vocabulary actions -----------------------------------------------------
-  async function addTag() {
-    const name = newName.trim();
-    if (!name) return;
-    busyTag = -1;
-    try {
-      await api.genreTagCreate(name, newColor, newArchetype || null);
-      newName = "";
-      // Step the swatch on, so a vocabulary built in one sitting comes out with
-      // twelve different colours instead of twelve red ones.
-      newColor = SWATCHES[(SWATCHES.indexOf(newColor) + 1) % SWATCHES.length];
-      await refresh();
-    } catch (e) {
-      toasts.push(e?.message || "création impossible", "error");
-    } finally {
-      busyTag = 0;
-    }
-  }
-
-  async function patchTag(tag, patch) {
-    busyTag = tag.id;
-    try {
-      await api.genreTagEdit(tag.id, patch);
-      await refresh();
-    } catch (e) {
-      toasts.push(e?.message || "modification impossible", "error");
-    } finally {
-      busyTag = 0;
-    }
-  }
-
-  // The engine already knows a set of genres; add the ones this vocabulary is
-  // missing, so a deleted default can be brought back without retyping it.
-  async function addEngineGenres() {
-    seedingDefaults = true;
-    try {
-      const r = await api.genreDefaults();
-      await refresh();
-      toasts.push(
-        r.created
-          ? `${r.created} genre${r.created > 1 ? "s" : ""} ajouté${r.created > 1 ? "s" : ""}`
-          : "Les genres du moteur sont déjà tous là"
-      );
-    } catch (e) {
-      toasts.push(e?.message || "opération impossible", "error");
-    } finally {
-      seedingDefaults = false;
-    }
-  }
-
-  async function removeTag(tag) {
-    const n = counts[tag.name] || 0;
-    const msg = n
-      ? `Supprimer « ${tag.name} » et ses ${n} étiquette${n > 1 ? "s" : ""} ?`
-      : `Supprimer « ${tag.name} » ?`;
-    if (!window.confirm(msg)) return;
-    busyTag = tag.id;
-    try {
-      await api.genreTagDelete(tag.id);
-      await refresh();
-      await loadCandidates();
-    } catch (e) {
-      toasts.push(e?.message || "suppression impossible", "error");
-    } finally {
-      busyTag = 0;
-    }
   }
 
   // -- tagging actions --------------------------------------------------------
@@ -854,60 +737,6 @@
     } else loadCandidates();
   }
 
-  // -- well-known recordings per genre ------------------------------------------
-  // Eight tagged tracks before a genre means anything, and the first eight are
-  // the hardest to find in a library nobody sorted by genre. A genre with a
-  // list opens it under its row; each entry is looked up on Deezer, listened
-  // to here, and tagged with one click (which also archives it, so it gets a
-  // vector). Scenes nobody has written a canon for list their artists instead.
-  let refGenres = new Set();
-  let refOpen = null; // genre name whose panel is open
-  let refData = null;
-  let refLoading = false;
-  let refBusy = null; // deezer id being imported
-  async function loadRefGenres() {
-    try {
-      refGenres = new Set((await api.genreReferenceGenres()).genres || []);
-    } catch {
-      refGenres = new Set();
-    }
-  }
-  async function toggleRefs(tag) {
-    if (refOpen === tag.name) {
-      refOpen = null;
-      refData = null;
-      return;
-    }
-    refOpen = tag.name;
-    refData = null;
-    refLoading = true;
-    try {
-      const d = await api.genreReferences(tag.name);
-      if (refOpen === tag.name) refData = d;
-    } catch (e) {
-      toasts.push(e?.message || "Références indisponibles", "error");
-      refOpen = null;
-    } finally {
-      refLoading = false;
-    }
-  }
-  async function importRef(tag, ref) {
-    if (refBusy || !ref.match) return;
-    refBusy = ref.match.deezer_id;
-    try {
-      const r = await api.genreReferenceImport(ref.match.deezer_id, tag.id);
-      ref.in_library = true;
-      ref.tag = tag.name;
-      refData = refData;
-      toasts.push(`« ${ref.title} » étiqueté ${tag.name}${r.queued ? " — archivage lancé" : ""}`);
-      await refresh();
-    } catch (e) {
-      toasts.push(e?.message || "Import impossible", "error");
-    } finally {
-      refBusy = null;
-    }
-  }
-
   // -- construction: how many tagged tracks have been measured -----------------
   let constr = null;
   let measuring = false;
@@ -1151,189 +980,6 @@
     }
   }
 
-  // -- extractor actions ------------------------------------------------------
-  async function onPickExtractor(ev) {
-    const file = ev.target.files?.[0];
-    if (!file) return;
-    if (!/\.onnx$/i.test(file.name)) {
-      toasts.push("Il faut un fichier .onnx", "error");
-      ev.target.value = "";
-      return;
-    }
-    extUploading = true;
-    extStatus = null;
-    stopExtPoll();
-    try {
-      const res = await api.genreExtractorUpload(file);
-      toasts.push("Extracteur installé");
-      await refresh();
-      // Straight into the check: a model that loads but measures nothing is the
-      // one failure this whole screen exists to catch. Skipped when the server
-      // lacks onnxruntime — there is nothing to measure with.
-      if (res?.extractor?.onnxruntime) await startExtractorTest();
-    } catch (e) {
-      toasts.push(e?.message || "envoi impossible", "error");
-    } finally {
-      extUploading = false;
-      if (extFileInput) extFileInput.value = "";
-    }
-  }
-
-  async function removeExtractor() {
-    if (!window.confirm("Supprimer l'extracteur importé ?")) return;
-    extRemoving = true;
-    stopExtPoll();
-    extStatus = null;
-    try {
-      await api.genreExtractorDelete();
-      toasts.push("Extracteur supprimé");
-      await refresh();
-    } catch (e) {
-      toasts.push(e?.message || "suppression impossible", "error");
-    } finally {
-      extRemoving = false;
-    }
-  }
-
-  async function startExtractorTest() {
-    extTesting = true;
-    try {
-      extStatus = await api.genreExtractorTest();
-    } catch (e) {
-      extTesting = false;
-      toasts.push(e?.message || "test impossible", "error");
-      return;
-    }
-    pollExtractorTest();
-  }
-
-  // The check runs server-side on real tracks (ffmpeg + inference), so this is
-  // a poll rather than a request that blocks: leaving the page mid-test is fine,
-  // the job keeps going and the next visit picks the verdict back up.
-  async function pollExtractorTest() {
-    stopExtPoll();
-    const tick = async () => {
-      try {
-        extStatus = await api.genreExtractorTestStatus();
-      } catch {
-        extTesting = false;
-        return;
-      }
-      if (extStatus?.running) {
-        extPoll = setTimeout(tick, 1200);
-      } else {
-        extTesting = false;
-        extPoll = null;
-        if (extStatus?.ok) toasts.push("Extracteur vérifié");
-      }
-    };
-    extPoll = setTimeout(tick, 800);
-  }
-
-  function stopExtPoll() {
-    if (extPoll) {
-      clearTimeout(extPoll);
-      extPoll = null;
-    }
-  }
-
-  function openExtractor() {
-    tab = "model";
-    // Straight to the action the empty state named, when it can run now.
-    if (extractor.available && !embed?.running && !extractor.session_error) startEmbed();
-  }
-
-  // -- embedding backfill -----------------------------------------------------
-  async function startEmbed() {
-    try {
-      embed = await api.genreEmbed();
-    } catch (e) {
-      toasts.push(e?.message || "lancement impossible", "error");
-      return;
-    }
-    pollEmbed();
-  }
-
-  async function pollEmbed() {
-    stopEmbedPoll();
-    const tick = async () => {
-      try {
-        embed = await api.genreEmbedStatus();
-      } catch {
-        embedPoll = null;
-        return;
-      }
-      if (embed?.running) {
-        embedPoll = setTimeout(tick, 1000);
-        return;
-      }
-      embedPoll = null;
-      if (embed?.error) {
-        toasts.push(embed.error, "error");
-      } else if (embed?.failed) {
-        toasts.push(`${embed.failed} titre${embed.failed > 1 ? "s" : ""} en échec`, "error");
-      } else {
-        const n = embed?.done || 0;
-        toasts.push(`${n} empreinte${n > 1 ? "s" : ""} calculée${n > 1 ? "s" : ""}`);
-      }
-      // Newly measured tracks can now be tagged.
-      await refresh();
-      await loadCandidates();
-    };
-    embedPoll = setTimeout(tick, 700);
-  }
-
-  function stopEmbedPoll() {
-    if (embedPoll) {
-      clearTimeout(embedPoll);
-      embedPoll = null;
-    }
-  }
-
-  // -- analysis backfill ------------------------------------------------------
-  async function startAnalysis() {
-    try {
-      analysis = await api.analysisBackfill(analysisForce, analysisWorkers);
-    } catch (e) {
-      toasts.push(e?.message || "lancement impossible", "error");
-      return;
-    }
-    pollAnalysis();
-  }
-
-  async function pollAnalysis() {
-    stopAnalysisPoll();
-    const tick = async () => {
-      try {
-        analysis = await api.analysisBackfillStatus();
-      } catch {
-        analysisPoll = null;
-        return;
-      }
-      if (analysis?.running) {
-        analysisPoll = setTimeout(tick, 1000);
-        return;
-      }
-      analysisPoll = null;
-      if (analysis?.error) {
-        toasts.push(analysis.error, "error");
-      } else {
-        const n = analysis?.done || 0;
-        toasts.push(`${n} titre${n > 1 ? "s" : ""} analysé${n > 1 ? "s" : ""}`);
-      }
-      await refresh();
-      await loadCandidates();
-    };
-    analysisPoll = setTimeout(tick, 700);
-  }
-
-  function stopAnalysisPoll() {
-    if (analysisPoll) {
-      clearTimeout(analysisPoll);
-      analysisPoll = null;
-    }
-  }
-
   // -- keyboard ---------------------------------------------------------------
   function onKey(ev) {
     if (tab !== "tag") return;
@@ -1375,53 +1021,10 @@
     }
   }
 
-  // Everything this page needs, asked for AT ONCE and painted as it arrives.
-  //
-  // It used to await five requests in a row, with the slowest of them — the
-  // candidate list, which reads one vector file per scanned track off the disk
-  // — third in the queue. So the job progress, which is the one thing an
-  // operator opens this page to look at while a backfill runs, was the LAST
-  // thing to appear, behind a request that could take a minute. They are
-  // independent answers about independent things; nothing was ever waiting for
-  // anything.
-  async function loadJobStatus() {
-    if (!$user?.admin) return;
-    // A job started before a reload keeps running server-side: pick its
-    // progress back up instead of pretending nothing is happening.
-    const [ext, emb, ana] = await Promise.allSettled([
-      api.genreExtractorTestStatus(),
-      api.genreEmbedStatus(),
-      api.analysisBackfillStatus(),
-    ]);
-    if (ext.status === "fulfilled" && ext.value) {
-      const s = ext.value;
-      if (s.running) {
-        extStatus = s;
-        extTesting = true;
-        pollExtractorTest();
-      } else if (s.started) {
-        extStatus = s;
-      }
-    }
-    if (emb.status === "fulfilled" && emb.value) {
-      embed = emb.value;
-      if (embed.running) pollEmbed();
-    }
-    if (ana.status === "fulfilled" && ana.value) {
-      analysis = ana.value;
-      if (typeof analysis.workers_setting === "number")
-        analysisWorkers = analysis.workers_setting;
-      if (analysis.workers_auto) analysisWorkersAuto = analysis.workers_auto;
-      if (analysis.running) pollAnalysis();
-    }
-  }
-
   onMount(() => {
     refresh();
-    loadJobStatus();
     watchRelabel();
     loadConstruction();
-    loadRefGenres();
     // Unconditionally: the extractor is what MEASURES a track, and tagging only
     // needs what was already measured. An archive carried over from a server
     // that had onnxruntime is a perfectly good training set on one that does
@@ -1432,9 +1035,6 @@
     clearTimeout(shareTimer);
     clearTimeout(probeTimer);
     stopPreview();
-    stopExtPoll();
-    stopEmbedPoll();
-    stopAnalysisPoll();
     stopRelabelPoll();
     stopMeasuring();
     releaseMeasurer();
@@ -1467,7 +1067,7 @@
     <div class="titles">
       <h1>Studio de genres</h1>
       <p class="muted sub-line">
-        Votre vocabulaire, vos étiquettes, votre modèle — entraîné dans ce navigateur.
+        Vos étiquettes et votre modèle — entraîné dans ce navigateur.
       </p>
     </div>
   </header>
@@ -1482,25 +1082,6 @@
       <span>Le studio est réservé à l'administrateur : il n'y a qu'un modèle.</span>
     </div>
   {:else}
-    {#if !extractor.available && tab !== "tag"}
-      <div class="banner">
-        <Icon name="info" size={16} />
-        <div>
-          <strong>L'extracteur n'est pas disponible.</strong>
-          <p class="muted">
-            {extractor.reason || "onnxruntime et le modèle d'empreintes sont nécessaires."}
-            Les empreintes déjà calculées restent utilisables : vous pouvez étiqueter
-            et entraîner normalement, mais aucun nouveau titre ne sera mesuré.
-          </p>
-          {#if tab !== "model"}
-            <button class="ghost small-btn" on:click={openExtractor}>
-              <Icon name="download" size={14} /> Installer l'extracteur
-            </button>
-          {/if}
-        </div>
-      </div>
-    {/if}
-
     <nav class="tabs">
       {#each TABS as t}
         <button class="tab" class:sel={tab === t.id} on:click={() => (tab = t.id)}>
@@ -1512,165 +1093,6 @@
 
     {#if tab === "tree"}
       <GenreTree />
-    {/if}
-
-    {#if tab === "vocab"}
-      <section class="card">
-        <div class="vocab-head">
-          <h2><Icon name="sort" size={18} /> Vocabulaire</h2>
-          <button
-            class="ghost small-btn"
-            on:click={addEngineGenres}
-            disabled={seedingDefaults}
-          >
-            <Icon name="refresh" size={14} />
-            {seedingDefaults ? "Ajout…" : "Genres du moteur"}
-          </button>
-        </div>
-        <p class="sub muted">
-          Les genres que <em>vous</em> distinguez. Le modèle n'apprendra jamais une
-          nuance qui n'a pas de nom ici — et chaque genre veut au moins huit titres
-          pour valoir quelque chose. Les genres déjà reconnus par le moteur sont
-          pré-remplis : il ne reste qu'à confirmer.
-        </p>
-
-        <div class="tag-list">
-          {#each tags as tag (tag.id)}
-            <div class="tag-row" class:busy={busyTag === tag.id}>
-              <span class="dot" style={`background:${tag.color || "var(--accent)"}`}></span>
-              <input
-                class="tname"
-                value={tag.name}
-                on:change={(e) =>
-                  e.target.value.trim() && e.target.value !== tag.name
-                    ? patchTag(tag, { name: e.target.value.trim() })
-                    : null}
-              />
-              <div class="swatches">
-                {#each SWATCHES as c}
-                  <button
-                    class="sw-dot"
-                    class:sel={tag.color === c}
-                    style={`background:${c}`}
-                    aria-label={`Couleur ${c}`}
-                    on:click={() => patchTag(tag, { color: c })}
-                  ></button>
-                {/each}
-              </div>
-              <select
-                class="arch"
-                value={tag.archetype || ""}
-                on:change={(e) => patchTag(tag, { archetype: e.target.value || null })}
-              >
-                {#each ARCHETYPES as a}<option value={a.id}>{a.label}</option>{/each}
-              </select>
-              <span class="count" class:thin={(counts[tag.name] || 0) < 8}>
-                {counts[tag.name] || 0}
-              </span>
-              <span class="row-actions">
-                {#if refGenres.has(tag.name)}
-                  <button
-                    class="icon-btn"
-                    class:on={refOpen === tag.name}
-                    on:click={() => toggleRefs(tag)}
-                    aria-label="Titres de référence"
-                    title="Titres de référence"
-                  >
-                    <Icon name="disc" size={16} />
-                  </button>
-                {/if}
-                <button class="icon-btn danger" on:click={() => removeTag(tag)} aria-label="Supprimer">
-                  <Icon name="trash" size={16} />
-                </button>
-              </span>
-            </div>
-            {#if refOpen === tag.name}
-              <div class="refs">
-                {#if refLoading || !refData}
-                  <p class="muted small">Recherche des références sur Deezer…</p>
-                {:else}
-                  {#if refData.offline}
-                    <p class="muted small">
-                      Deezer ne répond pas : la liste n'a pas pu être vérifiée. Réessayez plus tard.
-                    </p>
-                  {/if}
-                  {#each refData.tracks as ref (ref.artist + ref.title)}
-                    <div class="ref" class:missing={!ref.match}>
-                      {#if ref.match}
-                        <button
-                          class="ref-play"
-                          on:click={() => previewTrack(ref.match)}
-                          aria-label={previewing && previewId === trackKey(ref.match) ? "Pause" : "Écouter"}
-                        >
-                          <Icon name={previewing && previewId === trackKey(ref.match) ? "pause" : "play"} size={14} />
-                        </button>
-                      {:else}
-                        <span class="ref-play off"><Icon name="close" size={12} /></span>
-                      {/if}
-                      <span class="ref-txt">
-                        <span class="ref-t">{ref.title}</span>
-                        <span class="ref-a muted">
-                          {ref.artist}{#if !ref.match && !refData.offline} · introuvable sur Deezer{/if}
-                        </span>
-                      </span>
-                      {#if ref.match}
-                        {#if ref.in_library && ref.tag === tag.name}
-                          <span class="ref-done muted"><Icon name="check" size={14} /> étiqueté</span>
-                        {:else}
-                          <button
-                            class="ghost small-btn"
-                            disabled={!!refBusy}
-                            on:click={() => importRef(tag, ref)}
-                            title={ref.tag ? `Porte déjà « ${ref.tag} »` : ""}
-                          >
-                            {refBusy === ref.match.deezer_id ? "…" : ref.tag ? `Remplacer ${ref.tag}` : "Étiqueter"}
-                          </button>
-                        {/if}
-                      {/if}
-                    </div>
-                  {/each}
-                  {#if refData.artists?.length}
-                    <p class="muted small ref-note">
-                      {refData.tracks.length ? "Et ses artistes phares" : "Pas de liste de titres fiable pour ce genre — ses artistes phares"}, à écouter puis
-                      étiqueter en masse depuis leur page&nbsp;:
-                    </p>
-                    <div class="ref-artists">
-                      {#each refData.artists as a (a.name)}
-                        {#if a.match}
-                          <button class="chip-btn" on:click={() => push("/artist/" + a.match.deezer_id)}>{a.name}</button>
-                        {:else}
-                          <span class="chip-btn off" title="Introuvable sur Deezer">{a.name}</span>
-                        {/if}
-                      {/each}
-                    </div>
-                  {/if}
-                  <p class="muted small ref-note">
-                    Des exemples reconnus du genre, pas une vérité&nbsp;: écoutez avant d'étiqueter.
-                  </p>
-                {/if}
-              </div>
-            {/if}
-          {/each}
-          {#if !tags.length}
-            <p class="muted empty">Aucun genre. Commencez par en créer quelques-uns.</p>
-          {/if}
-        </div>
-
-        <form class="add" on:submit|preventDefault={addTag}>
-          <span class="dot" style={`background:${newColor}`}></span>
-          <input placeholder="Nouveau genre (hardtekk, zaag, uptempo…)" bind:value={newName} />
-          <select bind:value={newArchetype}>
-            {#each ARCHETYPES as a}<option value={a.id}>{a.label}</option>{/each}
-          </select>
-          <button class="primary" disabled={!newName.trim() || busyTag === -1}>
-            <Icon name="plus" size={16} /> Ajouter
-          </button>
-        </form>
-        <p class="hint muted">
-          L'archétype dit aux animations à quoi ce genre <em>ressemble</em> : c'est ce
-          que le moteur mélange, pas le nom du genre.
-        </p>
-      </section>
     {/if}
 
     {#if tab === "tag"}
@@ -1715,21 +1137,9 @@
           </div>
         {/if}
 
-        {#if embed?.running || analysis?.running}
-          <!-- The jobs live in the Modèle tab; here only the fact that one is
-               running, since it is what fills this list. -->
-          <button class="job-line" on:click={() => (tab = "model")}>
-            <span class="progress slim"><i style={`width:${embed?.running ? embedPct : analysisPct}%`}></i></span>
-            <span class="muted small">
-              {embed?.running ? "Calcul des empreintes" : "Analyse des sons"} —
-              {embed?.running ? `${embed.scanned}/${embed.total || "?"}` : `${analysis.scanned}/${analysis.total || "?"}`}
-            </span>
-          </button>
-        {/if}
-
         {#if !tags.length}
           <p class="muted empty">
-            Créez d'abord quelques genres dans l'onglet « Genres ».
+            Les genres du moteur n'ont pas encore été chargés : rechargez la page.
           </p>
         {:else if noMore}
           <div class="empty-state">
@@ -1740,12 +1150,12 @@
               <p>Aucun titre ne porte encore d'empreinte.</p>
               <p class="small">
                 {extractor.available
-                  ? "Lancez le calcul des empreintes : le studio ne propose que les titres déjà mesurés."
-                  : "Installez d'abord l'extracteur, puis lancez le calcul des empreintes."}
+                  ? "Lancez l'analyse dans l'onglet Bibliothèque : le studio ne propose que les titres déjà mesurés."
+                  : "Installez d'abord l'extracteur (onglet Bibliothèque, Avancé)."}
               </p>
-              <button class="primary" on:click={openExtractor}>
+              <button class="primary" on:click={() => (tab = "library")}>
                 <Icon name={extractor.available ? "activity" : "download"} size={16} />
-                {extractor.available ? "Calculer les empreintes" : "Installer l'extracteur"}
+                Ouvrir la bibliothèque
               </button>
             {/if}
             <div class="empty-actions">
@@ -1948,285 +1358,37 @@
       </section>
     {/if}
 
+    {#if tab === "library"}
+      <GenreLibrary {extractor} on:change={() => { refresh(); loadCandidates(); }} />
+    {/if}
+
     {#if tab === "model"}
       <section class="card">
-        <h2><Icon name="activity" size={18} /> Mesures</h2>
-        <p class="sub muted">
-          Ce que le studio sait d'un titre vient de deux passes sur le fichier : son
-          empreinte (ce que le modèle lit) et l'analyse (tempo, style). Seuls les
-          titres mesurés peuvent être proposés à l'étiquetage et servir d'exemple.
-        </p>
-          {#if extractor.available}
-            <div class="embed-bar" class:running={embed?.running}>
-              {#if embed?.running}
-                <div class="progress"><i style={`width:${embedPct}%`}></i></div>
-                <div class="embed-stats muted small">
-                  <span>{embed.scanned}/{embed.total || "?"} analysés</span>
-                  <span class="sep">·</span>
-                  <span><strong>{embed.done}</strong> calculées</span>
-                  {#if embed.failed}
-                    <span class="sep">·</span>
-                    <span class="bad">{embed.failed} en échec</span>
-                  {/if}
-                </div>
-              {:else}
-                <button
-                  class="ghost"
-                  on:click={startEmbed}
-                  disabled={!!extractor.session_error}
-                >
-                  <Icon name="activity" size={16} /> Calculer les empreintes
-                </button>
-                {#if embed && (embed.done || embed.failed)}
-                  <span class="muted small">
-                    Dernier passage : <strong>{embed.done}</strong> calculée{embed.done > 1 ? "s" : ""}{#if embed.failed},
-                      <span class="bad">{embed.failed} en échec</span>{/if}
-                  </span>
-                {:else}
-                  <span class="muted small">
-                    Mesure les titres qui n'en ont pas encore — l'entraînement ne voit
-                    que ce qui a été mesuré.
-                  </span>
-                {/if}
-              {/if}
-            </div>
-            {#if extractor.session_error}
-              <div class="banner bad">
-                <Icon name="alert" size={16} /><span>{extractor.session_error}</span>
-              </div>
-            {:else if extractor.session_state === "checking"}
-              <p class="muted small">Vérification du modèle…</p>
-            {/if}
-            {#if embed?.error}
-              <div class="banner bad">
-                <Icon name="alert" size={16} /><span>{embed.error}</span>
-              </div>
-            {/if}
-            <JobFailures job={embed} label="empreintes" />
-          {/if}
-
-          <div class="analysis-bar" class:running={analysis?.running}>
-            {#if analysis?.running}
-              <div class="progress"><i style={`width:${analysisPct}%`}></i></div>
-              <div class="embed-stats muted small">
-                <span>{analysis.scanned}/{analysis.total || "?"} analysés</span>
-                <span class="sep">·</span>
-                <span><strong>{analysis.done}</strong> à jour</span>
-                {#if analysis.failed}
-                  <span class="sep">·</span>
-                  <span class="bad">{analysis.failed} en échec</span>
-                {/if}
-                <span class="sep">·</span>
-                <span>{analysis.workers} en parallèle</span>
-              </div>
-            {:else}
-              <button class="ghost" on:click={startAnalysis}>
-                <Icon name="activity" size={16} /> Analyser les sons
-              </button>
-              <label class="inline-field">
-                Parallèle
-                <!-- 0 means "ask the machine": half its cores, so the other half
-                     keeps streaming. Nobody should have to know how many cores
-                     their server has to get more than one of them used. -->
-                <input type="number" min="0" max="8" bind:value={analysisWorkers} />
-                <span class="muted small"
-                  >{analysisWorkers > 0 ? "fixé" : `auto · ${analysisWorkersAuto}`}</span
-                >
-              </label>
-              <label class="inline-check">
-                <input type="checkbox" bind:checked={analysisForce} />
-                Reclasser tout
-              </label>
-              {#if analysis && (analysis.done || analysis.failed)}
-                <span class="muted small">
-                  Dernier passage : <strong>{analysis.done}</strong> analysé{analysis.done > 1 ? "s" : ""}{#if analysis.failed},
-                    <span class="bad">{analysis.failed} en échec</span>{/if}
-                </span>
-              {:else}
-                <span class="muted small">
-                  Tempo + style (+ empreintes). « Reclasser tout » remesure même ce qui
-                  a déjà un verdict.
-                </span>
-              {/if}
-            {/if}
-          </div>
-          {#if analysis?.error}
-            <div class="banner bad">
-              <Icon name="alert" size={16} /><span>{analysis.error}</span>
-            </div>
-          {/if}
-          <!-- The banner is the headline; this is the report. A counter with no
-               per-track reason sent the operator to the container log, which is
-               exactly what somebody using the app from a phone cannot read. -->
-          <JobFailures job={analysis} label="analyse" />
-          <SimilarRebuild />
-      </section>
-
-      <section class="card">
-        <h2><Icon name="activity" size={18} /> Extracteur</h2>
-        <p class="sub muted">
-          Le modèle gelé qui transforme un titre en empreinte : 1280 nombres par
-          fenêtre de deux secondes, résumés sur tout le titre et sur sa moitié la
-          plus forte — le drop, le refrain, là où le genre se décide. Il a
-          sa propre licence, alors le serveur ne le télécharge jamais tout seul :
-          importez la copie que vous vous êtes procurée. Elle sert aussi bien ici
-          qu'à <code>supysonic-cli deezer embed</code>.
-        </p>
-
-        {#if !extractor.onnxruntime}
-          <div class="banner bad">
-            <Icon name="alert" size={16} />
-            <span>
-              <code>onnxruntime</code> n'est pas installé sur le serveur : le modèle ne
-              pourra pas tourner avant d'installer <code>supysonic[embedding]</code>.
-            </span>
-          </div>
-        {/if}
-        {#if extractor.session_error}
-          <div class="banner bad">
-            <Icon name="alert" size={16} />
-            <span>
-              Le modèle est présent mais ne se charge pas : {extractor.session_error}
-            </span>
-          </div>
-        {/if}
-
-        {#if extractor.model}
-          <div class="active">
-            <div class="ext-info">
-              <strong>{extractor.model.filename}</strong>
-              <p class="muted small">
-                {fmtBytes(extractor.model.size)} ·
-                {extractor.model.source === "config"
-                  ? "chemin défini par embed_model"
-                  : "importé sur ce serveur"}
-              </p>
-            </div>
-            <div class="ext-actions">
-              {#if extractor.uploadable}
-                <label class="ghost file-btn" class:disabled={extUploading}>
-                  <Icon name="upload" size={16} />
-                  {extUploading ? "Envoi…" : "Remplacer"}
-                  <input
-                    bind:this={extFileInput}
-                    type="file"
-                    accept=".onnx,application/octet-stream"
-                    on:change={onPickExtractor}
-                    disabled={extUploading}
-                  />
-                </label>
-              {/if}
-              {#if extractor.model.source !== "config"}
-                <button
-                  class="ghost danger"
-                  on:click={removeExtractor}
-                  disabled={extRemoving}
-                >
-                  <Icon name="trash" size={16} /> Supprimer
-                </button>
-              {/if}
-            </div>
-          </div>
-
-          {#if extractor.onnxruntime}
-            <div class="ext-test">
-              <button class="ghost" on:click={startExtractorTest} disabled={extTesting}>
-                <Icon name={extTesting ? "refresh" : "check"} size={16} />
-                {extTesting ? "Vérification…" : "Vérifier l'extracteur"}
-              </button>
-              <span class="muted small">
-                Décode quelques-uns de vos titres : deux moitiés du <em>même</em>
-                morceau doivent se ressembler plus que deux morceaux différents.
-              </span>
-            </div>
-
-            {#if extTesting && !extStatus?.result}
-              <div class="progress indet"><i></i></div>
-            {/if}
-
-            {#if extStatus?.result}
-              {@const r = extStatus.result}
-              {#if r.same_track !== undefined}
-                {#if extStatus.ok}
-                  <div class="banner ok">
-                    <Icon name="check" size={16} />
-                    <span>
-                      Vérifié sur {r.tracks} titres — même morceau {pct(r.same_track)} %,
-                      morceaux différents {pct(r.different_tracks)} %.
-                    </span>
-                  </div>
-                {:else}
-                  <div class="banner bad">
-                    <Icon name="alert" size={16} />
-                    <span>{r.reason || extStatus.error || "échec de la vérification"}</span>
-                  </div>
-                {/if}
-              {:else}
-                <div class="banner">
-                  <Icon name="info" size={16} />
-                  <span>{r.reason || "vérification impossible pour l'instant"}</span>
-                </div>
-              {/if}
-            {:else if extStatus?.error}
-              <div class="banner bad">
-                <Icon name="alert" size={16} /><span>{extStatus.error}</span>
-              </div>
-            {/if}
-
-            {#if extTesting && extStatus?.progress?.length}
-              <ul class="ext-log muted small">
-                {#each extStatus.progress.slice(-3) as line}<li>{line}</li>{/each}
-              </ul>
-            {/if}
-          {/if}
-        {:else}
-          <div class="empty-state">
-            <Icon name="upload" size={28} />
-            <p>Aucun extracteur installé.</p>
-            {#if extractor.uploadable}
-              <label class="primary big file-btn" class:disabled={extUploading}>
-                <Icon name="upload" size={16} />
-                {extUploading ? "Envoi…" : "Importer le modèle .onnx"}
-                <input
-                  bind:this={extFileInput}
-                  type="file"
-                  accept=".onnx,application/octet-stream"
-                  on:change={onPickExtractor}
-                  disabled={extUploading}
-                />
-              </label>
-              <p class="small muted">
-                Téléchargez
-                <a href={extractor.model_url} target="_blank" rel="noopener">
-                  discogs-effnet-bsdynamic-1.onnx
-                </a>
-                chez Essentia (≈ 18 Mo), puis importez-le ici. Il reste sur votre
-                serveur.
-              </p>
-            {:else}
-              <p class="small">
-                Configurez <code>cache_dir</code> dans <code>[webapp]</code> pour
-                pouvoir importer un extracteur ici.
-              </p>
-            {/if}
-          </div>
-        {/if}
-      </section>
-
-      <section class="card">
         <h2><Icon name="activity" size={18} /> Entraînement</h2>
-        <p class="sub muted">
-          Le gros modèle ne bouge pas : il transforme chaque titre en vecteur, une
-          fois. Ce qui s'entraîne ici est la petite tête qui va de ce vecteur à
-          <em>vos</em> genres — quelques secondes, dans cet onglet, sans rien installer.
-        </p>
-
-        <p class="sub muted guard">
-          L'entraînement se surveille lui-même : il écarte ce qui fausserait le
-          modèle (doublons, artiste trop présent, genre trop maigre), le note sur
-          des titres et des artistes qu'il n'a pas vus, et ne garde un modèle plus
-          gros que s'il fait vraiment mieux.
-        </p>
+        <div class="ready">
+          <div class="ready-head">
+            <strong>{eligible.length} genre{eligible.length > 1 ? "s" : ""} prêt{eligible.length > 1 ? "s" : ""}</strong>
+            <span class="muted small">{labelled} titres étiquetés · {MIN_EXAMPLES} minimum par genre</span>
+          </div>
+          {#if readiness.length}
+            <ul class="ready-list">
+              {#each readiness.slice(0, readyAll ? 999 : 8) as r (r.name)}
+                <li class:short={r.n < MIN_EXAMPLES}>
+                  <span class="r-name" title={r.name}>{r.name}</span>
+                  <span class="r-bar"><i style={`width:${Math.min(100, (r.n / READY_FULL) * 100)}%`}></i><b style={`left:${(MIN_EXAMPLES / READY_FULL) * 100}%`}></b></span>
+                  <span class="r-n">{r.n}</span>
+                </li>
+              {/each}
+            </ul>
+            {#if readiness.length > 8}
+              <button class="ghost small-btn" on:click={() => (readyAll = !readyAll)}>
+                {readyAll ? "Réduire" : `Voir les ${readiness.length} genres`}
+              </button>
+            {/if}
+          {:else}
+            <p class="muted small">Étiquetez quelques titres pour entraîner un modèle.</p>
+          {/if}
+        </div>
 
         <details class="advanced" bind:open={advanced}>
           <summary>Réglages avancés</summary>
@@ -2268,18 +1430,14 @@
              labels, and a click on it would tick the box. -->
         {#if useConstruction && constr && constr.labelled}
           <div class="measure">
-            <span class="muted small">
-              Construction mesurée pour <strong>{constr.measured}</strong> titre{constr.measured > 1 ? "s" : ""}
-              étiqueté{constr.measured > 1 ? "s" : ""} sur {constr.labelled}.
-            </span>
+            <span class="r-bar wide"><i style={`width:${Math.round((constr.measured / constr.labelled) * 100)}%`}></i></span>
+            <span class="muted small">Construction lue sur {constr.measured} / {constr.labelled}</span>
             {#if measuring}
-              <span class="muted small">
-                Mesure… {measureDone} / {measureTotal}{#if measureLanes > 1} · {measureLanes} en parallèle{/if}{#if measureFailed}, {measureFailed} en échec{/if}
-              </span>
+              <span class="muted small">{measureDone} / {measureTotal}{#if measureLanes > 1} · {measureLanes} en parallèle{/if}{#if measureFailed} · {measureFailed} en échec{/if}</span>
               <button class="ghost small-btn" on:click={stopMeasuring}>Arrêter</button>
             {:else if constr.missing?.length}
               <button class="ghost small-btn" on:click={measureMissing}>
-                <Icon name="activity" size={14} /> Mesurer les {constr.missing.length} restants
+                <Icon name="activity" size={14} /> Compléter ({constr.missing.length})
               </button>
             {/if}
           </div>
@@ -4140,4 +3298,16 @@
   .primary.risky {
     background: color-mix(in srgb, #f43f5e 75%, var(--accent));
   }
+
+  .ready { display: grid; gap: 10px; margin-bottom: 18px; }
+  .ready-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .ready-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .ready-list li { display: grid; grid-template-columns: minmax(80px, 150px) 1fr 32px; align-items: center; gap: 10px; font-size: 0.86rem; }
+  .r-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-bar { position: relative; height: 8px; border-radius: 4px; background: var(--surface-2, #1b1d21); }
+  .r-bar i { display: block; height: 100%; border-radius: 4px; background: var(--accent, #22d3ee); }
+  .ready-list li.short .r-bar i { background: #f59e0b; }
+  .r-bar b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text-dim, #9aa0a6); opacity: 0.7; }
+  .r-bar.wide { flex: 1 1 120px; max-width: 220px; }
+  .r-n { text-align: right; font-variant-numeric: tabular-nums; }
 </style>

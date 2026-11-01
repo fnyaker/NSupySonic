@@ -2,6 +2,7 @@
 // names before anything reads the location (lib/linkrescue.js).
 import "./lib/linkrescue.js";
 import "./app.css";
+import "./lib/studio.css";
 import { mount } from "svelte";
 import App from "./App.svelte";
 import { dropFreshMarker } from "./lib/hardreload.js";
