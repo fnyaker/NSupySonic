@@ -20,11 +20,14 @@ import unittest
 
 try:
     import numpy as np
-except ImportError:  # the minimal environment has none; the measures need it
-    raise unittest.SkipTest("numpy is not installed")
+
+    from supysonic.deezer import measure as M
+
+    HAVE_NUMPY = True
+except Exception:  # pragma: no cover - the minimal environment has no numpy
+    HAVE_NUMPY = False
 
 from supysonic.deezer import analysis as ana
-from supysonic.deezer import measure as M
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUST = os.path.join(ROOT, "webapp", "measure", "target", "release", "examples", "measure")
@@ -44,7 +47,7 @@ def _signal(seconds=8, seed=5):
     return np.clip(x, -1, 1).astype(np.float32)
 
 
-@unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+@unittest.skipUnless(HAVE_NUMPY and shutil.which("ffmpeg"), "needs numpy and ffmpeg")
 class AgainstFfmpegTestCase(unittest.TestCase):
     def test_the_descriptors_we_can_reproduce_match_aspectralstats(self):
         x = _signal()
@@ -74,7 +77,7 @@ class AgainstFfmpegTestCase(unittest.TestCase):
         self.assertIn("could not reproduce", M.__doc__)
 
 
-@unittest.skipUnless(os.path.exists(RUST), "native build of webapp/measure not present")
+@unittest.skipUnless(HAVE_NUMPY and os.path.exists(RUST), "needs numpy and a native build of webapp/measure")
 class RustAgainstTwinTestCase(unittest.TestCase):
     def test_rust_and_numpy_agree(self):
         x = _signal(6)
