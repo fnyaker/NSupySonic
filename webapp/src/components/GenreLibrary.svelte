@@ -22,6 +22,8 @@
   let workersAuto = 1;
   let force = false;
   let timer = null;
+  let explorer = null;
+  let explorerSave = null;
   let wasRunning = false;
   let dead = false;
 
@@ -110,11 +112,30 @@
     }, 400);
   }
 
-  onMount(load);
+  function saveExplorer() {
+    clearTimeout(explorerSave);
+    explorerSave = setTimeout(async () => {
+      try {
+        explorer = await api.explorer({ enabled: explorer.enabled, archive: explorer.archive, pool: explorer.pool });
+      } catch (e) {
+        toasts.push(e?.message || "enregistrement impossible", "error");
+      }
+    }, 300);
+  }
+
+  onMount(async () => {
+    load();
+    try {
+      explorer = await api.explorer();
+    } catch {
+      /* the card simply stays hidden */
+    }
+  });
   onDestroy(() => {
     dead = true;
     clearTimeout(timer);
     clearTimeout(saving);
+    clearTimeout(explorerSave);
   });
 
   const n = (v) => (v || 0).toLocaleString("fr-FR");
@@ -223,6 +244,35 @@
     </p>
   </section>
 
+  {#if explorer}
+    <section class="st-card">
+      <h2><Icon name="compass" size={18} /> Exploration automatique</h2>
+      <label class="switch top">
+        <input type="checkbox" bind:checked={explorer.enabled} on:change={saveExplorer} />
+        <span>
+          <strong>Chercher de nouveaux sons en arrière-plan</strong>
+          <span class="st-dim sw-sub">
+            Uniquement des genres que l'analyseur sait reconnaître, vérifiés sur l'extrait de 30 s,
+            jamais pendant que vous écoutez. Le Flow et les radios les proposent comme découvertes.
+          </span>
+        </span>
+      </label>
+      <label class="switch top" class:dim={!explorer.enabled}>
+        <input type="checkbox" bind:checked={explorer.archive} on:change={saveExplorer} disabled={!explorer.enabled} />
+        <span>
+          <strong>Archiver tout ce qui est trouvé</strong>
+          <span class="st-dim sw-sub">Par défaut non : un titre n'est archivé que si vous l'écoutez ou l'aimez.</span>
+        </span>
+      </label>
+      <p class="st-dim foot">
+        {explorer.pool_now} découverte{explorer.pool_now > 1 ? "s" : ""} en réserve
+        {#if explorer.running}· recherche en cours{/if}
+        {#if explorer.paused}· en pause : {WHY[explorer.paused] || explorer.paused}{/if}
+        {#if explorer.last_error}· <span class="bad">{explorer.last_error}</span>{/if}
+      </p>
+    </section>
+  {/if}
+
   <details class="st-card adv">
     <summary>Avancé</summary>
     <div class="adv-body">
@@ -278,6 +328,11 @@
   .sched { display: flex; align-items: center; gap: 14px 22px; flex-wrap: wrap; }
   .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; min-height: 40px; }
   .switch input { width: 18px; height: 18px; accent-color: var(--accent, #22d3ee); }
+  .switch.top { align-items: flex-start; padding: 6px 0; }
+  .switch.top input { margin-top: 3px; flex: none; }
+  .switch.top > span { display: grid; gap: 2px; }
+  .sw-sub { font-size: 0.82rem; line-height: 1.4; }
+  .switch.dim { opacity: 0.5; }
   .fld { display: inline-flex; align-items: center; gap: 8px; }
   .fld.dim { opacity: 0.45; }
   .fld input, .fld select { font: inherit; color: inherit; background: var(--surface-2, #1b1d21); border: 1px solid var(--border, #2a2d33); border-radius: 10px; padding: 8px 10px; min-height: 40px; }

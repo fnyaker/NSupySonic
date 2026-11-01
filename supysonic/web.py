@@ -194,6 +194,11 @@ def create_application(config=None):
 
     _releases.start(app)
 
+    # Finds, in the background, music for genres the library lacks (never under test).
+    from .deezer import explorer as _explorer
+
+    _explorer.start(app)
+
     # What each person's own accounts bring into their library, once a day.
     from . import libraryimport as _libraryimport
 

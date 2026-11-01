@@ -472,6 +472,19 @@ app looked untouched — and the cleanup decides what to drop from exactly this 
   heard through ends the streak. "Plus comme ça" also adds its own neighbours. Cost on 8 000 titles
   (`tools/perf_api.py --archived`): the first pick of a session 284 ms cold (pool + energy map), then 18-22 ms,
   11 statements, ~400 B gzip; the old `/api/flow` (kept for older apps) was 220 ms and 4.7 KB every refill.
+- **The explorer** (`supysonic/deezer/explorer.py`, table `discovery` schema `20261102`, `GET|PUT /api/explorer`, the *Exploration
+  automatique* card of the studio's Bibliothèque tab): finds music for genres the library lacks, quietly. It only searches genres
+  the ENGINE knows (`analysis.known_genres()`, resolved through the tree), weighted by tree closeness to what is played and by how
+  little the library holds of them; looks a genre up as Deezer playlists named after it first, then a plain search (all
+  `ALLOWED` in the detach guard); fetches the 30 s preview with `automatch.fetch_preview` (Deezer's CDN only, size-capped) and runs
+  the SAME analysis the library gets (`analysis.analyze_file`). A find is kept only if the engine hears the target or its direct
+  parent/child (tree distance <= 0.1, confidence >= 0.4); everything else is stored `rejected` and never fetched again. Finds are
+  `Discovery` rows — NOT tracks, nothing archived: the Flow offers them like the library's unplayed titles (`discover._offer_discoveries`,
+  by genre distance, "Une découverte : <genre>", cached 60 s) and playing or liking one archives it through the usual path, unless
+  the operator ticked "archiver tout" (bulk priority). It runs only when nobody has listened for 5 min, no foreground download runs and
+  load per core <= 0.5, one preview at a time through a `Throttle`, 1.5 s between Deezer calls, stopping at the first outage (never a
+  verdict). The queue's next title may be prefetched like any catalogue title, so a find at the head of the queue can be archived just
+  before it plays.
 - **Energy** (`supysonic/energy.py`, `user_taste.energy`): a 0..1 RANK in the library from the analysis (LUFS,
   −LRA, centroid, flux peak, entropy, the tempo only when its confidence >= 0.3 — Spotify's energy, re-built from
   what we measure), cached 10 min and rebuilt on a background thread. The notch (Très calme 0.1 … Intense 0.9, or

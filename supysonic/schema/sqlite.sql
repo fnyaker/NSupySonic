@@ -515,3 +515,16 @@ CREATE TABLE IF NOT EXISTS track_dislike (
     PRIMARY KEY (user_id, track_id)
 );
 CREATE INDEX IF NOT EXISTS index_track_dislike_track_id_fk ON track_dislike(track_id);
+
+CREATE TABLE IF NOT EXISTS discovery (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deezer_id VARCHAR(20) NOT NULL UNIQUE,
+    state VARCHAR(10) NOT NULL DEFAULT 'new',
+    target VARCHAR(48) NOT NULL,
+    style VARCHAR(48),
+    confidence REAL NOT NULL DEFAULT 0,
+    bpm REAL,
+    found DATETIME NOT NULL,
+    payload TEXT
+);
+CREATE INDEX IF NOT EXISTS index_discovery_state ON discovery(state);

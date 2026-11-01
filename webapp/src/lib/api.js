@@ -337,6 +337,9 @@ export const api = {
   analysisBackfill: (force, workers) =>
     req("/analysis/backfill", { method: "POST", body: body({ force, workers }) }),
   analysisBackfillStatus: () => req("/analysis/backfill"),
+  // The background explorer: state, and its switches (admin).
+  explorer: (settings) =>
+    settings ? req("/explorer", { method: "PUT", body: body(settings) }) : req("/explorer"),
   analysisBackfillStop: () => req("/analysis/backfill/stop", { method: "POST" }),
   // What is out of date and at which step (SQL counts), plus the nightly window.
   analysisPlan: () => req("/analysis/plan"),

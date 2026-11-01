@@ -77,7 +77,9 @@ class DislikesTestCase(_Disliked):
     def test_the_radio_never_offers_them_and_offers_the_near_one_less(self):
         def counts():
             seen = {}
-            for s in range(40):
+            # 200 radios: the near title's count is a small number from a draw, and
+            # the tracks' random ids reorder ties, so 40 left a ~8 % flake
+            for s in range(200):
                 for i in radio.build(self.user, [self.seed.id], 8, rng=random.Random(s)):
                     seen[i] = seen.get(i, 0) + 1
             return seen
@@ -88,7 +90,7 @@ class DislikesTestCase(_Disliked):
         after = counts()
         for gone in (self.bad.id, self.twin.id, self.copy.id):
             self.assertNotIn(gone, after)
-        # 40 radios of 8 titles: the near title 13 times before, 4 after (measured)
+        # 200 radios of 8 titles: the near title far more often before than after
         self.assertLess(after.get(self.near.id, 0), before[self.near.id])
 
     def test_a_radio_started_on_the_disliked_title_still_answers(self):
