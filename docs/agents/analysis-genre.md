@@ -521,10 +521,16 @@ ffmpeg and, when a native build exists (`cd webapp/measure && cargo build --rele
 `supysonic-cli deezer measure-compare [--style X]` writes the paired ffmpeg/own descriptors (the image has ffmpeg alone: the rate and channels are read
 from its banner, `analysis.probe_audio`).
 
+**The beat tracker is ported** (`webapp/measure/src/tempo.rs`, from `deezer/beats.py`): same constants, same order of operations,
+streamed (`tp_begin` / `tp_chunk` + `tp_push` / `tp_finish` / `tp_out` / `tp_beat`; 44.1 kHz mono f32 in chunks of at most 2^20
+samples). **Identical to the server on the 28 arranged records (tempo, octave decision and every beat position) and on 14 real tracks**
+(one track differs in 3 of 178 beat positions, same tempo): the numbers are bit-for-bit what `beats.analyse` gives, so the
+tempo-eval figures in this file hold for the client. Native: ~0.1-0.4 s for 40 s of audio. `tests/test_measure.py::RustTempoTestCase`
+(runs with a native build, `cargo build --release --examples` in `webapp/measure`) and `test/measure.test.mjs` (the wasm) pin it.
+
 ## What remains
 
-1. The beat tracker (port of `deezer/beats.py`, 577 lines of numpy) and the log-mel front-end + patch aggregation
-   (`embedding._log_mel_patches`, `_aggregate`) in the crate, with parity tests against the Python twin.
+1. The log-mel front-end + patch aggregation (`embedding._log_mel_patches`, `_aggregate`) in the crate, with parity tests against the Python twin.
 2. The embedding network itself through onnxruntime-web on the operator's own `.onnx`, served to the admin only (its licence is non-commercial
    and no-derivatives: unmodified, operator's copy).
 3. The client runner: Opus 64 k in Range blocks (resumable), decode (the browser resamples; ffmpeg measured the SOURCE rate, so the runner

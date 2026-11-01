@@ -69,3 +69,60 @@ test("hostile sizes are refused, not trusted", () => {
   assert.equal(x.ms_begin(2, 10000, 1), 0);
   assert.equal(x.ms_begin(99, 10000, 44100), 0);
 });
+
+// -- the beat tracker, as a stream -------------------------------------------------------
+
+function clicks(bpm, seconds, rate = 44100) {
+  // a pitched kick on every beat over a little noise (deterministic)
+  const n = Math.round(seconds * rate), out = new Float32Array(n);
+  let s = 12345;
+  for (let i = 0; i < n; i++) {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    out[i] = 0.01 * (s / 0x7fffffff - 0.5);
+  }
+  const period = (60 / bpm) * rate, len = Math.round(0.12 * rate);
+  for (let b = 0; b * period < n - len; b++) {
+    const at = Math.round(b * period);
+    for (let k = 0; k < len; k++) {
+      const t = k / rate;
+      out[at + k] += 0.8 * Math.sin(2 * Math.PI * (55 * t + 90 * 0.0011 * (1 - Math.exp(-t / 0.0011)))) * Math.exp(-k / 2500);
+    }
+  }
+  return out;
+}
+
+function track(samples, chunk = 44100) {
+  assert.equal(x.tp_begin(), 1);
+  for (let at = 0; at < samples.length; at += chunk) {
+    const part = samples.subarray(at, Math.min(samples.length, at + chunk));
+    const ptr = x.tp_chunk(part.length);
+    assert.ok(ptr !== 0);
+    new Float32Array(x.memory.buffer, ptr, part.length).set(part);
+    x.tp_push();
+  }
+  if (!x.tp_finish()) return null;
+  return {
+    bpm: x.tp_out(0), confidence: x.tp_out(1), doubled: x.tp_out(3) === 1,
+    beats: Array.from({ length: x.tp_out(5) }, (_, i) => x.tp_beat(i)),
+  };
+}
+
+test("a kick on every beat reads its tempo, whatever the chunking", () => {
+  const a = clicks(132, 30);
+  const one = track(a, 44100);
+  const two = track(a, 3000);
+  assert.ok(Math.abs(one.bpm - 132) < 0.05, `bpm ${one.bpm}`);
+  assert.ok(one.confidence > 0.8, `confidence ${one.confidence}`);
+  // the stream is the same however it is cut
+  assert.equal(two.bpm, one.bpm);
+  assert.deepEqual(two.beats, one.beats);
+  // beats land on the kicks (every 60/132 s, within a frame)
+  const gap = one.beats.slice(1).map((b, i) => b - one.beats[i]);
+  assert.ok(gap.every((g) => Math.abs(g - 60 / 132) < 0.03));
+});
+
+test("no beat gives no tempo, and a hostile chunk is refused", () => {
+  assert.equal(track(new Float32Array(44100 * 10)), null);
+  assert.equal(x.tp_chunk(0), 0);
+  assert.equal(x.tp_chunk((1 << 20) + 1), 0);
+});

@@ -30,6 +30,7 @@ from supysonic.deezer import analysis as ana
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUST = os.path.join(ROOT, "webapp", "measure", "target", "release", "examples", "measure")
+RUST_TEMPO = os.path.join(ROOT, "webapp", "measure", "target", "release", "examples", "tempo")
 RATE = 44100
 
 
@@ -112,5 +113,41 @@ class ProbeTestCase(unittest.TestCase):
                 fp.write(b"not audio")
             with self.assertRaises(ValueError):
                 ana.probe_audio(os.path.join(d, "x.flac"))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def _kick(bpm):
+    p = 60.0 / bpm
+    return (f"0.8*sin(2*PI*(45+160*exp(-35*mod(t\\,{p})))*mod(t\\,{p}))*exp(-9*mod(t\\,{p}))")
+
+
+@unittest.skipUnless(HAVE_NUMPY and shutil.which("ffmpeg") and os.path.exists(RUST_TEMPO),
+                     "needs numpy, ffmpeg and a native build of webapp/measure (examples/tempo)")
+class RustTempoTestCase(unittest.TestCase):
+    """The Rust beat tracker against supysonic/deezer/beats.py: the tempo the client
+    measures is the tempo the server serves, beat for beat."""
+
+    def test_the_same_tempo_and_the_same_beats_as_the_server(self):
+        from supysonic.deezer import beats
+
+        d = tempfile.mkdtemp()
+        try:
+            for bpm in (132, 150, 200):
+                path = os.path.join(d, f"k{bpm}.wav")
+                subprocess.run(
+                    ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                     f"aevalsrc='{_kick(bpm)}':s=44100:d=30", "-ac", "1", path], check=True)
+                py = beats.analyse(path)
+                raw = subprocess.run(
+                    ["ffmpeg", "-v", "0", "-i", path, "-vn", "-ac", "1", "-ar", "44100", "-f", "f32le", "-"],
+                    capture_output=True, check=True).stdout
+                rs = json.loads(subprocess.run([RUST_TEMPO], input=raw, capture_output=True, check=True).stdout)
+                self.assertIsNotNone(py, bpm)
+                self.assertAlmostEqual(rs["bpm"], py["bpm"], delta=0.01, msg=bpm)
+                self.assertEqual(rs["doubled"], py["doubled"], bpm)
+                self.assertEqual(len(rs["beats"]), len(py["beats"]), bpm)
+                same = sum(abs(a - b) < 2e-4 for a, b in zip(rs["beats"], py["beats"]))
+                self.assertGreaterEqual(same / len(py["beats"]), 0.98, bpm)
         finally:
             shutil.rmtree(d, ignore_errors=True)

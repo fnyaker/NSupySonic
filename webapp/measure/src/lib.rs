@@ -7,6 +7,7 @@
 pub mod fft;
 pub mod loudness;
 pub mod spectral;
+pub mod tempo;
 
 /// What `analysis._spectral` returns, from decoded PCM.
 #[derive(Debug, Clone, Default)]
@@ -109,5 +110,90 @@ pub extern "C" fn ms_out(i: u32) -> f64 {
     #[allow(static_mut_refs)]
     unsafe {
         OUT.get(i as usize).copied().unwrap_or(f64::NAN)
+    }
+}
+
+// -- the tempo, as a stream: begin, push chunks of 44.1 kHz mono, finish, read back ---------
+
+static mut ONSETS: Option<tempo::Onsets> = None;
+static mut TEMPO: Option<tempo::Tempo> = None;
+static mut CHUNK: Vec<f32> = Vec::new();
+/// Most samples one pushed chunk may hold (4 MB): a hostile size is refused, not allocated.
+const CHUNK_MAX: u32 = 1 << 20;
+
+#[no_mangle]
+pub extern "C" fn tp_begin() -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        ONSETS = Some(tempo::Onsets::new());
+        TEMPO = None;
+    }
+    1
+}
+
+/// A buffer of `n` samples for the page to fill, then `tp_push`. Null when refused.
+#[no_mangle]
+pub extern "C" fn tp_chunk(n: u32) -> *mut f32 {
+    if n == 0 || n > CHUNK_MAX {
+        return core::ptr::null_mut();
+    }
+    #[allow(static_mut_refs)]
+    unsafe {
+        CHUNK.resize(n as usize, 0.0);
+        CHUNK.as_mut_ptr()
+    }
+}
+
+/// Feed the chunk; returns the onset frames held so far (0 without a `tp_begin`).
+#[no_mangle]
+pub extern "C" fn tp_push() -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        match ONSETS.as_mut() {
+            Some(o) => {
+                o.push(&CHUNK);
+                o.df.len() as u32
+            }
+            None => 0,
+        }
+    }
+}
+
+/// 1 when a tempo was found (then `tp_out` / `tp_beat` read it), else 0.
+#[no_mangle]
+pub extern "C" fn tp_finish() -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        TEMPO = ONSETS.as_ref().and_then(tempo::analyse);
+        TEMPO.is_some() as u32
+    }
+}
+
+/// 0 bpm, 1 confidence, 2 salience, 3 doubled (0/1), 4 alternation, 5 number of beats.
+#[no_mangle]
+pub extern "C" fn tp_out(i: u32) -> f64 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        match TEMPO.as_ref() {
+            Some(t) => match i {
+                0 => t.bpm,
+                1 => t.confidence,
+                2 => t.salience,
+                3 => t.doubled as u32 as f64,
+                4 => t.alternation,
+                5 => t.beats.len() as f64,
+                _ => f64::NAN,
+            },
+            None => f64::NAN,
+        }
+    }
+}
+
+/// The i-th beat, in seconds.
+#[no_mangle]
+pub extern "C" fn tp_beat(i: u32) -> f64 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        TEMPO.as_ref().and_then(|t| t.beats.get(i as usize).copied()).unwrap_or(f64::NAN)
     }
 }
