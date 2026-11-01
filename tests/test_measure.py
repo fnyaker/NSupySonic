@@ -18,7 +18,10 @@ import subprocess
 import tempfile
 import unittest
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:  # the minimal environment has none; the measures need it
+    raise unittest.SkipTest("numpy is not installed")
 
 from supysonic.deezer import analysis as ana
 from supysonic.deezer import measure as M
