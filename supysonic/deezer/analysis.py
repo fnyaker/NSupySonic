@@ -1504,6 +1504,41 @@ def audit_published_tempo(provider, limit=200, progress=None):
     return stats
 
 
+def analyze_file(path, with_embedding=True):
+    """Measure an audio file that is NOT a library track (a 30 s preview): the
+    same spectral pass, tempo and extractor as ``analyze_track_verbose`` and the
+    same decision, but nothing is stored. Returns ``{"bpm", "bpm_confidence",
+    "verdict", "feats"}`` or raises. Used by the explorer to check that what it
+    found on Deezer sounds like the genre it was looking for."""
+    if not ffmpeg_available():
+        raise RuntimeError("ffmpeg is not installed")
+    feats = _spectral(path)
+    bpm, conf, pulse = None, 0.0, 0.0
+    try:
+        measured, mconf, pulse = _measure_tempo(path)
+        if measured:
+            bpm, conf = measured, mconf
+    except Exception:
+        logger.debug("analysis: tempo pass failed for %s", path, exc_info=True)
+    vec = None
+    if with_embedding:
+        try:
+            from . import embedding as emb
+
+            if emb.available():
+                vec, _why = emb.embed_file_verbose(path)
+        except Exception:
+            logger.debug("analysis: embedding failed for %s", path, exc_info=True)
+    feats.update(
+        bpm=bpm or 0.0, bpm_confidence=conf, pulse=pulse,
+        lra=feats.get("lra") if feats.get("lra") is not None else 7.0,
+        lufs=feats.get("lufs"),
+    )
+    verdict = _decide_style(None, feats, vec)
+    return {"bpm": bpm, "bpm_confidence": conf, "verdict": verdict, "feats": feats,
+            "embedded": vec is not None}
+
+
 def analyze_track(track: Track, provider=None, force: bool = False):
     """Measure one archived track and store the verdict. Returns the row."""
     return analyze_track_verbose(track, provider, force=force)[0]
@@ -1628,6 +1663,8 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         payload["styleLevel"] = verdict["level"]
     row = existing or TrackAnalysis(track=track)
     row.version = ANALYSIS_VERSION
+    row.embed_version = _embed_stamp(vec)
+    row.decided_head = current_head_id()
     row.analyzed = now()
     row.bpm = bpm
     row.bpm_confidence = bpm_conf
@@ -1717,6 +1754,26 @@ def regain_from_analyses(page_size=500):
 _FAMILY_ARCH = {fid: arch for fid, _label, arch, _fn in FAMILIES}
 
 
+def current_head_id() -> str:
+    """The id of the genre head deciding verdicts now ("none" for no head): the
+    value ``TrackAnalysis.decided_head`` is stamped with."""
+    from . import genre as gen
+
+    try:
+        head = gen.active_head()
+    except Exception:
+        return "none"
+    return str(head["id"]) if head else "none"
+
+
+def _embed_stamp(vec) -> int:
+    """``TrackAnalysis.embed_version`` for a vector: this generation's number
+    when it is the current layout, else 0 (none, or an older width)."""
+    from . import embedding as emb
+
+    return emb.EMBED_VERSION if emb.vector_is_current(vec) else 0
+
+
 def _decide_style(track, feats, vec):
     """A track's style from its measures, its embedding and its tag:
     ``{style, conf, arch, weights, source, model, level}``.
@@ -1801,7 +1858,7 @@ def _stored_features(row, data):
         return None
 
 
-def redecide(row, vec=False):
+def redecide(row, vec=False, head_id=None):
     """Take a stored row's style decision again, from what is stored: the
     measures in its data, the track's current tag, the ACTIVE head on the
     track's stored vector. No ffmpeg, no decode. Returns True when it changed.
@@ -1809,13 +1866,24 @@ def redecide(row, vec=False):
     ``vec``: the vector if the caller has it, None for none, or False (the
     default) to read the sidecar when a head is active.
     """
+    def stamp_only():
+        # Nothing to decide FROM (no stored measures): say it was looked at, or
+        # the row would count as out of date for ever.
+        stamp = head_id if head_id is not None else current_head_id()
+        if row.decided_head != stamp:
+            row.decided_head = stamp
+            TrackAnalysis.update(decided_head=stamp).where(
+                TrackAnalysis.track == row.track_id
+            ).execute()
+        return False
+
     try:
         data = json.loads(row.data) if row.data else {}
     except (TypeError, ValueError):
-        return False
+        return stamp_only()
     feats = _stored_features(row, data)
     if feats is None:
-        return False
+        return stamp_only()
     track = row.track
     if vec is False:
         vec = None
@@ -1837,8 +1905,17 @@ def redecide(row, vec=False):
         and data.get("styleSource", "heuristic") == v["source"]
         and data.get("styleLevel") == v["level"]
     )
+    stamp = head_id if head_id is not None else current_head_id()
     if same:
+        if row.decided_head != stamp:
+            # Nothing moved, but the row now says it was decided under THIS head
+            # — so the library can tell "up to date" from "never looked at".
+            row.decided_head = stamp
+            TrackAnalysis.update(decided_head=stamp).where(
+                TrackAnalysis.track == row.track_id
+            ).execute()
         return False
+    row.decided_head = stamp
     row.style, row.style_confidence, row.archetype = v["style"], v["conf"], v["arch"]
     data.update(archetypes=v["weights"], styleSource=v["source"], model=v["model"])
     if v["level"]:
@@ -1868,6 +1945,7 @@ def reapply_head(on_stats=None, should_stop=None, page_size=None):
              "model": 0, "family": 0, "tag": 0, "file": 0, "heuristic": 0}
     size = page_size or PAGE_SIZE
     last = None
+    head_id = current_head_id()
     while True:
         if should_stop and should_stop():
             break
@@ -1878,7 +1956,7 @@ def reapply_head(on_stats=None, should_stop=None, page_size=None):
         if not page:
             break
         for row in page:
-            if redecide(row):
+            if redecide(row, head_id=head_id):
                 stats["changed"] += 1
             try:
                 data = json.loads(row.data or "{}")
@@ -2320,8 +2398,16 @@ def _walk_library(work, workers, stats, report, key, force, limit=None):
             if pool is None:
                 for track in page:
                     work(track)
+                    if stats.get("stopped"):
+                        break
             else:
                 list(pool.map(guarded, page))
+            if stats.get("stopped"):
+                # Cancelled, or the window closed, part-way through a page: the
+                # cursor stays where the last COMPLETE page ended, so the next
+                # run re-walks this page (cheap — the finished tracks are
+                # current and skipped) instead of losing the rest of it.
+                return
             _checkpoint_write(key, page[-1].id, force)
             if limit is not None and stats["done"] >= limit:
                 return  # partial by request: keep the cursor so the next run resumes
@@ -2374,7 +2460,7 @@ def _record_failure(stats, track, reason):
 
 
 def backfill(provider=None, force=False, limit=None, progress=None, on_stats=None,
-             workers=None):
+             workers=None, throttle=None):
     """Measure every archived track that has no current verdict.
 
     The safety net for what the archive event cannot see: tracks archived before
@@ -2425,6 +2511,11 @@ def backfill(provider=None, force=False, limit=None, progress=None, on_stats=Non
                 stats["skipped"] += 1
                 report(stats)
             return
+        if throttle is not None and not throttle.wait():
+            with lock:
+                stats["stopped"] = True
+            return
+        t_unit = time.monotonic()
         try:
             row, reason = analyze_track_verbose(track, provider, force=force)
         except Exception as exc:
@@ -2445,13 +2536,15 @@ def backfill(provider=None, force=False, limit=None, progress=None, on_stats=Non
                 if stats["done"] % 25 == 0:
                     say(f"  {stats['done']} analysed...")
             report(stats)
+        if throttle is not None:
+            throttle.spent(time.monotonic() - t_unit)
 
     _walk_library(work, workers, stats, report, ANALYSIS_CURSOR_KEY, force, limit)
     return stats
 
 
 def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None,
-                        workers=None):
+                        workers=None, throttle=None):
     """Extract the frozen vector for every archived track that lacks one.
 
     Separate from `backfill` because it has a different cost profile and a
@@ -2494,12 +2587,29 @@ def backfill_embeddings(force=False, limit=None, progress=None, on_stats=None,
                 report(stats)
             return
         if not force and emb.vector_is_current(emb.load_embedding(track)):
+            # Already the current layout; make the row SAY so (rows written
+            # before the stamp existed read 0 and would count as out of date).
+            TrackAnalysis.update(embed_version=emb.EMBED_VERSION).where(
+                (TrackAnalysis.track == track.id)
+                & (TrackAnalysis.embed_version < emb.EMBED_VERSION)
+            ).execute()
             with lock:
                 stats["skipped"] += 1
                 report(stats)
             return
+        if throttle is not None and not throttle.wait():
+            with lock:
+                stats["stopped"] = True
+            return
+        t_unit = time.monotonic()
         vec, reason = emb.embed_file_verbose(track.path)
         ok = vec is not None and emb.save_embedding(track, vec)
+        if throttle is not None:
+            throttle.spent(time.monotonic() - t_unit)
+        if ok:
+            TrackAnalysis.update(embed_version=emb.EMBED_VERSION).where(
+                TrackAnalysis.track == track.id
+            ).execute()
         with lock:
             if not ok:
                 stats["failed"] += 1

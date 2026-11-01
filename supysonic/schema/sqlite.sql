@@ -252,6 +252,8 @@ CREATE TABLE IF NOT EXISTS track_analysis (
     style VARCHAR(24),
     style_confidence REAL NOT NULL DEFAULT 0,
     archetype VARCHAR(16),
+    embed_version INTEGER NOT NULL DEFAULT 0,
+    decided_head VARCHAR(40),
     data TEXT
 );
 

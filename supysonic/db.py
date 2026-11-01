@@ -36,7 +36,7 @@ from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "20261031"
+SCHEMA_VERSION = "20261101"
 
 
 def now():
@@ -717,6 +717,14 @@ class TrackAnalysis(_Model):
     style = CharField(24, null=True)
     style_confidence = FloatField(default=0)
     archetype = CharField(16, null=True)
+    # Which generation of the pipeline produced each stage of this row, so the
+    # library can be asked "what is out of date, and at which step" in one SQL
+    # count instead of reading files: ``version`` is the measurement
+    # (ANALYSIS_VERSION), ``embed_version`` the stored vector's layout
+    # (EMBED_VERSION, 0 = none / not stamped yet) and ``decided_head`` the genre
+    # head the verdict was last decided under ("none" for no head).
+    embed_version = IntegerField(default=0)
+    decided_head = CharField(40, null=True)
     # Everything else — the descriptors, the archetype mix, the loudness — as
     # JSON, so a later refinement adds a measurement without a migration.
     data = TextField(null=True)
