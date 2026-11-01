@@ -177,6 +177,12 @@ class ExploreTestCase(_Library):
         self.assertEqual((c.provider, c.ref), ("deezer", "900001"))
         self.assertTrue(c.why.startswith("Une découverte"))
         self.assertEqual(c.info["title"], "T1")
+        # a guest (content-only) is never offered one
+        from supysonic.db import User
+
+        guest = User.create(name="guest", password="x", salt="x", admin=False)
+        gp = discover.track_candidates(guest, discover.profile(guest, fresh=True), random.Random(1))
+        self.assertFalse([k for k in gp if isinstance(k, str) and k.startswith("deezer:9000")])
         # taken into the library (played, liked): no longer a find
         t = Track.select().first()
         Track.update(deezer_id="900001").where(Track.id == t.id).execute()
@@ -185,6 +191,13 @@ class ExploreTestCase(_Library):
         self.assertNotIn("deezer:900001", pool)
         X.prune()
         self.assertIsNone(Discovery.get_or_none(Discovery.deezer_id == "900001"))
+
+    def test_the_cached_pool_never_crosses_databases(self):
+        import time
+
+        # a copy kept for ANOTHER database (as the previous test's) must not be served
+        X._pool_cache = (time.monotonic(), -1, [("999", "Frenchcore", {"title": "stale"})])
+        self.assertEqual(X.pool_rows(), [])
 
     def test_the_explorer_switches_are_the_admins_and_are_cleaned(self):
         r = self.client.put("/api/explorer", json={"enabled": False, "archive": True, "pool": 99999})

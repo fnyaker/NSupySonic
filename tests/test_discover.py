@@ -14,6 +14,7 @@ provider at all.
 """
 
 import datetime
+import unittest.mock
 import os
 import random
 import sqlite3
@@ -536,3 +537,29 @@ class StyleFlowTestCase(_Library):
         self.assertGreaterEqual(rows["Hardcore"]["branch"], 18)  # frenchcore + uptempo + hardcore
         self.assertEqual(rows["Frenchcore"]["parent"], "Hardcore")
         self.assertNotIn("Reggae", rows)  # nothing of it in the library
+
+
+class FamilyIdsTestCase(unittest.TestCase):
+    """The analysis stores the engine's family ids; the tree is made of labels."""
+
+    def test_every_engine_family_id_is_a_node_of_the_tree(self):
+        from supysonic import genretree
+        from supysonic.deezer.analysis import FAMILIES
+
+        tree = genretree.Tree(genretree.default_edges())
+        unknown = [fid for fid, label, _a, _w in FAMILIES
+                   if label in tree.nodes and tree.node(fid) != label]
+        self.assertEqual(unknown, [])
+        tree_ids = {fid for fid, label, _a, _w in FAMILIES if label in tree.nodes}
+        self.assertIn("dnb", tree_ids)
+        self.assertEqual(tree.node("dnb"), "Drum & bass")
+        self.assertEqual(tree.node("hiphop"), "Hip-hop")
+
+    def test_a_family_id_is_as_close_to_its_label_as_the_label_is(self):
+        from supysonic import genretree
+
+        tree = genretree.Tree(genretree.default_edges())
+        with unittest.mock.patch.object(genretree, "get", lambda: tree):
+            self.assertEqual(genretree.distance("dnb", "Drum & bass"), 0.0)
+            self.assertEqual(genretree.distance("jazz", "Jazz / acoustique"), 0.0)
+            self.assertLess(genretree.distance("dnb", "Drum & bass"), genretree.distance("dnb", "House"))

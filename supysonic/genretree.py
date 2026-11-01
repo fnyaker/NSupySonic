@@ -97,6 +97,15 @@ class Tree:
             self.children.setdefault(parent, []).append((child, float(weight)))
         self.folded = {fold(n): n for n in self.nodes}
         self.aliases = {fold(k): v for k, v in aliases if v in self.nodes}
+        # The engine stores its heuristic verdicts as FAMILY IDS ("dnb", "jazz",
+        # "hiphop"), which are not the labels the tree is made of: without this
+        # twenty families read as unknown to every distance, and a drum & bass
+        # title was "unrelated" to drum & bass.
+        from .deezer.analysis import FAMILY_LABEL
+
+        for fid, label in FAMILY_LABEL.items():
+            if label in self.nodes:
+                self.aliases.setdefault(fold(fid), label)
         self._up = {}
         self._down = {}
         self._fam = {}

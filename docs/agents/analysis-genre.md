@@ -447,6 +447,9 @@ tree). `genre.decide` climbs ancestors (level `ancestor`, roots excluded) when t
 lifts the last pick's parent and siblings. Every write bumps the version, tells the devices and relabels only if a
 head is active; the undo log is compact per-key `Meta` rows (256-char limit). The SPA mirrors the tree
 (`refreshTree` on a verdict-generation change) and `genreOf`/`skinId` fall back to the nearest known ancestor.
+**The analysis stores FAMILY IDS** (`dnb`, `jazz`, `hiphop`…, 20 of them differ from their label), so `Tree.node` resolves every engine family id to its label
+(`FAMILY_LABEL` as aliases): before, those verdicts were "unknown" to every tree distance — a drum & bass title was unrelated to drum & bass in the
+Flow's genre candidates (`tests/test_discover.py::FamilyIdsTestCase`).
 `tests/test_multi_o.py` pins statement counts and the unchanged verdicts; `node test/genretree/run.mjs` is the bench.
 
 ## Library maintenance: stamped versions, a nightly window, zero impact

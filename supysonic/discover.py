@@ -625,7 +625,9 @@ def track_candidates(user, taste, rng, with_catalog=True):
             styles[style] = g
         _offer(pool, Cand(tid, 0.45 + 0.5 * g, max(0.1, 1.0 - g), f"Un peu de {style}",
                           track=tid, artist=aid))
-    if with_catalog:
+    if with_catalog and getattr(user, "admin", False):
+        # Playing a find archives it through the account: the owner's, like the
+        # rest of the catalogue discovery (guests are content-only).
         _offer_discoveries(pool, genres, styles)
     if disliked:
         apply_dislikes(pool, disliked)
