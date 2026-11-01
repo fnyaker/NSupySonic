@@ -1,7 +1,6 @@
 //! The per-frame spectral descriptors `analysis._spectral` takes from ffmpeg's
 //! `aspectralstats`, written out. Definitions and what does NOT match ffmpeg
-//! (flatness on band-limited material, entropy) are in
-//! supysonic/deezer/measure.py and docs/claude/client-analysis.md.
+//! (flatness on band-limited lossy material) are in supysonic/deezer/measure.py.
 
 use crate::fft::Fft;
 
@@ -70,7 +69,10 @@ pub fn channel(x: &[f32], rate: f64, out: &mut Series) {
             }
         }
         let flux = mag.iter().zip(&prev).map(|(a, b)| (a - b) * (a - b)).sum::<f64>().sqrt();
-        let ent = -mag.iter().map(|m| { let p = m / sum; if p > 0.0 { p * p.log2() } else { 0.0 } }).sum::<f64>() / log_bins;
+        // ffmpeg's "entropy" is -sum(m * log2 m) over the RAW magnitudes (m = |X| / 2048,
+        // NOT divided by their sum) over log2(1024): it exceeds 1 on loud broadband frames.
+        // Recovered frame by frame (2e-5) and then on 99 real tracks.
+        let ent = -mag.iter().map(|m| if *m > 0.0 { m * m.log2() } else { 0.0 }).sum::<f64>() / log_bins;
         out.centroid.push(centroid);
         out.spread.push(var.sqrt());
         out.flatness.push(flat);

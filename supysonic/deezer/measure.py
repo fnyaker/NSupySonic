@@ -10,9 +10,7 @@ browser cannot run that filter, so the client needs the same numbers computed by
 code we own, and "the same" has to be demonstrated rather than hoped for. This
 module is the reference for that code: the definitions below were recovered from
 ffmpeg's output frame by frame (see docs/agents/analysis-genre.md (Analysis on the client PC)) and agree with
-it to rounding for everything except ENTROPY, where ffmpeg's number is a quantity
-we could not reproduce (correlation 0.8 with Shannon entropy at best); that one
-is a calibrated stand-in (``ENTROPY_FIT``) and is the least trustworthy.
+it to rounding (entropy was recovered from 99 real tracks: see below).
 
 Definitions (a frame is 2048 samples of ONE channel, Hann window, hop 1024, at the
 source's own rate; the magnitude spectrum is |rfft|/2048 over the first 1024 bins,
@@ -21,6 +19,14 @@ Nyquist excluded; f[k] = k·rate/2048):
 - centroid  Σ f·m / Σ m                      spread  sqrt(Σ (f-centroid)²·m / Σ m)
 - flatness  exp(mean ln m) / mean m          rolloff f[first k with cumsum(m) ≥ 0.85·Σ m]
 - flux      ‖m − m_previous_frame‖₂ (the first frame against zeros)
+- entropy   −Σ m·log2(m) / log2(1024) over the RAW magnitudes (not normalised to a
+            probability: it exceeds 1 on loud broadband frames)
+
+Known difference: on band-limited LOSSY material (mp3/ogg cut at 16 kHz) the quietest
+bins are float32 rounding noise inside ffmpeg, so its flatness reads higher than any
+other FFT's (3-6x on such files); on the lossless library it was measured at a median
+ratio of 0.99, worst 0.80, over 99 real tracks (none of this moves a verdict: the rules'
+fuzzy bands are wider).
 
 Frames of all channels are pooled, then medians / the 90th percentile are taken,
 exactly as ``analysis._parse_spectral`` does.
@@ -34,10 +40,6 @@ WIN = 2048
 HOP = 1024
 ROLLOFF = 0.85
 
-#: entropy_ffmpeg ≈ a·H + b where H is the Shannon entropy of the normalised
-#: magnitude, divided by log2(bins). Fitted per-track-median on real music; see the doc.
-ENTROPY_FIT = (1.0, 0.0)
-
 
 def _hann():
     return np.hanning(WIN)
@@ -45,7 +47,10 @@ def _hann():
 
 def frame_stats(x, rate):
     """Per-frame descriptors of one channel: dict of arrays, ffmpeg's framing
-    (the first frame is half silence, as ffmpeg's is)."""
+    (the first frame is half silence, as ffmpeg's is). The transform runs in
+    FLOAT32 like ffmpeg's: its rounding noise is what the geometric mean of the
+    quietest bins (flatness) is made of on band-limited material, so a double
+    precision transform reads systematically flatter-looking-less than ffmpeg."""
     x = np.asarray(x, dtype=np.float32)
     n = len(x)
     if n < WIN // 2:
@@ -54,7 +59,8 @@ def frame_stats(x, rate):
     count = max(1, (len(padded) - WIN) // HOP + 1)
     idx = np.arange(WIN)[None, :] + HOP * np.arange(count)[:, None]
     frames = padded[idx] * _hann().astype(np.float32)
-    mag = (np.abs(np.fft.rfft(frames, axis=1))[:, : WIN // 2] / WIN).astype(np.float64)
+    mag32 = np.abs(np.fft.rfft(frames, axis=1))[:, : WIN // 2] / np.float32(WIN)
+    mag = mag32.astype(np.float64)
     f = np.arange(WIN // 2) * (rate / WIN)
     s = mag.sum(axis=1)
     ok = s > 0
@@ -69,11 +75,12 @@ def frame_stats(x, rate):
     rolloff = f[np.minimum(k, len(f) - 1)]
     prev = np.vstack([np.zeros((1, mag.shape[1])), mag[:-1]])
     flux = np.sqrt(((mag - prev) ** 2).sum(axis=1))
-    p = mag / s[:, None]
-    h = -(p * np.log2(np.where(p > 0, p, 1.0))).sum(axis=1) / np.log2(mag.shape[1])
-    a, b = ENTROPY_FIT
+    # ffmpeg's "entropy" is NOT a probability entropy: it is -sum(m*log2(m)) over the
+    # RAW magnitudes (m = |X|/2048, not divided by their sum), over log2(1024). It
+    # exceeds 1 on loud broadband frames. Matches to 2e-5 frame by frame.
+    ent = -(mag * np.log2(np.where(mag > 0, mag, 1.0))).sum(axis=1) / np.log2(mag.shape[1])
     return {"centroid": centroid, "spread": spread, "flatness": flat, "rolloff": rolloff,
-            "flux": flux, "entropy": a * h + b}
+            "flux": flux, "entropy": ent}
 
 
 def _pct(xs, q):

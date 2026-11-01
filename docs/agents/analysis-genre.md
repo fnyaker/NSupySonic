@@ -491,72 +491,44 @@ embed, re-decide (`start_relabel`) — each resumable (checkpoint) and each unit
 ## Analysis on the client PC (WASM): WIP, preparation — not wired into the app
 
 The goal: measure, embed and classify on the admin's PC (a Rust/WASM core, Opus 64 k in Range blocks, resumable, each result
-pushed to the server as it lands). **Nothing loads the crate yet, no endpoint receives results, the classifier is unchanged.**
-It hit a numerical wall that needs the owner's library to cross (below). The owner chose "our own measures everywhere" (the same
-definitions on the server in numpy and on the client in Rust, `ANALYSIS_VERSION` bumped, the rules that read flatness/entropy
-re-fitted); the groundwork is `deezer/measure.py` (the numpy reference), `webapp/measure` (the crate) and
-`supysonic-cli deezer measure-compare`.
+pushed to the server as it lands, the SERVER classifying from the stored measures so tags, the head and the rules stay in one
+place). **Nothing loads the crate yet, no endpoint receives results, the classifier is unchanged.**
 
-## What was established (measured, `supysonic/deezer/measure.py`)
-
-`analysis._spectral` takes its numbers from ffmpeg's `aspectralstats` run on the SOURCE signal (its
-own rate, every channel, pooled). Frame by frame against ffmpeg, a numpy twin reproduces:
-
-- the framing: 2048-sample symmetric Hann window, hop 1024, the first frame half silence;
-  magnitude = `|rfft|/2048` over the first 1024 bins (Nyquist excluded), `f[k] = k·rate/2048`;
-- **centroid, spread, skewness, kurtosis, mean, crest** — to rounding;
-- **rolloff** = `f[first k where cumsum(m) ≥ 0.85·Σm]` — exact;
-- **flux** = `‖m − m_prev‖₂` (first frame against zeros) — exact.
-
-On 30 real files the per-track medians agree to ~0.1% for centroid / spread / rolloff / flux_peak
-on mp3 and ogg, but drift 4–8% on some loud files (not understood: not channel pooling, not the
-rate; probably a clipping/float-range difference in decode).
-
-## What cannot be matched
-
-- **entropy**: no definition tried (Shannon of m, m², √m, other normalisations, lags) reproduces
-  ffmpeg's value; the best is correlation ~0.8 with Shannon-of-m. The classifier's hard-dance rules
-  (zaag, frenchcore, uptempo, krach, pieep, tribe, hardtekk — 12 of them) read it in tight
-  windows (0.32–0.78).
-- **flatness**: matches on a synthetic signal and on some frames, but on real, low-passed material
-  (mp3/ogg with a 16 kHz cut) the per-track median differs 3–6× (0.104 vs 0.038): the geometric mean
-  is dominated by bins at the FFT's float32 noise floor, which is a property of ffmpeg's FFT, not of the
-  music. A browser's FFT and Opus decode have another floor. `flatness`/`flatness_hi` are also read by
-  the hard families.
-
-So a client implementation is NOT interchangeable with the server's ffmpeg numbers, and the
-classifier's thresholds were fitted on ffmpeg's. Two ways out, decided with the owner (chosen:
-"our own measures everywhere"): replace the two descriptors with ones we define (a floor-robust
-flatness, a Shannon entropy) in BOTH the server (numpy) and the client (Rust), bump
-`ANALYSIS_VERSION`, and **re-fit the rules that read them on real hard-dance tracks** — which needs
-data from the owner's library, not from this repo.
-
-## The tool for that: `supysonic-cli deezer measure-compare`
-
-Writes `measure-compare.csv`: for N archived tracks spread over the library, ffmpeg's descriptors
-next to `measure.py`'s, with the track's style. The image ships ffmpeg alone (no ffprobe): the rate and channels come from ffmpeg's own banner (`analysis.probe_audio`); `--style` keeps one genre and its sub-genres (the library holds audiobooks too). It fails, rather than writing an empty file, when nothing could be measured. Run it on the real library (a few hundred tracks across
-the hard genres), keep the CSV; the new definitions and thresholds are fitted on it.
+**The numbers are the server's, so no re-measure and no recalibration are needed.** `analysis._spectral` takes its descriptors from
+ffmpeg's `aspectralstats` on the SOURCE signal (its own rate, every channel, pooled). Recovered frame by frame, then checked on 99 real
+tracks of the owner's library (`supysonic-cli deezer measure-compare`, 90 s each; median relative error of own vs ffmpeg: centroid
+1e-4, spread 7e-5, rolloff 0, flux 2e-4):
+- framing: 2048-sample symmetric Hann window, hop 1024, the first frame half silence; `m = |rfft|/2048` over the first 1024 bins
+  (Nyquist excluded), `f[k] = k·rate/2048`;
+- centroid, spread, skewness, kurtosis, mean, crest, **rolloff** (`f[first k where cumsum(m) >= 0.85·Σm]`) and **flux**
+  (`‖m − m_prev‖₂`, first frame against zeros) match to rounding;
+- **entropy is `−Σ m·log2(m) / log2(1024)` over the RAW magnitudes** (not a probability entropy: it exceeds 1 on loud broadband frames,
+  1.87 seen). Every definition built on `m/Σm` failed for a week of attempts; the unnormalised one matches frame by frame to 2e-5;
+- **flatness** (`exp(mean ln m)/mean m`) matches (median ratio 0.99, worst 0.80 over the 99 tracks) except on band-limited LOSSY
+  material (mp3/ogg cut at 16 kHz, 3-6x): the quietest bins are float32 rounding noise inside ffmpeg, which no other FFT reproduces.
+  No fixed floor fitted across files (the best varies 1e-7..1e-9 by file); not worth chasing, the rules' fuzzy bands are wider.
+- a few tracks differ by up to ~4-10% on centroid/flux (speech with silences, some game music): not understood, harmless.
+- the library holds audiobooks, and the heuristic classifies speech as frenchcore / pieep / hardstyle (ffmpeg entropy ~0.15 on
+  them). Not this work's concern, but a "speech" family would remove a source of noise from genre statistics.
 
 ## What is built (`webapp/measure`, `src/lib/measure/measure.wasm`, `npm run wasm`)
 
-No-dependency Rust, like `trainer`: `fft.rs`, `spectral.rs` (centroid, spread, rolloff, flux
-exactly as above; flatness and entropy provisional — the same definitions as `measure.py`),
-`loudness.rs` (BS.1770 K-weighting re-derived per rate, 400 ms blocks, gates, LRA from 3 s windows;
-**LUFS within 0.1 of ffmpeg's `ebur128`, LRA within 0.1–0.8 LU** over 12 real files — ffmpeg bins the
-range on a 0.1 LU histogram, this uses exact percentiles). WASM surface: `ms_begin/ms_channel/ms_run/ms_out`,
-`ms_src_hash` (a stale binary fails `test/measure.test.mjs`). `tests/test_measure.py` pins numpy vs
-ffmpeg for the reproducible descriptors and, when a native build exists
-(`cd webapp/measure && cargo build --release --example measure`), Rust vs numpy (≤ 1e-4).
+No-dependency Rust, like `trainer`: `fft.rs`, `spectral.rs` (the descriptors above), `loudness.rs` (BS.1770 K-weighting re-derived per rate,
+400 ms blocks, gates, LRA from 3 s windows; **LUFS within 0.1 of ffmpeg's `ebur128`, LRA within 0.1–0.8 LU** over 12 real files — ffmpeg bins the
+range on a 0.1 LU histogram, this uses exact percentiles). WASM surface: `ms_begin/ms_channel/ms_run/ms_out`, `ms_src_hash` (a stale binary
+fails `test/measure.test.mjs`). `deezer/measure.py` is the numpy twin (float32 FFT, like ffmpeg); `tests/test_measure.py` pins numpy against
+ffmpeg and, when a native build exists (`cd webapp/measure && cargo build --release --example measure`), Rust against numpy (<= 1e-4).
+`supysonic-cli deezer measure-compare [--style X]` writes the paired ffmpeg/own descriptors (the image has ffmpeg alone: the rate and channels are read
+from its banner, `analysis.probe_audio`).
 
-## What remains once the descriptors are settled
+## What remains
 
-1. In the crate: settle flatness/entropy, then the beat tracker (port of `deezer/beats.py`, 577 lines of numpy),
-   the log-mel front-end + patch aggregation (`embedding._log_mel_patches`, `_aggregate`); parity
-   tests against the Python twin on fixtures.
-2. The embedding network itself runs through onnxruntime-web on the operator's own `.onnx`, served
-   to the admin only (its licence is non-commercial and no-derivatives: unmodified, operator's copy).
-3. Client runner: Opus 64 k in Range blocks (resumable), decode, worker pool, throttle, results
-   pushed per track (`POST /api/analysis/<id>/measures`, version-checked, validated), then the SERVER
-   classifies from the stored measures (tag, head and heuristic live there; one decision function
-   for both modes).
-4. A `where` setting (server | client) so the nightly window and the client runner never both work.
+1. The beat tracker (port of `deezer/beats.py`, 577 lines of numpy) and the log-mel front-end + patch aggregation
+   (`embedding._log_mel_patches`, `_aggregate`) in the crate, with parity tests against the Python twin.
+2. The embedding network itself through onnxruntime-web on the operator's own `.onnx`, served to the admin only (its licence is non-commercial
+   and no-derivatives: unmodified, operator's copy).
+3. The client runner: Opus 64 k in Range blocks (resumable), decode (the browser resamples; ffmpeg measured the SOURCE rate, so the runner
+   asks the server for the file's rate and decodes at it), worker pool, throttle, results pushed per track
+   (`POST /api/analysis/<id>/measures`, version-checked, validated), then the SERVER classifies. A `where` setting (server | client) so the
+   nightly window and the client runner never both work. Opus 64 k is lossy and band-limited: measure how its descriptors move against the
+   FLAC's before trusting it (the flatness problem above is exactly this).

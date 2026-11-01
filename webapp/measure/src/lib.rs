@@ -1,9 +1,8 @@
 //! NSupySonic's whole-track measures, for analysis on the client PC.
 //!
-//! WIP (preparation): the spectral descriptors and loudness are here; the beat
-//! tracker and the log-mel front-end are not yet, and flatness / entropy await
-//! the calibration described in docs/agents/analysis-genre.md (Analysis on the client PC). Nothing in the app
-//! loads this yet.
+//! WIP (preparation): the spectral descriptors and loudness are here and agree with
+//! ffmpeg's (docs/agents/analysis-genre.md, "Analysis on the client PC"); the beat
+//! tracker and the log-mel front-end are not yet. Nothing in the app loads this.
 
 pub mod fft;
 pub mod loudness;

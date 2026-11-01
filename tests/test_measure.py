@@ -5,11 +5,10 @@
 
 """deezer/measure.py (the numpy twin) against ffmpeg and against the Rust crate.
 
-WIP groundwork for analysing on the client PC (docs/claude/client-analysis.md).
-Pins what is KNOWN to match ffmpeg's aspectralstats — centroid, spread, rolloff,
-flux — and the Rust crate against the twin. Flatness and entropy are NOT pinned to
-ffmpeg: they are the open calibration problem, and a test asserting otherwise
-would be asserting something false."""
+WIP groundwork for analysing on the client PC (docs/agents/analysis-genre.md).
+Pins what matches ffmpeg's aspectralstats — centroid, spread, rolloff, flux, entropy
+(its exact formula) and flatness (on a full-band signal) — and the Rust crate against
+the twin. Flatness on band-limited LOSSY files is the one known difference."""
 
 import json
 import os
@@ -67,14 +66,9 @@ class AgainstFfmpegTestCase(unittest.TestCase):
             mine = M.measure([back], RATE)
         finally:
             shutil.rmtree(d, ignore_errors=True)
-        for key, tol in (("centroid", 0.002), ("spread", 0.002), ("rolloff", 0.002), ("flux_peak", 0.01)):
+        for key, tol in (("centroid", 0.002), ("spread", 0.002), ("rolloff", 0.002), ("flux_peak", 0.01),
+                         ("entropy", 0.002), ("flatness", 0.02)):
             self.assertAlmostEqual(mine[key] / ref[key], 1.0, delta=tol, msg=key)
-
-    def test_the_known_mismatch_is_documented_not_hidden(self):
-        # entropy / flatness are the calibrated stand-ins; this fails the day someone
-        # claims otherwise without redoing client-analysis.md.
-        self.assertEqual(M.ENTROPY_FIT, (1.0, 0.0))
-        self.assertIn("could not reproduce", M.__doc__)
 
 
 @unittest.skipUnless(HAVE_NUMPY and os.path.exists(RUST), "needs numpy and a native build of webapp/measure")
