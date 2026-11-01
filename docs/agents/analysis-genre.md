@@ -534,7 +534,7 @@ data from the owner's library, not from this repo.
 ## The tool for that: `supysonic-cli deezer measure-compare`
 
 Writes `measure-compare.csv`: for N archived tracks spread over the library, ffmpeg's descriptors
-next to `measure.py`'s, with the track's style. Run it on the real library (a few hundred tracks across
+next to `measure.py`'s, with the track's style. The image ships ffmpeg alone (no ffprobe): the rate and channels come from ffmpeg's own banner (`analysis.probe_audio`); `--style` keeps one genre and its sub-genres (the library holds audiobooks too). It fails, rather than writing an empty file, when nothing could be measured. Run it on the real library (a few hundred tracks across
 the hard genres), keep the CSV; the new definitions and thresholds are fitted on it.
 
 ## What is built (`webapp/measure`, `src/lib/measure/measure.wasm`, `npm run wasm`)

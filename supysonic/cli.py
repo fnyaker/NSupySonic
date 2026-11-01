@@ -719,10 +719,13 @@ def deezer_analyze(config, force, limit, workers):
 @deezer.command("measure-compare")
 @click.option("--limit", type=int, default=200, show_default=True,
               help="How many archived tracks to measure (spread evenly over the library).")
+@click.option("--style", "styles", multiple=True,
+              help="Only tracks whose genre is this one or under it in the tree "
+                   "(repeatable): e.g. --style Hardcore --style Hardstyle.")
 @click.option("--out", type=click.Path(dir_okay=False), default="measure-compare.csv",
               show_default=True, help="Where to write the per-track CSV.")
 @click.pass_obj
-def deezer_measure_compare(config, limit, out):
+def deezer_measure_compare(config, limit, styles, out):
     """Measure tracks with ffmpeg's filters AND with our own spectral code.
 
     The client-side analysis can only reuse the server's classifier if its numbers
@@ -743,25 +746,30 @@ def deezer_measure_compare(config, limit, out):
     from .deezer import analysis as ana
     from .deezer import measure as M
 
-    rows = list(Track.select().join(TrackAnalysis, on=(TrackAnalysis.track == Track.id))
-                .where(Track.last_modification > 0).order_by(Track.id))
+    query = (Track.select().join(TrackAnalysis, on=(TrackAnalysis.track == Track.id))
+             .where(Track.last_modification > 0))
+    if styles:
+        from . import discover, genretree
+
+        nodes = [n for n in (genretree.get().node(x) for x in styles) if n]
+        if not nodes:
+            raise ClickException("unknown style: " + ", ".join(styles))
+        query = query.where(TrackAnalysis.style.in_(list(discover.style_names(nodes))))
+    rows = list(query.order_by(Track.id))
     rows = [t for t in rows if t.path and os.path.isfile(t.path)]
     if not rows:
         raise ClickException("no archived, analysed track to measure")
     step = max(1, len(rows) // limit)
     rows = rows[::step][:limit]
     keys = ("centroid", "spread", "flatness", "flatness_hi", "rolloff", "flux_peak", "entropy")
+    written = 0
     with open(out, "w", newline="") as fp:
         w = csv.writer(fp)
         w.writerow(["track", "style", "rate", "channels"] + [f"ffmpeg_{k}" for k in keys]
                    + [f"own_{k}" for k in keys])
         for i, t in enumerate(rows, 1):
             try:
-                info = json.loads(subprocess.run(
-                    ["ffprobe", "-v", "0", "-select_streams", "a:0", "-show_entries",
-                     "stream=sample_rate,channels", "-of", "json", t.path],
-                    capture_output=True, text=True, check=True).stdout)["streams"][0]
-                rate, ch = int(info["sample_rate"]), int(info["channels"])
+                rate, ch = ana.probe_audio(t.path)
                 ref = ana._spectral(t.path)
                 raw = subprocess.run(
                     ["ffmpeg", "-v", "0", "-t", str(ana.MAX_SECONDS), "-i", t.path,
@@ -772,11 +780,16 @@ def deezer_measure_compare(config, limit, out):
                 style = t.analysis.get().style if t.analysis.count() else ""
                 w.writerow([t.title, style, rate, ch] + [round(ref[k], 5) for k in keys]
                            + [round(mine[k], 5) for k in keys])
+                written += 1
             except Exception as exc:
                 click.echo(f"  skipped {t.path}: {exc}")
             if i % 10 == 0:
                 click.echo(f"  {i}/{len(rows)}")
-    click.echo(f"Wrote {out}")
+    if not written:
+        raise ClickException(
+            "no track could be measured (see the reasons above): nothing worth keeping in " + out
+        )
+    click.echo(f"Wrote {written} tracks to {out}")
 
 
 @deezer.command("bpm-audit")

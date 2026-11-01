@@ -1504,6 +1504,31 @@ def audit_published_tempo(provider, limit=200, progress=None):
     return stats
 
 
+_STREAM_LINE = re.compile(r"Stream #\d+:\d+[^:]*: Audio: [^,]+, (\d+) Hz, ([^,]+)")
+_CHANNELS = {"mono": 1, "stereo": 2, "2.1": 3, "quad": 4, "4.0": 4, "5.0": 5, "5.1": 6,
+             "6.1": 7, "7.1": 8}
+
+
+def probe_audio(path):
+    """``(sample rate, channels)`` of the first audio stream, read from ffmpeg's
+    own banner — the image ships ffmpeg alone, no ffprobe. ``ValueError`` with
+    ffmpeg's words when there is no audio stream to read."""
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-i", path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60, check=False,
+    )
+    err = proc.stderr.decode("utf-8", "replace")
+    m = _STREAM_LINE.search(err)
+    if not m:
+        raise ValueError(ffmpeg_tail(err) or "no audio stream")
+    layout = m.group(2).strip()
+    channels = _CHANNELS.get(layout.split("(")[0])
+    if channels is None:
+        n = re.match(r"(\d+) channels", layout)
+        channels = int(n.group(1)) if n else 2
+    return int(m.group(1)), channels
+
+
 def analyze_file(path, with_embedding=True):
     """Measure an audio file that is NOT a library track (a 30 s preview): the
     same spectral pass, tempo and extractor as ``analyze_track_verbose`` and the
