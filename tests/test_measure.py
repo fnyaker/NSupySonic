@@ -30,6 +30,7 @@ from supysonic.deezer import analysis as ana
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUST = os.path.join(ROOT, "webapp", "measure", "target", "release", "examples", "measure")
+RUST_MEL = os.path.join(ROOT, "webapp", "measure", "target", "release", "examples", "mel")
 RUST_TEMPO = os.path.join(ROOT, "webapp", "measure", "target", "release", "examples", "tempo")
 RATE = 44100
 
@@ -151,3 +152,49 @@ class RustTempoTestCase(unittest.TestCase):
                 self.assertGreaterEqual(same / len(py["beats"]), 0.98, bpm)
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+
+@unittest.skipUnless(HAVE_NUMPY and os.path.exists(RUST_MEL),
+                     "needs numpy and a native build of webapp/measure (examples/mel)")
+class RustMelTestCase(unittest.TestCase):
+    """The extractor's front-end and aggregation in Rust against embedding.py: a head
+    trained on the server's vectors must read the client's, so the numbers must be the same."""
+
+    def _samples(self, seconds=70, seed=3):
+        rng = np.random.default_rng(seed)
+        n = 16000 * seconds
+        t = np.arange(n) / 16000
+        x = 0.3 * np.sin(2 * np.pi * 330 * t) * (1 + np.sin(2 * np.pi * 0.25 * t)) + 0.05 * rng.standard_normal(n)
+        for k in range(seconds * 2):
+            s = int(k * 0.5 * 16000)
+            m = np.arange(2000)
+            x[s:s + 2000] += 0.6 * np.sin(2 * np.pi * (60 + 80 * np.exp(-m / 300)) * m / 16000) * np.exp(-m / 700)
+        return x.astype(np.float32)
+
+    def test_patches_levels_and_the_stored_vector_match(self):
+        import struct
+
+        from supysonic.deezer import embedding as E
+
+        s = self._samples()
+        offs = E.patch_offsets(len(s))
+        py = E._log_mel_patches(s, offs)
+        loud = E.patch_loudness(s, offs)
+        out = subprocess.run([RUST_MEL], input=s.astype("<f4").tobytes(), capture_output=True, check=True).stdout
+        n = struct.unpack("<I", out[:4])[0]
+        self.assertEqual(list(struct.unpack(f"<{n}I", out[4:4 + 4 * n])), offs)
+        p = 4 + 4 * n
+        patches = np.frombuffer(out[p:p + 4 * n * 128 * 96], "<f4").reshape(n, 128, 96)
+        self.assertLess(float(np.abs(patches - py).max()), 1e-4)
+        rows = np.random.default_rng(1).standard_normal((n, 1280)).astype(np.float32)
+        ra = np.frombuffer(subprocess.run(
+            [RUST_MEL, "aggregate"],
+            input=struct.pack("<I", n) + rows.tobytes() + np.asarray(loud, "<f4").tobytes(),
+            capture_output=True, check=True).stdout, "<f4")
+        self.assertEqual(len(ra), 3840)
+        self.assertLess(float(np.abs(ra - E._aggregate(rows, loud)).max()), 1e-5)
+
+    def test_short_tracks_give_no_patches(self):
+        from supysonic.deezer import embedding as E
+
+        self.assertEqual(E.patch_offsets(1000), [])

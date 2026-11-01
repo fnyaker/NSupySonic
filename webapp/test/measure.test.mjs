@@ -126,3 +126,45 @@ test("no beat gives no tempo, and a hostile chunk is refused", () => {
   assert.equal(x.tp_chunk(0), 0);
   assert.equal(x.tp_chunk((1 << 20) + 1), 0);
 });
+
+// -- the extractor's front-end and aggregation -------------------------------------------
+
+function melPatches(samples) {
+  const n = x.mel_plan(samples.length);
+  for (let k = 0; k < n; k++) {
+    const at = x.mel_offset(k);
+    new Float32Array(x.memory.buffer, x.mel_segment(k), 33024).set(samples.subarray(at, at + 33024));
+  }
+  assert.equal(x.mel_run(), n ? 1 : 0);
+  return n;
+}
+
+test("a track yields patches spread over it, log-mel shaped and finite", () => {
+  const rate = 16000, s = new Float32Array(rate * 90);
+  for (let i = 0; i < s.length; i++) s[i] = 0.3 * Math.sin((2 * Math.PI * 440 * i) / rate) * (i % (rate * 2) < rate ? 1 : 0.2);
+  const n = melPatches(s);
+  assert.ok(n >= 20 && n <= 60, `patches ${n}`);
+  assert.equal(x.mel_offset(0), 0);
+  assert.ok(x.mel_offset(n - 1) <= s.length - 33024);
+  const p = new Float32Array(x.memory.buffer, x.mel_patches(), n * 128 * 96);
+  assert.ok(p.every(Number.isFinite));
+  assert.ok(p.some((v) => v > 1), "a loud tone reaches the log scale's upper range");
+});
+
+test("too short or absurdly long a track is refused", () => {
+  assert.equal(x.mel_plan(1000), 0);
+  assert.equal(x.mel_plan(0xffffffff), 0);
+});
+
+test("the stored vector is 3840 numbers: unit mean+spread block, then the loud half", () => {
+  const rate = 16000, s = new Float32Array(rate * 60);
+  for (let i = 0; i < s.length; i++) s[i] = 0.2 * Math.sin((2 * Math.PI * 220 * i) / rate);
+  const n = melPatches(s);
+  const rows = new Float32Array(x.memory.buffer, x.mel_rows(), n * 1280);
+  let seed = 7;
+  for (let i = 0; i < rows.length; i++) { seed = (seed * 1103515245 + 12345) & 0x7fffffff; rows[i] = seed / 0x7fffffff - 0.5; }
+  const v = new Float32Array(x.memory.buffer, x.mel_aggregate(), 3840).slice();
+  const norm = (a) => Math.sqrt(a.reduce((t, e) => t + e * e, 0));
+  assert.ok(Math.abs(norm(v.subarray(0, 2560)) - 1) < 1e-4, "the v2 vector is unit");
+  assert.ok(Math.abs(norm(v.subarray(2560)) - norm(v.subarray(0, 1280))) < 1e-4, "the loud block weighs what the mean block does");
+});
