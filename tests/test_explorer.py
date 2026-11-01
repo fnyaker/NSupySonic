@@ -177,6 +177,12 @@ class ExploreTestCase(_Library):
         self.assertEqual((c.provider, c.ref), ("deezer", "900001"))
         self.assertTrue(c.why.startswith("Une découverte"))
         self.assertEqual(c.info["title"], "T1")
+        # a guest (content-only) is never offered one
+        from supysonic.db import User
+
+        guest = User.create(name="guest", password="x", salt="x", admin=False)
+        gp = discover.track_candidates(guest, discover.profile(guest, fresh=True), random.Random(1))
+        self.assertFalse([k for k in gp if isinstance(k, str) and k.startswith("deezer:9000")])
         # taken into the library (played, liked): no longer a find
         t = Track.select().first()
         Track.update(deezer_id="900001").where(Track.id == t.id).execute()
