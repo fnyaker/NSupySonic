@@ -6,6 +6,7 @@
 
 pub mod fft;
 pub mod loudness;
+pub mod lowband;
 pub mod mel;
 pub mod spectral;
 pub mod tempo;
