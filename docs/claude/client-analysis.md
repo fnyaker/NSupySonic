@@ -2,7 +2,7 @@
 
 > Part of the project docs split out of CLAUDE.md (index: `CLAUDE.md`). Read when: working on running the analysis in the browser (Rust/WASM), on `deezer/measure.py`, or on anything that changes how `centroid/spread/flatness/entropy/rolloff/flux` are measured.
 
-**Status: NOT built.** The goal (measure, embed and classify on the admin's PC, results pushed per
+**Status: WIP, preparation — not wired into the app.** The Rust crate below exists and is tested; nothing loads it, no endpoint receives its results, and the classifier is not changed. The goal (measure, embed and classify on the admin's PC, results pushed per
 track, resumable) hit a numerical wall that has to be decided before any Rust is written.
 
 ## What was established (measured, `supysonic/deezer/measure.py`)
@@ -45,10 +45,20 @@ Writes `measure-compare.csv`: for N archived tracks spread over the library, ffm
 next to `measure.py`'s, with the track's style. Run it on the real library (a few hundred tracks across
 the hard genres), keep the CSV; the new definitions and thresholds are fitted on it.
 
+## What is built (`webapp/measure`, `src/lib/measure/measure.wasm`, `npm run wasm`)
+
+No-dependency Rust, like `trainer`: `fft.rs`, `spectral.rs` (centroid, spread, rolloff, flux
+exactly as above; flatness and entropy provisional — the same definitions as `measure.py`),
+`loudness.rs` (BS.1770 K-weighting re-derived per rate, 400 ms blocks, gates, LRA from 3 s windows;
+**LUFS within 0.1 of ffmpeg's `ebur128`, LRA within 0.1–0.8 LU** over 12 real files — ffmpeg bins the
+range on a 0.1 LU histogram, this uses exact percentiles). WASM surface: `ms_begin/ms_channel/ms_run/ms_out`,
+`ms_src_hash` (a stale binary fails `test/measure.test.mjs`). `tests/test_measure.py` pins numpy vs
+ffmpeg for the reproducible descriptors and, when a native build exists
+(`cd webapp/measure && cargo build --release --example measure`), Rust vs numpy (≤ 1e-4).
+
 ## What remains once the descriptors are settled
 
-1. Rust crate `webapp/measure` (no dependencies, like `trainer`): the descriptors above, EBU R128
-   LUFS/LRA (replacing ebur128), the beat tracker (port of `deezer/beats.py`, 577 lines of numpy),
+1. In the crate: settle flatness/entropy, then the beat tracker (port of `deezer/beats.py`, 577 lines of numpy),
    the log-mel front-end + patch aggregation (`embedding._log_mel_patches`, `_aggregate`); parity
    tests against the Python twin on fixtures.
 2. The embedding network itself runs through onnxruntime-web on the operator's own `.onnx`, served

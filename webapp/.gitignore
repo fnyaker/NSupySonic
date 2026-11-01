@@ -4,3 +4,4 @@ rhythm/target-simd/
 appcore/target/
 trainer/target/
 trainer/target-simd/
+measure/target/
