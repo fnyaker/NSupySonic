@@ -186,6 +186,13 @@ class ExploreTestCase(_Library):
         X.prune()
         self.assertIsNone(Discovery.get_or_none(Discovery.deezer_id == "900001"))
 
+    def test_the_cached_pool_never_crosses_databases(self):
+        import time
+
+        # a copy kept for ANOTHER database (as the previous test's) must not be served
+        X._pool_cache = (time.monotonic(), -1, [("999", "Frenchcore", {"title": "stale"})])
+        self.assertEqual(X.pool_rows(), [])
+
     def test_the_explorer_switches_are_the_admins_and_are_cleaned(self):
         r = self.client.put("/api/explorer", json={"enabled": False, "archive": True, "pool": 99999})
         self.assertEqual(r.status_code, 200)

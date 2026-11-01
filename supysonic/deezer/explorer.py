@@ -361,26 +361,30 @@ def explore_once(provider, throttle, *, rng=None, targets=TARGETS_PER_BATCH,
 # -- consuming the pool -----------------------------------------------------
 
 
-_pool_cache = (0.0, [])
+_pool_cache = (0.0, None, [])
 POOL_TTL = 60.0
 
 
 def pool_rows(limit=300):
     """``[(deezer_id, style, info dict)]`` of the verified finds nobody has taken
     into the library yet, newest first: what the Flow may offer. Kept a minute:
-    the Flow asks on every pick and the pool moves a few titles an hour."""
+    the Flow asks on every pick and the pool moves a few titles an hour. The
+    copy belongs to ONE database (another one, as in a test, never reads it)."""
+    from ..db import db
+
     global _pool_cache
-    at, kept = _pool_cache
-    if time.monotonic() - at < POOL_TTL:
+    at, owner, kept = _pool_cache
+    here = id(db.obj)
+    if owner == here and time.monotonic() - at < POOL_TTL:
         return kept
     rows = _pool_rows(limit)
-    _pool_cache = (time.monotonic(), rows)
+    _pool_cache = (time.monotonic(), here, rows)
     return rows
 
 
 def _forget_pool():
     global _pool_cache
-    _pool_cache = (0.0, [])
+    _pool_cache = (0.0, None, [])
 
 
 def _pool_rows(limit):
