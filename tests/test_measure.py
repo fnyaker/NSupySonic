@@ -93,3 +93,30 @@ class RustAgainstTwinTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+class ProbeTestCase(unittest.TestCase):
+    """The image ships ffmpeg alone: the rate and channel count are read from its banner."""
+
+    def _make(self, d, name, rate, layout, codec_args=()):
+        path = os.path.join(d, name)
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate={rate}:duration=1",
+             "-ac", str(layout), *codec_args, path], check=True)
+        return path
+
+    def test_rate_and_channels_without_ffprobe(self):
+        d = tempfile.mkdtemp()
+        try:
+            for name, rate, ch, extra in (
+                ("a.flac", 44100, 2, ()), ("b.flac", 48000, 1, ()),
+                ("c.wav", 22050, 2, ()), ("d.mp3", 44100, 2, ("-b:a", "128k")),
+            ):
+                self.assertEqual(ana.probe_audio(self._make(d, name, rate, ch, extra)), (rate, ch), name)
+            with open(os.path.join(d, "x.flac"), "wb") as fp:
+                fp.write(b"not audio")
+            with self.assertRaises(ValueError):
+                ana.probe_audio(os.path.join(d, "x.flac"))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
