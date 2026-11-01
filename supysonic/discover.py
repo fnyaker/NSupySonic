@@ -199,6 +199,12 @@ def profile(user, fresh=False) -> Taste:
 
 
 def invalidate(user=None):
+    try:
+        from .deezer import explorer
+
+        explorer._forget_pool()
+    except Exception:  # nothing to forget
+        pass
     with _cache_lock:
         if user is None:
             _cache.clear()
@@ -524,9 +530,35 @@ def track_candidates(user, taste, rng, with_catalog=True):
             styles[style] = g
         _offer(pool, Cand(tid, 0.45 + 0.5 * g, max(0.1, 1.0 - g), f"Un peu de {style}",
                           track=tid, artist=aid))
+    if with_catalog:
+        _offer_discoveries(pool, genres, styles)
     if disliked:
         apply_dislikes(pool, disliked)
     return pool
+
+
+def _offer_discoveries(pool, genres, styles):
+    """The explorer's finds (supysonic/deezer/explorer.py): titles of a genre
+    the engine knows, verified on their preview, that the library does not hold.
+    Offered like the library's unplayed titles, by how far their genre is from
+    the taste — playing one archives it, as any play does."""
+    try:
+        from .deezer import explorer
+
+        rows = explorer.pool_rows()
+    except Exception:  # best effort: a missing table or a bad row is no reason to fail a Flow
+        return
+    for dz_id, style, info in rows:
+        key = f"deezer:{dz_id}"
+        if key in pool:
+            continue
+        g = styles.get(style)
+        if g is None:
+            g = min(1.0, min(genretree.distance(style, s) + 0.4 * (1.0 - w) for s, w in genres)) if genres else 0.6
+            styles[style] = g
+        _offer(pool, Cand(key, 0.45 + 0.5 * g, max(0.1, 1.0 - g), f"Une découverte : {style}",
+                          provider="deezer", ref=dz_id, artist=info.get("artist_ref") or None,
+                          artist_ref=info.get("artist_ref") or None, info=info))
 
 
 def apply_dislikes(pool, disliked):

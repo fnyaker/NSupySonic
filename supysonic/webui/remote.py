@@ -191,6 +191,7 @@ POLICY = {
     "track_gains": "read",  # a POST, and a read
     "flow": "read",
     "flow_next": "read",
+    "explorer_settings": "admin",
     "recommend": "read",
     "discover_prefs": "read",
     "discover_prefs_set": "full",

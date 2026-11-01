@@ -36,7 +36,7 @@ from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "20261101"
+SCHEMA_VERSION = "20261102"
 
 
 def now():
@@ -960,6 +960,30 @@ class PlaylistTrack(_Model):
     index = IntegerField()
 
 
+class Discovery(_Model):
+    """A track the background explorer found on the provider for a genre the
+    engine knows, listened to for thirty seconds and VERIFIED to sound like it.
+
+    Deliberately not a ``Track``: nothing is downloaded or archived for it. It
+    becomes a library track only when somebody plays or likes it (the ordinary
+    archive-on-play path), unless the operator switched "archive everything" on.
+    ``state`` is ``new`` (offered by the Flow and the radios) or ``rejected``
+    (looked at and not what was searched for — kept so it is never fetched again).
+    """
+
+    id = AutoField()
+    deezer_id = CharField(20, unique=True)
+    state = CharField(10, default="new", index=True)
+    # The genre that was searched for, and what the analysis made of the preview.
+    target = CharField(48)
+    style = CharField(48, null=True)
+    confidence = FloatField(default=0)
+    bpm = FloatField(null=True)
+    found = DateTimeField(default=now)
+    # What the Flow needs to offer it (title, artist, album, cover, duration), JSON.
+    payload = TextField(null=True)
+
+
 class TrackNeighbor(_Model):
     """The tracks that sound closest to ``track``, best first, so a radio or a
     "similar" shelf is one indexed read (supysonic/similar.py fills it)."""
@@ -1709,6 +1733,7 @@ def _migration_order():
         StarredPlaylist,  # after Playlist and User
         PlaylistTrack,
         TrackNeighbor,  # after Track
+        Discovery,
         TrackEnrichment,  # after Track
         RadioStation,
         PodcastChannel,

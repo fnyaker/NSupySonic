@@ -261,7 +261,7 @@ class RoutesTestCase(_Library):
         self.app.deezer = None  # whatever Deezer is doing, the screens answer
         discover.invalidate()
         n = count_statements(lambda: self.client.get("/api/recommend?d=0.5&seed=q"))
-        self.assertLessEqual(n, 41)  # 40, plus the dislikes
+        self.assertLessEqual(n, 42)  # 40, plus the dislikes, plus the explorer's finds (cached 60 s)
         n = count_statements(lambda: self.client.get("/api/flow?d=0.5&seed=q"))
         self.assertLessEqual(n, 30)
         self.assertEqual(self.client.get("/api/releases").status_code, 200)

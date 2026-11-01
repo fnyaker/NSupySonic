@@ -153,6 +153,21 @@ def discover_prefs_set():
 # -- the Flow and the recommendations -------------------------------------------------
 
 
+@webapi.route("/explorer", methods=["GET", "PUT"])
+@login_required
+@admin_required
+def explorer_settings():
+    """The background explorer's state and its switches: on/off, whether what
+    it finds is archived at once (default no: found music is archived only when
+    it is played or liked), and how many finds it keeps ready."""
+    from ..deezer import explorer
+
+    if request.method == "PUT":
+        explorer.save_settings(request.get_json(silent=True))
+        discover.invalidate()
+    return jsonify(explorer.status())
+
+
 @webapi.route("/flow", methods=["GET", "POST"])
 @login_required
 def flow():
