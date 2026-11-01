@@ -716,6 +716,69 @@ def deezer_analyze(config, force, limit, workers):
     _echo_failures(stats)
 
 
+@deezer.command("measure-compare")
+@click.option("--limit", type=int, default=200, show_default=True,
+              help="How many archived tracks to measure (spread evenly over the library).")
+@click.option("--out", type=click.Path(dir_okay=False), default="measure-compare.csv",
+              show_default=True, help="Where to write the per-track CSV.")
+@click.pass_obj
+def deezer_measure_compare(config, limit, out):
+    """Measure tracks with ffmpeg's filters AND with our own spectral code.
+
+    The client-side analysis can only reuse the server's classifier if its numbers
+    agree with ffmpeg's. They do for centroid, spread, rolloff and flux; flatness
+    and entropy do not (they depend on ffmpeg's FFT noise floor and on a definition
+    we could not recover), and the classifier's hard-dance rules read both. This
+    writes the two sets side by side, with the tagged genre, so the mapping (or new
+    thresholds) can be fitted on YOUR music. Read-only: nothing is stored.
+    """
+    import csv
+    import json
+    import os
+    import subprocess
+
+    import numpy as np
+
+    from .db import Track, TrackAnalysis
+    from .deezer import analysis as ana
+    from .deezer import measure as M
+
+    rows = list(Track.select().join(TrackAnalysis, on=(TrackAnalysis.track == Track.id))
+                .where(Track.last_modification > 0).order_by(Track.id))
+    rows = [t for t in rows if t.path and os.path.isfile(t.path)]
+    if not rows:
+        raise ClickException("no archived, analysed track to measure")
+    step = max(1, len(rows) // limit)
+    rows = rows[::step][:limit]
+    keys = ("centroid", "spread", "flatness", "flatness_hi", "rolloff", "flux_peak", "entropy")
+    with open(out, "w", newline="") as fp:
+        w = csv.writer(fp)
+        w.writerow(["track", "style", "rate", "channels"] + [f"ffmpeg_{k}" for k in keys]
+                   + [f"own_{k}" for k in keys])
+        for i, t in enumerate(rows, 1):
+            try:
+                info = json.loads(subprocess.run(
+                    ["ffprobe", "-v", "0", "-select_streams", "a:0", "-show_entries",
+                     "stream=sample_rate,channels", "-of", "json", t.path],
+                    capture_output=True, text=True, check=True).stdout)["streams"][0]
+                rate, ch = int(info["sample_rate"]), int(info["channels"])
+                ref = ana._spectral(t.path)
+                raw = subprocess.run(
+                    ["ffmpeg", "-v", "0", "-t", str(ana.MAX_SECONDS), "-i", t.path,
+                     "-map", "0:a:0", "-f", "f32le", "pipe:1"],
+                    capture_output=True, check=True).stdout
+                a = np.frombuffer(raw, np.float32).reshape(-1, ch)
+                mine = M.measure([a[:, c] for c in range(ch)], rate)
+                style = t.analysis.get().style if t.analysis.count() else ""
+                w.writerow([t.title, style, rate, ch] + [round(ref[k], 5) for k in keys]
+                           + [round(mine[k], 5) for k in keys])
+            except Exception as exc:
+                click.echo(f"  skipped {t.path}: {exc}")
+            if i % 10 == 0:
+                click.echo(f"  {i}/{len(rows)}")
+    click.echo(f"Wrote {out}")
+
+
 @deezer.command("bpm-audit")
 @click.option("--limit", type=int, default=200, show_default=True,
               help="How many archived tracks to check, most played first.")
