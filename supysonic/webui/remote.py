@@ -192,6 +192,7 @@ POLICY = {
     "flow": "read",
     "flow_next": "read",
     "explorer_settings": "admin",
+    "flow_styles": "read",
     "recommend": "read",
     "discover_prefs": "read",
     "discover_prefs_set": "full",

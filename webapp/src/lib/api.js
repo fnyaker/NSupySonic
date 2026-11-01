@@ -286,6 +286,8 @@ export const api = {
   homeMix: (id) => req("/home/mix/" + encodeURIComponent(id)),
   // The Flow's next title(s), chosen now with what the session said
   // (lib/flow.js builds the body).
+  // The genres a Flow can be set to, with what the library holds of each.
+  flowStyles: () => req("/flow/styles"),
   flowPick: (payload) => req("/flow/next", { method: "POST", body: body(payload) }),
   // The Flow's starting energy notch (null: "Libre").
   setFlowEnergy: (energy) => req("/discover/prefs", { method: "PUT", body: body({ energy }) }),

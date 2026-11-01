@@ -485,6 +485,16 @@ app looked untouched — and the cleanup decides what to drop from exactly this 
   load per core <= 0.5, one preview at a time through a `Throttle`, 1.5 s between Deezer calls, stopping at the first outage (never a
   verdict). The queue's next title may be prefetched like any catalogue title, so a find at the head of the queue can be archived just
   before it plays.
+- **A Flow around a STYLE** (`discover.style_taste`, `styles` on `POST /api/flow` and `/api/flow/next`, `GET /api/flow/styles`,
+  `StylePicker.svelte`, `lib/flow.js#startStyles`): the person's taste is cut down to the chosen genres (a branch means all of
+  it: the weighted tracks, artists and albums whose served genre is `within` one of them) and the taste's genres become the
+  chosen ones, so everything downstream — the known titles, their sound neighbours, the library's unplayed titles by TREE
+  DISTANCE from the style, the discovery band — works unchanged around the style instead of around the whole taste. At
+  level 0 it stays inside the branch, higher levels widen it through the tree. A small genre is not left to the random
+  sample of the library: its own unplayed titles are drawn too (`taste.focus`, the spellings `TrackAnalysis.style` may
+  hold, family ids included). At most 6 styles, names resolved by the tree (an unknown name is a 400, not "everything");
+  a style the person never played has no taste and rests on the library's titles of that genre. The choice lives on the
+  device (`flow.styles`) and rides in the session body.
 - **Energy** (`supysonic/energy.py`, `user_taste.energy`): a 0..1 RANK in the library from the analysis (LUFS,
   −LRA, centroid, flux peak, entropy, the tempo only when its confidence >= 0.3 — Spotify's energy, re-built from
   what we measure), cached 10 min and rebuilt on a background thread. The notch (Très calme 0.1 … Intense 0.9, or
