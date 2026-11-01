@@ -33,7 +33,7 @@ from playhouse.db_url import parseresult_to_dict, schemes
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-SCHEMA_VERSION = "20261012"
+SCHEMA_VERSION = "20261102"
 
 
 def now():
@@ -707,6 +707,14 @@ class TrackAnalysis(_Model):
     style = CharField(24, null=True)
     style_confidence = FloatField(default=0)
     archetype = CharField(16, null=True)
+    # Which generation of the pipeline produced each stage of this row, so the
+    # library can be asked "what is out of date, and at which step" in one SQL
+    # count instead of reading files: ``version`` is the measurement
+    # (ANALYSIS_VERSION), ``embed_version`` the stored vector's layout
+    # (EMBED_VERSION, 0 = none / not stamped yet) and ``decided_head`` the genre
+    # head the verdict was last decided under ("none" for no head).
+    embed_version = IntegerField(default=0)
+    decided_head = CharField(40, null=True)
     # Everything else — the descriptors, the archetype mix, the loudness — as
     # JSON, so a later refinement adds a measurement without a migration.
     data = TextField(null=True)
@@ -748,6 +756,30 @@ class TrackTag(_Model):
 
     class Meta:
         primary_key = CompositeKey("track", "tag")
+
+
+class Discovery(_Model):
+    """A track the background explorer found on Deezer for a genre the engine
+    knows, listened to for thirty seconds and VERIFIED to sound like it.
+
+    Deliberately not a ``Track``: nothing is downloaded or archived for it. It
+    becomes a library track only when somebody plays or likes it (the ordinary
+    archive-on-play path), unless the operator switched "archive everything"
+    on. ``state`` is ``new`` (offered to radios) or ``rejected`` (looked at and
+    not what was searched for — kept so it is never fetched again).
+    """
+
+    id = AutoField()
+    deezer_id = CharField(20, unique=True)
+    state = CharField(10, default="new", index=True)
+    # The genre that was searched for, and what the analysis made of the preview.
+    target = CharField(48)
+    style = CharField(48, null=True)
+    confidence = FloatField(default=0)
+    bpm = FloatField(null=True)
+    found = DateTimeField(default=now)
+    # The API track dict the player needs (title, artists, cover…), as JSON.
+    payload = TextField(null=True)
 
 
 class GenreModel(_Model):
@@ -1240,6 +1272,7 @@ def _migration_order():
         GenreTag,
         TrackTag,  # after Track and GenreTag: it references both
         GenreModel,
+        Discovery,
         User,
         ClientPrefs,
         StarredFolder,

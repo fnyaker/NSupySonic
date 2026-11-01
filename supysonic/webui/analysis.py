@@ -35,9 +35,11 @@ run it is about to play, in one call, before any of it starts.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
+import time
 import uuid
 
 from flask import current_app, jsonify, request
@@ -112,6 +114,10 @@ _analysis_job = {
     # whole reason this job was impossible to debug from the app.
     "failures": [],
     "failure_reasons": {},
+    "cancel": False,
+    "stage": None,
+    "mode": None,
+    "embed_done": 0,
 }
 
 
@@ -134,9 +140,47 @@ def _analysis_job_json() -> dict:
         return _job_snapshot(_analysis_job)
 
 
-def _run_analysis(app, force, workers, limit):
+#: How the maintenance job gives way to the people using the app.
+#: ``night`` is the scheduled window (nobody is expected to be there, and the
+#: listening gate stops it the moment somebody is); ``now`` is the button,
+#: pressed in the middle of the day, so it takes half of one worker's time.
+THROTTLE_MODES = {
+    "night": dict(duty=0.9, listen_quiet=45.0, max_load=0.75),
+    "now": dict(duty=0.5, listen_quiet=45.0, max_load=0.6),
+}
+NOW_WORKERS_MAX = 2
+
+#: The Throttle of the job in flight (the studio reads WHY it is paused).
+_throttle = None
+
+_SCHEDULE_KEY = "analysis_schedule"
+SCHEDULE_DEFAULT = {"enabled": True, "at": "03:00", "hours": 6}
+
+
+def _run_analysis(app, force, workers, limit, mode="now", deadline=None):
+    """The whole maintenance pass, in order of cost: re-decide what a new head
+    changes (no audio), measure what is unmeasured or measured by an older
+    release, re-extract what the extractor changed, then re-decide once more
+    with the new vectors. Each stage is resumable and gated by the Throttle."""
     from ..db import close_connection, open_connection
-    from ..deezer.analysis import backfill
+    from ..deezer import analysis as ana
+    from ..deezer import embedding as emb
+    from ..deezer.workload import Throttle
+
+    global _throttle
+
+    def cancelled():
+        with _analysis_lock:
+            if _analysis_job.get("cancel"):
+                return True
+        return deadline is not None and time.time() >= deadline
+
+    throttle = Throttle(stop=cancelled, **THROTTLE_MODES.get(mode, THROTTLE_MODES["now"]))
+    _throttle = throttle
+
+    def set_stage(name):
+        with _analysis_lock:
+            _analysis_job["stage"] = name
 
     with app.app_context():
         try:
@@ -147,32 +191,216 @@ def _run_analysis(app, force, workers, limit):
                 # consistent at this instant — copy it here and the job state
                 # never aliases a container the workers keep mutating.
                 snap = _job_snapshot(stats)
+                snap.pop("workers", None)
                 with _analysis_lock:
                     _analysis_job.update(snap)
 
             provider = getattr(app, "deezer", None)
-            stats = backfill(
-                provider=provider,
-                force=force,
-                limit=limit,
-                workers=workers,
-                on_stats=on_stats,
+            set_stage("measure")
+            stats = ana.backfill(
+                provider=provider, force=force, limit=limit, workers=workers,
+                on_stats=on_stats, throttle=throttle,
             )
             snap = _job_snapshot(stats)
+            snap.pop("workers", None)
             with _analysis_lock:
                 _analysis_job.update(snap)
+            embedded = 0
+            if not cancelled() and not emb.why_unavailable() and not emb.session_error():
+                set_stage("embed")
+                es = ana.backfill_embeddings(
+                    force=False, limit=limit, workers=workers, throttle=throttle,
+                    on_stats=lambda st: _analysis_job.update(embed_done=st.get("done", 0)),
+                )
+                embedded = es.get("done", 0)
+            if not cancelled():
+                set_stage("decide")
+                from . import genre as _wg
+
+                _wg.start_relabel(app)
         except Exception as exc:
             logger.warning("Analysis backfill crashed", exc_info=True)
             with _analysis_lock:
                 _analysis_job["error"] = str(exc)
         finally:
+            _throttle = None
             with _analysis_lock:
                 _analysis_job["running"] = False
+                _analysis_job["stage"] = None
                 _analysis_job["finished"] = now().isoformat()
             try:
                 close_connection()
             except Exception:
                 pass
+
+
+def _effective_workers(requested, mode):
+    from ..deezer.analysis import auto_workers
+
+    n = auto_workers(requested)
+    return min(n, NOW_WORKERS_MAX) if mode == "now" else n
+
+
+def start_job(app, force=False, workers=None, mode="now", deadline=None, total=None):
+    """Start the maintenance job unless one is already running. True if started.
+
+    The one place a job begins — the button, the boot resume and the nightly
+    window all come through here, so they cannot disagree about the state."""
+    effective = _effective_workers(_workers() if workers is None else workers, mode)
+    with _analysis_lock:
+        if _analysis_job["running"]:
+            return False
+        _analysis_job.update(
+            running=True, started=now().isoformat(), finished=None, force=force,
+            workers=effective, total=total or 0, scanned=0, done=0, skipped=0,
+            failed=0, error=None, failures=[], failure_reasons={}, cancel=False,
+            stage="measure", mode=mode, embed_done=0,
+        )
+    threading.Thread(
+        target=_run_analysis, args=(app, force, effective, None, mode, deadline),
+        name="analysis-backfill", daemon=True,
+    ).start()
+    return True
+
+
+def _library_total():
+    return Track.select().where(Track.last_modification > 0).count()
+
+
+def plan():
+    """What is out of date, and at which step — SQL counts, no file read.
+
+    ``current`` is a track fully up to date; the others can overlap (a track
+    measured by an old release is usually also due an embedding and a verdict),
+    so ``todo`` counts DISTINCT tracks with anything left to do."""
+    from ..deezer import embedding as emb
+    from ..deezer.analysis import ANALYSIS_VERSION, current_head_id
+
+    total = _library_total()
+    rows = TrackAnalysis.select().where(TrackAnalysis.version > 0)
+    measured = rows.count()
+    head = current_head_id()
+    extractor = not emb.why_unavailable()
+    stale_measure = TrackAnalysis.select().where(
+        TrackAnalysis.version < ANALYSIS_VERSION).count()
+    stale_embed = (
+        TrackAnalysis.select().where(TrackAnalysis.embed_version < emb.EMBED_VERSION).count()
+        if extractor else 0
+    )
+    stale_decide = TrackAnalysis.select().where(
+        (TrackAnalysis.decided_head.is_null()) | (TrackAnalysis.decided_head != head)
+    ).count()
+    cond = (TrackAnalysis.version < ANALYSIS_VERSION) | (
+        (TrackAnalysis.decided_head.is_null()) | (TrackAnalysis.decided_head != head)
+    )
+    if extractor:
+        cond = cond | (TrackAnalysis.embed_version < emb.EMBED_VERSION)
+    todo_rows = TrackAnalysis.select().where(cond).count()
+    unmeasured = max(0, total - measured)
+    return {
+        "total": total,
+        "unmeasured": unmeasured,
+        "stale_measure": stale_measure,
+        "stale_embed": stale_embed,
+        "stale_decide": stale_decide,
+        "todo": unmeasured + todo_rows,
+        "current": max(0, total - unmeasured - todo_rows),
+        "version": ANALYSIS_VERSION,
+        "embed_version": emb.EMBED_VERSION,
+        "extractor": extractor,
+    }
+
+
+def schedule_settings():
+    row = Meta.get_or_none(Meta.key == _SCHEDULE_KEY)
+    out = dict(SCHEDULE_DEFAULT)
+    if row is not None:
+        try:
+            saved = json.loads(row.value)
+            if isinstance(saved, dict):
+                out.update({k: saved[k] for k in out if k in saved})
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _clean_schedule(data):
+    from ..deezer.scheduler import _parse_at
+
+    at = str(data.get("at", SCHEDULE_DEFAULT["at"]))
+    h, m = _parse_at(at, default=(3, 0))
+    try:
+        hours = max(1, min(23, int(data.get("hours", SCHEDULE_DEFAULT["hours"]))))
+    except (TypeError, ValueError):
+        hours = SCHEDULE_DEFAULT["hours"]
+    return {"enabled": bool(data.get("enabled", True)), "at": f"{h:02d}:{m:02d}", "hours": hours}
+
+
+def _window(settings, at_time):
+    """``(start, end)`` of the window containing ``at_time``, else of the next
+    one to start today. A window may run past midnight, so yesterday's is tried
+    first."""
+    from datetime import timedelta
+
+    h, m = (int(x) for x in settings["at"].split(":"))
+    today = at_time.replace(hour=h, minute=m, second=0, microsecond=0)
+    span = timedelta(hours=settings["hours"])
+    yesterday = today - timedelta(days=1)
+    if yesterday <= at_time < yesterday + span:
+        return yesterday, yesterday + span
+    return today, today + span
+
+
+def window_due(settings, at_time, last_fired):
+    """The deadline (epoch seconds) of a window to run now, or None. A window is
+    run once per day; a restart in the middle of one joins it."""
+    if not settings.get("enabled"):
+        return None
+    start, end = _window(settings, at_time)
+    if not (start <= at_time < end):
+        return None
+    if last_fired == start.date().isoformat():
+        return None
+    return end.timestamp()
+
+
+def schedule_loop(app):
+    """The nightly window: once a day, from ``at`` for ``hours``, run whatever
+    is out of date. Polls once a minute so a change of settings applies at once
+    and a restart inside the window joins it."""
+    import time as _t
+    from datetime import datetime
+
+    def loop():
+        _t.sleep(RESUME_DELAY)
+        last = None
+        while True:
+            try:
+                with app.app_context():
+                    from ..db import close_connection, open_connection
+
+                    open_connection(reuse=True)
+                    try:
+                        settings = schedule_settings()
+                        deadline = window_due(settings, datetime.now(), last)
+                        if deadline is not None:
+                            p = plan()
+                            if p["todo"] and start_job(
+                                app, mode="night", deadline=deadline, total=p["total"]
+                            ):
+                                start, _ = _window(settings, datetime.now())
+                                last = start.date().isoformat()
+                                logger.info("Nightly analysis window: %s tracks to do", p["todo"])
+                            elif not p["todo"]:
+                                start, _ = _window(settings, datetime.now())
+                                last = start.date().isoformat()
+                    finally:
+                        close_connection()
+            except Exception:
+                logger.warning("Analysis schedule check failed", exc_info=True)
+            _t.sleep(60)
+
+    threading.Thread(target=loop, name="analysis-schedule", daemon=True).start()
 
 
 #: Let the server finish coming up before a library job takes the disk.
@@ -188,14 +416,14 @@ def resume_if_interrupted(app):
     otherwise "analyse everything" silently means "analyse everything, unless
     something interrupts you, in which case wait to be asked again", and the
     operator finds out weeks later that two thirds of the library was never
-    measured.
+    measured. It resumes under the same Throttle as everything else.
     """
     from ..deezer.analysis import ANALYSIS_CURSOR_KEY, _checkpoint_read
 
     def start():
-        import time
+        import time as _t
 
-        time.sleep(RESUME_DELAY)
+        _t.sleep(RESUME_DELAY)
         with app.app_context():
             from ..db import close_connection, open_connection
 
@@ -206,7 +434,7 @@ def resume_if_interrupted(app):
                 if state is None and forced is None:
                     return
                 force = state is None
-                total = Track.select().where(Track.last_modification > 0).count()
+                total = _library_total()
             except Exception:
                 logger.debug("Could not read the analysis checkpoint", exc_info=True)
                 return
@@ -215,88 +443,22 @@ def resume_if_interrupted(app):
                     close_connection()
                 except Exception:
                     pass
-        with _analysis_lock:
-            if _analysis_job["running"]:
-                return
-            _analysis_job.update(
-                running=True, started=now().isoformat(), finished=None, force=force,
-                workers=_workers(), total=total, scanned=0, done=0, skipped=0,
-                failed=0, error=None, failures=[], failure_reasons={},
-            )
         logger.info("Resuming the interrupted analysis backfill")
-        _run_analysis(app, force, _workers(), None)
+        start_job(app, force=force, mode="now", total=total)
 
     threading.Thread(target=start, name="analysis-resume", daemon=True).start()
-
-
-def reanalyse_if_stale(app):
-    """Re-measure the library on boot when its verdicts are older than this
-    release's analysis (``ANALYSIS_VERSION``).
-
-    A version bump means a stored verdict would come out differently today —
-    version 5 replaced the tempo estimator with a beat tracker, and a library
-    left on the old figures keeps serving 154 for a 150 BPM track until
-    somebody happens to press the button. The ordinary (not forced) backfill
-    re-measures exactly the stale rows and skips the current ones, so this is
-    the button pressed once, by the release that needs it. Nothing starts when
-    every row is current, when a run is already going (the interrupted-run
-    resume above takes precedence), or without ffmpeg.
-    """
-    from ..deezer.analysis import ANALYSIS_VERSION, ffmpeg_available
-
-    def start():
-        import time
-
-        time.sleep(RESUME_DELAY + 5)
-        if not ffmpeg_available():
-            return
-        with app.app_context():
-            from ..db import close_connection, open_connection
-
-            try:
-                open_connection(reuse=True)
-                stale = (
-                    TrackAnalysis.select(TrackAnalysis.track)
-                    .where(TrackAnalysis.version < ANALYSIS_VERSION)
-                    .limit(1)
-                    .exists()
-                )
-                total = Track.select().where(Track.last_modification > 0).count() if stale else 0
-            except Exception:
-                logger.debug("Could not look for stale analyses", exc_info=True)
-                return
-            finally:
-                try:
-                    close_connection()
-                except Exception:
-                    pass
-        if not stale:
-            return
-        with _analysis_lock:
-            if _analysis_job["running"]:
-                return
-            _analysis_job.update(
-                running=True, started=now().isoformat(), finished=None, force=False,
-                workers=_workers(), total=total, scanned=0, done=0, skipped=0,
-                failed=0, error=None, failures=[], failure_reasons={},
-            )
-        logger.info("Analyses older than version %s: re-measuring the library", ANALYSIS_VERSION)
-        _run_analysis(app, False, _workers(), None)
-
-    threading.Thread(target=start, name="analysis-upgrade", daemon=True).start()
 
 
 @webapi.route("/analysis/backfill", methods=["POST"])
 @login_required
 @admin_required
 def analysis_backfill_start():
-    """(Re)measure the library: tempo, style, and the embedding when possible."""
+    """(Re)measure the library — the "Lancer maintenant" button. Gated by the
+    Throttle like the nightly run: it pauses while anybody listens."""
     from ..deezer.analysis import ffmpeg_available
 
     if not ffmpeg_available():
         return jsonify({"error": "ffmpeg n'est pas installé sur le serveur"}), 400
-    from ..deezer.analysis import auto_workers
-
     data = request.get_json(silent=True) or {}
     force = bool(data.get("force"))
     raw = data.get("workers")
@@ -305,37 +467,44 @@ def analysis_backfill_start():
     except (TypeError, ValueError):
         workers = _workers()
     workers = _set_workers(workers)
-    # What the job will actually run with, so the studio can say "auto (4)"
-    # rather than leaving the operator to guess what auto resolved to.
-    effective = auto_workers(workers)
+    start_job(current_app._get_current_object(), force=force, workers=workers,
+              mode="now", total=_library_total())
+    return jsonify({"ok": True, **_analysis_job_json()})
+
+
+@webapi.route("/analysis/backfill/stop", methods=["POST"])
+@login_required
+@admin_required
+def analysis_backfill_stop():
+    """Ask the running job to stop after the track in hand. It resumes where it
+    left off (the checkpoint) the next time it runs."""
     with _analysis_lock:
         if _analysis_job["running"]:
-            # Snapshot, not a spread of the live dict: the ledger inside
-            # it is a container the worker threads keep appending to.
-            return jsonify({"ok": True, **_job_snapshot(_analysis_job)})
-        _analysis_job.update(
-            running=True,
-            started=now().isoformat(),
-            finished=None,
-            force=force,
-            workers=effective,
-            total=Track.select().where(Track.last_modification > 0).count(),
-            scanned=0,
-            done=0,
-            skipped=0,
-            failed=0,
-            error=None,
-            failures=[],
-            failure_reasons={},
-        )
-    app = current_app._get_current_object()
-    threading.Thread(
-        target=_run_analysis,
-        args=(app, force, workers, None),
-        name="analysis-backfill",
-        daemon=True,
-    ).start()
+            _analysis_job["cancel"] = True
     return jsonify({"ok": True, **_analysis_job_json()})
+
+
+@webapi.route("/analysis/plan")
+@login_required
+@admin_required
+def analysis_plan():
+    """What is out of date and at which step, plus the nightly window."""
+    return jsonify({**plan(), "schedule": schedule_settings()})
+
+
+@webapi.route("/analysis/schedule", methods=["PUT"])
+@login_required
+@admin_required
+def analysis_schedule_set():
+    clean = _clean_schedule(request.get_json(silent=True) or {})
+    row = Meta.get_or_none(Meta.key == _SCHEDULE_KEY)
+    value = json.dumps(clean)
+    if row is None:
+        Meta.create(key=_SCHEDULE_KEY, value=value)
+    else:
+        row.value = value
+        row.save()
+    return jsonify({"ok": True, "schedule": clean})
 
 
 @webapi.route("/analysis/backfill")
@@ -352,6 +521,7 @@ def analysis_backfill_status():
     return jsonify(
         {
             **_analysis_job_json(),
+            "paused": _throttle.reason if _throttle is not None else None,
             "workers_setting": _workers(),
             "workers_auto": auto_workers(0),
         }

@@ -2272,13 +2272,19 @@ def track_radio(track_id):
         return err
     if not _valid_id(track_id):
         return jsonify({"tracks": []})
+    remote = []
     try:
         res = provider.get_track_mix(track_id)
+        remote = _tracks((res or {}).get("data", []))
     except Exception:
         # Seeds autoplay after a track ends — a Deezer hiccup shouldn't 500 it.
         _log_deezer_failure("Track radio failed for %s", track_id)
-        return jsonify({"tracks": []})
-    return jsonify({"tracks": _tracks((res or {}).get("data", []))})
+    # Blended with the library's own "like this" (genre, tempo, artists, a dose of
+    # chance): Deezer's mix alone was near-identical every time, and the library
+    # part still answers when Deezer does not.
+    from .radio import blend_track_radio
+
+    return jsonify({"tracks": blend_track_radio(request.webuser, track_id, remote)})
 
 
 @webapi.route("/radio/artist/<artist_id>")
@@ -4338,6 +4344,7 @@ from . import share  # noqa: E402,F401  isort:skip
 from . import edges  # noqa: E402,F401  isort:skip
 from . import analysis  # noqa: E402,F401  isort:skip
 from . import genre  # noqa: E402,F401  isort:skip
+from . import radio  # noqa: E402,F401  isort:skip
 from . import export  # noqa: E402,F401  isort:skip
 from . import credits  # noqa: E402,F401  isort:skip
 from . import party  # noqa: E402,F401  isort:skip

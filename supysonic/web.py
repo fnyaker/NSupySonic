@@ -74,7 +74,10 @@ def setup_deezer(app):
             from .webui import genre as _wg
 
             _wa.resume_if_interrupted(app)
-            _wa.reanalyse_if_stale(app)
+            _wa.schedule_loop(app)
+            from .deezer import explorer as _ex
+
+            _ex.loop(app)
             _wg.resume_if_interrupted(app)
             _wg.relabel_if_stale(app)
     return app.deezer
@@ -220,6 +223,19 @@ def create_application(config=None):
         "base-uri 'self'; "
         "form-action 'self'"
     )
+
+    # Library maintenance gives way to anybody listening (workload.Throttle). A
+    # stream is the one request whose smoothness the whole box owes the person;
+    # a prefetch (bg=1 / X-NS-Background) is nobody listening yet.
+    @app.before_request
+    def note_listening():
+        path = request.path
+        if path.startswith(("/api/stream/", "/rest/stream", "/rest/download")) and not (
+            request.headers.get("X-NS-Background") == "1" or request.args.get("bg") == "1"
+        ):
+            from .deezer import workload
+
+            workload.touch_listening()
 
     @app.after_request
     def set_security_headers(response):

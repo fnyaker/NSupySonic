@@ -87,6 +87,7 @@
     "/explore": wrap({ asyncComponent: () => import("./routes/Explore.svelte") }),
     "/explore/:genre": wrap({ asyncComponent: () => import("./routes/Explore.svelte") }),
     "/settings": wrap({ asyncComponent: () => import("./routes/Settings.svelte") }),
+    "/radio": wrap({ asyncComponent: () => import("./routes/Radio.svelte") }),
     "/genres": wrap({ asyncComponent: () => import("./routes/Genres.svelte") }),
   };
 

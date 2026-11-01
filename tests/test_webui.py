@@ -11,6 +11,7 @@ import struct
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from supysonic import webui as _webui
 from supysonic.config import DefaultConfig
@@ -5102,7 +5103,8 @@ class TrackAnalysisTestCase(unittest.TestCase):
 
         self._login()
 
-        def fake_backfill(provider=None, force=False, limit=None, workers=1, on_stats=None):
+        def fake_backfill(provider=None, force=False, limit=None, workers=1, on_stats=None,
+                          throttle=None):
             stats = {"scanned": 0, "done": 0, "skipped": 0, "failed": 0, "error": None}
             for _ in range(3):
                 stats["scanned"] += 1
@@ -5130,6 +5132,128 @@ class TrackAnalysisTestCase(unittest.TestCase):
         self.assertEqual(job["scanned"], 3)
         self.assertIsNotNone(job["finished"])
         self.assertIsNone(job["error"])
+
+    # -- versions per track, the plan, the nightly window ------------------
+
+    def _stamped(self, n, **row):
+        from supysonic.db import TrackAnalysis
+        from supysonic.deezer import analysis as ana
+
+        t = self._deezer_track(str(n))
+        t.last_modification = 1
+        t.save()
+        fields = dict(version=ana.ANALYSIS_VERSION, embed_version=0, decided_head=None)
+        fields.update(row)
+        TrackAnalysis.create(track=t, analyzed=now(), **fields)
+        return t
+
+    def test_the_plan_counts_what_is_out_of_date_at_each_step(self):
+        from supysonic.deezer import analysis as ana
+        from supysonic.deezer import embedding as emb
+        from supysonic.webui import analysis as wa
+
+        self._login()
+        head = ana.current_head_id()
+        self._stamped(1, embed_version=emb.EMBED_VERSION, decided_head=head)  # current
+        self._stamped(2, version=ana.ANALYSIS_VERSION - 1,
+                      embed_version=emb.EMBED_VERSION, decided_head=head)  # old measure
+        self._stamped(3, embed_version=emb.EMBED_VERSION, decided_head="old-head")
+        t = self._deezer_track("4")  # archived, never measured
+        t.last_modification = 1
+        t.save()
+        with mock.patch.object(emb, "why_unavailable", lambda: None):
+            p = wa.plan()
+        self.assertEqual(p["total"], 4)
+        self.assertEqual(p["unmeasured"], 1)
+        self.assertEqual(p["stale_measure"], 1)
+        self.assertEqual(p["stale_decide"], 1)
+        self.assertEqual(p["current"], 1)
+        self.assertEqual(p["todo"], 3)
+        body = self.client.get("/api/analysis/plan").json
+        self.assertIn("schedule", body)
+
+    def test_a_row_says_which_head_decided_it_and_a_new_head_restamps(self):
+        from supysonic.db import TrackAnalysis
+        from supysonic.deezer import analysis as ana
+
+        t = self._stamped(5)
+        ana.reapply_head()
+        self.assertEqual(
+            TrackAnalysis.get(TrackAnalysis.track == t).decided_head, ana.current_head_id()
+        )
+
+    def test_the_nightly_window_runs_once_a_day_and_joins_a_restart(self):
+        from datetime import datetime
+
+        from supysonic.webui import analysis as wa
+
+        s = {"enabled": True, "at": "03:00", "hours": 6}
+        day = lambda h, m=0, d=1: datetime(2026, 11, d, h, m)
+        self.assertIsNone(wa.window_due(s, day(2, 59), None))        # not yet
+        self.assertIsNotNone(wa.window_due(s, day(3, 0), None))      # opens
+        self.assertIsNotNone(wa.window_due(s, day(7, 30), None))     # restart inside
+        self.assertIsNone(wa.window_due(s, day(9, 0), None))         # closed
+        self.assertIsNone(wa.window_due(s, day(4, 0), "2026-11-01")) # already ran
+        self.assertIsNotNone(wa.window_due(s, day(4, 0), "2026-10-31"))
+        self.assertIsNone(wa.window_due({**s, "enabled": False}, day(4, 0), None))
+        # A window across midnight belongs to the day it OPENED on.
+        late = {"enabled": True, "at": "23:00", "hours": 6}
+        self.assertIsNotNone(wa.window_due(late, day(2, 0, d=2), None))
+        self.assertIsNone(wa.window_due(late, day(2, 0, d=2), "2026-11-01"))
+
+    def test_the_schedule_is_validated_and_persisted(self):
+        self._login()
+        r = self.client.put("/api/analysis/schedule",
+                            json={"enabled": False, "at": "99:99", "hours": 500})
+        self.assertEqual(r.status_code, 200)
+        got = r.json["schedule"]
+        self.assertFalse(got["enabled"])
+        self.assertEqual(got["at"], "03:00")  # unparseable falls back
+        self.assertEqual(got["hours"], 23)
+        self.assertEqual(self.client.get("/api/analysis/plan").json["schedule"], got)
+
+    def test_stop_cancels_the_running_job_and_a_stopped_walk_keeps_its_cursor(self):
+        from supysonic.db import Meta
+        from supysonic.deezer import analysis as ana
+        from supysonic.webui import analysis as wa
+
+        self._login()
+        with wa._analysis_lock:
+            wa._analysis_job.update(running=True, cancel=False)
+        self.assertTrue(self.client.post("/api/analysis/backfill/stop").json["cancel"])
+        with wa._analysis_lock:
+            wa._analysis_job.update(running=False, cancel=False)
+
+        for i in range(4):
+            t = self._deezer_track(str(700 + i))
+            t.last_modification = 1
+            t.save()
+
+        class Gate:
+            """Lets one track through, then says the window closed."""
+            def __init__(self):
+                self.n = 0
+            def wait(self):
+                self.n += 1
+                return self.n <= 1
+            def spent(self, _):
+                pass
+
+        orig = (ana.PAGE_SIZE, ana.analyze_track_verbose, ana.os.path.isfile,
+                ana.ffmpeg_available)
+        ana.PAGE_SIZE = 2
+        ana.analyze_track_verbose = lambda *a, **k: (object(), None)
+        ana.os.path.isfile = lambda p: True
+        ana.ffmpeg_available = lambda: True
+        try:
+            stats = ana.backfill(workers=1, throttle=Gate())
+        finally:
+            (ana.PAGE_SIZE, ana.analyze_track_verbose, ana.os.path.isfile,
+             ana.ffmpeg_available) = orig
+        self.assertTrue(stats.get("stopped"))
+        self.assertEqual(stats["done"], 1)
+        # Stopped inside the FIRST page: no checkpoint, so nothing is skipped on resume.
+        self.assertIsNone(Meta.get_or_none(Meta.key == ana.ANALYSIS_CURSOR_KEY))
 
 
 class GenreStudioTestCase(unittest.TestCase):

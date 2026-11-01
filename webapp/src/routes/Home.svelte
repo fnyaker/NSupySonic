@@ -13,6 +13,16 @@
   let flowLoading = false;
   let loading = true;
   let tuner = false;
+  // "Pour vous": mixes built from the library's own genre / tempo / artist
+  // verdicts and this listener's stars. Different on every visit.
+  let forYou = [];
+  async function loadForYou() {
+    try {
+      forYou = (await api.recommendationsLibrary()).mixes || [];
+    } catch {
+      forYou = [];
+    }
+  }
 
   $: greeting = (() => {
     const h = new Date().getHours();
@@ -37,6 +47,7 @@
   })();
 
   onMount(async () => {
+    loadForYou();
     // Personalized Deezer discovery is the account owner's; guests just browse.
     if (!$isAdmin) {
       loading = false;
@@ -102,6 +113,19 @@
   <Skeleton kind="shelf" />
   <Skeleton kind="shelf" />
 {:else}
+  {#if forYou.length}
+    <h2>Pour vous</h2>
+    <div class="foryou">
+      {#each forYou as m (m.id)}
+        <button class="fy" on:click={() => player.playQueue(m.tracks, 0, { kind: "mix", id: m.id })}>
+          <span class="fy-t">{m.title}</span>
+          <span class="fy-s">{m.subtitle}</span>
+          <span class="fy-p"><Icon name="play" size={16} /></span>
+        </button>
+      {/each}
+    </div>
+  {/if}
+
   {#if mixes.length}
     <h2>Des mixes créés pour vous</h2>
     <div class="grid">
@@ -146,6 +170,19 @@
 {/if}
 
 <style>
+  .foryou { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-bottom: 8px; }
+  .fy {
+    position: relative; display: grid; align-content: end; gap: 3px; min-height: 120px; padding: 16px;
+    border: 0; border-radius: 16px; text-align: left; color: #fff; font: inherit; cursor: pointer;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  }
+  .fy:nth-child(2) { background: linear-gradient(135deg, #0ea5e9, var(--accent)); }
+  .fy:nth-child(3) { background: linear-gradient(135deg, #10b981, #0ea5e9); }
+  .fy:nth-child(4) { background: linear-gradient(135deg, #f59e0b, var(--accent-2)); }
+  .fy-t { font-weight: 800; font-size: 1.1rem; letter-spacing: -0.01em; }
+  .fy-s { font-size: 0.8rem; opacity: 0.85; }
+  .fy-p { position: absolute; top: 12px; right: 12px; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: rgba(0,0,0,0.3); }
+
   .hero {
     display: flex;
     align-items: center;

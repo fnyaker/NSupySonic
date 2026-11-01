@@ -270,3 +270,69 @@ class DownloadQueueTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThrottleTestCase(unittest.TestCase):
+    """The zero-impact gate library maintenance goes through (workload.Throttle):
+    nothing runs while anybody listens or a download is awaited, the machine is
+    left a clear share, and a cancelled job leaves without finishing a unit."""
+
+    def setUp(self):
+        self.slept = []
+        workload._last_listen = 0.0
+        self.addCleanup(setattr, workload, "_last_listen", 0.0)
+
+    def _throttle(self, **kw):
+        kw.setdefault("sleep", self.slept.append)
+        return workload.Throttle(**kw)
+
+    def test_an_idle_machine_is_not_waited_for(self):
+        with mock.patch.object(workload, "load_per_core", lambda: 0.0):
+            self.assertTrue(self._throttle().wait())
+        self.assertEqual(self.slept, [])
+
+    def test_it_waits_for_a_listener_then_goes(self):
+        workload.touch_listening()
+        n = []
+
+        def sleep(s):
+            n.append(s)
+            workload._last_listen -= 100  # the song ended
+
+        t = workload.Throttle(sleep=sleep, listen_quiet=45.0)
+        with mock.patch.object(workload, "load_per_core", lambda: 0.0):
+            self.assertTrue(t.wait())
+        self.assertEqual(len(n), 1)
+
+    def test_it_waits_for_a_download_a_person_is_waiting_on(self):
+        t = self._throttle()
+        seen = []
+        with mock.patch.object(workload, "load_per_core", lambda: 0.0):
+            with workload.foreground():
+                t._sleep = lambda s: (seen.append(t.reason), setattr(t, "_stop", lambda: True))
+                self.assertFalse(t.wait())  # cancelled while paused
+        self.assertEqual(seen, ["download"])
+
+    def test_a_loaded_box_is_left_alone(self):
+        t = self._throttle()
+        seen = []
+        t._sleep = lambda s: (seen.append(t.reason), setattr(t, "_stop", lambda: True))
+        with mock.patch.object(workload, "load_per_core", lambda: 3.0):
+            self.assertFalse(t.wait())
+        self.assertEqual(seen, ["load"])
+
+    def test_a_cancelled_job_does_not_start_another_unit(self):
+        t = self._throttle(stop=lambda: True)
+        self.assertFalse(t.wait())
+
+    def test_the_duty_cycle_caps_the_share_of_time_taken(self):
+        t = self._throttle(duty=0.5)
+        t.spent(2.0)
+        self.assertEqual(self.slept, [2.0])  # worked 2 s, rests 2 s: half
+        self.slept.clear()
+        t = self._throttle(duty=0.25)
+        t.spent(1.0)
+        self.assertEqual(self.slept, [3.0])
+        self.slept.clear()
+        self._throttle(duty=1.0).spent(5.0)
+        self.assertEqual(self.slept, [])  # full speed: no rest

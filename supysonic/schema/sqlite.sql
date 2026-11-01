@@ -248,6 +248,8 @@ CREATE TABLE IF NOT EXISTS track_analysis (
     style VARCHAR(24),
     style_confidence REAL NOT NULL DEFAULT 0,
     archetype VARCHAR(16),
+    embed_version INTEGER NOT NULL DEFAULT 0,
+    decided_head VARCHAR(40),
     data TEXT
 );
 
@@ -300,3 +302,16 @@ CREATE TABLE IF NOT EXISTS remote_link (
     last_used DATETIME
 );
 CREATE INDEX IF NOT EXISTS index_remote_link_user_id_fk ON remote_link(user_id);
+
+CREATE TABLE IF NOT EXISTS discovery (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deezer_id VARCHAR(20) NOT NULL UNIQUE,
+    state VARCHAR(10) NOT NULL DEFAULT 'new',
+    target VARCHAR(48) NOT NULL,
+    style VARCHAR(48),
+    confidence REAL NOT NULL DEFAULT 0,
+    bpm REAL,
+    found DATETIME NOT NULL,
+    payload TEXT
+);
+CREATE INDEX IF NOT EXISTS index_discovery_state ON discovery(state);

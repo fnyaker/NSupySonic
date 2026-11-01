@@ -280,6 +280,11 @@ export const api = {
   analysisBackfill: (force, workers) =>
     req("/analysis/backfill", { method: "POST", body: body({ force, workers }) }),
   analysisBackfillStatus: () => req("/analysis/backfill"),
+  analysisBackfillStop: () => req("/analysis/backfill/stop", { method: "POST" }),
+  // What is out of date and at which step (SQL counts), plus the nightly window.
+  analysisPlan: () => req("/analysis/plan"),
+  analysisSchedule: (settings) =>
+    req("/analysis/schedule", { method: "PUT", body: body(settings) }),
 
   // Where the audio actually starts and stops inside the archived file, for
   // the crossfade's silence trimming. Answers {ready:false} rather than an
@@ -362,6 +367,16 @@ export const api = {
 
   // radios
   trackRadio: (id) => req("/radio/track/" + id),
+  // Genre radios, built from the library's own verdicts (works offline, every user).
+  radioGenres: () => req("/radio/genres"),
+  recommendationsLibrary: () => req("/recommendations/library"),
+  // The background explorer: state, and its two switches (admin).
+  radioExplorer: (settings) =>
+    settings
+      ? req("/radio/explorer", { method: "PUT", body: body(settings) })
+      : req("/radio/explorer"),
+  radioGenre: ({ seeds, discovery, count = 60, randomness }) =>
+    req("/radio/genre", { method: "POST", body: body({ seeds, discovery, count, randomness }) }),
   trackCredits: (id) => req("/track/" + id + "/credits"),
   artistRadio: (id) => req("/radio/artist/" + id),
 

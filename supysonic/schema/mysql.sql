@@ -246,6 +246,8 @@ CREATE TABLE IF NOT EXISTS track_analysis (
     style VARCHAR(24),
     style_confidence DOUBLE NOT NULL DEFAULT 0,
     archetype VARCHAR(16),
+    embed_version INTEGER NOT NULL DEFAULT 0,
+    decided_head VARCHAR(40),
     data TEXT
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -298,3 +300,16 @@ CREATE TABLE IF NOT EXISTS remote_link (
     last_used DATETIME
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE INDEX index_remote_link_user_id_fk ON remote_link(user_id);
+
+CREATE TABLE IF NOT EXISTS discovery (
+    id INTEGER NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    deezer_id VARCHAR(20) NOT NULL UNIQUE,
+    state VARCHAR(10) NOT NULL DEFAULT 'new',
+    target VARCHAR(48) NOT NULL,
+    style VARCHAR(48),
+    confidence DOUBLE NOT NULL DEFAULT 0,
+    bpm DOUBLE,
+    found DATETIME NOT NULL,
+    payload TEXT
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE INDEX index_discovery_state ON discovery(state);
