@@ -29,6 +29,11 @@ COPY webapp/trainer/ ./
 RUN cargo build --release --target wasm32-unknown-unknown --target-dir /out/trainer \
  && RUSTFLAGS="-C target-feature=+simd128" \
     cargo build --release --target wasm32-unknown-unknown --target-dir /out/trainer-simd
+# The whole-track measures (webapp/measure): the client-side analysis. Not committed
+# anywhere: this is the only place that makes it (CI builds it the same way).
+WORKDIR /measure
+COPY webapp/measure/ ./
+RUN cargo build --release --target wasm32-unknown-unknown --target-dir /out/measure
 
 # ---------------------------------------------------------------------------
 # Web builder: compile the Svelte discovery SPA (vite -> supysonic/webui/dist)
@@ -54,6 +59,7 @@ COPY --from=wasmbuilder /out/simd/wasm32-unknown-unknown/release/rhythm.wasm src
 COPY --from=wasmbuilder /out/appcore/wasm32-unknown-unknown/release/appcore.wasm src/lib/appcore/appcore.wasm
 COPY --from=wasmbuilder /out/trainer/wasm32-unknown-unknown/release/trainer.wasm src/lib/genre/trainer.wasm
 COPY --from=wasmbuilder /out/trainer-simd/wasm32-unknown-unknown/release/trainer.wasm src/lib/genre/trainer-simd.wasm
+COPY --from=wasmbuilder /out/measure/wasm32-unknown-unknown/release/measure.wasm src/lib/measure/measure.wasm
 RUN npm run build   # writes /web/supysonic/webui/dist
 
 # ---------------------------------------------------------------------------
