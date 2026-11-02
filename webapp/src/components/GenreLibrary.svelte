@@ -10,6 +10,7 @@
   import JobFailures from "./JobFailures.svelte";
   import GenreExtractor from "./GenreExtractor.svelte";
   import SimilarRebuild from "./SimilarRebuild.svelte";
+  import { clientJob } from "../lib/analysis/runner.js";
 
   /** `status.extractor` from /genre/status. */
   export let extractor = { available: false };
@@ -26,6 +27,12 @@
   let explorerSave = null;
   let wasRunning = false;
   let dead = false;
+  // Who measures: the server (ffmpeg there) or this computer (webapp/measure, WebAssembly).
+  let where = "server";
+  let clientRun = null;
+  $: onClient = where === "client";
+  $: cj = $clientJob;
+  $: cpct = cj.total ? Math.min(100, Math.round(((cj.done + cj.failed) / cj.total) * 100)) : 0;
 
   const STAGES = { measure: "Mesure", embed: "Empreintes", decide: "Classement" };
   const WHY = {
@@ -63,6 +70,7 @@
     if (p.status === "fulfilled" && p.value) {
       plan = p.value;
       if (p.value.schedule) schedule = p.value.schedule;
+      if (p.value.where && !cj.running) where = p.value.where;
     }
     if (j.status === "fulfilled" && j.value) {
       job = j.value;
@@ -88,6 +96,26 @@
       return;
     }
     wasRunning = true;
+    load();
+  }
+
+  async function setWhere(w) {
+    if (w === where || cj.running) return;
+    const before = where;
+    where = w;
+    try {
+      await api.analysisWhere(w);
+    } catch (e) {
+      where = before;
+      toasts.push(e?.message || "choix impossible", "error");
+    }
+  }
+
+  async function startClient() {
+    // Loaded on demand: the WebAssembly core and its worker are not part of the first screen.
+    clientRun ||= (await import("../lib/analysis/client.js")).clientAnalysis();
+    await clientRun.run();
+    dispatch("change");
     load();
   }
 
@@ -150,7 +178,16 @@
         <span class="num">{n(current)}</span>
         <span class="of st-dim">sur {n(total)} titres à jour</span>
       </div>
-      {#if running}
+      {#if onClient && cj.running}
+        <button class="st-btn" on:click={() => clientRun?.stop()}>
+          <Icon name="pause" size={16} />Arrêter
+        </button>
+      {:else if onClient}
+        <button class="st-btn primary" on:click={startClient} disabled={!plan.todo}>
+          <Icon name={plan.todo ? "play" : "check"} size={16} />
+          {plan.todo ? "Analyser ici" : "Tout est à jour"}
+        </button>
+      {:else if running}
         <button class="st-btn" on:click={stopJob} disabled={job.cancel}>
           <Icon name="pause" size={16} />{job.cancel ? "Arrêt…" : "Arrêter"}
         </button>
@@ -160,6 +197,15 @@
           {plan.todo ? "Analyser maintenant" : "Tout est à jour"}
         </button>
       {/if}
+    </div>
+
+    <div class="where" role="group" aria-label="Où analyser">
+      <button class:on={!onClient} disabled={cj.running} on:click={() => setWhere("server")}>
+        <Icon name="server" size={15} />Serveur
+      </button>
+      <button class:on={onClient} disabled={cj.running} on:click={() => setWhere("client")}>
+        <Icon name="monitor" size={15} />Cet ordinateur
+      </button>
     </div>
 
     <div class="stack" role="img" aria-label={`${current} à jour, ${stale} à remettre à jour, ${never} jamais analysés`}>
@@ -173,7 +219,18 @@
       {#if never}<span><b class="dot new"></b>{n(never)} jamais analysés</span>{/if}
     </div>
 
-    {#if running}
+    {#if onClient && (cj.running || cj.done || cj.failed || cj.error)}
+      <div class="live">
+        <div class="bar"><i style={`width:${cpct}%`}></i></div>
+        <p class="st-dim">
+          <strong>{cj.running ? "Mesure sur cet ordinateur" : cj.stopped ? "Arrêtée" : "Terminée"}</strong>
+          · {n(cj.done)} analysés{#if cj.total} sur {n(cj.total)}{/if}
+          {#if cj.failed}· <span class="bad">{cj.failed} en échec</span>{/if}
+        </p>
+        {#if cj.current.length}<p class="st-dim line">{cj.current.join(", ")}</p>{/if}
+        {#if cj.error}<div class="st-note bad"><Icon name="alert" size={16} /><span>{cj.error}</span></div>{/if}
+      </div>
+    {:else if !onClient && running}
       <div class="live">
         <div class="bar"><i style={`width:${pct}%`}></i></div>
         <p class="st-dim">
@@ -185,13 +242,13 @@
           <p class="pause"><Icon name="moon" size={14} /> En pause : {WHY[job.paused] || job.paused}. Reprend toute seule.</p>
         {/if}
       </div>
-    {:else if plan.todo && schedule.enabled}
+    {:else if !onClient && plan.todo && schedule.enabled}
       <p class="st-dim line"><Icon name="moon" size={14} /> Prochaine analyse automatique à {schedule.at}, pendant {schedule.hours} h au plus.</p>
     {/if}
     {#if job?.error && !running}
       <div class="st-note bad"><Icon name="alert" size={16} /><span>{job.error}</span></div>
     {/if}
-    <JobFailures {job} label="analyse" />
+    <JobFailures job={onClient ? cj : job} label="analyse" />
   {/if}
 </section>
 
@@ -325,6 +382,10 @@
   .mini i { display: block; height: 100%; background: var(--accent, #22d3ee); transition: width 0.4s; }
   .foot { margin-top: 16px; }
 
+  .where { display: inline-flex; gap: 4px; padding: 4px; margin: 4px 0 14px; border-radius: 12px; background: rgba(255,255,255,0.06); }
+  .where button { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border: 0; border-radius: 9px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+  .where button.on { background: var(--accent, #22d3ee); color: #04141a; font-weight: 600; }
+  .where button:disabled { cursor: default; opacity: 0.6; }
   .sched { display: flex; align-items: center; gap: 14px 22px; flex-wrap: wrap; }
   .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; min-height: 40px; }
   .switch input { width: 18px; height: 18px; accent-color: var(--accent, #22d3ee); }

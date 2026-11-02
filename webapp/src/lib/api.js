@@ -342,6 +342,12 @@ export const api = {
   // The background explorer: state, and its switches (admin).
   explorer: (settings) =>
     settings ? req("/explorer", { method: "PUT", body: body(settings) }) : req("/explorer"),
+  // Analysis on the client PC: what to measure, the measures coming back, who measures.
+  analysisTodo: (after) =>
+    req("/analysis/todo?limit=20" + (after ? "&after=" + encodeURIComponent(after) : "")),
+  analysisMeasures: (id, m) =>
+    req("/analysis/" + encodeURIComponent(id) + "/measures", { method: "POST", body: body(m) }),
+  analysisWhere: (where) => req("/analysis/where", { method: "PUT", body: body({ where }) }),
   analysisBackfillStop: () => req("/analysis/backfill/stop", { method: "POST" }),
   // What is out of date and at which step (SQL counts), plus the nightly window.
   analysisPlan: () => req("/analysis/plan"),

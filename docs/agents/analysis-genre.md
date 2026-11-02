@@ -488,11 +488,22 @@ embed, re-decide (`start_relabel`) — each resumable (checkpoint) and each unit
   applies at once and a restart inside the window joins it. A window that crosses midnight belongs to
   the day it opened on. It does nothing when `plan().todo` is 0.
 
-## Analysis on the client PC (WASM): WIP, preparation — not wired into the app
+## Analysis on the client PC (WASM)
 
 The goal: measure, embed and classify on the admin's PC (a Rust/WASM core, Opus 64 k in Range blocks, resumable, each result
 pushed to the server as it lands, the SERVER classifying from the stored measures so tags, the head and the rules stay in one
-place). **Nothing loads the crate yet, no endpoint receives results, the classifier is unchanged.**
+place).
+
+**How it runs (Réglages > Genres > Bibliothèque, "Où analyser: Serveur | Cet ordinateur").** `Meta.analysis_where` picks who
+measures; on "client" the server's own pass skips the measure stage. `lib/analysis/runner.js` asks `/api/analysis/todo` (20 per
+page, `next` cursor, so a run cut anywhere resumes with exactly what is unsent), downloads each ORIGINAL FLAC in 4 MB Range blocks
+(`download.js`: `X-NS-Background`, 503/429 waited out with `Retry-After`, a block whose `Content-Range` is not the one asked is
+retried, never stitched), decodes it at the file's own rate (`decode.js`: Opus-range shifts measured, see above), measures it in a
+Worker (`worker.js`, `measure.js` over the wasm: spectral + loudness, bass attacks, tracker on 44.1 kHz mono) and POSTs the numbers
+to `/api/analysis/<id>/measures`; each track is stored the moment it is sent. One lane, so the PC stays the person's own. A 409
+(`version`) stops the run: the page was built for another measure. Failures keep their cause per track (`JobFailures`). Silence
+is a named failure ("no spectral frames"), never invented numbers. Not done: the embedding step (onnxruntime-web).
+Tests: `webapp/test/clientanalysis.test.mjs` (real wasm on a 150 BPM kick, mock server for the blocks, runner ledger/stop/409).
 
 **The numbers are the server's, so no re-measure and no recalibration are needed.** `analysis._spectral` takes its descriptors from
 ffmpeg's `aspectralstats` on the SOURCE signal (its own rate, every channel, pooled). Recovered frame by frame, then checked on 99 real
