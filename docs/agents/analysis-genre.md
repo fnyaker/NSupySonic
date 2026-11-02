@@ -502,7 +502,7 @@ retried, never stitched), decodes it at the file's own rate (`decode.js`: Opus-r
 Worker (`worker.js`, `measure.js` over the wasm: spectral + loudness, bass attacks, tracker on 44.1 kHz mono) and POSTs the numbers
 to `/api/analysis/<id>/measures`; each track is stored the moment it is sent. One lane, so the PC stays the person's own. A 409
 (`version`) stops the run: the page was built for another measure. Failures keep their cause per track (`JobFailures`). Silence
-is a named failure ("no spectral frames"), never invented numbers. Not done: the embedding step (onnxruntime-web).
+is a named failure ("no spectral frames"), never invented numbers. The vector is described in the next paragraph.
 `measure.wasm` is NOT committed (gitignored): `.github/workflows/webapp.yaml` and the Dockerfile build it from `webapp/measure`; locally run `node measure/build.mjs`.
 Tests: `webapp/test/clientanalysis.test.mjs` (real wasm on a 150 BPM kick, mock server for the blocks, runner ledger/stop/409).
 
@@ -561,12 +561,24 @@ download is the ORIGINAL FLAC, not an Opus transcode: measured on 14 files, an O
 the spread 3-6 %, flatness ~50 % and flips the tempo's octave or value on ~4 of 14 files.
 `tests/test_client_ingest.py` pins the endpoints, the gates and the setting.
 
+**The vector on the client (onnxruntime-web 1.22, `lib/analysis/embed.js`).** The operator's own `.onnx` (never vendored, licence non-commercial and
+no-derivatives) is served UNMODIFIED to the admin only (`GET /api/analysis/extractor/model`, Range-capable, `Cache-Control: private`); the Worker
+fetches it in the same background Range blocks, builds one onnxruntime-web session (1 thread, wasm backend) and keeps it for the run. The page decodes the
+track to 16 kHz mono (the server's `ffmpeg -ac 1 -ar 16000`), the Rust core makes the patches, the network runs `BATCH` = 8 patches at a time (peak memory
+grows with the batch), the core aggregates the 3840-vector and `encodeVector` packs it as the sidecar's own half floats (checked bit for bit against
+`struct.pack("<e")`). `todo?embed=1` also lists tracks whose only lag is the vector and tells each what it `need`s (`measure`, `embed`), plus
+`extractor {url, version, dim}`: **a model change redoes only the vector** (no decode of the measures, one `POST /api/analysis/<id>/embedding`, then
+`store_client_embedding` writes the sidecar, stamps `embed_version` and re-decides the style from it, no audio read). Both the measures POST and this one validate
+the vector (version, base64, EMBED_DIM halves, finite) and answer 409 only for a wrong version (422 for "measure first": a 409 stops a client run). A
+failed network never loses the measures: they are POSTed first and the failure is reported as "empreinte : <cause>". `plan.extractor` is true in client mode
+as soon as a model file exists, so the studio counts the step even where the server has no onnxruntime. Measured: chain on a tiny ONNX with the extractor's
+shapes, 4.7e-7 from the hand-computed vector; in headless Chromium on 3 real FLACs (44.1/48 kHz, mono/stereo) the browser reads 174/128/150 BPM exactly,
+the vectors are stored (7680-byte sidecars) and a simulated model change sends 3 vectors and 0 measures. The runtime (`ort-wasm-simd-threaded.{wasm,mjs}`,
+11 MB) is a build artefact fetched on the first run and left OUT of the service worker's staged list (`vite.config.js`), so no phone downloads it.
+Not verified: the vector of the REAL extractor against the server's (the browser resamples to 16 kHz, ffmpeg's swr is not the same filter: compare both vectors
+on real tracks with the operator's model before trusting a mixed library; the cosine between them is the number to write here).
+
 ## What remains
 
-1. The embedding network itself through onnxruntime-web on the operator's own `.onnx`, served to the admin only (its licence is non-commercial
-   and no-derivatives: unmodified, operator's copy).
-2. The client runner: Opus 64 k in Range blocks (resumable), decode (the browser resamples; ffmpeg measured the SOURCE rate, so the runner
-   asks the server for the file's rate and decodes at it), worker pool, throttle, results pushed per track
-   (`POST /api/analysis/<id>/measures`, version-checked, validated), then the SERVER classifies. A `where` setting (server | client) so the
-   nightly window and the client runner never both work. Opus 64 k is lossy and band-limited: measure how its descriptors move against the
-   FLAC's before trusting it (the flatness problem above is exactly this).
+1. Compare the real extractor's vector, browser vs server, on a few real tracks (above).
+2. A worker pool (the runner is one lane on purpose). The run already waits between tracks while this computer plays music (`deps.busy`, the `playing` store; the card says so).

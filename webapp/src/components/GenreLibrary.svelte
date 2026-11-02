@@ -224,10 +224,12 @@
         <div class="bar"><i style={`width:${cpct}%`}></i></div>
         <p class="st-dim">
           <strong>{cj.running ? "Mesure sur cet ordinateur" : cj.stopped ? "Arrêtée" : "Terminée"}</strong>
-          · {n(cj.done)} analysés{#if cj.total} sur {n(cj.total)}{/if}
+          · {n(cj.done)} analysés{#if cj.total}{" "}sur {n(cj.total)}{/if}
           {#if cj.failed}· <span class="bad">{cj.failed} en échec</span>{/if}
         </p>
-        {#if cj.current.length}<p class="st-dim line">{cj.current.join(", ")}</p>{/if}
+        {#if cj.paused}
+          <p class="pause"><Icon name="moon" size={14} /> En pause : vous écoutez de la musique. Reprend entre deux titres.</p>
+        {:else if cj.current.length}<p class="st-dim line">{cj.current.join(", ")}</p>{/if}
         {#if cj.error}<div class="st-note bad"><Icon name="alert" size={16} /><span>{cj.error}</span></div>{/if}
       </div>
     {:else if !onClient && running}
@@ -382,8 +384,8 @@
   .mini i { display: block; height: 100%; background: var(--accent, #22d3ee); transition: width 0.4s; }
   .foot { margin-top: 16px; }
 
-  .where { display: inline-flex; gap: 4px; padding: 4px; margin: 4px 0 14px; border-radius: 12px; background: rgba(255,255,255,0.06); }
-  .where button { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border: 0; border-radius: 9px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+  .where { display: flex; width: 100%; max-width: 420px; gap: 4px; padding: 4px; margin: 4px 0 14px; border-radius: 12px; background: rgba(255,255,255,0.06); }
+  .where button { flex: 1; justify-content: center; white-space: nowrap; display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
   .where button.on { background: var(--accent, #22d3ee); color: #04141a; font-weight: 600; }
   .where button:disabled { cursor: default; opacity: 0.6; }
   .sched { display: flex; align-items: center; gap: 14px 22px; flex-wrap: wrap; }

@@ -19,3 +19,8 @@ export async function decodeTrack(bytes, rate, channels) {
   const mono44 = rate === 44100 ? monoOf(chans) : monoOf(await decodeAt(bytes, 1, 44100));
   return { channels: chans, mono44 };
 }
+
+/** The track as 16 kHz mono: what the extractor's front-end reads (the server's ffmpeg: `-ac 1 -ar 16000`). */
+export async function decodeMono16(bytes) {
+  return monoOf(await decodeAt(bytes, 1, 16000));
+}

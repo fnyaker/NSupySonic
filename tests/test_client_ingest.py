@@ -177,6 +177,25 @@ class TodoTestCase(_Library):
         self.assertEqual(self.client.get("/api/analysis/todo?after=junk").status_code, 400)
 
 
+    def test_vector_only_lags_are_listed_for_a_client_that_can_embed(self):
+        from supysonic.deezer import embedding as emb
+
+        t = self.made[0]
+        self.assertEqual(self.client.post(f"/api/analysis/{t.id}/measures", json=GOOD).status_code, 200)
+        with mock.patch.object(emb, "model_path", return_value=__file__), \
+                mock.patch.object(emb, "model_info", return_value={"size": 5, "filename": "m.onnx"}):
+            plain = self.client.get("/api/analysis/todo?limit=20").json
+            wide = self.client.get("/api/analysis/todo?limit=20&embed=1").json
+        self.assertNotIn(str(t.id), [x["id"] for x in plain["tracks"]])
+        mine = [x for x in wide["tracks"] if x["id"] == str(t.id)]
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(mine[0]["need"], {"measure": False, "embed": True})
+        others = [x for x in wide["tracks"] if x["id"] != str(t.id)]
+        self.assertTrue(all(x["need"] == {"measure": True, "embed": True} for x in others))
+        self.assertEqual(wide["extractor"]["dim"], emb.EMBED_DIM)
+        self.assertIsNone(plain["extractor"])
+
+
 class WhereTestCase(_Archived):
     def test_the_choice_is_validated_kept_and_shown(self):
         self.assertEqual(self.client.get("/api/analysis/plan").json["where"], "server")
@@ -199,3 +218,101 @@ class WhereTestCase(_Archived):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClientEmbeddingTestCase(_Archived):
+    def test_a_client_that_can_embed_makes_the_vector_step_due_without_onnxruntime(self):
+        from supysonic.deezer import embedding as emb
+        from supysonic.webui import analysis as web
+
+        self.post()
+        with mock.patch.object(emb, "why_unavailable", return_value="no onnxruntime"), \
+                mock.patch.object(emb, "model_path", return_value=__file__):
+            Meta.delete().where(Meta.key == "analysis_where").execute()
+            self.assertFalse(web.plan()["extractor"])  # the server's own pass cannot embed
+            Meta.create(key="analysis_where", value="client")
+            p = web.plan()
+        self.assertTrue(p["extractor"])
+        self.assertEqual(p["stale_embed"], TrackAnalysis.select().where(TrackAnalysis.embed_version < emb.EMBED_VERSION).count())
+        self.assertGreaterEqual(p["stale_embed"], 1)  # the track measured above has no vector yet
+        self.assertGreaterEqual(p["todo"], 1)
+
+    """The vector a client computes with its own copy of the extractor: validated like
+    every other number, stored as the sidecar the server's own pass writes, stamped, and the
+    style decided again from it. The model itself is served to the admin only."""
+
+    def vec(self, **kw):
+        import base64
+        import struct
+
+        from supysonic.deezer import embedding as emb
+
+        vals = kw.pop("values", None) or [((i % 7) - 3) / 10.0 for i in range(emb.EMBED_DIM)]
+        return {"version": emb.EMBED_VERSION, "data": base64.b64encode(struct.pack(f"<{len(vals)}e", *vals)).decode(), **kw}
+
+    def test_a_vector_sent_with_the_measures_is_stored_as_the_sidecar_and_stamped(self):
+        from supysonic.deezer import embedding as emb
+
+        r = self.post({**GOOD, "embedding": self.vec()})
+        self.assertEqual(r.status_code, 200, r.data)
+        stored = emb.load_embedding(self.track)
+        self.assertEqual(len(stored), emb.EMBED_DIM)
+        self.assertAlmostEqual(stored[1], -0.2, places=2)
+        self.assertEqual(TrackAnalysis.get(TrackAnalysis.track == self.track).embed_version, emb.EMBED_VERSION)
+
+    def test_a_vector_alone_completes_a_track_measured_before(self):
+        from supysonic.deezer import embedding as emb
+
+        self.post()
+        self.assertEqual(TrackAnalysis.get(TrackAnalysis.track == self.track).embed_version, 0)
+        r = self.client.post(f"/api/analysis/{self.track.id}/embedding", json=self.vec())
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(TrackAnalysis.get(TrackAnalysis.track == self.track).embed_version, emb.EMBED_VERSION)
+        self.assertIsNotNone(emb.load_embedding(self.track))
+
+    def test_a_vector_for_a_track_never_measured_is_refused(self):
+        r = self.client.post(f"/api/analysis/{self.track.id}/embedding", json=self.vec())
+        self.assertEqual(r.status_code, 422)  # not 409: that one means "wrong version" and stops a client run
+
+    def test_hostile_vectors_are_refused_and_nothing_is_written(self):
+        from supysonic.deezer import embedding as emb
+
+        nan = [float("nan")] + [0.0] * (emb.EMBED_DIM - 1)
+        bad = [
+            self.vec(version=emb.EMBED_VERSION - 1),
+            self.vec(values=[0.1] * 10),
+            self.vec(values=nan),
+            {"version": emb.EMBED_VERSION, "data": "!!not base64!!"},
+            {"version": emb.EMBED_VERSION, "data": "A" * (emb.EMBED_DIM * 8)},
+            {"version": emb.EMBED_VERSION},
+            [1, 2],
+        ]
+        self.post()
+        for body in bad:
+            r = self.client.post(f"/api/analysis/{self.track.id}/embedding", json=body)
+            self.assertIn(r.status_code, (400, 409), body)
+        self.assertIsNone(emb.load_embedding(self.track))
+        r = self.post({**GOOD, "embedding": self.vec(values=[0.1] * 10)}, tid=self.track.id)
+        self.assertEqual(r.status_code, 400)
+
+    def test_the_model_is_served_to_the_admin_unmodified_and_to_nobody_else(self):
+        import tempfile
+
+        from supysonic.deezer import embedding as emb
+
+        self.assertEqual(self.client.get("/api/analysis/extractor/model").status_code, 404)
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as fp:
+            fp.write(b"ONNX-BYTES" * 100)
+        try:
+            with mock.patch.object(emb, "model_path", return_value=fp.name):
+                r = self.client.get("/api/analysis/extractor/model", headers={"Range": "bytes=0-9"})
+                self.assertEqual(r.status_code, 206)
+                self.assertEqual(r.data, b"ONNX-BYTES")
+                self.assertIn("private", r.headers["Cache-Control"])
+                UserManager.add("bob", "B0b-secret-77", admin=False)
+                guest = self.app.test_client()
+                guest.post("/api/login", json={"username": "bob", "password": "B0b-secret-77"})
+                self.assertEqual(guest.get("/api/analysis/extractor/model").status_code, 403)
+                self.assertEqual(self.app.test_client().get("/api/analysis/extractor/model").status_code, 401)
+        finally:
+            os.unlink(fp.name)

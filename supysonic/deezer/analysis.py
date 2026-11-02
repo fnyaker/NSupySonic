@@ -1757,11 +1757,63 @@ def analyze_from_client(track, spectral, tempo, provider=None, vec=None, force=F
     if track is None or not track.path or not os.path.isfile(track.path):
         return None, "file missing from the archive"
     existing = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+    if vec is not None:
+        from . import embedding as emb
+
+        if not emb.save_embedding(track, vec):
+            vec = None  # not stored: do not decide on a vector the next read will not find
     if existing and not force and existing.version >= ANALYSIS_VERSION:
+        if vec is not None:
+            store_client_embedding(existing, vec)
         return existing, None
     feats = dict(spectral)
     return _store_verdict(track, existing, provider, feats, tempo, True, vec,
                           time.monotonic(), origin="client")
+
+
+def decode_client_vector(payload):
+    """A client's embedding -> the vector, or raises ``ValueError`` saying why.
+
+    ``payload`` is ``{"version": EMBED_VERSION, "data": <base64 of EMBED_DIM float16>}``,
+    the sidecar's own layout, so what is stored is byte for byte what was sent."""
+    import base64
+    import binascii
+    import struct
+
+    from . import embedding as emb
+
+    if not isinstance(payload, dict):
+        raise ValueError("embedding must be an object")
+    if payload.get("version") != emb.EMBED_VERSION:
+        raise ValueError(f"embedding version {payload.get('version')!r}, this server's is {emb.EMBED_VERSION}")
+    data = payload.get("data")
+    if not isinstance(data, str) or len(data) > 4 * emb.EMBED_DIM:
+        raise ValueError("embedding data is missing or too long")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("embedding data is not base64")
+    if len(raw) != emb.EMBED_DIM * 2:
+        raise ValueError(f"embedding is {len(raw) // 2} wide, expected {emb.EMBED_DIM}")
+    vec = list(struct.unpack(f"<{emb.EMBED_DIM}e", raw))
+    if any(v != v or v in (float("inf"), float("-inf")) for v in vec):
+        raise ValueError("embedding holds a non-finite number")
+    return vec
+
+
+def store_client_embedding(row, vec):
+    """A client's vector for a track whose measures are already stored: the stamp
+    says so, and the style is decided again from the vector (no audio read).
+    Returns True when the style changed."""
+    from . import embedding as emb
+
+    if not emb.save_embedding(row.track, vec):
+        return False
+    TrackAnalysis.update(embed_version=emb.EMBED_VERSION).where(
+        TrackAnalysis.track == row.track_id
+    ).execute()
+    row.embed_version = emb.EMBED_VERSION
+    return redecide(row, vec=vec)
 
 
 #: ``Track.gain`` is what the player reads as the track's loudness (it applies
