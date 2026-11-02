@@ -1610,35 +1610,18 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         )
         return None, f"spectral pass: {exc}"
 
-    bpm = _deezer_bpm(provider, track)
-    # Where the TEMPO came from, which is not where the style came from. One
-    # variable used to carry both, and since the style is decided later it
-    # simply overwrote this: every row in the table says its bpm came from the
-    # "heuristic", whatever actually produced it.
-    bpm_source = "deezer" if bpm else None
-    bpm_conf = 0.95 if bpm else 0.0
-    pulse = 0.0
+    # The tempo, then the embedding (when this server can make one: it rides the same
+    # decode budget), then the one decision both paths share.
+    measured, conf, pulse = None, 0.0, 0.0
+    alternation = None
     try:
         measured, conf, pulse = _measure_tempo(track.path)
-        if measured and _tracker():
-            bpm, bpm_conf, bpm_source = _reconcile_tracked(
-                bpm, measured, conf, _take_witness(track.path)
-            )
-        elif not bpm and measured:
-            bpm, bpm_conf, bpm_source = measured, conf, "measured"
-        elif bpm and measured:
-            bpm, bpm_conf, bpm_source = _reconcile_octave(
-                bpm, measured, conf, bpm_conf, bpm_source
-            )
+        alternation = _take_witness(track.path)
     except Exception as exc:
         # Not fatal: a track with no tempo is still worth a style verdict.
         logger.warning(
             "analysis: tempo pass failed for %s: %s", track.path, exc, exc_info=True
         )
-
-    # The frozen extractor's vector, when this server can make one. It is what
-    # the tagging studio trains on and what a trained head reads; producing it
-    # here means it rides the same single decode budget as everything else.
     vec = None
     try:
         from . import embedding as emb
@@ -1648,6 +1631,38 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
     except Exception as exc:
         logger.warning(
             "analysis: embedding failed for %s: %s", track.path, exc, exc_info=True
+        )
+    return _store_verdict(
+        track, existing, provider, feats, (measured, conf, pulse, alternation),
+        _tracker(), vec, t0,
+    )
+
+
+def _store_verdict(track, existing, provider, feats, tempo, tracked, vec, t0, origin="server"):
+    """Everything after the measuring, shared by the server's own pass and by the
+    measures a client (the admin's browser, webapp/measure) sends: reconcile the tracked
+    tempo with Deezer's figure, decide the style (tag, head, rules) and store the row.
+    ``tempo`` is ``(measured bpm or None, confidence, pulse, alternation or None)``."""
+    measured, conf, pulse, alternation = tempo
+    bpm = _deezer_bpm(provider, track)
+    # Where the TEMPO came from, which is not where the style came from. One
+    # variable used to carry both, and since the style is decided later it
+    # simply overwrote this: every row in the table says its bpm came from the
+    # "heuristic", whatever actually produced it.
+    bpm_source = "deezer" if bpm else None
+    bpm_conf = 0.95 if bpm else 0.0
+    try:
+        if measured and tracked:
+            bpm, bpm_conf, bpm_source = _reconcile_tracked(bpm, measured, conf, alternation)
+        elif not bpm and measured:
+            bpm, bpm_conf, bpm_source = measured, conf, "measured"
+        elif bpm and measured:
+            bpm, bpm_conf, bpm_source = _reconcile_octave(
+                bpm, measured, conf, bpm_conf, bpm_source
+            )
+    except Exception as exc:
+        logger.warning(
+            "analysis: tempo reconcile failed for %s: %s", track.path, exc, exc_info=True
         )
 
     feats.update(
@@ -1684,6 +1699,8 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         "embedded": vec is not None,
         "took": round(time.monotonic() - t0, 2),
     }
+    if origin != "server":
+        payload["measuredBy"] = origin
     if verdict["level"]:
         payload["styleLevel"] = verdict["level"]
     row = existing or TrackAnalysis(track=track)
@@ -1712,6 +1729,39 @@ def analyze_track_verbose(track: Track, provider=None, force: bool = False):
         track.path, bpm, bpm_source, style, style_conf, payload["took"],
     )
     return row, None
+
+
+def gate_tempo(attacks, tracker, grid):
+    """``(bpm, confidence, pulse, alternation)`` from what a client's tracker measured
+    (webapp/measure: ``tempo.rs`` and ``lowband.rs``), through the very gates
+    ``_measure_tempo`` puts on the server's own: too few bass attacks a minute, too
+    little salience or a tempo out of range mean no tempo at all. ``(None, 0, 0, None)``
+    then. The reconciliation with Deezer's figure is `_store_verdict`'s, as for the server."""
+    none = (None, 0.0, 0.0, None)
+    if not tracker or attacks is None or attacks < MIN_ATTACKS_PER_MINUTE:
+        return none
+    if tracker.get("salience", 0.0) < MIN_BEAT_SALIENCE:
+        return none
+    bpm = tracker.get("bpm")
+    if not bpm or not (MIN_BPM <= bpm <= MAX_BPM):
+        return none
+    return (round(float(bpm), 3), round(float(tracker.get("confidence", 0.0)), 3),
+            round(float(grid or 0.0), 3), tracker.get("alternation"))
+
+
+def analyze_from_client(track, spectral, tempo, provider=None, vec=None, force=False):
+    """Store the verdict of measures taken by a client: ``spectral`` is
+    ``_parse_spectral``'s dict, ``tempo`` is ``gate_tempo``'s tuple. Returns
+    ``(row, reason)`` like ``analyze_track_verbose``; the decision (tag, head, rules) is
+    the server's, from these numbers, so a client never classifies anything."""
+    if track is None or not track.path or not os.path.isfile(track.path):
+        return None, "file missing from the archive"
+    existing = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+    if existing and not force and existing.version >= ANALYSIS_VERSION:
+        return existing, None
+    feats = dict(spectral)
+    return _store_verdict(track, existing, provider, feats, tempo, True, vec,
+                          time.monotonic(), origin="client")
 
 
 #: ``Track.gain`` is what the player reads as the track's loudness (it applies

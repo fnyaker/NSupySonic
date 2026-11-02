@@ -6,6 +6,7 @@
 
 pub mod fft;
 pub mod loudness;
+pub mod lowband;
 pub mod mel;
 pub mod spectral;
 pub mod tempo;
@@ -300,6 +301,45 @@ pub extern "C" fn mel_aggregate() -> *const f32 {
                 MEL_VEC.as_ptr()
             }
             None => core::ptr::null(),
+        }
+    }
+}
+
+// -- the low band (the tempo's gate and the pulse), on the channels `ms_begin` was given ------
+
+static mut LOWBAND: Option<lowband::LowBand> = None;
+
+/// Measure the low band of the channels loaded by `ms_begin` / `ms_channel`. 1 on success.
+#[no_mangle]
+pub extern "C" fn lb_run() -> u32 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        if CH.is_empty() {
+            return 0;
+        }
+        let refs: Vec<&[f32]> = CH.iter().map(|v| v.as_slice()).collect();
+        LOWBAND = Some(lowband::analyse(&refs, RATE));
+        1
+    }
+}
+
+/// Bass attacks a minute (NaN before `lb_run`).
+#[no_mangle]
+pub extern "C" fn lb_attacks() -> f64 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        LOWBAND.as_ref().map_or(f64::NAN, |l| l.attacks)
+    }
+}
+
+/// How concentrated the bass onsets are on the grid of this tempo (NaN before `lb_run`).
+#[no_mangle]
+pub extern "C" fn lb_grid(bpm: f64) -> f64 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        match LOWBAND.as_ref() {
+            Some(l) if bpm.is_finite() && bpm > 0.0 => l.grid(bpm),
+            _ => f64::NAN,
         }
     }
 }

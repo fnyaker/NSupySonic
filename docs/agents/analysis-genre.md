@@ -488,11 +488,22 @@ embed, re-decide (`start_relabel`) — each resumable (checkpoint) and each unit
   applies at once and a restart inside the window joins it. A window that crosses midnight belongs to
   the day it opened on. It does nothing when `plan().todo` is 0.
 
-## Analysis on the client PC (WASM): WIP, preparation — not wired into the app
+## Analysis on the client PC (WASM)
 
 The goal: measure, embed and classify on the admin's PC (a Rust/WASM core, Opus 64 k in Range blocks, resumable, each result
 pushed to the server as it lands, the SERVER classifying from the stored measures so tags, the head and the rules stay in one
-place). **Nothing loads the crate yet, no endpoint receives results, the classifier is unchanged.**
+place).
+
+**How it runs (Réglages > Genres > Bibliothèque, "Où analyser: Serveur | Cet ordinateur").** `Meta.analysis_where` picks who
+measures; on "client" the server's own pass skips the measure stage. `lib/analysis/runner.js` asks `/api/analysis/todo` (20 per
+page, `next` cursor, so a run cut anywhere resumes with exactly what is unsent), downloads each ORIGINAL FLAC in 4 MB Range blocks
+(`download.js`: `X-NS-Background`, 503/429 waited out with `Retry-After`, a block whose `Content-Range` is not the one asked is
+retried, never stitched), decodes it at the file's own rate (`decode.js`: Opus-range shifts measured, see above), measures it in a
+Worker (`worker.js`, `measure.js` over the wasm: spectral + loudness, bass attacks, tracker on 44.1 kHz mono) and POSTs the numbers
+to `/api/analysis/<id>/measures`; each track is stored the moment it is sent. One lane, so the PC stays the person's own. A 409
+(`version`) stops the run: the page was built for another measure. Failures keep their cause per track (`JobFailures`). Silence
+is a named failure ("no spectral frames"), never invented numbers. Not done: the embedding step (onnxruntime-web).
+Tests: `webapp/test/clientanalysis.test.mjs` (real wasm on a 150 BPM kick, mock server for the blocks, runner ledger/stop/409).
 
 **The numbers are the server's, so no re-measure and no recalibration are needed.** `analysis._spectral` takes its descriptors from
 ffmpeg's `aspectralstats` on the SOURCE signal (its own rate, every channel, pooled). Recovered frame by frame, then checked on 99 real
@@ -535,6 +546,19 @@ the client's vector is the server's. Page-side protocol: `mel_plan(n)` (how many
 `mel_segment(k)` (fill 33024 samples), `mel_run()`, `mel_patches()` (count x 128 x 96 -> the network), `mel_rows()` (write count x 1280 back),
 `mel_aggregate()` (3840 floats). Only the 60 patches' samples are copied in, so wasm memory is ~10 MB whatever the track's length.
 `RustMelTestCase` pins it (native build of `examples/mel`).
+
+**The server's side is in** (`webui/analysis.py`, `analysis.analyze_from_client`, `gate_tempo`, `_store_verdict`): the server's own pass and a client's
+measures now meet in ONE function, `_store_verdict` (reconcile the tracked tempo with Deezer's figure, decide the style by tag / head / rules,
+store the row), so a client only ever sends numbers and the decision stays the server's. `GET /api/analysis/todo` (admin; `after` / `limit` <= 20
+/ `force`) lists archived tracks with no current verdict in ONE statement, each with the file's own rate and channels (probed once), the original
+FLAC's URL and the server's read caps (`spectral_seconds` 600, `tempo_seconds` 1200); `POST /api/analysis/<row uuid>/measures` takes
+`{version, spectral{...}, tempo{bpm, confidence, salience, alternation, attacks, grid} | null, force?}`, refuses another `ANALYSIS_VERSION` (409),
+range-checks every number (400), and applies `_measure_tempo`'s gates (attacks/min >= 40, salience >= 1.12, 55-300 BPM) to the tracker's output;
+`PUT /api/analysis/where` ("server" | "client", `plan().where`) says who measures the library: in "client" the server's job skips the measure
+stage and keeps the embeddings and the re-deciding. The first-play measure of a fresh archive stays the server's (a listener waits on it). The
+download is the ORIGINAL FLAC, not an Opus transcode: measured on 14 files, an Opus transcode (64 to 256 kbit/s alike) moves the centroid ~2-3 %,
+the spread 3-6 %, flatness ~50 % and flips the tempo's octave or value on ~4 of 14 files.
+`tests/test_client_ingest.py` pins the endpoints, the gates and the setting.
 
 ## What remains
 
