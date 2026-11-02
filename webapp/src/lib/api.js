@@ -343,8 +343,10 @@ export const api = {
   explorer: (settings) =>
     settings ? req("/explorer", { method: "PUT", body: body(settings) }) : req("/explorer"),
   // Analysis on the client PC: what to measure, the measures coming back, who measures.
-  analysisTodo: (after) =>
-    req("/analysis/todo?limit=20" + (after ? "&after=" + encodeURIComponent(after) : "")),
+  analysisTodo: (after, embed) =>
+    req("/analysis/todo?limit=20" + (embed ? "&embed=1" : "") + (after ? "&after=" + encodeURIComponent(after) : "")),
+  analysisEmbedding: (id, v) =>
+    req("/analysis/" + encodeURIComponent(id) + "/embedding", { method: "POST", body: body(v) }),
   analysisMeasures: (id, m) =>
     req("/analysis/" + encodeURIComponent(id) + "/measures", { method: "POST", body: body(m) }),
   analysisWhere: (where) => req("/analysis/where", { method: "PUT", body: body({ where }) }),

@@ -290,6 +290,8 @@ POLICY = {
     "analysis_where_set": "admin",
     "analysis_todo": "admin",
     "analysis_measures": "admin",
+    "analysis_embedding": "admin",
+    "analysis_extractor_model": "admin",
     "analysis_schedule_set": "admin",
     "archive_migrate_start": "admin",
     "archive_migrate_status": "admin",

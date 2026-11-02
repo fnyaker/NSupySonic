@@ -43,7 +43,7 @@ import threading
 import time
 import uuid
 
-from flask import current_app, jsonify, request
+from flask import current_app, jsonify, request, send_file
 
 from ..db import Meta, Track, TrackAnalysis, now
 from . import _may_access_track, _valid_id, admin_required, login_required, webapi
@@ -295,7 +295,10 @@ def plan():
     rows = TrackAnalysis.select().where(TrackAnalysis.version > 0)
     measured = rows.count()
     head = current_head_id()
-    extractor = not emb.why_unavailable()
+    # A browser that analyses the library runs the extractor itself from the operator's .onnx,
+    # so the vector is due even where this server has no onnxruntime.
+    where_now = where()
+    extractor = not emb.why_unavailable() or (where_now == "client" and emb.model_path() is not None)
     stale_measure = TrackAnalysis.select().where(
         TrackAnalysis.version < ANALYSIS_VERSION).count()
     stale_embed = (
@@ -323,7 +326,7 @@ def plan():
         "version": ANALYSIS_VERSION,
         "embed_version": emb.EMBED_VERSION,
         "extractor": extractor,
-        "where": where(),
+        "where": where_now,
     }
 
 
@@ -564,15 +567,19 @@ def analysis_todo():
     except (TypeError, ValueError):
         limit = TODO_PAGE
     force = request.args.get("force") == "1"
+    from ..deezer import embedding as emb
     from peewee import JOIN
+
+    # `embed=1`: this client can run the extractor, so tracks whose only lag is the vector count too
+    can_embed = request.args.get("embed") == "1" and emb.model_path() is not None
 
     q = Track.select().where(Track.last_modification > 0)
     if not force:
         # the ones with no current verdict, in one statement (not a lookup per track)
-        q = (
-            q.join(TrackAnalysis, JOIN.LEFT_OUTER, on=(TrackAnalysis.track == Track.id))
-            .where(TrackAnalysis.version.is_null() | (TrackAnalysis.version < ana.ANALYSIS_VERSION))
-        )
+        lag = TrackAnalysis.version.is_null() | (TrackAnalysis.version < ana.ANALYSIS_VERSION)
+        if can_embed:
+            lag = lag | (TrackAnalysis.embed_version < emb.EMBED_VERSION)
+        q = q.join(TrackAnalysis, JOIN.LEFT_OUTER, on=(TrackAnalysis.track == Track.id)).where(lag)
     q = q.order_by(Track.id)
     after = request.args.get("after")
     if after:
@@ -600,7 +607,27 @@ def analysis_todo():
         })
         if len(out) >= limit:
             break
+    # what each track still lacks: the measures, the vector, or both (one statement for the page)
+    stamps = {}
+    if out:
+        ids = [uuid.UUID(o["id"]) for o in out]
+        for ta in TrackAnalysis.select(TrackAnalysis.track, TrackAnalysis.version, TrackAnalysis.embed_version).where(
+            TrackAnalysis.track.in_(ids)
+        ):
+            stamps[str(ta.track_id)] = (ta.version, ta.embed_version)
+    for o in out:
+        version, embed = stamps.get(o["id"], (None, None))
+        o["need"] = {
+            "measure": force or version is None or version < ana.ANALYSIS_VERSION,
+            "embed": can_embed and (force or embed is None or embed < emb.EMBED_VERSION),
+        }
+    mi = emb.model_info() if can_embed else None
     return jsonify({
+        "extractor": (
+            {"url": "/api/analysis/extractor/model", "size": mi["size"], "name": mi["filename"],
+             "version": emb.EMBED_VERSION, "dim": emb.EMBED_DIM}
+            if mi else None
+        ),
         "tracks": out,
         # more to look at when the page filled up, or when the scan stopped at its cap
         "next": str(last) if last is not None and (len(out) >= limit or scanned >= cap) else None,
@@ -670,15 +697,70 @@ def analysis_measures(mid):
             tempo = ana.gate_tempo(attacks, tracker, grid)
     except ValueError as exc:
         return jsonify({"error": f"invalid measures: {exc}"}), 400
+    vec = None
+    if data.get("embedding") is not None:
+        try:
+            vec = ana.decode_client_vector(data["embedding"])
+        except ValueError as exc:
+            return jsonify({"error": f"invalid embedding: {exc}"}), 400
     if not track.path or not os.path.isfile(track.path):
         return jsonify({"error": "not archived"}), 404
     row, reason = ana.analyze_from_client(
         track, spectral, tempo, provider=getattr(current_app, "deezer", None),
-        force=bool(data.get("force")),
+        vec=vec, force=bool(data.get("force")),
     )
     if row is None:
         return jsonify({"error": reason or "not stored"}), 500
     return jsonify({"ok": True, "style": row.style, "bpm": row.bpm})
+
+
+@webapi.route("/analysis/extractor/model")
+@login_required
+@admin_required
+def analysis_extractor_model():
+    """The operator's own extractor ``.onnx``, unmodified, to the admin's browser only
+    (its licence allows the operator's copy, not redistribution). Range-capable."""
+    from ..deezer import embedding as emb
+
+    path = emb.model_path()
+    if not path:
+        return jsonify({"error": "no extractor installed"}), 404
+    resp = send_file(path, mimetype="application/octet-stream", conditional=True, max_age=0)
+    resp.headers["Cache-Control"] = "private, no-cache"
+    return resp
+
+
+@webapi.route("/analysis/<mid>/embedding", methods=["POST"])
+@login_required
+@admin_required
+def analysis_embedding(mid):
+    """A client's vector for a track whose measures are already stored: body
+    ``{version, data}`` (``analysis.decode_client_vector``). The style is decided
+    again from it, no audio read."""
+    from ..deezer import analysis as ana
+
+    try:
+        key = uuid.UUID(str(mid))
+    except ValueError:
+        return jsonify({"error": "invalid id"}), 400
+    track = Track.get_or_none(Track.id == key)
+    if track is None:
+        return jsonify({"error": "unknown track"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "invalid body"}), 400
+    try:
+        vec = ana.decode_client_vector(data)
+    except ValueError as exc:
+        status = 409 if "version" in str(exc) else 400
+        return jsonify({"error": "version" if status == 409 else f"invalid embedding: {exc}"}), status
+    if not track.path or not os.path.isfile(track.path):
+        return jsonify({"error": "not archived"}), 404
+    row = TrackAnalysis.get_or_none(TrackAnalysis.track == track)
+    if row is None:
+        return jsonify({"error": "measure first"}), 422
+    changed = ana.store_client_embedding(row, vec)
+    return jsonify({"ok": True, "changed": bool(changed)})
 
 
 @webapi.route("/analysis/schedule", methods=["PUT"])

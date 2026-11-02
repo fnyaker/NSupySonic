@@ -170,3 +170,67 @@ test("stop ends after the track in hand and resumes from the server's todo", asy
   assert.deepEqual(posted, ["a"]);
   assert.equal(r.state().stopped, true);
 });
+
+test("a model change redoes only the vector: no decode, no measures, one embedding POST", async () => {
+  const sent = [];
+  const page = {
+    tracks: [{ ...T("a"), need: { measure: false, embed: true } }, { ...T("b"), need: { measure: true, embed: true } }],
+    next: null, version: 7, spectral_seconds: 600, tempo_seconds: 1200,
+    extractor: { url: "/api/analysis/extractor/model", version: 3 },
+  };
+  const { d } = deps({ pages: [page] });
+  let decoded = 0;
+  d.decode = async () => (decoded++, { channels: [new Float32Array(1)], mono44: new Float32Array(1) });
+  d.embed = async (_b, ex) => ({ version: ex.version, data: "AAAA" });
+  d.api.analysisEmbedding = async (id, v) => sent.push(["embedding", id, v.version]);
+  d.api.analysisMeasures = async (id, body) => sent.push(["measures", id, !!body.embedding]);
+  const r = createRunner(d);
+  await r.run();
+  assert.deepEqual(sent, [["embedding", "a", 3], ["measures", "b", true]]);
+  assert.equal(decoded, 1);
+  assert.equal(r.state().done, 2);
+});
+
+test("a failed network keeps the measures and names the failure", async () => {
+  const sent = [];
+  const page = {
+    tracks: [{ ...T("a"), need: { measure: true, embed: true } }], next: null, version: 7,
+    spectral_seconds: 600, tempo_seconds: 1200, extractor: { url: "/m", version: 3 },
+  };
+  const { d } = deps({ pages: [page] });
+  d.embed = async () => {
+    throw new Error("the extractor has no 1280-wide output");
+  };
+  d.api.analysisMeasures = async (id, body) => sent.push([id, !!body.embedding]);
+  const r = createRunner(d);
+  await r.run();
+  assert.deepEqual(sent, [["a", false]]);
+  assert.equal(r.state().failed, 1);
+  assert.match(r.state().failures[0].reason, /empreinte.*1280/);
+});
+
+test("without an extractor on the server the vector is simply not asked for", async () => {
+  const asked = [];
+  const { d } = deps({ pages: [PAGE(["a"], null)] });
+  d.api.analysisTodo = async (_after, embed) => (asked.push(embed), PAGE(["a"], null));
+  const r = createRunner(d);
+  await r.run();
+  assert.deepEqual(asked, [false]);
+  assert.equal(r.state().done, 1);
+});
+
+test("the run waits between tracks while this computer plays music, and says so", async () => {
+  let playing = true;
+  const { d, posted } = deps({ pages: [PAGE(["a", "b"], null)] });
+  d.busy = () => playing;
+  d.busyPoll = 5;
+  const r = createRunner(d);
+  const run = r.run();
+  await new Promise((ok) => setTimeout(ok, 40));
+  assert.equal(r.state().paused, true);
+  assert.deepEqual(posted, []);
+  playing = false;
+  await run;
+  assert.deepEqual(posted, ["a", "b"]);
+  assert.equal(r.state().paused, false);
+});

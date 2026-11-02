@@ -36,6 +36,9 @@ function buildStamp() {
       assets = Object.keys(bundle)
         .map((k) => bundle[k].fileName)
         .filter((f) => f && f !== "index.html")
+        // onnxruntime-web's 11 MB runtime is only for the admin's client analysis, which needs the
+        // network anyway: it is fetched when a run starts, never staged on every phone.
+        .filter((f) => !/^assets\/ort-wasm.*\.(wasm|mjs)$/.test(f))
         .map((f) => `/app/${f}`)
         .sort();
     },
@@ -99,6 +102,9 @@ export default defineConfig({
     __APP_BUILD__: JSON.stringify(BUILD_ID),
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
+  // Module workers: the client analysis worker loads onnxruntime-web on demand, and a worker
+  // that imports lazily needs code-splitting, which the default "iife" cannot do.
+  worker: { format: "es" },
   build: {
     outDir: "../supysonic/webui/dist",
     emptyOutDir: true,
