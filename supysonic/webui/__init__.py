@@ -4672,6 +4672,44 @@ def cover_response(cid, *, vetted=False):
         return jsonify({"error": "not found"}), 404
 
 
+@webapi.route("/stream/<deezer_id>/ready")
+@login_required
+def stream_ready(deezer_id):
+    """Whether ``/stream/<id>?q=`` would now answer with a finished FILE (a length, byte
+    ranges, so a seek anywhere lands) rather than a stream generated as it is sent.
+
+    A FIRST play is the second kind: no length, no ranges, so the browser cannot seek past
+    what it has read (it fetches the URL again and starts from 0). The player asks this
+    before it re-fetches for a seek, instead of re-fetching blind and getting another
+    generated stream back. Cheap: one indexed lookup, a file test, a cache test; it
+    never starts a download or a transcode."""
+    from ..deezer import archive
+    from .refs import canonical
+
+    deezer_id = canonical(deezer_id)
+    quality = (request.args.get("q") or "").upper()
+    bitrate = None
+    if quality.startswith("OPUS_"):
+        try:
+            b = int(quality.split("_", 1)[1])
+            bitrate = b if b in _OPUS_BITRATES else 128
+        except ValueError:
+            bitrate = 128
+    if _valid_id(deezer_id):
+        track = archive.find_local_track(deezer_id)
+    else:
+        try:
+            track = Track[uuid.UUID(deezer_id)]
+        except (ValueError, Track.DoesNotExist):
+            return jsonify({"error": "invalid id"}), 400
+        if not _may_access_track(track):
+            return jsonify({"error": "invalid id"}), 400
+    ready = bool(track is not None and track.path and os.path.isfile(track.path))
+    if ready and bitrate:
+        ready = current_app.transcode_cache.has(f"deezer-{track.id}-opus{bitrate}.ogg")
+    return jsonify({"ready": ready})
+
+
 @webapi.route("/stream/<deezer_id>")
 @login_required
 def stream(deezer_id):

@@ -81,6 +81,13 @@ class PlayerService : Service() {
         val service: PlayerService get() = this@PlayerService
     }
 
+    /**
+     * Next (true) / previous (false) made by the native player itself, true when it did:
+     * set by MainActivity on bind. With the activity stopped the page is throttled or
+     * frozen and a command sent to it waits, or is lost when no activity is bound.
+     */
+    var nativeSkip: ((Boolean) -> Boolean)? = null
+
     /** Transport commands back to the WebView; set by MainActivity on bind. */
     var commandSink: ((String, Double?) -> Unit)? = null
 
@@ -131,8 +138,12 @@ class PlayerService : Service() {
         session.setCallback(object : MediaSessionCompat.Callback() {
             override fun onPlay() = send("play")
             override fun onPause() = send("pause")
-            override fun onSkipToNext() = send("next")
-            override fun onSkipToPrevious() = send("prev")
+            override fun onSkipToNext() {
+                if (nativeSkip?.invoke(true) != true) send("next")
+            }
+            override fun onSkipToPrevious() {
+                if (nativeSkip?.invoke(false) != true) send("prev")
+            }
             override fun onSeekTo(pos: Long) = send("seek", pos / 1000.0)
             override fun onStop() = send("pause")
         })

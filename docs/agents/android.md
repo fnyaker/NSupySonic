@@ -135,6 +135,18 @@ nothing changed. `node test/native/run.mjs` drives it on a hidden page whose tim
 events run, crossfade and trim on (`--old` runs that scenario as bridge 7: the page crossfaded by itself, the app never
 advanced).
 
+**Next / previous from a media button, with the page asleep** (`PlayerService` -> `PlayerService.nativeSkip` -> `NativeAudio.skip`).
+The notification, a headset or the lock screen used to send `next` / `prev` to the PAGE (`commandSink` -> `evaluateJavascript`): with the
+activity stopped that page is throttled (timers once a minute after five minutes) or frozen, with the activity gone `commandSink` is null
+and the command vanished — "after a while in the background I can no longer skip". Media3's model is the opposite: the player that owns
+the playlist answers the command, whoever asks. So while the activity is stopped the app's player does it itself, from the list the page
+named (bridge 7/8): next = `advance(next.first())`, previous = restart the track past 3 s, else back to the one this player went through
+(`trail`, up to 20, the track left returns to the front of the list); each tells the page (`adv`, `onAdvance`) so it adopts the change when
+it wakes. Not ours to do (the page is shown, no list, nothing before) -> the command goes to the page as before. The list is only what the
+page named (<= 12): past it the app cannot know the next track, and a skip goes to the page. Sources: developer.chrome.com "Timer throttling
+in Chrome 88" and the Page Lifecycle API (frozen pages run no timers), Media3 `MediaSession` / `MediaController` docs (commands go to the
+session's player). Unit-untestable (ExoPlayer): the build is CI's `android` workflow, the logic is read against `advance`.
+
 **When the app's player fails** (lot N6, `nativeplayer.js#noteNativeFault`, `Player.svelte#fallBackToPage`): a player
 error (MEDIA_ERR_DECODE, i.e. ExoPlayer's decoder or audio-track codes, or `naCreate` refusing) is recorded in
 `audio.native.fault` BEFORE the element's error fires, so `nativeAudioWanted` is already false and the playing track moves

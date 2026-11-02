@@ -2,6 +2,15 @@
 
 Reference notes for agents working on this area. Read [CLAUDE.md](../../CLAUDE.md) first: its process and rules apply here. Other areas: [docs/agents/](./).
 
+**A seek into a part not yet downloaded (first play).** A first play is generated as it is sent (live archive, or a transcode): no length,
+no ranges, so the browser cannot seek past what it has read — it fetches the URL again and starts from 0. `performSeek` therefore CHASES
+the target (the bar shows it, the sound goes on from where it is) and re-fetches ONCE, when `GET /api/stream/<id>/ready?q=` says the server
+has the FILE (`pollReady`, every second, up to 90 s; Opus: the transcode is in the cache) — the old blind reload after 8 s got another
+generated stream back, paused it and left silence until the 45 s cap snapped the bar back. What the established servers do: ExoPlayer's
+progressive docs need ranges and a length to seek; the OpenSubsonic `transcodeOffset` extension restarts the transcode at the position
+(`timeOffset`) instead — a later step if waiting for the file proves too long on a slow link (Deezer's FLAC is fetched at link speed, a few
+seconds on a LAN, tens on a mobile link). The app's player has its own held seek (android.md, bridge 7).
+
 **Crossfade + silence trimming** (`components/Player.svelte`, `lib/edges.js`,
 `supysonic/webui/edges.py`). Two ideas that need each other: masters carry a beat of digital silence
 at each end, and a crossfade that ignores them fades one track's silence into another's — the gap it

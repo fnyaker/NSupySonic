@@ -264,6 +264,7 @@ POLICY = {
     "share_file": "full",
     "share_clip": "full",
     "stream": "full",
+    "stream_ready": "full",
     # tagging is the one piece of the genre studio `full` carries
     "genre_label": "full",
     "genre_bulk_preview": "full",

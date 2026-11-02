@@ -138,6 +138,33 @@ class NativeAudio(
     // stalls; while it is shown, the page does them as it always has.
     private var foreground = true
 
+    /**
+     * A media button's next / previous (the notification, a headset, the lock screen) while
+     * the activity is stopped: this player makes the change itself, from the list the page
+     * named, because the page it would otherwise be sent to is throttled, frozen or gone —
+     * a hidden page's timers run once a minute after five minutes (developer.chrome.com,
+     * "timer throttling in Chrome 88") and a frozen one runs nothing (Page Lifecycle API).
+     * False when it is not ours to do (the page is shown, nothing to go to): the command
+     * then goes to the page as it always did.
+     */
+    fun skip(forward: Boolean): Boolean {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return doSkip(forward)
+        var done = false
+        val latch = java.util.concurrent.CountDownLatch(1)
+        main.post {
+            try {
+                done = doSkip(forward)
+            } finally {
+                latch.countDown()
+            }
+        }
+        latch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+        return done
+    }
+
+    private fun doSkip(forward: Boolean): Boolean =
+        !foreground && slots[lastPlayed]?.skip(forward) == true
+
     /** The activity was started (true) or stopped (false). */
     fun setForeground(fg: Boolean) {
         main.post {
@@ -298,6 +325,10 @@ class NativeAudio(
         private var vol = 1f
         // What follows, in order, as the page last named it.
         private var next: List<Next> = emptyList()
+        // The tracks this player went on to by itself, oldest first (the last is the one playing):
+        // what "previous" goes back to while the page cannot be asked.
+        private val trail = ArrayList<Next>()
+        private var curAtMs = 0L
         // The key of the track this player went on to by itself, until the next source.
         private var curKey = ""
         // Where the current track's audio ends (the page's silence trim), 0 for its file's end.
@@ -327,6 +358,8 @@ class NativeAudio(
                     val url = o.optString("url")
                     cancelChase()
                     next = emptyList()
+                    trail.clear()
+                    curAtMs = 0L
                     curKey = ""
                     curEndMs = 0
                     main.removeCallbacks(trimCheck)
@@ -546,6 +579,9 @@ class NativeAudio(
         /** The page names the track that follows; this player goes on to it by itself. */
         private fun advance(n: Next) {
             next = next.drop(1)
+            trail.add(n)
+            if (trail.size > 20) trail.removeAt(0)
+            curAtMs = n.atMs
             main.removeCallbacks(trimCheck)
             curEndMs = n.endMs
             cancelChase()
@@ -562,6 +598,50 @@ class NativeAudio(
             curKey = n.key.ifEmpty { "-" }
             send("adv")
             onAdvance(n.meta)
+        }
+
+        /** A media button's next (true) or previous (false), made here; false when it is not ours. */
+        fun skip(forward: Boolean): Boolean {
+            if (released || id != lastPlayed || chaseMs >= 0) return false
+            if (forward) {
+                if (next.isEmpty()) return false
+                advance(next.first())
+                return true
+            }
+            // Previous, as every player does it: past three seconds it restarts the track,
+            // earlier it goes back to the one before — when this player went through it.
+            if (!hasItem) return false
+            if (player.currentPosition > PREV_RESTART_MS || trail.size < 2) {
+                if (trail.isEmpty() && curAtMs == 0L && player.currentPosition <= PREV_RESTART_MS) return false
+                cancelChase()
+                pendingSeek = true
+                proc.startAt = curAtMs / 1000.0
+                player.seekTo(curAtMs)
+                send(null)
+                return true
+            }
+            val current = trail.removeAt(trail.size - 1)
+            val back = trail.last()
+            // The track we leave goes back in front of the list: "next" returns to it.
+            next = listOf(current) + next
+            main.removeCallbacks(trimCheck)
+            curEndMs = back.endMs
+            cancelChase()
+            url = back.url
+            complete = false
+            pendingSeek = false
+            vol = back.vol
+            player.volume = vol
+            proc.startAt = back.atMs / 1000.0
+            curAtMs = back.atMs
+            player.setMediaItem(MediaItem.fromUri(back.url), back.atMs)
+            hasItem = true
+            prepared = false
+            prepare()
+            curKey = back.key.ifEmpty { "-" }
+            send("adv")
+            onAdvance(back.meta)
+            return true
         }
 
         private fun rate(r: Double): Float =
@@ -689,6 +769,8 @@ class NativeAudio(
         private const val CHASE_TRIES = 4
         // How many tracks ahead the page may name.
         private const val MAX_NEXT = 12
+        // "Previous" restarts the track past this, goes back before it.
+        private const val PREV_RESTART_MS = 3_000L
     }
 }
 
