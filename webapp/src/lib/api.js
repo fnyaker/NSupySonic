@@ -738,6 +738,11 @@ export const api = {
   streamUrl: (id, quality) =>
     BASE + "/stream/" + id + (quality && quality !== "FLAC" ? "?q=" + quality : ""),
 
+  // Whether the stream would now be a finished FILE (length + ranges: a seek lands anywhere)
+  // and not a first-play stream generated as it is sent. Never starts a download.
+  streamReady: (id, quality) =>
+    req("/stream/" + encodeURIComponent(id) + "/ready" + (quality && quality !== "FLAC" ? "?q=" + quality : "")),
+
   // archived cover art (same-origin) for any track id — used to cache pochettes
   // for offline playback.
   coverUrl: (id) => BASE + "/cover/" + id,

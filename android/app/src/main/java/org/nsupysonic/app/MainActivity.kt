@@ -136,6 +136,7 @@ class MainActivity : AppCompatActivity() {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as PlayerService.LocalBinder).service
             service?.commandSink = { cmd, value -> runOnUiThread { runJsCommand(cmd, value) } }
+            service?.nativeSkip = { forward -> nativeAudio?.skip(forward) == true }
             pendingState?.let { service?.update(it) }
         }
 
@@ -143,6 +144,7 @@ class MainActivity : AppCompatActivity() {
             // The sink closes over THIS activity's WebView; a service that comes
             // back (onServiceConnected) installs a fresh one.
             service?.commandSink = null
+            service?.nativeSkip = null
             service = null
         }
     }
@@ -1223,6 +1225,7 @@ class MainActivity : AppCompatActivity() {
         audioRoute?.stop()
         audioRoute = null
         service?.commandSink = null
+        service?.nativeSkip = null
         if (bound) {
             try {
                 unbindService(connection)

@@ -1261,14 +1261,34 @@
     el.addEventListener("progress", onAvail);
     el.addEventListener("canplay", onAvail);
     el.addEventListener("timeupdate", onAvail);
-    // One reload, a few seconds in: covers backward seeks (a forward-only
-    // stream never re-buffers what's behind) and picks up the server-side
-    // archive/transcode if it finished meanwhile (a reload then serves a
-    // seekable file).
-    chase.reloadTimer = setTimeout(reloadForChase, 8000);
+    // The reload that makes the target reachable is made WHEN THE SERVER HAS THE FILE
+    // (a length and byte ranges), not blind after a fixed wait: a reload while the
+    // download is still going gets another generated stream back, silence and the
+    // start of the track. Until then the sound goes on from where it is. Backward
+    // seeks wait the same way (a forward-only stream never re-buffers what is behind).
+    chase.reloadTimer = setTimeout(pollReady, 600);
     // Give up silently after a while — the bar falls back to the real position.
-    chase.capTimer = setTimeout(cancelSeekChase, 45000);
+    chase.capTimer = setTimeout(cancelSeekChase, 90000);
     onAvail(); // in case it became seekable between the check and now
+  }
+
+  async function pollReady() {
+    if (!chase) return;
+    const mine = chase;
+    const cur = get(current);
+    if (cur && !curIsBlob && get(online)) {
+      try {
+        const r = await api.streamReady(trackRef(cur), curQ);
+        if (chase !== mine) return;
+        if (r && r.ready) {
+          reloadForChase();
+          return;
+        }
+      } catch {
+        /* not answered: ask again */
+      }
+    }
+    if (chase === mine) mine.reloadTimer = setTimeout(pollReady, 1000);
   }
 
   function reloadForChase() {
