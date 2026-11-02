@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -153,8 +154,18 @@ NOW_WORKERS_MAX = 2
 #: The Throttle of the job in flight (the studio reads WHY it is paused).
 _throttle = None
 
+_WHERE_KEY = "analysis_where"
+WHERE_CHOICES = ("server", "client")
 _SCHEDULE_KEY = "analysis_schedule"
 SCHEDULE_DEFAULT = {"enabled": True, "at": "03:00", "hours": 6}
+
+
+def where() -> str:
+    """Where the library is measured: "server" (ffmpeg here, the default) or "client"
+    (the admin's browser, webapp/measure, sends the numbers). Either way the SERVER
+    decides the style; a client only measures."""
+    row = Meta.get_or_none(Meta.key == _WHERE_KEY)
+    return row.value if row is not None and row.value in WHERE_CHOICES else "server"
 
 
 def _run_analysis(app, force, workers, limit, mode="now", deadline=None):
@@ -196,15 +207,19 @@ def _run_analysis(app, force, workers, limit, mode="now", deadline=None):
                     _analysis_job.update(snap)
 
             provider = getattr(app, "deezer", None)
-            set_stage("measure")
-            stats = ana.backfill(
-                provider=provider, force=force, limit=limit, workers=workers,
-                on_stats=on_stats, throttle=throttle,
-            )
-            snap = _job_snapshot(stats)
-            snap.pop("workers", None)
-            with _analysis_lock:
-                _analysis_job.update(snap)
+            if where() == "server":
+                set_stage("measure")
+                stats = ana.backfill(
+                    provider=provider, force=force, limit=limit, workers=workers,
+                    on_stats=on_stats, throttle=throttle,
+                )
+                snap = _job_snapshot(stats)
+                snap.pop("workers", None)
+                with _analysis_lock:
+                    _analysis_job.update(snap)
+            # (client mode: the browser measures; this job keeps the stages that need
+            # the server's model — the embeddings until the client makes them too — and
+            # the re-deciding)
             embedded = 0
             if not cancelled() and not emb.why_unavailable() and not emb.session_error():
                 set_stage("embed")
@@ -308,6 +323,7 @@ def plan():
         "version": ANALYSIS_VERSION,
         "embed_version": emb.EMBED_VERSION,
         "extractor": extractor,
+        "where": where(),
     }
 
 
@@ -490,6 +506,179 @@ def analysis_backfill_stop():
 def analysis_plan():
     """What is out of date and at which step, plus the nightly window."""
     return jsonify({**plan(), "schedule": schedule_settings()})
+
+
+@webapi.route("/analysis/where", methods=["PUT"])
+@login_required
+@admin_required
+def analysis_where_set():
+    """``{"where": "server" | "client"}``: who measures the library."""
+    value = (request.get_json(silent=True) or {}).get("where")
+    if value not in WHERE_CHOICES:
+        return jsonify({"error": "where must be server or client"}), 400
+    row = Meta.get_or_none(Meta.key == _WHERE_KEY)
+    if row is None:
+        Meta.create(key=_WHERE_KEY, value=value)
+    else:
+        row.value = value
+        row.save()
+    return jsonify({"ok": True, "where": value})
+
+
+#: Tracks one ``/analysis/todo`` answer lists, and the longest a client reads of one:
+#: the server's own caps (``analysis.MAX_SECONDS``, ``beats.MAX_SECONDS``).
+TODO_PAGE = 20
+_probes = {}
+
+
+def _probe(track):
+    """``(rate, channels)`` of a file, read once (a process per track is not free)."""
+    from ..deezer import analysis as ana
+
+    key = (str(track.id), track.path)
+    if key not in _probes:
+        if len(_probes) > 4000:
+            _probes.clear()
+        try:
+            _probes[key] = ana.probe_audio(track.path)
+        except Exception:
+            _probes[key] = None
+    return _probes[key]
+
+
+@webapi.route("/analysis/todo")
+@login_required
+@admin_required
+def analysis_todo():
+    """The next archived tracks a client has to measure, in key order: ``after`` (a
+    row UUID) continues, ``limit`` <= 20, ``force=1`` also lists current ones. Each
+    carries what a client must know to decode it like the server does: the file's own
+    sample rate and channels (ffmpeg measures the SOURCE signal), its duration, the
+    URL of the original FLAC (lossy transcodes move the descriptors: measured), and
+    the seconds it may read (the server's caps)."""
+    from ..deezer import analysis as ana
+    from ..deezer import beats
+
+    try:
+        limit = max(1, min(int(request.args.get("limit", TODO_PAGE)), TODO_PAGE))
+    except (TypeError, ValueError):
+        limit = TODO_PAGE
+    force = request.args.get("force") == "1"
+    from peewee import JOIN
+
+    q = Track.select().where(Track.last_modification > 0)
+    if not force:
+        # the ones with no current verdict, in one statement (not a lookup per track)
+        q = (
+            q.join(TrackAnalysis, JOIN.LEFT_OUTER, on=(TrackAnalysis.track == Track.id))
+            .where(TrackAnalysis.version.is_null() | (TrackAnalysis.version < ana.ANALYSIS_VERSION))
+        )
+    q = q.order_by(Track.id)
+    after = request.args.get("after")
+    if after:
+        try:
+            q = q.where(Track.id > uuid.UUID(after))
+        except ValueError:
+            return jsonify({"error": "invalid after"}), 400
+    out = []
+    last = None
+    cap = limit * 4 + 1  # a file gone from the disk costs a row, not a request
+    scanned = 0
+    for t in q.limit(cap):
+        scanned += 1
+        last = t.id
+        if not t.path or not os.path.isfile(t.path):
+            continue
+        probe = _probe(t)
+        if probe is None:
+            continue
+        ref = str(t.deezer_id) if t.deezer_id else str(t.id)
+        out.append({
+            "id": str(t.id), "ref": ref, "title": t.title, "duration": t.duration or 0,
+            "rate": probe[0], "channels": probe[1],
+            "url": "/api/stream/" + ref,
+        })
+        if len(out) >= limit:
+            break
+    return jsonify({
+        "tracks": out,
+        # more to look at when the page filled up, or when the scan stopped at its cap
+        "next": str(last) if last is not None and (len(out) >= limit or scanned >= cap) else None,
+        "version": ana.ANALYSIS_VERSION,
+        "spectral_seconds": ana.MAX_SECONDS,
+        "tempo_seconds": beats.MAX_SECONDS,
+    })
+
+
+def _number(value, lo, hi, nullable=False):
+    if value is None and nullable:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("a number is expected")
+    v = float(value)
+    if not math.isfinite(v) or v < lo or v > hi:
+        raise ValueError(f"{v} is outside [{lo}, {hi}]")
+    return v
+
+
+_SPECTRAL = {
+    "centroid": (0, 30000, False), "spread": (0, 30000, False), "flatness": (0, 1.5, False),
+    "flatness_hi": (0, 1.5, False), "entropy": (0, 5, False), "rolloff": (0, 30000, False),
+    "flux_peak": (0, 1000, False), "lufs": (-120, 10, True), "lra": (0, 100, True),
+}
+_TRACKER = {"bpm": (20, 400), "confidence": (0, 1), "salience": (0, 10000), "alternation": (0, 1)}
+
+
+@webapi.route("/analysis/<mid>/measures", methods=["POST"])
+@login_required
+@admin_required
+def analysis_measures(mid):
+    """A client's measures of one archived track (webapp/measure: the descriptors,
+    the beat tracker, the bass attacks and pulse). Body: ``version`` (must be this
+    server's ``ANALYSIS_VERSION``: a client built for another measures another thing),
+    ``spectral`` {centroid, spread, flatness, flatness_hi, entropy, rolloff, flux_peak,
+    lufs, lra}, ``tempo`` {bpm, confidence, salience, alternation, attacks, grid} or null.
+    Everything is range-checked, nothing is trusted. The server decides the style."""
+    from ..deezer import analysis as ana
+
+    try:
+        key = uuid.UUID(str(mid))
+    except ValueError:
+        return jsonify({"error": "invalid id"}), 400
+    track = Track.get_or_none(Track.id == key)
+    if track is None:
+        return jsonify({"error": "unknown track"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "invalid body"}), 400
+    if data.get("version") != ana.ANALYSIS_VERSION:
+        return jsonify({"error": "version", "server": ana.ANALYSIS_VERSION}), 409
+    try:
+        sp = data.get("spectral")
+        if not isinstance(sp, dict):
+            raise ValueError("spectral is missing")
+        spectral = {k: _number(sp.get(k), lo, hi, null) for k, (lo, hi, null) in _SPECTRAL.items()}
+        spectral["frames"] = int(_number(sp.get("frames", 0), 0, 10_000_000))
+        tp = data.get("tempo")
+        tempo = (None, 0.0, 0.0, None)
+        if tp is not None:
+            if not isinstance(tp, dict):
+                raise ValueError("tempo must be an object or null")
+            tracker = {k: _number(tp.get(k), lo, hi) for k, (lo, hi) in _TRACKER.items()}
+            attacks = _number(tp.get("attacks"), 0, 100000)
+            grid = _number(tp.get("grid"), 0, 1)
+            tempo = ana.gate_tempo(attacks, tracker, grid)
+    except ValueError as exc:
+        return jsonify({"error": f"invalid measures: {exc}"}), 400
+    if not track.path or not os.path.isfile(track.path):
+        return jsonify({"error": "not archived"}), 404
+    row, reason = ana.analyze_from_client(
+        track, spectral, tempo, provider=getattr(current_app, "deezer", None),
+        force=bool(data.get("force")),
+    )
+    if row is None:
+        return jsonify({"error": reason or "not stored"}), 500
+    return jsonify({"ok": True, "style": row.style, "bpm": row.bpm})
 
 
 @webapi.route("/analysis/schedule", methods=["PUT"])
