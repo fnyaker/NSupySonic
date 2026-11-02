@@ -133,7 +133,7 @@ python tools/partest.py                              # Python suite in parallel 
 python -m unittest tests.test_webui.SomeClass.test_x # one test (unittest, no pytest)
 NS_REQUIRE_FFMPEG=1 python tools/partest.py          # fail, don't skip, without ffmpeg
 cd webapp && npm install && npm test && npm run build   # SPA suite and build (-> supysonic/webui/dist)
-cd webapp && npm run wasm                            # after touching a Rust crate; commit the .wasm files
+cd webapp && npm run wasm                            # after touching a Rust crate; commit the .wasm files EXCEPT measure.wasm (built by CI and the Dockerfile, never committed)
 python tools/perf_api.py [--serve]                   # every /api route timed on a big synthetic library
 docker build -t nsupysonic:dev . && docker/smoke.sh nsupysonic:dev
 ```

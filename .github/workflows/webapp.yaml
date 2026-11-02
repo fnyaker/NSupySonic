@@ -54,6 +54,12 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      # measure.wasm is not committed: built here from webapp/measure (no dependencies).
+      - name: Build the measures core (WebAssembly)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          node measure/build.mjs
+
       - name: Test
         run: npm test
 

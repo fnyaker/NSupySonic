@@ -4,6 +4,7 @@
 # Distributed under terms of the GNU AGPLv3 license.
 
 import collections
+import threading
 import contextlib
 import os
 import os.path
@@ -40,9 +41,14 @@ def count_statements():
     """
     counts = collections.Counter()
     original = peewee.Database.execute_sql
+    # Only THIS thread's statements: the patch is process-wide, and a worker thread
+    # left running by an earlier test (a loop, a pool) would otherwise write into the
+    # count and fail an assertion that says "no insert" (seen once on CI).
+    mine = threading.get_ident()
 
     def execute_sql(self, sql, *args, **kwargs):
-        counts[sql.split(None, 1)[0].upper()] += 1
+        if threading.get_ident() == mine:
+            counts[sql.split(None, 1)[0].upper()] += 1
         return original(self, sql, *args, **kwargs)
 
     peewee.Database.execute_sql = execute_sql

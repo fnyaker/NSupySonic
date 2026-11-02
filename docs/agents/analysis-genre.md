@@ -503,6 +503,7 @@ Worker (`worker.js`, `measure.js` over the wasm: spectral + loudness, bass attac
 to `/api/analysis/<id>/measures`; each track is stored the moment it is sent. One lane, so the PC stays the person's own. A 409
 (`version`) stops the run: the page was built for another measure. Failures keep their cause per track (`JobFailures`). Silence
 is a named failure ("no spectral frames"), never invented numbers. Not done: the embedding step (onnxruntime-web).
+`measure.wasm` is NOT committed (gitignored): `.github/workflows/webapp.yaml` and the Dockerfile build it from `webapp/measure`; locally run `node measure/build.mjs`.
 Tests: `webapp/test/clientanalysis.test.mjs` (real wasm on a 150 BPM kick, mock server for the blocks, runner ledger/stop/409).
 
 **The numbers are the server's, so no re-measure and no recalibration are needed.** `analysis._spectral` takes its descriptors from
