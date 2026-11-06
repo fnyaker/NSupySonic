@@ -1,28 +1,29 @@
-// CHROME — liquid metal, moved by the bass.
+// CHROME — liquid metal in a dark studio.
 //
-// Bass music, neurofunk, halftime: sounds that are heavy, glossy and
-// shape-shifting, and the picture is exactly that material. Drops of liquid
-// chrome — a cluster of metaballs melting into each other — hang in a dark
-// studio lit by coloured softboxes, and the bass is what moves them:
+// Bass music, neurofunk, halftime, trap: music that is heavy, glossy and
+// shape-shifting, and the picture is the material. A great drop of mercury
+// hangs in a black studio, smaller beads merging into it, and the bass is what
+// moves it.
 //
-//   THE METAL is raymarched: five spheres joined with a smooth union, so where
-//   two drops meet they neck and merge like mercury. It has no colour of its
-//   own; everything you see on it is the STUDIO reflected — three softboxes in
-//   the palette's colours, a floor, a horizon line — which is what chrome is,
-//   and why it reads as metal and not as grey plastic.
-//   THE BASS. The sub swells the drops and pulls them together; the wobble in
-//   the mids ripples their surface; the kick squashes the cluster for a beat.
-//   THE DROP turns it into ferrofluid: a field of spikes stands up out of the
-//   surface and sinks back over four bars, standing up again on big kicks.
-//   THE LIGHTS orbit slowly on the bar, so highlights slide over the metal
-//   even when the music holds still.
+//   THE METAL is raymarched, one large drop smoothly joined to the beads that
+//   orbit it. It has no colour of its own: everything on it is the STUDIO
+//   reflected — two tall softboxes, a hard horizon, a warm low strip, a black
+//   floor — with a Fresnel edge and one hard specular. Narrow sources on a
+//   sphere stay crisp; that is what separates chrome from a blurred blob.
+//   THE MUSIC. The sub swells and ripples the drop; the kick squashes it and
+//   runs a ripple round its skin; the DROP throws the beads outward on their
+//   orbits and stretches the drop along the fall, then pulls it back over four
+//   bars — a change of shape, not of brightness.
+//   THE LIGHTS drift on the bar, so the reflections slide over the metal even
+//   when the music holds still.
 //
-// With the artwork in front the drops orbit AROUND it; without, they gather
-// in the middle.
+// With the artwork in front, the drop sits in the free band UNDER it;
+// without, it hangs in the middle of the frame.
 //
 // Parameters:
-//   blobs   how many drops (2..5)    spikes  ferrofluid strength
-//   ripple  surface ripple           march   step budget (x tier)
+//   blobs   how many beads merge into the drop (2..5)
+//   spikes  the drop's burst           ripple  surface ripple
+//   march   step budget (x tier)
 
 import { onStamp } from "./kit.js";
 
@@ -30,150 +31,207 @@ export default {
   id: "chrome",
   uses: [],
   params: { blobs: 5, spikes: 1, ripple: 1, march: 64 },
-  look: { exposure: 1.0, bloom: 1.2, threshold: 0.75, saturation: 1.15 },
+  look: { exposure: 1.0, bloom: 1.0, threshold: 0.9, saturation: 1.04 },
 
   fragment: `
-float smin3(float a, float b, float k) { float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h); }
+float wrapPi(float a) { return mod(a + PI, TAU) - PI; }
 
-// Where drop i is.
-vec3 blobAt(int i, float bars, float orbitR) {
-  float fi = float(i);
-  float a = fi * TAU / 5.0 + bars * TAU * 0.0625 * (1.0 + 0.2 * fi);
-  float r = orbitR * (0.8 + 0.25 * sin(bars * 0.7 + fi * 1.9));
-  // The sub pulls them in.
-  r *= 1.0 - 0.25 * uBandA.x;
-  return vec3(cos(a) * r * 1.9, sin(a * 1.3 + fi) * 0.45 * orbitR, sin(a) * r * 0.9);
+// A rectangle on the studio wall, anti-aliased by the pixel's angular size.
+float panel(float az, float el, float az0, float daz, float el0, float el1, float aa) {
+  float a = 1.0 - smoothstep(daz - aa, daz + aa, abs(wrapPi(az - az0)));
+  float b = smoothstep(el0 - aa, el0 + aa, el) * (1.0 - smoothstep(el1 - aa, el1 + aa, el));
+  return a * b;
 }
 
-float map(vec3 p, float bars, float orbitR) {
+// The studio as a MIRROR sees it: a hard horizon, two tall strip lights, a
+// big key, one warm low strip, a dark floor. Sharp sources, sharp highlights.
+vec3 room(vec3 r, float aa, float drift) {
+  float az = atan(r.x, r.z);
+  float el = r.y;
+  vec3 c = el > 0.0
+    ? mix(vec3(0.075, 0.080, 0.095), vec3(0.20, 0.215, 0.25), smoothstep(0.0, 0.9, el))
+    : mix(vec3(0.030, 0.033, 0.040), vec3(0.085, 0.090, 0.110), smoothstep(-0.7, 0.0, el));
+  // The cove line, all round the room: the hairline a mirror keeps.
+  c += mix(vec3(0.94, 0.97, 1.0), uPalHigh.rgb, 0.12) * exp(-pow(el / 0.036, 2.0)) * 2.0;
+  // A big key high and left, and its narrower mate behind it.
+  c += vec3(1.0) * panel(az, el, 2.05 + drift * 0.2, 0.28, 0.24, 0.80, aa) * 4.0;
+  c += vec3(1.0) * panel(az, el, 2.62 + drift * 0.2, 0.11, 0.32, 0.72, aa) * 3.2;
+  // Two tall strips: the vertical highlights that read as chrome.
+  c += mix(vec3(0.95, 0.97, 1.0), uPalHigh.rgb, 0.10) * panel(az, el, -0.92 + drift * 0.8, 0.050, -0.05, 0.88, aa) * 5.5;
+  c += mix(vec3(0.95, 0.97, 1.0), uPalMid.rgb, 0.12) * panel(az, el, 0.64 - drift * 0.6, 0.040, 0.05, 0.92, aa) * 5.0;
+  // Two narrow coloured strips: the palette in the metal, not a tint over it.
+  c += mix(uPalAcc.rgb, vec3(1.0), 0.25) * panel(az, el, -0.28 + drift * 1.1, 0.075, 0.04, 0.62, aa) * 3.2;
+  c += mix(uPalHigh.rgb, vec3(1.0), 0.30) * panel(az, el, 0.30 - drift * 0.9, 0.060, 0.10, 0.75, aa) * 2.4;
+  // The one warm accent, low on the wall.
+  c += mix(uPalAcc.rgb, vec3(1.0), 0.32) * panel(az, el, 1.52, 0.26, 0.015, 0.09, aa) * 2.6;
+  // A broad fill behind the camera and a ceiling bounce: the body of the
+  // metal, never a black hole.
+  c += mix(vec3(0.88, 0.92, 1.0), uPalMid.rgb, 0.08) * panel(az, el, 0.0, 1.3, 0.30, 0.95, aa) * 0.65;
+  c += vec3(0.8, 0.86, 1.0) * panel(az, el, 1.30, 0.50, 0.05, 0.85, aa) * 0.22;
+  c += vec3(0.8, 0.86, 1.0) * panel(az, el, -1.55, 0.45, 0.02, 0.80, aa) * 0.18;
+  c += vec3(0.9, 0.94, 1.0) * smoothstep(0.55, 1.0, el) * 0.25;
+  c += vec3(0.8, 0.83, 0.9) * smoothstep(-0.7, -0.15, el) * 0.16;
+  return c;
+}
+
+// The wall seen directly: a dark cyclorama with the two side strips just out
+// of focus and a hard floor line. It frames the drop and lights the edges.
+vec3 wall(vec3 r, float aa) {
+  float az = atan(r.x, r.z);
+  float el = r.y;
+  vec3 c = mix(vec3(0.008, 0.009, 0.015), vec3(0.036, 0.040, 0.052), smoothstep(-0.1, 0.75, el));
+  c += vec3(0.55, 0.60, 0.72) * panel(az, el, -0.92, 0.15, -0.3, 0.85, max(aa, 0.03)) * 0.45;
+  c += vec3(0.95, 0.97, 1.0) * panel(az, el, -0.92, 0.045, -0.25, 0.82, max(aa, 0.02)) * 0.55;
+  c += vec3(0.6, 0.66, 0.8) * exp(-pow((wrapPi(az + 0.92)) / 0.30, 2.0)) * smoothstep(-0.4, 0.2, el) * 0.05;
+  c += vec3(0.5, 0.55, 0.66) * panel(az, el, 0.64, 0.13, -0.25, 0.9, max(aa, 0.03)) * 0.4;
+  c += vec3(0.95, 0.97, 1.0) * panel(az, el, 0.64, 0.035, -0.2, 0.86, max(aa, 0.02)) * 0.5;
+  c += vec3(0.6, 0.66, 0.8) * exp(-pow((wrapPi(az - 0.64)) / 0.28, 2.0)) * smoothstep(-0.4, 0.2, el) * 0.045;
+  c += mix(vec3(0.8, 0.86, 1.0), uPalMid.rgb, 0.12) * exp(-pow((el - 0.32) / 0.30, 2.0)) * 0.012;
+  return c;
+}
+
+// One bead's place and size: a ring round the drop, thrown outward on the
+// drop's burst.
+vec4 bead(int i, float t, float crown) {
+  float fi = float(i);
+  vec3 h = hash31(fi * 7.31 + 2.1);
   int n = int(clamp(P_BLOBS, 2.0, 5.0));
-  // The kick squashes the cluster, a beat's worth.
-  float sq = envB(uSince.y, 0.4) * 0.18 * (0.6 + 0.4 * uCtl.x);
-  p.y *= 1.0 + sq;
-  float d = 1e3;
+  float a = fi * TAU / float(n) + h.y * TAU + (h.z - 0.5) * 0.7 + t * 0.20;
+  float portrait = 1.0 - step(1.0, uFrame.z);
+  float orb = 0.72 + 0.12 * h.z + 0.04 * sin(t * 0.8 + fi);
+  float spread = 1.0 + crown * P_SPIKES * (0.75 + 0.35 * h.x) * mix(1.0, 0.45, portrait);
+  vec3 c = vec3(cos(a) * orb * spread, (h.y - 0.5) * 0.62 + crown * 0.50 * h.z, sin(a) * orb * 0.55 * spread);
+  float rad = (0.130 + 0.060 * h.x) * (1.0 + 0.15 * uBandA.x) * (1.0 + 0.30 * crown);
+  return vec4(c, rad);
+}
+
+float smin(float a, float b, float k) {
+  float h = max(k - abs(a - b), 0.0) / k;
+  return min(a, b) - h * h * k * 0.25;
+}
+
+// The liquid: one big drop, its skin rippling with the bass, the beads joined
+// to it with a smooth neck, and the whole mass tearing outward on the drop.
+float map(vec3 p, float t, float crown, float squash, float pulse, vec4 B[5]) {
+  // A phone frame is narrow: the drop shrinks so it fits the free band.
+  float fs = uFrame.z < 1.0 ? 0.36 : 1.0;
+  vec3 q = p / fs;
+  q.y = q.y / (1.0 + 0.16 * crown * P_SPIKES) * squash;
+  vec3 d = normalize(q + vec3(0.0, 0.0001, 0.0));
+  float rip = (sin(d.x * 7.0 + t * 1.1) + 0.7 * sin(d.y * 9.5 - t * 0.9) + 0.8 * sin(d.z * 8.0 + t * 1.3))
+            * 0.024 * (0.5 + 0.9 * uBandA.x) * P_RIPPLE * (1.0 - 0.6 * crown);
+  float R = 0.60 * (1.0 + 0.035 * uBandA.x + 0.02 * pulse) + rip;
+  float s = length(q) - R;
+  // The drop's answer is a BURST: the beads pull away on their orbits and
+  // the drop stretches along the fall, so the mass tears apart and comes back.
+  // The beads, joined by a neck: a liquid mass, not a pile of marbles.
+  int n = int(clamp(P_BLOBS, 2.0, 5.0));
   for (int i = 0; i < 5; i++) {
     if (i >= n) break;
-    vec3 c = blobAt(i, bars, orbitR);
-    float rad = (0.5 + 0.1 * float(i % 2)) * (0.85 + 0.35 * uBandA.x);
-    d = smin3(d, length(p - c) - rad, 0.5);
+    vec4 b = B[i];
+    vec3 e = q - b.xyz;
+    // On the drop they stretch along the fall.
+    e.y /= 1.0 + crown * 1.8;
+    s = smin(s, length(e) - b.w, 0.24 * (1.0 - 0.4 * crown));
   }
-  // Ripples: the mids moving the skin.
-  float rip = sin(p.x * 6.0 + uClock.x * 3.0) * sin(p.y * 7.0 - uClock.x * 2.0) * sin(p.z * 6.5);
-  d += rip * 0.022 * (0.3 + uBandA.z + uBandA.w) * P_RIPPLE;
-  // The drop's ferrofluid: spikes standing out of the surface.
-  float sp = uS0.x * P_SPIKES;
-  if (sp > 0.01) {
-    vec3 q = p * 4.0;
-    float spike = pow(max(0.0, sin(q.x) * sin(q.y) * sin(q.z)), 4.0);
-    d -= spike * 0.32 * sp;
-  }
-  return d;
+  return s * fs;
 }
 
-vec3 normalAt(vec3 p, float bars, float orbitR) {
-  vec2 e = vec2(0.002, 0.0);
+vec3 normalAt(vec3 p, float t, float crown, float squash, float pulse, float e, vec4 B[5]) {
   return normalize(vec3(
-    map(p + e.xyy, bars, orbitR) - map(p - e.xyy, bars, orbitR),
-    map(p + e.yxy, bars, orbitR) - map(p - e.yxy, bars, orbitR),
-    map(p + e.yyx, bars, orbitR) - map(p - e.yyx, bars, orbitR)));
-}
-
-// The studio, as seen in a mirror: a sky that brightens toward a hard white
-// horizon, a dark floor below it, and three softboxes. Chrome IS its
-// environment — a mirror of a dark room is a black blob — so this is lit
-// like a product shot: one bright line that every curve of the metal bends.
-vec3 studio(vec3 rd, float bars) {
-  vec3 c = mix(mix(uPalMid.rgb, vec3(1.0), 0.2) * 0.45, uPalLow.rgb * 0.12, smoothstep(0.0, 0.8, rd.y));
-  c += vec3(1.0) * exp(-pow(rd.y * 12.0, 2.0)) * 1.1;
-  if (rd.y < 0.0) {
-    // The floor: dark, with the faint reflection of the horizon on it.
-    c = uPalBg.rgb * 0.4 + mix(uPalMid.rgb, vec3(1.0), 0.3) * exp(rd.y * 5.0) * 0.2;
-    // A bounce card under the metal, so its underside is not a black hole.
-    c += mix(uPalLow.rgb, uPalMid.rgb, 0.5) * exp(-pow((rd.y + 0.6) * 4.0, 2.0)) * 0.5;
-  }
-  float t = bars * TAU * 0.0625;
-  for (int i = 0; i < 3; i++) {
-    float fi = float(i);
-    float a = t + fi * TAU / 3.0;
-    vec3 dir = normalize(vec3(cos(a), 0.45 + 0.25 * fi, sin(a)));
-    vec3 x = normalize(cross(dir, vec3(0.0, 1.0, 0.0)));
-    vec3 y = cross(x, dir);
-    float u = dot(rd, x);
-    float v = dot(rd, y);
-    float on = step(0.0, dot(rd, dir));
-    float box = smoothstep(0.3, 0.24, abs(u)) * smoothstep(0.5, 0.42, abs(v)) * on;
-    vec3 bc = i == 0 ? uPalHigh.rgb : i == 1 ? uPalMid.rgb : uPalAcc.rgb;
-    c += mix(bc, vec3(1.0), 0.3) * box * 3.0;
-  }
-  return c;
+    map(p + vec3(e, 0.0, 0.0), t, crown, squash, pulse, B) - map(p - vec3(e, 0.0, 0.0), t, crown, squash, pulse, B),
+    map(p + vec3(0.0, e, 0.0), t, crown, squash, pulse, B) - map(p - vec3(0.0, e, 0.0), t, crown, squash, pulse, B),
+    map(p + vec3(0.0, 0.0, e), t, crown, squash, pulse, B) - map(p - vec3(0.0, 0.0, e), t, crown, squash, pulse, B)));
 }
 
 void main() {
   vec2 p = fragP();
+  float px = uFrame.w;
+  float beats = uClock.x * uSpeed;
   float bars = uClock.y * uSpeed;
   float amp = 0.6 + 0.4 * uCtl.x;
-  // The cluster sits round the artwork when there is one.
-  float orbitR = uHole.z > 0.0 ? max(uHole.z, uHole.w) * 2.6 + 0.6 : 1.0;
-  // Looking at the cluster from slightly above; it lands on the artwork's
-  // centre on screen (or the frame's).
-  vec3 ro = vec3(0.0, 0.25, -2.6);
-  vec3 rd = normalize(vec3(p - uHole.xy - vec2(0.0, 0.1), 1.0));
-  rd.yz *= rot(0.1);
-  ro.xz *= rot(0.15 * sin(bars * 0.2));
-  rd.xz *= rot(0.15 * sin(bars * 0.2));
+  float crown = uS0.x;
+  // The kick's two envelopes, once per pixel instead of once per march step.
+  float squash = 1.0 + envB(uSince.y, 0.45) * 0.16 * (0.6 + 0.4 * uCtl.x);
+  float pulse = envB(uSince.y, 0.5);
+  // The beads' orbits do not change between march steps: build them once.
+  vec4 B[5];
+  int nb = int(clamp(P_BLOBS, 2.0, 5.0));
+  for (int i = 0; i < 5; i++) B[i] = i < nb ? bead(i, beats, crown) : vec4(0.0, 0.0, 0.0, -1.0);
 
-  int steps = int(clamp(P_MARCH * uQual.x, 32.0, 96.0));
-  float t = 0.5;
+  // The drop sits at the artwork's centre when there is one, and a little
+  // above the frame's centre otherwise.
+  vec2 ctr = uHole.z > 0.0 ? vec2(uHole.x, uHoleR.z - 0.26) : vec2(0.0, 0.06);
+  // The camera breathes around the drop, so the reflections never stop.
+  vec3 ro = vec3(0.24 * sin(bars * 0.30), 0.10 + 0.04 * sin(beats * 0.9), -2.55);
+  vec3 rd = normalize(vec3(p - ctr, 1.55));
+  rd.xz *= rot(0.28 * sin(bars * 0.30));
+  ro.xz *= rot(0.30 * sin(bars * 0.30));
+
+  int steps = int(clamp(P_MARCH * uQual.x * 0.7, 24.0, 72.0));
+  float t = 0.35;
   bool hit = false;
   float near = 1e3;
-  for (int i = 0; i < 96; i++) {
+  for (int i = 0; i < 72; i++) {
     if (i >= steps) break;
     vec3 pos = ro + rd * t;
-    float d = map(pos, bars, orbitR);
+    float d = map(pos, beats, crown, squash, pulse, B);
     near = min(near, d / t);
-    if (d < 0.0008 * t) { hit = true; break; }
-    t += d * (0.65 - 0.25 * uS0.x);
-    if (t > 9.0) break;
+    if (d < 0.0009 * t) { hit = true; break; }
+    t += d * (0.55 - 0.10 * crown);
+    if (t > 8.0) break;
   }
-  // The void the metal hangs in: a soft gradient, the softboxes only as the
-  // glow they throw on the haze (seen directly they would be rectangles
-  // hanging in the dark, which is a photo studio, not a picture).
-  vec3 col = mix(uPalBg.rgb * 0.5, uPalLow.rgb * 0.07, smoothstep(-0.8, 0.9, p.y));
-  col += mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * exp(-dot(p - uHole.xy, p - uHole.xy) * 0.8) * 0.05 * (0.6 + 0.4 * uFlow.x);
-  // The glow of the metal on the air round it: a halo where rays grazed it.
-  col += mix(uPalMid.rgb, uPalHigh.rgb, 0.5) * exp(-near * 30.0) * 0.05 * (0.5 + uFlow.x);
+
+  // The studio behind it.
+  vec3 col = wall(vec3(rd.x, rd.y + 0.06, rd.z), px * 2.0);
+  // Floor line and its dark gloss.
+  if (p.y < ctr.y - 0.50) {
+    float below = ctr.y - 0.50 - p.y;
+    col = mix(vec3(0.008, 0.009, 0.014), vec3(0.004, 0.005, 0.009), smoothstep(0.0, 0.35, below));
+    col += mix(uPalMid.rgb, vec3(1.0), 0.5) * exp(-pow((p.x - ctr.x) / 0.75, 2.0)) * exp(-below * 5.0) * 0.05;
+    col += mix(vec3(0.8, 0.85, 0.95), uPalMid.rgb, 0.1) * exp(-pow(below / (px * 1.4), 2.0)) * 0.10;
+  }
+  // The glow the metal throws on the air.
+  col += mix(uPalMid.rgb, vec3(1.0), 0.5) * exp(-near * 26.0) * 0.03;
   if (hit) {
     vec3 pos = ro + rd * t;
-    vec3 n = normalAt(pos, bars, orbitR);
+    float e = max(0.0015, px * 0.8 / max(t, 0.6));
+    vec3 n = normalAt(pos, beats, crown, squash, pulse, e, B);
     vec3 r = reflect(rd, n);
-    float fres = 0.65 + 0.35 * pow(1.0 - max(dot(n, -rd), 0.0), 5.0);
-    vec3 refl = studio(r, bars);
-    // Chrome is a mirror, tinted the faintest bit toward the palette.
-    col = refl * fres * mix(vec3(1.0), uPalHigh.rgb, 0.15);
-    // The kick flashes the softboxes, which the metal catches.
-    col *= 1.0 + 0.8 * uHit.y * amp;
-
+    float fres = 0.55 + 0.45 * pow(1.0 - max(dot(n, -rd), 0.0), 5.0);
+    float aa = 0.010 + px * 2.6 / max(t, 0.5);
+    vec3 env = room(r, aa, bars * 0.30);
+    // Neutral chrome with a whisper of the palette, and one hard glint.
+    col = env * fres * mix(vec3(1.0), vec3(0.94, 0.97, 1.0), 0.55);
+    col += vec3(1.0, 0.98, 0.95) * pow(clamp(dot(r, normalize(vec3(0.18, 0.68, -0.71))), 0.0, 1.0), 700.0) * 12.0;
+    // A hot rim at the silhouette, and a dark line just inside it: the two
+    // things that make a chrome edge read against a dark room.
+    vec3 vd = normalize(ro - pos);
+    float rim = pow(1.0 - max(dot(n, vd), 0.0), 4.0);
+    col += mix(vec3(0.9, 0.95, 1.0), uPalHigh.rgb, 0.12) * rim * (0.05 + 0.12 * uFlow.x);
+    // The kick's flash on the metal, from the engine's own envelope.
+    col *= 1.0 + 0.5 * uHit.y * amp;
   }
-  col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.2;
-  col *= mix(0.35, 1.0, clearOfHole(p, 0.05));
+  col += mix(uPalHigh.rgb, vec3(1.0), 0.5) * uHit2.w * 0.10;
+  col *= mix(0.30, 1.0, clearOfHole(p, 0.05));
   emit(col * mix(1.0, uEnergy, 0.5));
 }
 `,
 
   create({ state, flash }) {
-    let spikes = 0;
+    let burst = 0;
     const drop = onStamp((m) => m.stamp.drop, () => {
-      spikes = 1;
-      flash(0.8);
+      burst = 1;
+      flash(0.75);
     });
     return {
       step(dt, m) {
         drop(m);
-        // The spikes sink back over four bars — and stand up again on every
-        // big kick while the drop is still going.
-        spikes = Math.max(0, spikes - dt / m.overBeats(16));
-        if (m.bigKick && m.dropped > 0.3) spikes = Math.max(spikes, 0.7);
-        state[0] = spikes * spikes;
+        // The burst sinks back over four bars; big kicks stand it up again
+        // while the drop is still ringing.
+        burst = Math.max(0, burst - dt / m.overBeats(16));
+        if (m.bigKick && m.dropped > 0.3) burst = Math.max(burst, 0.5);
+        state[0] = burst * burst;
       },
     };
   },

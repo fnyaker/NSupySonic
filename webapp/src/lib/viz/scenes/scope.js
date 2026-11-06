@@ -55,7 +55,7 @@ import { ScopeCore, vizCore } from "../core.js";
 // trail lasts as long at a 30 fps cap as at 144 — the alternative is a
 // persistence that changes character with a setting that has nothing to do
 // with it.
-const PERSIST = 0.07;
+const PERSIST = 0.045;
 
 // The trace is redrawn in the same place every frame (that is what triggering
 // buys), so additive strokes ACCUMULATE: the steady state is alpha/wash. Both
@@ -72,9 +72,9 @@ const PERSIST = 0.07;
 // `glow` is read as the HALO budget it really is — the part the post pass then
 // duplicates anyway — and the beam itself is the same at every tier. The tier
 // changes how PRECISE the trace is, never whether you can see it.
-const CORE_BRIGHT = 1.25; // clips to a white-hot beam, as a beam should
-const BODY_BRIGHT = 0.45;
-const HALO_BRIGHT = 0.2;
+const CORE_BRIGHT = 1.55; // clips to a white-hot beam, as a beam should
+const BODY_BRIGHT = 0.35;
+const HALO_BRIGHT = 0.13;
 
 // Full scale stops short of the graticule, so a limitered master reads as
 // "nearly at the top" rather than as a signal pinned against the border.
@@ -208,7 +208,7 @@ export function createScopeScene(opts = {}) {
     // and a coarse trace SHOULD read as a fatter, softer beam, which is
     // precisely what a scope with less resolution looks like.
     const coarse = clamp(Math.sqrt(len / Math.max(1, want)), 1, 2.2);
-    coreW = clamp(Math.min(lanes[0].span, lanes[1].span) * 0.02, 1, 2.6) * coarse;
+    coreW = clamp(Math.min(lanes[0].span, lanes[1].span) * 0.013, 1, 2.2) * coarse;
     if (want === cols) return;
     cols = want;
     rs.cols(cols);
@@ -269,10 +269,11 @@ export function createScopeScene(opts = {}) {
       g.lineTo(ox + ax * t1 + vx * v1, oy + ay * t1 + vy * v1);
       g.stroke();
     };
-    g.lineWidth = 1;
-    // The frame, then the halves, then the divisions — three weights, so it
-    // reads as a scale rather than as graph paper.
-    g.strokeStyle = hsl(pal.hue, pal.sat * 0.5, 0.62, a * 0.75);
+    g.lineWidth = 1.2;
+    // The frame, the halves, then the divisions: three weights, so it reads as
+    // a scale rather than as graph paper. The ink is deliberately desaturated:
+    // the graticule is the instrument's face, not a light source.
+    g.strokeStyle = hsl(pal.hue, pal.sat * 0.22, 0.64, a * 0.55);
     g.beginPath();
     g.moveTo(ox + vx, oy + vy);
     g.lineTo(ox + ax + vx, oy + ay + vy);
@@ -281,16 +282,26 @@ export function createScopeScene(opts = {}) {
     g.closePath();
     g.stroke();
 
-    g.strokeStyle = hsl(pal.hue, pal.sat * 0.45, 0.58, a * 0.42);
+    g.lineWidth = 1;
+    g.strokeStyle = hsl(pal.hue, pal.sat * 0.18, 0.58, a * 0.28);
     line(0, 0.5, 1, 0.5);
     line(0, -0.5, 1, -0.5);
     for (let d = 1; d < sc.divisions; d++) {
       const t = d / sc.divisions;
       line(t, -1, t, 1);
+      line(t, -1, t, -0.94);
+      line(t, 0.94, t, 1);
+    }
+    // Ticks on the frame at the half lines, so the scale is readable at a
+    // glance without a second, heavier grid.
+    g.strokeStyle = hsl(pal.hue, pal.sat * 0.22, 0.62, a * 0.5);
+    for (const v of [-0.5, 0, 0.5]) {
+      line(0, v, 0.035, v);
+      line(0.965, v, 1, v);
     }
     // The zero line, brightest of the three: it is the one the eye reads the
     // wave against.
-    g.strokeStyle = hsl(pal.hue, pal.sat * 0.6, 0.7, a);
+    g.strokeStyle = hsl(pal.hue, pal.sat * 0.35, 0.74, a * 0.9);
     line(0, 0, 1, 0);
   }
 
@@ -320,15 +331,21 @@ export function createScopeScene(opts = {}) {
   // Which trace is which. Two unlabelled waveforms are a decoration; "G" and
   // "D" on them is an instrument.
   function label(g, lane, text, pal, a) {
-    const size = clamp(Math.min(lane.span, lane.len) * 0.16, 9, 15);
+    const size = clamp(Math.min(lane.span, lane.len) * 0.20, 10, 16);
     g.font = `600 ${size.toFixed(1)}px ui-sans-serif, system-ui, sans-serif`;
     g.textAlign = "left";
     g.textBaseline = "top";
-    g.fillStyle = hsl(pal.hue, pal.sat * 0.4, 0.78, a);
     // Just inside the graticule's leading corner, whichever way the lane runs.
-    const x = lane.ox + (lane.horiz ? lane.len * 0.01 : -lane.span * 0.88);
-    const y = lane.horiz ? lane.oy - lane.span * 0.9 : lane.oy + lane.len * 0.01;
-    g.fillText(text, x, y);
+    const x = lane.ox + (lane.horiz ? lane.len * 0.012 : -lane.span * 0.88);
+    const y = lane.horiz ? lane.oy - lane.span * 0.88 : lane.oy + lane.len * 0.012;
+    // A coloured dot for the channel, then the letter. Two unlabelled
+    // waveforms are a decoration; G/D with their own colour is an instrument.
+    g.fillStyle = hsl(text === "G" ? pal.low : pal.high, pal.sat, 0.72, a * 0.9);
+    g.beginPath();
+    g.arc(x + size * 0.2, y + size * 0.55, size * 0.16, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = hsl(pal.hue, pal.sat * 0.25, 0.82, a);
+    g.fillText(text, x + size * 0.9, y);
   }
 
   function hueFor(ch, pal) {
@@ -358,7 +375,12 @@ export function createScopeScene(opts = {}) {
     const wash = 1 - Math.exp(-pdt / PERSIST);
 
     g.globalCompositeOperation = "source-over";
-    g.fillStyle = hsl(pal.hue - 12, pal.sat * 0.45, 0.045, wash);
+    // A smoked-glass face, very slightly lit from behind the trace: the
+    // phosphor's own wash over the previous frame, not a flat black rectangle.
+    const bg = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.72);
+    bg.addColorStop(0, hsl(pal.hue, pal.sat * 0.35, 0.06, wash));
+    bg.addColorStop(1, hsl(pal.hue - 12, pal.sat * 0.35, 0.025, wash));
+    g.fillStyle = bg;
     g.fillRect(0, 0, w, h);
 
     const scale = gain * DEFLECT * (0.55 + intensity * 0.45);
@@ -385,10 +407,10 @@ export function createScopeScene(opts = {}) {
       // that can afford it, two where they cannot — the core is never the one
       // dropped.
       strokeLane(g, lane, tr, at, scale,
-        strokeStyleFor(g, lane, ch, pal, 0.5, 1), coreW * 5.5, wash * HALO_BRIGHT * glow);
+        strokeStyleFor(g, lane, ch, pal, 0.5, 1), coreW * 3.4, wash * HALO_BRIGHT * glow);
       if (sc.passes > 2)
         strokeLane(g, lane, tr, at, scale,
-          strokeStyleFor(g, lane, ch, pal, 0.62, 1), coreW * 2.3, wash * BODY_BRIGHT * glow);
+          strokeStyleFor(g, lane, ch, pal, 0.62, 1), coreW * 1.6, wash * BODY_BRIGHT * glow);
       strokeLane(g, lane, tr, at, scale,
         strokeStyleFor(g, lane, ch, pal, 0.88, 1), coreW, wash * CORE_BRIGHT);
     }
