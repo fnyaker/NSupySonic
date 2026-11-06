@@ -231,6 +231,12 @@ pub struct Tempo {
     pub fixed_bpm: f32,
     /// Estimates on which the served grid was clearly present (capped).
     fixed_heard: u32,
+    /// The analysis profile's metrical-level policy: `half` means the true
+    /// tempo is 2x the grid's (dubstep, trap, dnb), `double` means it is the
+    /// grid's / 2 (a one-drop tracked at double time). The server's genre
+    /// supplies it; nothing here decides it from the audio.
+    half: bool,
+    double: bool,
     pub out: TempoOut,
 }
 
@@ -313,6 +319,8 @@ impl Tempo {
             hold: false,
             fixed_bpm: 0.0,
             fixed_heard: 0,
+            half: false,
+            double: false,
             out: TempoOut {
                 bpm: 0.0,
                 period: 0.5,
@@ -361,6 +369,8 @@ impl Tempo {
         self.challenge_count = 0;
         self.seed_lag = 0.0;
         self.fixed_bpm = 0.0;
+        self.half = false;
+        self.double = false;
         self.fixed_heard = 0;
         self.seed_up = 0.0;
         // The range is NOT reset: it describes the track about to play.
@@ -1164,4 +1174,19 @@ impl Tempo {
         self.prior_hi = hi.clamp(self.prior_lo + 1.0, MAX_BPM);
     }
 
+    /// The analysis profile's metrical-level policy (lib.rs `set_profile`).
+    pub fn set_octave_policy(&mut self, half: bool, double: bool) {
+        self.half = half;
+        self.double = double;
+    }
+
+    /// The tempo band the server's genre set, or (0, 0) when none did.
+    pub fn range(&self) -> (f32, f32) {
+        (self.prior_lo, self.prior_hi)
+    }
+
+    /// Whether a whole-track figure is locked (nothing is re-estimated).
+    pub fn fixed(&self) -> bool {
+        self.fixed_bpm > 0.0
+    }
 }

@@ -53,12 +53,15 @@ does not change, so neither does the answer. Measure once, keep it in `track_ana
   reconciled across the two implementations. **No new Python dependency**: no numpy, no model,
   nothing to install on a server that already has ffmpeg.
 - Everything it classifies on is **physical or scale-free** (BPM, hertz, decibels, 0..1 ratios), on
-  purpose: the client's live classifier works on its own normalized feature scales and the two must
+  purpose: the eval tools' live classifier works on its own normalized feature scales and the two must
   not be expected to share a threshold. **Once served, the server's genre and measured tempo ARE the
   answer**: the client pins the family and locks the tempo (see *The server's answers are locked* in [rhythm.md](rhythm.md)
   ) and classifies or estimates neither again. **And with none served there is NO genre**: the
   player runs no classifier of its own any more (`style.rs` `classify`, off from `engine.js`; the rules
-  stay, on by default, for the eval tools) — "si le serveur n'a rien, on a rien". That is why a
+  stay, on by default, for the eval tools) — "si le serveur n'a rien, on a rien". The served NAME does
+  select the live analysis PROFILE (the row that owns the bar cues, the kick/snare gates, the
+  arrangement and the genre channel; see *A served genre is analysed its own way* in [rhythm.md](rhythm.md)),
+  but the device infers no genre from the audio: with none served the generic row runs. That is why a
   client's ask (`request_analysis`) is no longer gated on a head or the extractor: the server's
   measurement is the only genre and tempo a track will get.
 - **Local files go down the same road, by their UUID.** `/api/analyses` and `/api/analysis/<id>`
@@ -169,8 +172,10 @@ The client takes the global answers and keeps the per-moment ones. `engine.js` p
 for the queue window (one call, like `/api/gains`) and **seeds the beat tracker** with the served
 BPM, so the grid starts locked and only the phase has to be found — the first bar is on the beat
 instead of the fourth. It never seeds the same tempo twice for a track: a second seed would undo a
-correction the kicks already made. The kick, the onsets and the transients stay live: no whole-file
-average can stand in for an event.
+correction the kicks already made. The served genre also selects the analysis profile (the row that
+owns the bar cues, the kick/snare gates, the arrangement and the genre channel); no genre is
+inferred on the device. The kick, the onsets and the transients stay live: no whole-file average can
+stand in for an event.
 
 **The genre studio** (`supysonic/deezer/embedding.py` + `genre.py`, `supysonic/webui/genre.py`,
 `webapp/src/lib/genre/`, `routes/Genres.svelte`) is the answer to "the classifier does not know MY

@@ -95,7 +95,9 @@ class NativeAnalysis(private val emit: (String) -> Unit) {
                 "seed" -> NsCore.analyserSeed(h, f(o, "bpm"), f(o, "conf"))
                 "lock" -> NsCore.analyserLockTempo(h, f(o, "bpm"))
                 "pin" -> NsCore.analyserPinFamily(h, o.optInt("i", -1))
-                "profile" -> NsCore.analyserSetProfile(h, f(o, "lull"), o.optBoolean("kicks", true))
+                "profile" ->
+                    if (o.has("id")) NsCore.analyserSetProfileId(h, o.optInt("id", -1), f(o, "lull"), o.optBoolean("kicks", true))
+                    else NsCore.analyserSetProfile(h, f(o, "lull"), o.optBoolean("kicks", true))
                 "range" -> NsCore.analyserSetRange(h, f(o, "lo"), f(o, "hi"))
                 "liveRange" -> NsCore.analyserSetLiveRange(h, o.optBoolean("on", false))
                 "groove" -> NsCore.analyserSetGroove(h, o.optInt("g", 0))

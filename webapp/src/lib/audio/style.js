@@ -1370,22 +1370,283 @@ export function grooveOf(name) {
 // A song form has no club drop — its chorus coming back after a fill is not
 // one — so the kick must be out for four bars, a real breakdown, before its
 // return counts. A genre with no drum kit publishes no kick at all.
-const SONG_FORM = new Set([
-  "ambient", "strings", "jazz", "vocalPop", "rnb", "hiphop", "rap", "rock", "metal", "brutal",
-  "punk", "indie", "hardrock", "reggaeton", "reggae", "dancehall", "funk", "lofi", "pop", "soul",
-  "blues", "country", "folk", "disco",
-]);
-const DRUMLESS = new Set(["ambient", "strings"]);
-const SONG_LULL_BEATS = 16;
+// --- THE SERVER-GENRE-SELECTED ANALYSIS PROFILE -------------------------------
+//
+// THE CLIENT NEVER CLASSIFIES THE GENRE. `engine.js` starts the analyser with
+// `classify: false` and `liveRange: false`; the genre is the SERVER's answer
+// (`adoptVerdict` pins the family, locks the tempo, and sends the profile
+// below). With no served genre the `generic` row runs — nothing is inferred
+// from the audio, and no reading of the audio ever switches a row.
+//
+// This table is the way one row of the vocabulary is LISTENED TO. The five
+// DOWN_MODELS were one set of bar cues for every genre; a house kick on every
+// beat, a one-drop's kick on beat 3 and a metal kit do not mark their bars
+// with the same cues. The same is true of the kick gate (a pitched hard kick
+// vs an 808 vs a brush), the evidence allowed to move the grid (a reggae
+// skank must not pull the phase off the kick), the drop lull (a club drop vs a
+// song form), the expected kick spacing (a half-time grid has half as many
+// beats), the roll gain and the genre channel.
+//
+// Fields, in the order `style.rs#AnalysisProfile` reads them:
+//   groove      1 four-on-floor, 2 hard dance, 3 broken, 4 live kit, 0 generic
+//   flags       1 kicks published, 2 half-time (true = 2x grid), 4 double-time
+//               (true = grid / 2), 8 beatless (no grid published), 16/32 meter
+//               3/4, 128 re-phase once when a late verdict lands
+//   lull        beats the kick must be out before its return is a DROP
+//   lockConf    the grid's confidence floor for `locked`
+//   kickScore, kickRel, kickClick, kickClickScale, kickLanded — kick.rs
+//   snareMin, snareRatio — kick.rs
+//   buildGain, buildMin, spacing, rollGain — pattern.rs
+//   down x8     beat.rs bar cues: chord, kick, low, novelty, snare_down,
+//               snare_back, mid, roll
+//   evidence x4 beat.rs grid weights: kick, low, snare, other (mid/roll are
+//               bar-only and never move the phase)
+//   genre x8    genre.rs gains: lead, buzz, screech, sub, offbeat, density,
+//               tail, grit
+//   phaseTol    how close evidence must be to the grid for the phase fit
+//               (beats; a one-drop widens it to 0.20)
+//   kickGrid    only PUBLISH a kick this close to the grid (0 = any); the grid
+//               and the tempo keep every low event
+const FLAG_KICKS = 1;
+const FLAG_HALF = 2;
+const FLAG_DOUBLE = 4;
+const FLAG_BEATLESS = 8;
+const FLAG_METER3 = 16;
+const FLAG_METER4 = 32;
+const FLAG_REPHASE = 128;
+
+const PROFILES = [
+  {
+    id: "generic",
+    groove: 0, flags: FLAG_KICKS, lull: 0, lockConf: 0.12, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.55, kickRel: 0.40, kickClick: 6, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.004, snareRatio: 2.2,
+    buildGain: 1.0, buildMin: 0.42, spacing: 1.0, rollGain: 1.0,
+    down: [1.4, 0.35, 0.25, 0.8, 0.9, 1.0, 0.0, 0.0],
+    evidence: [1.0, 0.45, 0.4, 0.22],
+    genre: [1, 1, 1, 1, 1, 1, 1, 1],
+  },
+  {
+    // Four-on-the-floor, the clap hidden under the kick. The bar is the chord
+    // change and the level's novelty; the mid-band cue speaks with a third of
+    // the weight a live snare gets, because the kick's own attack is in it.
+    id: "club",
+    groove: 1, flags: FLAG_KICKS | FLAG_METER4, lull: 0, lockConf: 0.12, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.50, kickRel: 0.40, kickClick: 3, kickClickScale: 12, kickLanded: 135,
+    snareMin: 0.004, snareRatio: 2.2,
+    buildGain: 1.0, buildMin: 0.42, spacing: 1.0, rollGain: 1.0,
+    down: [1.8, 0.0, 0.1, 0.9, 0.6, 1.0, 0.35, 0.6],
+    evidence: [1.0, 0.45, 0.4, 0.22],
+    genre: [1, 0.7, 0.7, 1.1, 1.2, 1.1, 1, 0.8],
+  },
+  {
+    // Hard dance: a pitched kick on every beat, bars closed by rolls. The
+    // kick is the phase authority; the mid cue is weak (the lead's attacks
+    // land in it); the roll before the downbeat is the bar's own tell.
+    id: "hard",
+    groove: 2, flags: FLAG_KICKS | FLAG_METER4, lull: 0, lockConf: 0.12, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.55, kickRel: 0.40, kickClick: 6, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.004, snareRatio: 2.2,
+    buildGain: 1.0, buildMin: 0.42, spacing: 1.0, rollGain: 1.0,
+    down: [1.4, 0.0, 0.1, 0.8, 0.9, 1.0, 0.3, 1.5],
+    evidence: [1.0, 0.45, 0.4, 0.22],
+    genre: [0.8, 1.3, 1.2, 1, 0.8, 1, 1.2, 1.1],
+  },
+  {
+    // Bass & breaks: a half-time grid, a snare on three, a sub that carries
+    // the drop. The true tempo is twice the grid's (dubstep 70 -> 140, dnb
+    // 87 -> 174), so the profile may move the level up one octave.
+    id: "bass",
+    groove: 3, flags: FLAG_KICKS | FLAG_HALF | FLAG_METER4, lull: 0, lockConf: 0.12, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.55, kickRel: 0.45, kickClick: 6, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.004, snareRatio: 2.0,
+    buildGain: 0.9, buildMin: 0.42, spacing: 1.5, rollGain: 1.0,
+    down: [1.4, 0.4, 0.2, 0.6, 0.6, 1.2, 0.35, 0.0],
+    evidence: [1.0, 0.45, 0.5, 0.22],
+    genre: [0.8, 1.1, 0.8, 1.25, 1.1, 1.1, 1, 0.9],
+  },
+  {
+    // Urban: a syncopated or half-time kick over an 808, claps on the
+    // backbeat, a song form (a chorus returning is not a club drop).
+    id: "urban",
+    groove: 3, flags: FLAG_KICKS | FLAG_METER4, lull: 8, lockConf: 0.15, phaseTol: 0.16, kickGrid: 0,
+    kickScore: 0.45, kickRel: 0.40, kickClick: 2, kickClickScale: 10, kickLanded: 120,
+    snareMin: 0.003, snareRatio: 2.0,
+    buildGain: 0.7, buildMin: 0.48, spacing: 1.5, rollGain: 0.8,
+    down: [1.4, 0.3, 0.2, 0.7, 0.8, 1.2, 0.35, 0.0],
+    evidence: [1.0, 0.4, 0.45, 0.2],
+    genre: [0.8, 0.7, 0.7, 1.3, 1.2, 1, 0.8, 0.8],
+  },
+  {
+    // The ONE-DROP: the kick is on beat 3, not 1, and the skank/hats are on
+    // the offbeats. The kick is the only phase authority (the skank is loud
+    // and constant, and it used to pull the grid off the beat: measured, the
+    // grid sat on the OFFBEAT for a whole reggae track). Beat 3 is not the
+    // downbeat, so the kick carries no bar cue here — the chord does. A
+    // one-drop tracked at double time is moved back one octave (152 -> 76).
+    id: "one-drop",
+    groove: 4, flags: FLAG_KICKS | FLAG_DOUBLE | FLAG_METER4 | FLAG_REPHASE, lull: 16, lockConf: 0.15, phaseTol: 0.20, kickGrid: 0.22,
+    kickScore: 0.45, kickRel: 0.55, kickClick: 2, kickClickScale: 10, kickLanded: 120,
+    snareMin: 0.003, snareRatio: 1.8,
+    buildGain: 0.5, buildMin: 0.50, spacing: 2.0, rollGain: 0.6,
+    down: [1.6, 0.0, 0.3, 0.6, 0.15, 0.2, 0.15, 0.0],
+    evidence: [1.0, 0.1, 0.05, 0.02],
+    genre: [1.2, 0.6, 0.6, 1.3, 1.4, 0.8, 0.8, 0.8],
+  },
+  {
+    // A played kit: the chord change and the snare on two and four. The kick
+    // is a beater in a room, not a sub; the drop lull is a song form's.
+    id: "rock",
+    groove: 4, flags: FLAG_KICKS | FLAG_METER4, lull: 16, lockConf: 0.12, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.55, kickRel: 0.40, kickClick: 8, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.003, snareRatio: 2.4,
+    buildGain: 0.5, buildMin: 0.50, spacing: 1.5, rollGain: 0.8,
+    down: [1.2, 0.5, 0.25, 0.6, 1.1, 1.1, 0.4, 0.0],
+    evidence: [1.0, 0.35, 0.55, 0.2],
+    genre: [1.1, 0.8, 0.9, 0.9, 0.9, 1, 1, 1.1],
+  },
+  {
+    // Metal: the double kick is a texture, not a bar marker — it is on every
+    // sixteenth — so the bar is the chord change and the snare, and the
+    // expected kick spacing is twice a rock kit's.
+    id: "metal",
+    groove: 4, flags: FLAG_KICKS | FLAG_METER4, lull: 16, lockConf: 0.12, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.55, kickRel: 0.40, kickClick: 8, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.003, snareRatio: 2.4,
+    buildGain: 0.4, buildMin: 0.55, spacing: 2.0, rollGain: 0.8,
+    down: [1.2, 0.0, 0.1, 0.6, 1.0, 1.2, 0.4, 0.0],
+    evidence: [1.0, 0.35, 0.6, 0.2],
+    genre: [1.0, 0.9, 0.9, 0.9, 0.9, 1.1, 1, 1.2],
+  },
+  {
+    // Song form: a sung hook, a soft kick, a backbeat, a chorus that is not a
+    // drop. The chord change and the voice's phrase mark the bar.
+    id: "pop",
+    groove: 4, flags: FLAG_KICKS, lull: 16, lockConf: 0.12, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.50, kickRel: 0.40, kickClick: 5, kickClickScale: 12, kickLanded: 135,
+    snareMin: 0.003, snareRatio: 2.2,
+    buildGain: 0.6, buildMin: 0.48, spacing: 1.0, rollGain: 1.0,
+    down: [1.4, 0.3, 0.15, 0.7, 0.7, 1.2, 0.4, 0.0],
+    evidence: [1.0, 0.4, 0.5, 0.2],
+    genre: [1.2, 0.7, 0.7, 1, 1, 1, 0.9, 0.8],
+  },
+  {
+    // A jazz kit: bass and ride carry the pulse, the chord change the bar.
+    // There is no kick to publish (a brush, a ride and a walking bass are not
+    // a kick), and a chorus returning is not a drop.
+    id: "jazz",
+    groove: 4, flags: FLAG_METER4, lull: 16, lockConf: 0.25, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.60, kickRel: 0.45, kickClick: 8, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.003, snareRatio: 2.0,
+    buildGain: 0.4, buildMin: 0.55, spacing: 1.0, rollGain: 0.5,
+    down: [1.6, 0.0, 0.1, 0.8, 0.2, 0.15, 0.1, 0.0],
+    evidence: [0.4, 0.5, 0.6, 0.2],
+    genre: [1.3, 0.5, 0.5, 0.8, 1.1, 0.9, 0.8, 0.6],
+  },
+  {
+    // Acoustic piano. No drum kit at all, but a stride left hand and a chord
+    // change mark the bar: the low note is evidence, not a kick. The grid
+    // keeps running (a ragtime has a beat) but publishes no kick.
+    id: "piano",
+    groove: 4, flags: FLAG_METER4, lull: 16, lockConf: 0.30, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.60, kickRel: 0.45, kickClick: 8, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.003, snareRatio: 2.0,
+    buildGain: 0.4, buildMin: 0.55, spacing: 1.0, rollGain: 0.3,
+    down: [2.0, 0.0, 0.1, 0.5, 0.05, 0.05, 0.05, 0.0],
+    evidence: [0.2, 0.7, 0.2, 0.3],
+    genre: [1.4, 0.4, 0.4, 0.7, 0.9, 0.8, 0.8, 0.5],
+  },
+  {
+    // Rubato/classical: no grid at all. The descriptors keep running (the
+    // look still breathes), but no beat, bar, kick or drop is published.
+    id: "classical",
+    groove: 4, flags: FLAG_BEATLESS, lull: 32, lockConf: 0.55, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.60, kickRel: 0.45, kickClick: 8, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.003, snareRatio: 2.0,
+    buildGain: 0.3, buildMin: 0.60, spacing: 1.0, rollGain: 0.2,
+    down: [1.6, 0.0, 0.2, 0.6, 0.2, 0.2, 0.2, 0.0],
+    evidence: [0.2, 0.5, 0.2, 0.3],
+    genre: [1.5, 0.3, 0.3, 0.6, 0.8, 0.7, 0.8, 0.4],
+  },
+  {
+    id: "ambient",
+    groove: 0, flags: FLAG_BEATLESS, lull: 32, lockConf: 0.45, phaseTol: 0.13, kickGrid: 0,
+    kickScore: 0.60, kickRel: 0.45, kickClick: 8, kickClickScale: 14, kickLanded: 135,
+    snareMin: 0.003, snareRatio: 2.0,
+    buildGain: 0.3, buildMin: 0.60, spacing: 1.0, rollGain: 0.2,
+    down: [1.4, 0.2, 0.2, 0.6, 0.4, 0.6, 0.2, 0.0],
+    evidence: [0.2, 0.4, 0.2, 0.2],
+    genre: [1.3, 0.4, 0.3, 0.8, 0.7, 0.6, 0.8, 0.4],
+  },
+];
+
+const PROFILE_ID = new Map(PROFILES.map((p, i) => [p.id, i]));
+const PROFILE_BY_ROW = new Map(PROFILES.map((p) => [p.id, p]));
+export const PROFILE_LIST = PROFILES.map((p) => ({
+  id: p.id,
+  groove: p.groove,
+  kicks: (p.flags & FLAG_KICKS) !== 0,
+  lull: p.lull,
+}));
+
+// Which family is listened to with which row. A family absent here uses the
+// generic row; that is not a bug, it is "the server named a genre we have no
+// profile for", and the generic detectors are the fallback.
+const PROFILE_OF_FAMILY = {
+  ambient: "ambient",
+  strings: "classical",
+  jazz: "jazz", blues: "jazz",
+  vocalPop: "pop", pop: "pop", soul: "pop", country: "pop", folk: "pop",
+  rnb: "urban", hiphop: "urban", rap: "urban", reggaeton: "urban", lofi: "urban",
+  house: "club", techno: "club", trance: "club", dance: "club", psytrance: "club",
+  disco: "club", funk: "club", afrohouse: "club", amapiano: "club", synthwave: "club",
+  dnb: "bass", dubstep: "bass", breakbeat: "bass", garage: "bass", trap: "bass", phonk: "bass",
+  dancehall: "one-drop", reggae: "one-drop",
+  rock: "rock", hardrock: "rock", punk: "rock", indie: "rock",
+  metal: "metal", brutal: "metal",
+  hardstyle: "hard", hardtekk: "hard", zaag: "hard", frenchcore: "hard", uptempo: "hard",
+  krach: "hard", pieep: "hard", hardcore: "hard", tribecore: "hard", speedcore: "hard",
+  industrial: "hard", rawstyle: "hard", hardtechno: "hard", hardpingpong: "hard", germanparty: "hard",
+};
+
+// A few names are the same family but not the same music to listen to: a
+// solo piano keeps its stride, a classical orchestra does not have a grid,
+// and an ambient pad has no drums. The SERVER's name, not the audio, decides.
+const PROFILE_BY_GENRE = {
+  piano: "piano",
+  classical: "classical", orchestral: "classical", choral: "classical", opera: "classical",
+  filmscore: "classical", soundtrack: "classical", baroque: "classical", romantic: "classical",
+  minimalism: "classical", strings: "classical", cordes: "classical",
+  ambient: "ambient", drone: "ambient", darkambient: "ambient", newage: "ambient",
+  shoegaze: "ambient", chillout: "ambient",
+};
 
 /**
- * The analyser's profile for a genre name: `lull` (beats the kick must be out
- * before a drop, 0 = the club default) and `kicks` (false: publish none).
+ * The analysis profile the SERVER's genre selects. `null`/unknown → the
+ * generic row. The result is `{ id, lull, kicks }`: `id` indexes the profile
+ * table the analyser was loaded with; `lull`/`kicks` stay for an old caller.
  */
 export function profileOf(name) {
+  const flat = flatten(name || "");
   const fam = genreOf(name)?.family;
-  if (!fam) return { lull: 0, kicks: true };
-  return { lull: SONG_FORM.has(fam) ? SONG_LULL_BEATS : 0, kicks: !DRUMLESS.has(fam) };
+  const key = PROFILE_BY_GENRE[flat] || PROFILE_OF_FAMILY[fam] || "generic";
+  const p = PROFILE_BY_ROW.get(key) || PROFILE_BY_ROW.get("generic");
+  return { id: PROFILE_ID.get(p.id), lull: p.lull, kicks: (p.flags & FLAG_KICKS) !== 0 };
+}
+
+/** The profile table, flattened for style.rs#AnalysisProfile. */
+export function profileTable() {
+  const out = [PROFILES.length];
+  for (const p of PROFILES) {
+    out.push(p.groove, p.flags, p.lull, p.lockConf);
+    out.push(p.kickScore, p.kickRel, p.kickClick, p.kickClickScale, p.kickLanded);
+    out.push(p.snareMin, p.snareRatio, p.buildGain, p.buildMin, p.spacing, p.rollGain);
+    out.push(...p.down);
+    out.push(...p.evidence);
+    out.push(...p.genre);
+    out.push(p.phaseTol, p.kickGrid);
+  }
+  return out;
 }
 
 /**
@@ -1432,6 +1693,8 @@ export function familyTable() {
       }
     }
   }
+  // The server-genre-selected analysis profiles follow the families.
+  for (const v of profileTable()) out.push(v);
   return new Float32Array(out);
 }
 

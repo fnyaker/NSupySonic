@@ -19,7 +19,7 @@ import java.nio.ByteBuffer
  */
 object NsCore {
     /** The JNI surface this code was written against (nscore's ABI_VERSION). */
-    private const val ABI = 1
+    private const val ABI = 2
 
     val available: Boolean by lazy {
         try {
@@ -59,6 +59,7 @@ object NsCore {
     @JvmStatic external fun analyserPinFamily(h: Long, id: Int)
     @JvmStatic external fun analyserSetGroove(h: Long, groove: Int)
     @JvmStatic external fun analyserSetProfile(h: Long, dropLullBeats: Float, kicks: Boolean)
+    @JvmStatic external fun analyserSetProfileId(h: Long, id: Int, dropLullBeats: Float, kicks: Boolean)
     @JvmStatic external fun analyserSetClassify(h: Long, on: Boolean)
     @JvmStatic external fun analyserSetLiveRange(h: Long, on: Boolean)
     @JvmStatic external fun analyserReset(h: Long)

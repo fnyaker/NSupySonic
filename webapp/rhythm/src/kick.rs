@@ -161,6 +161,16 @@ pub struct KickDetector {
     buzz_until: f64,
     buzz_start: f64,
     buzz_level: f32,
+    // The SERVER-GENRE-SELECTED ANALYSIS PROFILE (style.rs AnalysisProfile):
+    // what a kick of THIS genre is allowed to look like. The defaults are the
+    // measured generic ones; a profile narrows them without a second detector.
+    score_min: f32,
+    rel_floor: f32,
+    click_min: f32,
+    click_scale: f32,
+    landed_hz: f32,
+    snare_min: f32,
+    snare_ratio: f32,
 }
 
 impl KickDetector {
@@ -206,8 +216,37 @@ impl KickDetector {
             buzz_until: -1.0,
             buzz_start: -1.0,
             buzz_level: 0.0,
+            score_min: 0.55,
+            rel_floor: 0.4,
+            click_min: 6.0,
+            click_scale: 14.0,
+            landed_hz: 135.0,
+            snare_min: 0.004,
+            snare_ratio: 2.2,
         }
     }
+
+    /// The genre's kick/snare gates (style.rs AnalysisProfile).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_profile(
+        &mut self,
+        score_min: f32,
+        rel_floor: f32,
+        click_min: f32,
+        click_scale: f32,
+        landed_hz: f32,
+        snare_min: f32,
+        snare_ratio: f32,
+    ) {
+        self.score_min = score_min;
+        self.rel_floor = rel_floor;
+        self.click_min = click_min;
+        self.click_scale = click_scale.fmax(0.1);
+        self.landed_hz = landed_hz;
+        self.snare_min = snare_min;
+        self.snare_ratio = snare_ratio;
+    }
+
 
     pub fn reset(&mut self) {
         let sr = self.sr as f32;
@@ -525,9 +564,9 @@ impl KickDetector {
         // 130 Hz, where a snare's shell, a chord or a piano note does not. The
         // pitch drop measured after a jump is not used: a fast kick's sweep is
         // over in one cycle and reads 1.17, less than the false ones' 1.31.
-        let s_click = ((click - 6.0) / 14.0).clamp(0.0, 1.0);
+        let s_click = ((click - self.click_min) / self.click_scale).clamp(0.0, 1.0);
         let s_rel = ((rel - 0.5) / 0.4).clamp(0.0, 1.0);
-        let landed = f1 <= 0.0 || f1 <= 135.0;
+        let landed = f1 <= 0.0 || f1 <= self.landed_hz;
         let score = if !landed {
             0.0
         } else if path == 1.0 {
@@ -538,8 +577,8 @@ impl KickDetector {
         let _ = drop;
         let hit = Hit { t: onset, strength: rel.clamp(0.2, 1.5), f0, f1, path, click, drop, rel, score };
         self.candidates.push(hit);
-        let floor = if path == 1.0 { 0.4 } else { 0.45 };
-        if score < 0.55 || onset - self.last_kick < KICK_REFRACTORY || rel < floor {
+        let floor = self.rel_floor + if path == 1.0 { 0.0 } else { 0.05 };
+        if score < self.score_min || onset - self.last_kick < KICK_REFRACTORY || rel < floor {
             // THE REFERENCE MUST BE ABLE TO COME DOWN. Only an accepted kick
             // used to move it, so a passage played quieter lost its kicks for
             // good: measured, the same hardstyle bar 6 dB down kept one kick in
@@ -583,8 +622,8 @@ impl KickDetector {
         let d = m - self.snare_avg;
         self.snare_avg += d * 0.03;
         self.snare_var += (d * d - self.snare_var) * 0.03;
-        let thr = self.snare_avg + self.snare_var.fmax(1e-12).sqrt() * 2.2;
-        if m > thr && m > 0.004 && !f.kick_candidate && !near_kick {
+        let thr = self.snare_avg + self.snare_var.fmax(1e-12).sqrt() * self.snare_ratio;
+        if m > thr && m > self.snare_min && !f.kick_candidate && !near_kick {
             self.push_snare(t - DETECT_LATENCY, ((m - thr) / (thr + 1e-6)).clamp(0.2, 1.0));
         }
     }

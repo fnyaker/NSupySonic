@@ -288,6 +288,16 @@ pub struct Analyzer {
     // SERVED, which a live reading never overrides.
     groove: u8,
     groove_served: bool,
+    /// THE SERVER-GENRE-SELECTED ANALYSIS PROFILE (style.rs AnalysisProfile).
+    /// Set by `set_profile` from the served genre; generic when nothing was
+    /// served. It is never chosen from the audio.
+    profile: style::AnalysisProfile,
+    profile_id: i32,
+    profile_at: f64,
+    octave_done: bool,
+    /// A verdict just arrived: put the grid's phase on the new profile's
+    /// strongest evidence once, at the next frame that is not a lull.
+    rephase_pending: bool,
     level: u32,
     live_range: bool,
     range_from: i32,
@@ -368,6 +378,11 @@ impl Analyzer {
             mid_last: -1.0,
             groove: 0,
             groove_served: false,
+            profile: style::AnalysisProfile::generic(),
+            profile_id: -1,
+            profile_at: -1.0,
+            octave_done: false,
+            rephase_pending: false,
             level: LEVEL_SMART,
             live_range: true,
             range_from: -1,
@@ -427,6 +442,12 @@ impl Analyzer {
         self.groove = 0;
         self.groove_served = false;
         self.grid.set_model(0);
+        self.profile = style::AnalysisProfile::generic();
+        self.profile_id = -1;
+        self.profile_at = -1.0;
+        self.octave_done = false;
+        self.rephase_pending = false;
+        self.apply_profile();
         self.in_build = false;
         self.groove_s = 0.0;
         self.tempo.hold = false;
@@ -662,6 +683,18 @@ impl Analyzer {
             }
         }
         let f = &snap.f;
+        // What the ANIMATION is told is a kick: a profile whose kick is on the
+        // grid (a one-drop) drops a low struck note between beats — the reggae
+        // record's bass notes were 83% of what the detector called a kick.
+        // The grid and the tempo keep every low event, weighted by the
+        // profile's evidence: they are what holds the phase on a one-drop.
+        if let Some((kt, _)) = kick {
+            if self.profile.kick_grid > 0.0
+                && self.grid.psi(kt).map(|p| p.abs() > self.profile.kick_grid as f64).unwrap_or(false)
+            {
+                kick = None;
+            }
+        }
         // How loud the next few frames are against this track's loud level —
         // from the frames' own levels, not the smoothed dynamics, which take
         // longer than the lookahead to rise at the first kick of a drop.
@@ -676,6 +709,11 @@ impl Analyzer {
         let onset = if self.level >= LEVEL_RHYTHM { snap.onset } else { 0.0 };
 
         let rhythm = self.level >= LEVEL_RHYTHM;
+        if rhythm && self.rephase_pending && self.grid.initialised() && f.dynamics > 0.25 {
+            if self.grid.rephase(t) {
+                self.rephase_pending = false;
+            }
+        }
         if rhythm {
             self.grid.eval_at(t);
         }
@@ -879,6 +917,31 @@ impl Analyzer {
             );
         }
 
+        // THE SERVER'S GENRE SETS THE METRICAL LEVEL, ONCE. A half-time
+        // profile (dubstep, trap, dnb) whose grid sits on half the tempo, or a
+        // one-drop profile tracked at double time, is moved one octave toward
+        // the band the verdict named — never away from it, never from a live
+        // reading, and never while a measured tempo is locked. `profile_at`
+        // delays it until there is a grid to move.
+        if self.profile_at < 0.0 {
+            self.profile_at = t;
+        }
+        if !self.tempo.fixed()
+            && (self.profile.half || self.profile.double)
+            && b.locked
+            && !self.octave_done
+            && t - self.profile_at > 3.0
+        {
+            let (lo, hi) = self.tempo.range();
+            if lo > 0.0 && (b.bpm < lo * 0.97 || b.bpm > hi * 1.03) {
+                let cand = if self.profile.half { b.bpm * 2.0 } else { b.bpm * 0.5 };
+                if cand >= lo * 0.97 && cand <= hi * 1.03 {
+                    self.tempo.seed(cand, 0.8);
+                    self.octave_done = true;
+                }
+            }
+        }
+
         // A genre with no drum kit publishes no kick (pattern.rs `kicks`). Only
         // what is PUBLISHED is muted: the bar model and the sections above
         // still read those onsets, and a stride left hand is how a piano rag
@@ -1016,11 +1079,56 @@ impl Analyzer {
         self.tempo.seed(bpm, conf)
     }
 
-    /// The served genre's way of reading the arrangement (pattern.rs
-    /// `drop_lull_beats`, `kicks`); 0 beats restores the club default.
-    pub fn set_profile(&mut self, drop_lull_beats: f32, kicks: bool) {
-        self.pattern.drop_lull_beats = if drop_lull_beats > 0.0 { drop_lull_beats as f64 } else { pattern::DROP_LULL_CLUB };
-        self.pattern.kicks = kicks;
+    /// The served genre's analysis profile (style.js `profileOf`), by table
+    /// index. `id < 0` is the legacy two-field message: apply `drop_lull_beats`
+    /// and `kicks` on top of the generic profile. A profile is chosen from the
+    /// SERVER's genre only; nothing here reads the audio to pick one.
+    pub fn set_profile(&mut self, id: i32, drop_lull_beats: f32, kicks: bool) {
+        // An older page sends only the two fields the profile used to have:
+        // set what it asked for and leave the rest (the pin's groove) alone.
+        if id < 0 {
+            self.pattern.drop_lull_beats = if drop_lull_beats > 0.0 { drop_lull_beats as f64 } else { pattern::DROP_LULL_CLUB };
+            self.pattern.kicks = kicks;
+            self.profile_id = id;
+            return;
+        }
+        let changed = id != self.profile_id;
+        self.profile = self.style.profile(id).unwrap_or_else(|| {
+            let mut p = style::AnalysisProfile::generic();
+            if drop_lull_beats.is_finite() {
+                p.lull = drop_lull_beats.fmax(0.0);
+            }
+            p.kicks = kicks;
+            p
+        });
+        self.profile_id = id;
+        self.profile_at = -1.0;
+        self.octave_done = false;
+        self.rephase_pending = changed && self.profile.rephase && self.grid.initialised();
+        self.apply_profile();
+    }
+
+    /// Push the active profile into every detector it owns. Called when a
+    /// verdict arrives and after a reset; never per frame.
+    fn apply_profile(&mut self) {
+        let p = self.profile;
+        self.set_groove_now(p.groove);
+        self.grid.set_down(&p.down);
+        self.grid.set_profile(p.evidence, p.lock_conf, p.beatless);
+        self.grid.set_meter_hint(p.meter);
+        self.grid.set_fit_tol(p.phase_tol);
+        self.pattern.set_profile(p.lull, p.kicks, p.build_gain, p.build_min, p.spacing, p.roll_gain);
+        self.kick.set_profile(
+            p.kick_score,
+            p.kick_rel,
+            p.kick_click,
+            p.kick_click_scale,
+            p.kick_landed,
+            p.snare_min,
+            p.snare_ratio,
+        );
+        self.genre.set_gains(&p.genre);
+        self.tempo.set_octave_policy(p.half, p.double);
     }
 
     /// The server's tempo, locked (0 releases it): see tempo.rs `fixed_bpm`.
@@ -1055,10 +1163,26 @@ impl Analyzer {
     }
 
     /// A SERVED genre's way of building its groove (beat.rs DOWN_MODELS);
-    /// 0 hands the choice back to the live reading.
+    /// 0 hands the choice to the analysis profile (a sub-genre with no row of
+    /// its own keeps its family's profile rather than the generic model).
     pub fn set_groove(&mut self, g: u32) {
-        self.groove_served = g != 0;
-        self.set_groove_now(g.min(15) as u8);
+        if g == 0 {
+            self.groove_served = false;
+            self.set_groove_now(self.profile.groove);
+            self.grid.set_down(&self.profile.down);
+            return;
+        }
+        let g = g.min(15) as u8;
+        self.groove_served = true;
+        // A sub-genre with a groove of its own (gqom under afro house) keeps
+        // its own DOWN_MODEL; a genre whose groove is its profile's keeps the
+        // profile's bar cues (which are finer than the five default rows).
+        if g == self.profile.groove {
+            self.set_groove_now(g);
+            self.grid.set_down(&self.profile.down);
+        } else {
+            self.set_groove_now(g);
+        }
     }
 
     /// Whether the live family rules run (style.rs `classify`). Off, the
@@ -1187,9 +1311,9 @@ pub extern "C" fn rhythm_lock_tempo(bpm: f32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn rhythm_set_profile(drop_lull_beats: f32, kicks: u32) {
+pub extern "C" fn rhythm_set_profile(id: i32, drop_lull_beats: f32, kicks: u32) {
     if let Some(a) = g().a.as_mut() {
-        a.set_profile(drop_lull_beats, kicks != 0);
+        a.set_profile(id, drop_lull_beats, kicks != 0);
     }
 }
 

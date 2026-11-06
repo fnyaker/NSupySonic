@@ -79,6 +79,130 @@ pub const LOOK_N: usize = 7;
 const EVIDENCE_FULL: f32 = 0.25;
 pub const ARCH_N: usize = 5;
 
+// --- the SERVER-GENRE-SELECTED ANALYSIS PROFILE -------------------------------
+//
+// THE CLIENT NEVER CLASSIFIES THE GENRE. This table is chosen in JavaScript
+// from the SERVER's genre name (`style.js#profileOf` → `genreOf` → family →
+// profile id) and handed to the analyser with the family table. With no served
+// genre the generic row runs; no reading of the audio ever selects a profile.
+//
+// A profile owns what genuinely differs by genre and is visible in an
+// animation: how a beat marks its bar (beat.rs DOWN_MODELS), which evidence
+// may move the grid, whether a kick is published, how hard the kick detector
+// must be convinced, what a snare is, how long the kick must be out before its
+// return is a DROP, how a rise becomes a BUILD, the expected kick spacing (a
+// half-time or one-drop groove), the roll gain, and the genre channel's gains.
+#[derive(Clone, Copy)]
+pub struct AnalysisProfile {
+    /// beat.rs DOWN_MODELS: 0 unknown, 1 four-on-floor, 2 hard dance,
+    /// 3 broken beat, 4 live kit.
+    pub groove: u8,
+    /// Publish kick, roll and drop events (a solo piano has no drum kit).
+    pub kicks: bool,
+    /// The true tempo is 2x the grid's (dubstep, trap, dnb): a range move
+    /// toward the profile's band may go up one octave.
+    pub half: bool,
+    /// The true tempo is the grid's / 2 (a one-drop tracked at double time).
+    pub double: bool,
+    /// Do not publish a grid at all (rubato, ambient): the descriptors keep
+    /// running, the beat/bar/drop events stop.
+    pub beatless: bool,
+    /// 0, 3 or 4: pin the meter when the genre is 4/4 (or 3/4) by
+    /// construction. A club/hard/bass/urban/rock record is 4/4; leaving the
+    /// meter to the noisy 3-vs-4 comparison flipped it mid-track (measured,
+    /// house's bar moved 8 times in 33).
+    pub meter: u8,
+    /// Move the phase onto this profile's strongest evidence once, when the
+    /// verdict arrives after the grid already locked. Only a profile whose
+    /// phase can sit half a beat off (a one-drop's skank) asks for it; a
+    /// double-kick metal grid must keep the phase it found.
+    pub rephase: bool,
+    /// How close a piece of evidence must be to the grid for the phase fit to
+    /// believe it, in beats. A sparse one-drop kick can sit 0.15 beat off the
+    /// grid the skank built; 0.13 ignores it and the grid never corrects.
+    pub phase_tol: f32,
+    /// Only believe a kick this close to the grid, in beats (0 = any). A
+    /// one-drop's bass notes are low and struck; they are not kicks, and
+    /// 83% of the published kicks on the reggae record were bass notes.
+    pub kick_grid: f32,
+    /// Beats of lull before a return is a DROP (pattern.rs `drop_lull_beats`).
+    pub lull: f32,
+    /// The grid's confidence floor for `locked` (beat.rs `eval_at`).
+    pub lock_conf: f32,
+    /// kick.rs: minimum score, minimum level against the track's kicks, the
+    /// beater's dB over what preceded it and the dB that counts as a full
+    /// click, and the Hz the pitch must land at or below.
+    pub kick_score: f32,
+    pub kick_rel: f32,
+    pub kick_click: f32,
+    pub kick_click_scale: f32,
+    pub kick_landed: f32,
+    /// kick.rs: the mid-flux floor and the multiple of its variation a snare
+    /// must stand out by.
+    pub snare_min: f32,
+    pub snare_ratio: f32,
+    /// pattern.rs: build gain and threshold, expected main-kick spacing
+    /// multiplier, roll output multiplier.
+    pub build_gain: f32,
+    pub build_min: f32,
+    pub spacing: f32,
+    pub roll_gain: f32,
+    /// beat.rs bar cues: chord, kick, low, novelty, snare_down, snare_back,
+    /// mid, roll. The five DOWN_MODELS are the default rows; a profile may
+    /// name its own, because a house clap and a one-drop kick do not mark the
+    /// bar with the same cues.
+    pub down: [f32; 8],
+    /// The evidence weights that move the grid: kick, low, snare, other
+    /// (beat.rs `kind_weight`; mid and roll are bar-only and stay 0).
+    pub evidence: [f32; 4],
+    /// genre.rs: the eight channel gains (lead, buzz, screech, sub, offbeat,
+    /// density, tail, grit).
+    pub genre: [f32; crate::genre::N],
+}
+
+impl AnalysisProfile {
+    pub fn generic() -> AnalysisProfile {
+        AnalysisProfile {
+            groove: 0,
+            kicks: true,
+            half: false,
+            double: false,
+            beatless: false,
+            meter: 0,
+            rephase: false,
+            phase_tol: 0.13,
+            kick_grid: 0.0,
+            lull: 0.0,
+            lock_conf: 0.12,
+            kick_score: 0.55,
+            kick_rel: 0.4,
+            kick_click: 6.0,
+            kick_click_scale: 14.0,
+            kick_landed: 135.0,
+            snare_min: 0.004,
+            snare_ratio: 2.2,
+            build_gain: 1.0,
+            build_min: 0.42,
+            spacing: 1.0,
+            roll_gain: 1.0,
+            down: [1.4, 0.35, 0.25, 0.8, 0.9, 1.0, 0.0, 0.0],
+            evidence: [1.0, 0.45, 0.4, 0.22],
+            genre: [1.0; crate::genre::N],
+        }
+    }
+}
+
+impl Default for AnalysisProfile {
+    fn default() -> Self {
+        Self::generic()
+    }
+}
+
+/// One profile row, flattened by `style.js#profileTable`: 15 scalars, the
+/// eight bar cues, the four evidence weights, then the eight genre-channel
+/// gains.
+pub const PROFILE_FLOATS: usize = 37;
+
 #[derive(Clone, Copy)]
 struct Term {
     op: u8,
@@ -330,6 +454,7 @@ impl KickShape {
 
 pub struct Style {
     families: Vec<Family>,
+    profiles: Vec<AnalysisProfile>,
     weights: Vec<f32>,
     raw: Vec<f32>,
     pub s: [f32; N_FEAT],
@@ -361,6 +486,7 @@ impl Style {
     pub fn new() -> Style {
         Style {
             families: Vec::new(),
+            profiles: Vec::new(),
             weights: Vec::new(),
             raw: Vec::new(),
             s: [0.0; N_FEAT],
@@ -424,11 +550,72 @@ impl Style {
             }
             fams.push(Family { arch: arch.fmin(ARCH_N - 1), tempo_free, fallback, look, range: (lo, hi), groove, terms });
         }
+        // The profiles follow the families (style.js#profileTable). An older
+        // caller's table ends here: the generic profile is the only one.
+        let mut profiles = Vec::new();
+        if i < t.len() {
+            let n = next(&mut i).unwrap_or(0.0) as usize;
+            if n > 64 {
+                return false;
+            }
+            for _ in 0..n {
+                let base = i;
+                let get = |k: usize, d: f32| t.get(base + k).copied().unwrap_or(d);
+                if base + PROFILE_FLOATS > t.len() {
+                    return false;
+                }
+                let mut p = AnalysisProfile::generic();
+                let flags = get(1, 1.0) as u32;
+                p.groove = (get(0, 0.0) as u8).fmin(4);
+                p.kicks = flags & 1 != 0;
+                p.half = flags & 2 != 0;
+                p.double = flags & 4 != 0;
+                p.beatless = flags & 8 != 0;
+                p.rephase = flags & 0x80 != 0;
+                p.meter = if flags & 0x10 != 0 { 3 } else if flags & 0x20 != 0 { 4 } else { 0 };
+                p.lull = get(2, 0.0).fmax(0.0);
+                p.lock_conf = get(3, 0.12).fmax(0.0);
+                p.kick_score = get(4, 0.55);
+                p.kick_rel = get(5, 0.4);
+                p.kick_click = get(6, 6.0);
+                p.kick_click_scale = get(7, 14.0).fmax(0.1);
+                p.kick_landed = get(8, 135.0);
+                p.snare_min = get(9, 0.004);
+                p.snare_ratio = get(10, 2.2);
+                p.build_gain = get(11, 1.0);
+                p.build_min = get(12, 0.42);
+                p.spacing = get(13, 1.0).fmax(0.5);
+                p.roll_gain = get(14, 1.0);
+                for k in 0..8 {
+                    p.down[k] = get(15 + k, p.down[k]);
+                }
+                for k in 0..4 {
+                    p.evidence[k] = get(23 + k, p.evidence[k]).fmax(0.0);
+                }
+                for k in 0..crate::genre::N {
+                    p.genre[k] = get(27 + k, 1.0).fmax(0.0);
+                }
+                p.phase_tol = get(35, 0.13).clamp(0.05, 0.3);
+                p.kick_grid = get(36, 0.0).fmax(0.0);
+                profiles.push(p);
+                i += PROFILE_FLOATS;
+            }
+        }
         self.weights = vec![0.0; fams.len()];
         self.raw = vec![0.0; fams.len()];
         self.families = fams;
+        self.profiles = profiles;
         self.reset();
         true
+    }
+
+    /// The server-genre-selected analysis profile, or None for the generic one.
+    pub fn profile(&self, id: i32) -> Option<AnalysisProfile> {
+        if id >= 0 && (id as usize) < self.profiles.len() {
+            Some(self.profiles[id as usize])
+        } else {
+            None
+        }
     }
 
     pub fn reset(&mut self) {

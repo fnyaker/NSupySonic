@@ -162,6 +162,13 @@ pub struct Pattern {
     /// left-hand bass note is not a kick, and an animation thumping on it is
     /// wrong, so no kick, roll or drop event is published.
     pub kicks: bool,
+    /// The SERVER-GENRE-SELECTED ANALYSIS PROFILE's arrangement knobs: how
+    /// much a rise counts as a build, the threshold, the expected kick
+    /// spacing multiplier (2 half-time, 4 one-drop) and the roll gain.
+    build_gain: f32,
+    build_min: f32,
+    spacing: f32,
+    roll_gain: f32,
     pub out: PatternOut,
 }
 
@@ -219,6 +226,10 @@ impl Pattern {
             drop_lull_beats: DROP_LULL_CLUB,
             return_at: -1e9,
             kicks: true,
+            build_gain: 1.0,
+            build_min: 0.42,
+            spacing: 1.0,
+            roll_gain: 1.0,
             out: PatternOut::default(),
         };
         p.reset();
@@ -257,9 +268,23 @@ impl Pattern {
         self.drop_lull_beats = DROP_LULL_CLUB;
         self.return_at = -1e9;
         self.kicks = true;
+        self.build_gain = 1.0;
+        self.build_min = 0.42;
+        self.spacing = 1.0;
+        self.roll_gain = 1.0;
         self.gap_avg = 1.0;
         self.roll_run = 0.0;
         self.out = PatternOut { since_drop: 999.0, drop_in: -1.0, ..PatternOut::default() };
+    }
+
+    /// The genre's arrangement reading (style.rs AnalysisProfile).
+    pub fn set_profile(&mut self, drop_lull_beats: f32, kicks: bool, build_gain: f32, build_min: f32, spacing: f32, roll_gain: f32) {
+        self.drop_lull_beats = if drop_lull_beats > 0.0 { drop_lull_beats as f64 } else { DROP_LULL_CLUB };
+        self.kicks = kicks;
+        self.build_gain = build_gain.fmax(0.0);
+        self.build_min = build_min;
+        self.spacing = spacing.fmax(0.5);
+        self.roll_gain = roll_gain.fmax(0.0);
     }
 
     fn stat(&self, back: usize) -> Option<&BeatStat> {
@@ -355,7 +380,7 @@ impl Pattern {
             self.roll_div = 0.0;
         }
         let roll_left = ((self.roll_until - self.clock).fmax(0.0) / (beat * ROLL_HOLD)) as f32;
-        o.roll = (roll_left * (self.roll_notes / 3.0 + 0.34).fmin(1.0)).fmin(1.0);
+        o.roll = (roll_left * (self.roll_notes / 3.0 + 0.34).fmin(1.0) * self.roll_gain).fmin(1.0);
         o.roll_div = self.roll_div;
         o.roll_notes = self.roll_notes;
         self.cur.onsets += i.snares as f32 + if i.hat { 0.5 } else { 0.0 };
@@ -397,7 +422,7 @@ impl Pattern {
         // kick lands once or twice a bar, and judged by four-on-the-floor
         // every one of its bars was a breakdown and every return a drop
         // (measured: five false drops in one trap record).
-        let spacing = self.gap_avg.clamp(1.0, 4.5);
+        let spacing = (self.gap_avg * self.spacing).clamp(1.0, 8.0);
         let kicking = kick_out < 1.6 * spacing;
         self.has_kicks += ((if kicking { 1.0 } else { 0.0 }) - self.has_kicks)
             * (1.0 - (-dt / if kicking { 2.0 } else { 30.0 }).exp()) as f32;
@@ -432,7 +457,7 @@ impl Pattern {
             // A dense roll is itself a build even once it has stopped
             // accelerating: two or more hits a beat, the groove out.
             let dense = ((d_new - 1.6) / 2.0).clamp(0.0, 1.0);
-            rising = (acc * 0.5 + bright * 0.45 + louder * 0.35 + dense * 0.45).fmin(1.0);
+            rising = ((acc * 0.5 + bright * 0.45 + louder * 0.35 + dense * 0.45) * self.build_gain).fmin(1.0);
         }
         // The groove being IN cancels a build: a full drop with a busy hat
         // pattern is not a riser.
@@ -460,14 +485,14 @@ impl Pattern {
         } else if self.has_kicks > 0.3 {
             if groove_in && i.dynamics > 0.45 {
                 next = SEC_FULL;
-            } else if self.build_raw > 0.42 {
+            } else if self.build_raw > self.build_min {
                 next = SEC_BUILD;
             } else if kick_out > 4.0 * spacing.fmax(1.0).sqrt().fmax(1.0) + (spacing - 1.0) {
-                next = if self.build_raw > 0.3 && prev == SEC_BUILD { SEC_BUILD } else { SEC_BREAKDOWN };
+                next = if self.build_raw > self.build_min * 0.72 && prev == SEC_BUILD { SEC_BUILD } else { SEC_BREAKDOWN };
             }
         } else {
             // A track with no kick: its arrangement is its level.
-            next = if rel < 0.62 { SEC_BREAKDOWN } else if self.build_raw > 0.5 { SEC_BUILD } else { SEC_FULL };
+            next = if rel < 0.62 { SEC_BREAKDOWN } else if self.build_raw > self.build_min * 1.2 { SEC_BUILD } else { SEC_FULL };
         }
         if next != prev {
             if prev != SEC_PAUSE {

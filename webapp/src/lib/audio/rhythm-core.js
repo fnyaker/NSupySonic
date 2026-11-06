@@ -138,8 +138,8 @@ export class Rhythm {
     return !!this.x.rhythm_lock_tempo(+bpm || 0);
   }
   /** The served genre's reading of the arrangement (style.js profileOf). */
-  setProfile(lull, kicks) {
-    this.x.rhythm_set_profile(+lull || 0, kicks === false ? 0 : 1);
+  setProfile(id, lull, kicks) {
+    this.x.rhythm_set_profile(id | 0, +lull || 0, kicks === false ? 0 : 1);
   }
   /** Pin the served family (familyTable index); -1 releases it. */
   pinFamily(index) {
