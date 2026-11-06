@@ -1,0 +1,141 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "frontend": {
+      "description": "Ingénieur frontend UX/UI (Svelte 5, Vite 7, /app). À utiliser pour un écran, un composant, la navigation, le cache hors-ligne, la copy française, l'accessibilité, la perf perçue ou les benches webapp/test/{clicks,ui,queue,fullscreen,panel,requests}. Ne pas utiliser pour le contrat /api, le DSP ou les shaders.",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/prompts/frontend.md}",
+      "temperature": 0.35,
+      "color": "#3B82F6",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow"
+        }
+      }
+    },
+    "api": {
+      "description": "Ingénieur web/API (Flask, Subsonic /rest, base Peewee, migrations, config, jobs, fournisseurs, archive Deezer). À utiliser pour toute route /api ou /rest, un modèle ou une migration, un job de fond, la résilience Deezer, les priorités USER/PREFETCH/BULK ou l'import de compte. Ne pas utiliser pour le Svelte, l'Android ou le DSP.",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/prompts/api.md}",
+      "temperature": 0.15,
+      "color": "#10B981",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow"
+        }
+      }
+    },
+    "audio": {
+      "description": "Ingénieur du son (lecture, crossfade, trim, latence, ReplayGain, analyse Rust/WASM, tempo et descripteurs serveur, audio de la listen party). À utiliser pour ce qui est entendu, mesuré ou synchronisé, et pour les benches rhythm/output/skip/repeat/party/eval. Ne pas utiliser pour la mise en page, les routes ou les shaders.",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/prompts/audio.md}",
+      "temperature": 0.15,
+      "color": "#8B5CF6",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow"
+        }
+      }
+    },
+    "animation": {
+      "description": "Ingénieur/artiste animations (worlds WebGL2, shaders, skins, palette, oscilloscope, projector, éco, core Rust viz). À utiliser pour un rendu, un monde, une ambiance, une performance GPU ou le render bench. Ne pas utiliser pour l'analyse audio, la mise en page ou les routes.",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/prompts/animation.md}",
+      "temperature": 0.55,
+      "color": "#F59E0B",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow"
+        }
+      }
+    },
+    "security": {
+      "description": "Ingénieur sécurité (audit, modèle de menace, auth, CSRF, SSRF, CSP, secrets, capabilities, Android, dépendances). À utiliser pour une revue de surface sensible, un constat de sécurité, une enquête sur une faille ou une validation avant merge. Lecture seule par défaut : il rend des constats et des correctifs, il ne patch pas sans demande explicite.",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/prompts/security.md}",
+      "temperature": 0.1,
+      "color": "#EF4444",
+      "permission": {
+        "edit": "ask",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow"
+        }
+      }
+    },
+    "android": {
+      "description": "Ingénieur Android (Kotlin, WebView, bridge NSNative, lecteur Media3, offline, updater, login Deezer, JNI nscore). À utiliser pour l'app native, un pont, un cycle de vie, un téléchargement sur l'appareil ou un bench native/offline. Ne pas utiliser pour l'UI Svelte, le DSP ou les routes.",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/prompts/android.md}",
+      "temperature": 0.2,
+      "color": "#22C55E",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow"
+        }
+      }
+    },
+    "qa": {
+      "description": "Ingénieur QA/performance (tests Python et SPA, benches Chromium, upgrade, CI rouge, mesures de statements/requêtes/bytes/ms). À utiliser pour prouver un comportement, reproduire un échec CI, ajouter un test de non-régression ou mesurer une régression. Ne pas utiliser pour réécrire la prod afin de faire passer un test.",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/prompts/qa.md}",
+      "temperature": 0.1,
+      "color": "#14B8A6",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow"
+        }
+      }
+    },
+    "devops": {
+      "description": "Ingénieur DevOps/release (Dockerfile, compose, sept workflows GitHub, smoke test, ffmpeg statique, multi-arch, assets de release). À utiliser pour l'image, une CI rouge, un tag, la taille de l'image ou un secret de build. Ne pas utiliser pour le code applicatif, le Svelte ou l'Android.",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/prompts/devops.md}",
+      "temperature": 0.15,
+      "color": "#64748B",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow"
+        }
+      }
+    }
+  }
+}

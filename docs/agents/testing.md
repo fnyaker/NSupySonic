@@ -112,5 +112,9 @@ the code under it was broken:
   tones and a chord measure no tempo, a kick train mastered flat (tail at −2.2 dB) keeps its 150.
 - **Check the test by breaking the code.** Every test added for these rules was run against a
   deliberate mutation of the line it guards; a test that survives its mutant is decoration.
+- **Isolate optional providers.** A test that builds a source order or a list must switch off the
+  optional providers it did not mean to include. The YouTube extra is installed on some machines
+  and in the image, not in the minimal CI job, so its presence silently changed a fallback rank
+  (`tests.test_source_order`).
 - Tests that write files write them in their own temp directory: `tests/assets/folder` is scanned
   by several modules, from several processes under `partest`.

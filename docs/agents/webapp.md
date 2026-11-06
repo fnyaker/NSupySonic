@@ -2,7 +2,8 @@
 
 Reference notes for agents working on this area. Read [CLAUDE.md](../../CLAUDE.md) first: its process and rules apply here. Other areas: [docs/agents/](./).
 
-**Web app** (`webapp/`): Svelte 4 + Vite 5 SPA, hash routing (svelte-spa-router), consuming `/api`.
+**Web app** (`webapp/`): Svelte 5 + Vite 7 SPA, hash routing (svelte-spa-router), consuming `/api`.
+Existing components still use the legacy `$:` / `export let` syntax; follow the file you edit.
 Builds into `supysonic/webui/dist`. No emoji in the UI — all glyphs go through
 `src/components/Icon.svelte` (Lucide-style SVG). Home is **card-based** (mixes / recommended
 playlists / albums / artists), not track shelves. Podcasts have their own pages

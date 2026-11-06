@@ -2,6 +2,11 @@
 .git
 .github
 
+# Local agent/editor tooling — developer-only, never in the image
+.opencode
+opencode.json
+.claude
+
 # Secrets / local runtime config — must never enter the build context
 .env
 .env.*

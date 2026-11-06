@@ -100,6 +100,10 @@ class SourcesApiTestCase(_Case):
         self.fa = reg.register(fallback("fba", OPUS))
         self.fb = reg.register(fallback("fbb", MP3))
         reg.set_enabled("fake", False)  # the test server's own fake source
+        # The optional YouTube extra is installed on some dev machines and in
+        # the image; this case is about the admin's order for fba/fbb, so it
+        # must not gain a third fallback depending on what pip installed.
+        reg.set_enabled("youtube", False)
 
     def get(self):
         rv = self.client.get("/api/sources")

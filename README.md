@@ -389,6 +389,10 @@ export FLASK_APP="supysonic.web:create_application()"; flask run
 [docs/agents/](docs/agents/) is the long-form engineering guide, one file per area — architecture, the
 rules each subsystem learned the hard way, and the measurements behind them. [todo.md](todo.md) is the roadmap.
 
+[opencode.json](opencode.json) declares the project's subagents (`frontend`, `api`, `audio`,
+`animation`, `security`, `android`, `qa`, `devops`), with their prompts in `.opencode/prompts/`;
+[docs/agents/orchestration.md](docs/agents/orchestration.md) is the routing and handoff guide.
+
 ## Project layout
 
 ```
