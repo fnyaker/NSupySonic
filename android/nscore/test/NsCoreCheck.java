@@ -19,7 +19,7 @@ public class NsCoreCheck {
 
     public static void main(String[] args) throws Exception {
         System.loadLibrary("nscore");
-        if (NsCore.abiVersion() != 1) throw new AssertionError("abi " + NsCore.abiVersion());
+        if (NsCore.abiVersion() != 2) throw new AssertionError("abi " + NsCore.abiVersion());
         // Handles of 0 (freed, never made) are no-ops, never crashes.
         NsCore.analyserPush(0, 128);
         NsCore.analyserFree(0);
