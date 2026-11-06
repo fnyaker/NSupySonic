@@ -46,6 +46,7 @@ cd webapp && node test/party/run.mjs [--fmt flac]    # listen party end to end: 
 cd webapp && node test/remote/run.mjs [--phone] [--shots <dir>]   # remote control end to end: real server, owner + controller
                                                      # (make a link in the sheet, claim it, drive, drop the network, cut)
 cd webapp && node test/render/run.mjs --world piano --genre frenchcore --bpm 200   # render bench: contact sheet in test/render/out/
+cd webapp && node test/render/run.mjs --size 480x270   # the whole catalogue, one sheet per world, for a visual audit
 cd webapp && node test/render/run.mjs --check        # every world, held to the picture contracts (headless Chromium, no GPU needed)
 cd webapp && node test/render/run.mjs --strip        # the players' 40 px bar strip, photographed over the blurred cover
 cd webapp && node test/ui/run.mjs                    # the lists' main-thread cost in Chromium on a 8000-track library (needs npm run build):
@@ -94,6 +95,15 @@ supysonic-cli deezer embed --self-test                 # check the mel front-end
 # Docker (full stack: builds SPA + python image, runs entrypoint that creates admin + auto-sync)
 docker compose up --build                            # web player at :5722/app, Subsonic at :5722/rest
 docker build -t nsupysonic:dev . && docker/smoke.sh nsupysonic:dev   # what CI checks before pushing
+```
+
+The project's subagents are declared in `opencode.json`, with their prompts under
+`.opencode/prompts/` (`docs/agents/orchestration.md` is the routing guide):
+
+```sh
+opencode debug agents                        # what OpenCode loaded: ids, modes, permissions
+opencode debug config                        # which config files are in effect
+python -m unittest tests.test_agent_docs     # config, prompts and area notes stay in sync
 ```
 
 Note: the upstream `tests/` are unittest-based; there is no pytest config.

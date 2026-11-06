@@ -24,6 +24,11 @@ export default {
     const r = await Rhythm.fromBytes(wasmBytes(), sr);
     r.loadFamilies(familyTable());
     r.setLevel(2);
+    // PRODUCTION: the client never classifies the genre and never narrows the
+    // tempo band from a live reading (engine.js sets both off). The profile
+    // and the family come from the server's verdict, and only from it.
+    r.setClassify(false);
+    r.setLiveRange(false);
     const F = r.layout.fields;
     const at = (name) => F[name][0];
     const I = {
@@ -41,17 +46,17 @@ export default {
       const t0 = i / sr;
       if (!applied && (seed || genre) && t0 >= (seed ? seedAt : 0)) {
         applied = true;
-        // `served`: what the app does now with a measured verdict — the
-        // family pinned and the tempo locked (engine.js#adoptVerdict).
-        if (served && genre) {
+        // What the app does with a verdict: pin the family, apply its
+        // analysis profile and groove, narrow the tempo band. `served` also
+        // locks the measured tempo; a tag or a provisional figure does not.
+        if (genre) {
           r.pinFamily(familyIndex(genre));
           const p = profileOf(genre);
-          r.setProfile(p.lull, p.kicks);
+          r.setProfile(p.id, p.lull, p.kicks);
+          const range = tempoRangeFor(genre);
+          if (range) r.setRange(range[0], range[1]);
+          r.setGroove(grooveOf(genre));
         }
-        const range = genre ? tempoRangeFor(genre) : null;
-        if (range) r.setRange(range[0], range[1]);
-        r.setLiveRange(!genre);
-        if (genre) r.setGroove(grooveOf(genre));
         if (seed && served) r.lockTempo(seed);
         else if (seed) r.seed(seed, genre ? 0.9 : 0.7);
       }

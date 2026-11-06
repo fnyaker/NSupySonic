@@ -81,7 +81,9 @@ function recorder() {
   const g = {
     ops,
     createLinearGradient: () => grad,
+    createRadialGradient: () => grad,
     beginPath: () => ops.push("B"),
+    arc: () => {},
     moveTo: (x, y) => ops.push(x, y),
     lineTo: (x, y) => ops.push(x, y),
     quadraticCurveTo: (a, b, x, y) => ops.push(a, b, x, y),

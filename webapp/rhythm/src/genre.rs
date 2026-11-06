@@ -33,6 +33,12 @@ pub struct Genre {
     density: f32,
     onset_avg: f32,
     onset_var: f32,
+    /// The server-genre profile's gain for each channel (style.rs
+    /// AnalysisProfile `genre`): a hard-dance reading emphasises the buzz and
+    /// the screech, a club one the offbeat and the sub, an acoustic one the
+    /// lead. The numbers stay the same; what an animation is told to look at
+    /// changes with the genre.
+    gain: [f32; N],
     pub out: [f32; N],
 }
 
@@ -48,8 +54,14 @@ impl Genre {
             density: 0.0,
             onset_avg: 0.0,
             onset_var: 0.0,
+            gain: [1.0; N],
             out: [0.0; N],
         }
+    }
+
+    /// The profile's channel gains (style.rs AnalysisProfile).
+    pub fn set_gains(&mut self, gain: &[f32; N]) {
+        self.gain = *gain;
     }
 
     pub fn reset(&mut self) {
@@ -124,15 +136,15 @@ impl Genre {
         self.density += (rate - self.density) * (1.0 - (-dt / (beat * 2.0).fmax(0.2)).exp());
 
         self.out = [
-            self.lead,
-            self.buzz,
-            self.screech,
-            self.sub,
-            offbeat.clamp(0.0, 1.0),
+            (self.lead * self.gain[0]).clamp(0.0, 1.0),
+            (self.buzz * self.gain[1]).clamp(0.0, 1.0),
+            (self.screech * self.gain[2]).clamp(0.0, 1.0),
+            (self.sub * self.gain[3]).clamp(0.0, 1.0),
+            (offbeat.clamp(0.0, 1.0) * self.gain[4]).clamp(0.0, 1.0),
             // Four onsets a beat — sixteenths — is a full reading.
-            (self.density / 4.0).clamp(0.0, 1.0),
-            (kick_decay / 0.4).clamp(0.0, 1.0),
-            kick_grit.clamp(0.0, 1.0),
+            ((self.density / 4.0).clamp(0.0, 1.0) * self.gain[5]).clamp(0.0, 1.0),
+            ((kick_decay / 0.4).clamp(0.0, 1.0) * self.gain[6]).clamp(0.0, 1.0),
+            (kick_grit.clamp(0.0, 1.0) * self.gain[7]).clamp(0.0, 1.0),
         ];
     }
 }

@@ -433,7 +433,7 @@ function adoptVerdict(id, late = false) {
   const index = familyIndex(name);
   send({ t: "pin", i: index });
   const profile = profileOf(name);
-  send({ t: "profile", lull: profile.lull, kicks: profile.kicks });
+  send({ t: "profile", id: profile.id, lull: profile.lull, kicks: profile.kicks });
   // A sub-genre written at a tempo of its own (hitech, hard house…) narrows
   // its family's band; sent after the pin, which applied the family's.
   const range = tempoRangeFor(name);

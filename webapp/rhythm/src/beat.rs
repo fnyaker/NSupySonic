@@ -213,6 +213,19 @@ pub struct Grid {
     confidence: f32,
     tempo_conf: f32,
     offbeat: f32,
+    /// How much each kind of evidence may move the grid: kick, low, snare,
+    /// other. The bar-only kinds (mid, roll) stay at zero. The profile owns
+    /// this: a one-drop's skank and hats must not pull the phase off its kick.
+    kind_w: [f32; 6],
+    /// The confidence floor under which the grid is not published as locked.
+    lock_conf: f32,
+    /// A rubato/ambient profile: the grid may run, but no beat is published.
+    beatless: bool,
+    /// 0 (auto), 3 or 4: the server-genre profile's meter, when the genre is
+    /// 4/4 by construction.
+    meter_hint: u8,
+    /// The profile's phase-fit tolerance, in beats.
+    fit_tol: f64,
     pub out: BeatOut,
 }
 
@@ -273,6 +286,11 @@ impl Grid {
             confidence: 0.0,
             tempo_conf: 0.0,
             offbeat: 0.0,
+            kind_w: [1.0, 0.45, 0.4, 0.22, 0.0, 0.0],
+            lock_conf: 0.12,
+            beatless: false,
+            meter_hint: 0,
+            fit_tol: FIT_TOL,
             out: BeatOut::default(),
         };
         g.reset();
@@ -322,13 +340,29 @@ impl Grid {
         }
     }
 
-    fn kind_weight(kind: u8) -> f32 {
-        match kind {
-            KIND_KICK => 1.0,
-            KIND_LOW => 0.45,
-            KIND_SNARE => 0.4,
-            KIND_MID | KIND_ROLL => 0.0,
-            _ => 0.22,
+    fn kind_weight(&self, kind: u8) -> f32 {
+        self.kind_w.get(kind as usize).copied().unwrap_or(0.22)
+    }
+
+    /// The profile's evidence weights (kick, low, snare, other), the
+    /// confidence floor, and whether the grid may be published at all.
+    pub fn set_profile(&mut self, evidence: [f32; 4], lock_conf: f32, beatless: bool) {
+        // beat.rs KIND_*: 0 kick, 1 low, 2 full, 3 snare, 4 mid, 5 roll.
+        self.kind_w = [evidence[0], evidence[1], evidence[3], evidence[2], 0.0, 0.0];
+        self.lock_conf = lock_conf.fmax(0.0);
+        self.beatless = beatless;
+    }
+
+    /// The profile's meter (0 auto, 3 or 4).
+    /// The profile's phase-fit tolerance (beats).
+    pub fn set_fit_tol(&mut self, t: f32) {
+        self.fit_tol = (t as f64).clamp(0.05, 0.3);
+    }
+
+    pub fn set_meter_hint(&mut self, m: u8) {
+        self.meter_hint = if m == 3 || m == 4 { m } else { 0 };
+        if self.meter_hint != 0 {
+            self.meter = self.meter_hint as u32;
         }
     }
 
@@ -338,9 +372,27 @@ impl Grid {
         self.model = DOWN_MODELS[k.fmin(DOWN_MODELS.len() - 1)];
     }
 
+    /// The analysis profile's own bar cues (style.rs AnalysisProfile `down`):
+    /// the five DOWN_MODELS are the defaults, but the server's genre may say
+    /// that its kick is on beat 3 (a one-drop) or that its clap is all the mid
+    /// band has (a four-on-the-floor record).
+    pub fn set_down(&mut self, w: &[f32; 8]) {
+        self.model = DownModel {
+            chord: w[0],
+            kick: w[1],
+            low: w[2],
+            nov: w[3],
+            snare_down: w[4],
+            snare_back: w[5],
+            mid: w[6],
+            roll: w[7],
+        };
+    }
+
     /// The phase density of the recent evidence on the current grid.
     fn build_density(&mut self, now: f64) -> f32 {
         self.density = [0.0; BINS];
+        let kw = self.kind_w;
         let mem = (MEMORY_BEATS * self.p).fmax(MEMORY_MIN_S);
         let mut total = 0f32;
         for i in 0..self.ev_len {
@@ -349,7 +401,7 @@ impl Grid {
             if age > mem * 1.5 || age < -0.05 {
                 continue;
             }
-            let w = e.w * Self::kind_weight(e.kind) * (-age.fmax(0.0) / mem).exp() as f32;
+            let w = e.w * kw.get(e.kind as usize).copied().unwrap_or(0.22) * (-age.fmax(0.0) / mem).exp() as f32;
             let psi = wrap((e.t - self.t0) / self.p);
             let pos = (psi + 0.5) * BINS as f64;
             let c = pos.floor() as i64;
@@ -384,17 +436,17 @@ impl Grid {
             if age > mem || age < -0.05 {
                 continue;
             }
-            if Self::kind_weight(e.kind) <= 0.0 {
+            if self.kind_weight(e.kind) <= 0.0 {
                 continue;
             }
             let x = (e.t - self.t0) / self.p;
             let k = x.round();
             let psi = x - k;
-            if psi.abs() > FIT_TOL {
+            if psi.abs() > self.fit_tol {
                 continue;
             }
             // Kicks carry the fit; the rest only where there are no kicks.
-            let w = (e.w * Self::kind_weight(e.kind) * Self::kind_weight(e.kind)) as f64 * (-age / mem).exp();
+            let w = (e.w * self.kind_weight(e.kind) * self.kind_weight(e.kind)) as f64 * (-age / mem).exp();
             // Relative time, so the regression is well conditioned.
             let t = e.t - now;
             sw += w;
@@ -600,7 +652,7 @@ impl Grid {
             }
             let psi = wrap((e.t - t0) / p);
             if psi.abs() < 0.1 {
-                s += e.w * Self::kind_weight(e.kind);
+                s += e.w * self.kind_weight(e.kind);
             }
         }
         s
@@ -671,15 +723,21 @@ impl Grid {
             }
             let lvl = self.cur_level / n;
             self.prev_chroma = mean;
+            // The harmonic change and the level just measured belong to the
+            // beat that ENDED (`pending_beat`), not to the one that starts
+            // now: attributing them to the next beat made every chord change
+            // one beat late, and the bar with it. Measured: house read its
+            // downbeat 6% right, trance 5%, psytrance 4%, jazz 0%.
+            self.pending_chroma_change = if norm > 1e-6 { dist } else { 0.0 };
+            self.pending_level = lvl;
             // Score the PREVIOUS pending beat now that its surroundings are in.
             if self.pending_beat != i64::MIN {
                 self.score_beat(now);
             }
             self.pending_beat = idx;
             self.pending_t = self.t0 + (idx - self.idx_off) as f64 * self.p;
-            // The harmonic change measured across the boundary INTO this beat.
-            self.pending_chroma_change = if norm > 1e-6 { dist } else { 0.0 };
-            self.pending_level = lvl;
+            self.pending_chroma_change = 0.0;
+            self.pending_level = 0.0;
             self.cur_chroma = [0.0; 12];
             self.cur_level = 0.0;
             self.cur_frames = 0.0;
@@ -728,30 +786,33 @@ impl Grid {
             - mid * m.mid
             + (prev_roll - f.roll * 0.5) * m.roll;
         let back = f.snare * m.snare_back + mid * m.mid - f.chord * 0.3;
+        // A PHASE CLASS is scored, not a hypothesis. Beat b belongs to class
+        // b % M for ever; the bar's first beat is the class where the down cue
+        // consistently dominates. The four rotations of a periodic bar are the
+        // same multiset of values, so scoring hypotheses tied every offset and
+        // the loudest cue (the backbeat, a second kick) won: measured, house
+        // read its bar 6% right, trance 5%, psytrance 4%, jazz 0% even with
+        // the genre known.
+        let p4 = b.rem_euclid(4) as usize;
+        let p3 = b.rem_euclid(3) as usize;
+        let cue = down - back * 0.5;
         for i in 0..4 {
             self.score4[i] *= 0.965;
         }
         for i in 0..3 {
             self.score3[i] *= 0.965;
         }
-        // Hypothesis o: beats with (b - o) % M == 0 are downbeats.
-        for o in 0..4i64 {
-            let pos = (b - o).rem_euclid(4);
-            let s = match pos {
-                0 => down,
-                2 => down * 0.25,
-                _ => back,
-            };
-            self.score4[o as usize] += s;
-        }
-        for o in 0..3i64 {
-            let pos = (b - o).rem_euclid(3);
-            let s = if pos == 0 { down } else { back * 0.5 - down * 0.2 };
-            self.score3[o as usize] += s;
-        }
+        self.score4[p4] += cue;
+        self.score3[p3] += cue;
         let (o4, c4) = best_of(&self.score4);
         let (o3, c3) = best_of(&self.score3);
-        let want_meter = if c3 > c4 * 1.4 && c3 > 0.5 { 3 } else { 4 };
+        let want_meter = if self.meter_hint != 0 {
+            self.meter_hint as u32
+        } else if c3 > c4 * 1.4 && c3 > 0.5 {
+            3
+        } else {
+            4
+        };
         if want_meter != self.meter {
             self.meter = want_meter;
         }
@@ -815,7 +876,7 @@ impl Grid {
             return;
         }
         o.period = self.p as f32;
-        let locked = self.locked && self.confidence > 0.12;
+        let locked = !self.beatless && self.locked && self.confidence > self.lock_conf;
         o.locked = locked;
         o.bpm = if !locked {
             0.0
@@ -851,6 +912,32 @@ impl Grid {
         o.downbeat = o.beat && o.bar_pos == 0;
         o.since_beat = (t - self.last_beat_t).fmax(0.0) as f32;
         o.phrase_bar = ((cur - self.phrase_start).fmax(0) / m) as u32;
+    }
+
+    /// Move the grid onto the strongest evidence, once: a verdict arrives
+    /// behind the audio, and a one-drop whose first four seconds were read by
+    /// the generic profile can be locked half a beat off (on the skank). The
+    /// new profile's evidence weights are already in `kind_w`, so this is the
+    /// same mode the grid would have found had the verdict been known from
+    /// the first frame. The beat NUMBERS are kept (renumber), so the bars and
+    /// the phrase clocks move with the phase correction, not after it.
+    pub fn rephase(&mut self, now: f64) -> bool {
+        if !self.init {
+            return false;
+        }
+        let total = self.build_density(now);
+        if total <= 0.0 {
+            return false;
+        }
+        let (peak, _) = self.peak();
+        if peak.abs() < 0.1 {
+            return false;
+        }
+        let (old_t0, old_p) = (self.t0, self.p);
+        self.t0 += peak * self.p;
+        self.renumber(old_t0, old_p, now);
+        self.jump_count = 0;
+        true
     }
 
     pub fn period(&self) -> f64 {

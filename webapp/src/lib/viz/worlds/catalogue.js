@@ -59,7 +59,7 @@ export const WORLD_META = {
 
   // --- bass & breaks -----------------------------------------------------------
   wobble: { group: "bass", label: "Wobble", blurb: "Un tube de basse à la forme du LFO, son sillage derrière lui, et du courant qui crépite quand ça pousse." },
-  chrome: { group: "bass", label: "Chrome", blurb: "Une goutte de métal liquide qui se déforme sous les basses." },
+  chrome: { group: "bass", label: "Chrome", blurb: "Une masse de métal liquide dans un studio, qui se déforme sous les basses." },
   slices: { group: "bass", label: "Découpe", blurb: "Des bandes de papier découpé qui glissent et se décalent sur chaque break." },
 
   // --- urbain -----------------------------------------------------------------
@@ -73,7 +73,7 @@ export const WORLD_META = {
   discoball: { group: "groove", label: "Boule à facettes", blurb: "La boule tourne et balaie la salle de ses taches de lumière." },
   silk: { group: "groove", label: "Soie", blurb: "Des rubans de soie qui ondulent au fil de la voix." },
   artwork: { group: "groove", label: "Pochette vivante", blurb: "Les couleurs de la pochette, fondues en un dégradé qui respire." },
-  plasma: { group: "groove", label: "Lampe à lave", blurb: "De la cire éclairée de l'intérieur qui monte, fusionne et se sépare au groove." },
+  plasma: { group: "groove", label: "Lampe à plasma", blurb: "Un globe de plasma : des filaments qui frappent le verre, une décharge qui tourne au drop." },
 
   // --- rock & metal ------------------------------------------------------------
   stage: { group: "rock", label: "Scène", blurb: "Le groupe en contre-jour devant un mur LED qui montre la pochette, les faisceaux dans la fumée, la foule." },

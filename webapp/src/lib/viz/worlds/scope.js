@@ -25,7 +25,7 @@
 //   the trace is, never whether you can see it), a body, and a halo scaled
 //   by the tier's glow; wider as the columns get coarser, for the reason
 //   scope.js gives.
-//   THE PHOSPHOR is a time constant (70 ms), applied to this world's own last
+//   THE PHOSPHOR is a time constant (45 ms), applied to this world's own last
 //   frame: the trail lasts as long at a 30 fps cap as at 144.
 //   THE FACE — graticule, zero line, the trigger marker fading with the lock,
 //   "G" and "D" on the lanes — is drawn at a steady brightness under it.
@@ -41,7 +41,7 @@ import { ScopeCore } from "../core.js";
 // Must equal viz_scope.rs MAX_COLS: the texture is MAX_COLS pairs wide, one row
 // per channel, which is the core's own layout of the trace.
 const MAX_COLS = 4096;
-const PERSIST = 0.07;
+const PERSIST = 0.045;
 const DEFLECT = 0.88;
 const FALLBACK = { buffer: 4096, search: 40, points: 512, exact: false, fine: false, interp: false, divisions: 6, passes: 2 };
 const TINTS = { duo: 0, mono: 1, sweep: 2 };
@@ -93,29 +93,44 @@ vec3 face(vec2 p, int ch) {
   float px = uFrame.w;
   float inT = step(-0.002, tv.x) * step(tv.x, 1.002);
   float inV = step(abs(tv.y), 1.002);
-  // The frame, the halves and the divisions: three weights, so it reads as a
-  // scale rather than as graph paper — then the zero line, the brightest.
-  float fr = max(hair(min(abs(tv.x), abs(tv.x - 1.0)) * la, px) * inV, hair(abs(abs(tv.y) - 1.0) * lv, px) * inT);
+  // The screen's own frame: a thin bezel, then the scale.
+  float fr = max(hair(min(abs(tv.x), abs(tv.x - 1.0)) * la, px * 1.2) * inV,
+                 hair(abs(abs(tv.y) - 1.0) * lv, px * 1.2) * inT);
   float nd = max(1.0, uS1.z);
   float dv = abs(fract(tv.x * nd + 0.5) - 0.5) / nd * la;
-  float grid = max(hair(abs(abs(tv.y) - 0.5) * lv, px) * inT, hair(dv, px) * inV * inT);
-  float zero = hair(abs(tv.y) * lv, px * 1.3) * inT;
-  vec3 ink = mix(uPalMid.rgb, vec3(0.7), 0.5);
-  vec3 c = ink * (0.14 * fr + 0.07 * grid) + mix(uPalMid.rgb, vec3(0.9), 0.55) * 0.2 * zero;
+  float dh = abs(abs(tv.y) - 0.5) * lv;
+  float grid = max(hair(dh, px) * inT, hair(dv, px) * inV * inT);
+  // Ticks at the frame: the detail that makes it a scale rather than a grid.
+  float tickV = hair(dv, px) * step(0.90, abs(tv.y)) * inT * inV;
+  float tickH = hair(dh, px) * (step(tv.x, 0.035) + step(0.965, tv.x)) * inT * inV;
+  float zero = hair(abs(tv.y) * lv, px * 1.4) * inT;
+  // A smoked-glass face, very slightly lit from behind the trace.
+  float radial = exp(-length(vec2((tv.x - 0.5) * 1.15, tv.y * 1.3)) * 2.4);
+  vec3 ink = mix(uPalMid.rgb, vec3(0.72), 0.78);
+  vec3 c = ink * (0.10 * fr + 0.035 * grid + 0.06 * (tickV + tickH));
+  c += mix(uPalMid.rgb, vec3(0.95), 0.82) * 0.24 * zero;
+  c += uPalBg.rgb * 0.05 * radial;
   // The trigger marker, in the lane's own margin, fading with the lock.
   vec2 a = normalize(L0.zw);
   vec2 v = normalize(L1.xy);
   float s = uEv[4].y;
   vec2 q = vec2(dot(p - L0.xy, a), dot(p - L0.xy, v));
   float tri = max(max(q.x, -q.x - 1.4 * s), abs(q.y) - (-q.x) / 1.4);
-  c += mix(uPalHigh.rgb, vec3(1.0), 0.6) * 0.5 * uS0.z * (1.0 - smoothstep(-0.5 * px, 0.8 * px, tri));
-  // Which trace is which.
+  c += mix(uPalHigh.rgb, vec3(1.0), 0.7) * 0.7 * uS0.z * (1.0 - smoothstep(-0.5 * px, 0.8 * px, tri));
+  // A trigger LED at the top-left corner of each lane.
+  vec2 led = vec2((tv.x - 0.032) * la, (tv.y - 0.92) * lv);
+  float ledD = length(led);
+  float ledOn = 1.0 - smoothstep(0.5 * px, 1.5 * px, ledD);
+  c += mix(uPalHigh.rgb, vec3(1.0), 0.55) * ledOn * (0.22 + 0.78 * uS0.z) * 0.8;
+  // Which trace is which, with its own colour dot.
   float size = uEv[4].z;
-  vec2 anchor = uEv[4].x > 0.5 ? L0.xy + L0.zw * 0.012 + L1.xy * 0.9 : L0.xy - L1.xy * 0.88 + L0.zw * 0.012;
+  vec2 anchor = uEv[4].x > 0.5 ? L0.xy + L0.zw * 0.012 + L1.xy * 0.88 : L0.xy - L1.xy * 0.86 + L0.zw * 0.012;
   vec2 g = vec2(p.x - anchor.x, p.y - (anchor.y - size)) / size;
-  if (g.x > -0.2 && g.x < 1.2 && g.y > -0.2 && g.y < 1.2) {
+  if (g.x > -0.3 && g.x < 1.2 && g.y > -0.2 && g.y < 1.2) {
     float d = glyph(g, ch) * size;
-    c += mix(uPalMid.rgb, vec3(0.85), 0.6) * 0.3 * (1.0 - smoothstep(0.07 * size, 0.07 * size + 1.2 * px, d));
+    c += mix(uPalMid.rgb, vec3(0.9), 0.72) * 0.52 * (1.0 - smoothstep(0.07 * size, 0.07 * size + 1.2 * px, d));
+    float dotD = length(g - vec2(-0.16, 0.5)) * size;
+    c += mix((ch == 0) ? uPalLow.rgb : uPalHigh.rgb, vec3(1.0), 0.35) * 0.6 * (1.0 - smoothstep(0.5 * px, 1.2 * px, dotD));
   }
   return c;
 }
@@ -134,10 +149,10 @@ void main() {
   vec2 p = fragP();
   vec2 uv = gl_FragCoord.xy / uRes;
   // The phosphor: last frame's light, decayed by this frame's share of the
-  // 70 ms time constant; the face and the dark of the tube at their own
+  // 45 ms time constant; the face and the dark of the tube at their own
   // steady level under it.
   vec3 trail = prev(uv) * uS0.w;
-  vec3 steady = uPalBg.rgb * 0.6 + face(p, 0) + face(p, 1);
+  vec3 steady = uPalBg.rgb * 0.35 + face(p, 0) + face(p, 1);
   emit(max(trail, steady));
 }
 `,
@@ -197,14 +212,14 @@ vec4 sprite(vec2 q, vec4 c, float k) {
   float x = max(abs(q.x) * k - (k - 1.0), 0.0);
   float d = length(vec2(x, q.y));
   float pw = uFrame.w / max(1e-6, uS1.y);
-  float rc = 1.0 / 5.5;
-  float rb = 2.3 / 5.5;
+  float rc = 1.0 / 3.4;
+  float rb = 1.6 / 3.4;
   float core = 1.0 - smoothstep(rc - 0.6 * pw, rc + 0.6 * pw, d);
   float body = (1.0 - smoothstep(rb * 0.5, rb, d)) * uEv[4].w;
-  float halo = exp(-d * d * 3.5) * (1.0 - smoothstep(0.8, 1.0, d));
+  float halo = exp(-d * d * 4.5) * (1.0 - smoothstep(0.8, 1.0, d));
   float glowK = uS1.w;
   vec3 hot = mix(c.rgb, vec3(1.0), 0.72);
-  vec3 light = hot * core * 1.25 + c.rgb * (body * 0.5 + halo * 0.24) * glowK;
+  vec3 light = hot * core * 1.55 + c.rgb * (body * 0.35 + halo * 0.16) * glowK;
   return vec4(light, 1.0);
 }
 `,
@@ -278,7 +293,7 @@ vec4 sprite(vec2 q, vec4 c, float k) {
           rs.cols(cols);
         }
         const coarse = clamp(Math.sqrt(len / Math.max(1, want)), 1, 2.2);
-        const coreW = clamp(span * 0.02, 1, 2.6) * coarse;
+        const coreW = clamp(span * 0.013, 1, 2.2) * coarse;
         // Into p-space (y up, one unit = half the height) for the shaders.
         lanes.forEach((l, i) => {
           const o = i * 8;
@@ -293,7 +308,7 @@ vec4 sprite(vec2 q, vec4 c, float k) {
         });
         ev[16] = horiz ? 1 : 0;
         ev[17] = clamp(span * 0.07, 3.5, 9) * k;
-        ev[18] = clamp(Math.min(span, len) * 0.16, 9, 15) * k;
+        ev[18] = clamp(Math.min(span, len) * 0.20, 10, 16) * k;
         ev[19] = sc.passes > 2 ? 1 : 0;
         const intensity = clamp(opts.intensity ?? 0.7, 0, 1);
         state[0] = cols;
@@ -301,7 +316,7 @@ vec4 sprite(vec2 q, vec4 c, float k) {
         state[2] = locked;
         state[3] = Math.exp(-dt / PERSIST);
         state[4] = TINTS[opts.colour] ?? 0;
-        state[5] = ((coreW * 5.5) / 2) * k;
+        state[5] = ((coreW * 3.4) / 2) * k;
         state[6] = sc.divisions || 6;
         state[7] = glow;
       },

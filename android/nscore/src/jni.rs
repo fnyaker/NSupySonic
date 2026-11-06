@@ -155,7 +155,14 @@ pub unsafe extern "system" fn Java_org_nsupysonic_app_NsCore_analyserSetGroove(_
 #[no_mangle]
 pub unsafe extern "system" fn Java_org_nsupysonic_app_NsCore_analyserSetProfile(_: JEnv, _: JClass, h: i64, lull: f32, kicks: bool) {
     if let Some(a) = analyser(h) {
-        a.a.set_profile(lull, kicks);
+        a.a.set_profile(-1, lull, kicks);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn Java_org_nsupysonic_app_NsCore_analyserSetProfileId(_: JEnv, _: JClass, h: i64, id: i32, lull: f32, kicks: bool) {
+    if let Some(a) = analyser(h) {
+        a.a.set_profile(id, lull, kicks);
     }
 }
 

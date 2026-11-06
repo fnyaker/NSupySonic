@@ -77,7 +77,7 @@ class NsRhythm extends AudioWorkletProcessor {
         this.r.pinFamily(m.i);
         break;
       case "profile":
-        this.r.setProfile(m.lull, m.kicks);
+        this.r.setProfile(m.id ?? -1, m.lull, m.kicks);
         break;
       case "range":
         this.r.setRange(m.lo, m.hi);

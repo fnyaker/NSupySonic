@@ -122,8 +122,38 @@ green, merge without asking. No skipped or disabled test to get there.
 | `webapp/rhythm` (live analysis: kick, tempo, beat, pattern, style), `lib/audio/latency.js` | [rhythm.md](docs/agents/rhythm.md) |
 | `webapp/src/lib/viz/` (worlds, skins, shaders, scope, projector, eco mode) | [animations.md](docs/agents/animations.md) |
 | listen party, remote control | [party-remote.md](docs/agents/party-remote.md) |
+| a task that spans several areas, or you delegate to a subagent | [orchestration.md](docs/agents/orchestration.md) |
 
 Plans and studies: `docs/detachement-deezer.md`, `docs/multi-provider.md`, `todo.md`.
+
+## Équipe d'agents (OpenCode)
+
+Huit sous-agents sont définis dans `opencode.json` (prompts dans `.opencode/prompts/`). Invoque-les
+avec `@frontend`, `@api`, `@audio`, `@animation`, `@security`, `@android`, `@qa`, `@devops`, ou
+laisse l'agent principal déléguer d'après leur description.
+
+| Agent | Quand l'appeler |
+|---|---|
+| `frontend` | écran, composant, navigation, offline, copy FR, accessibilité, perf perçue |
+| `api` | route `/api` ou `/rest`, modèle/migration, config, job, fournisseur, archive Deezer |
+| `audio` | lecture, crossfade, trim, latence, ReplayGain, analyser/rhythm, tempo, party audio |
+| `animation` | world, shader, skin, oscilloscope, projector, éco, render bench |
+| `security` | audit, auth, CSRF, SSRF, CSP, secrets, capabilities, Android, dépendances |
+| `android` | Kotlin, WebView, bridge, lecteur natif, offline, updater, login Deezer |
+| `qa` | tests, benches, upgrade, CI rouge, mesures |
+| `devops` | Docker, compose, workflows, release, ffmpeg, multi-arch |
+
+- L'agent principal garde le besoin, le contrat entre zones, la vérification finale et le
+  commit/PR/merge. Un sous-agent ne commit pas, ne pousse pas et ne fusionne pas.
+- Un seul agent écrivain par fichier à la fois. `security` (audit) et `explore` peuvent lire en
+  parallèle du travail d'écriture.
+- Contrat d'abord : `api` définit la route/le payload/le schéma, `audio` le frame/la latence,
+  `android` la version du bridge ; `frontend` et `animation` consomment, sans inventer un contrat
+  parallèle.
+- Chaque sous-agent rend un rapport : besoin, changement/contrat, fichiers, mesures, vérifications,
+  docs, risques. Un rapport sans commande ni nombre n'est pas terminé.
+- Routage par chemin, protocole de passation, parallélisation, exemples et maintenance :
+  [orchestration.md](docs/agents/orchestration.md).
 
 ## Essential commands
 
@@ -142,7 +172,7 @@ Every browser bench and the rest: [commands.md](docs/agents/commands.md).
 
 ## Database / schema
 
-Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261101`); bump it
+Peewee ORM. `SCHEMA_VERSION` in `supysonic/db.py` is a date string (currently `20261102`); bump it
 and add a migration under `supysonic/schema/migration/{sqlite,postgres,mysql}/` when changing the
 schema. SQLite by default; Postgres/MySQL supported (PostgreSQL has no REPLACE: write portable
 upserts). A migration script is split on `;` AFTER its `--` comment lines are dropped

@@ -17,7 +17,7 @@ mod jni;
 
 /// Bumped whenever the JNI surface changes; `NsCore.kt` refuses a library whose
 /// number it does not know.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// The analyser plus the two buffers Kotlin reads and writes.
 pub struct Analyser {

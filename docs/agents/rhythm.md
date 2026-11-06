@@ -106,8 +106,10 @@ How it is built and shipped — each part of this is load-bearing:
   the rest from the coarse one, blended across 300-600 Hz, **interpolated between bins** where a log
   band is narrower than one (a single 512-point FFT is a 93 Hz bin, which is why every bar below
   ~400 Hz once drew as flat groups of identical bars) — and `style.js` keeps the TABLES: the family
-  list and each family's look, `tempoRangeFor`, `familyLook`, `LOOK_KEYS`. The classifier that reads
-  them is `style.rs`, loaded with `familyTable()` at start (`rhythm_load_families`).
+  list and each family's look, `tempoRangeFor`, `familyLook`, `LOOK_KEYS`, and the server-genre
+  ANALYSIS PROFILES (`PROFILES`, `profileTable`; see *A served genre is analysed its own way*). The
+  classifier that reads them is `style.rs`, loaded with `familyTable()` at start
+  (`rhythm_load_families`).
 
 The rules below were each measured on the JavaScript chain and ported rule for rule; the file names
 are the Rust ones.
@@ -312,6 +314,67 @@ heard it coasts through a lull. The eval's `served` scenario against `seeded`: F
 the ambient record locked 90% → 3% of the time. A PROVISIONAL tempo (Deezer's, before the file
 exists) is not locked: it seeds, below, and the tracker may still double it.
 
+**A SERVED GENRE IS ANALYSED ITS OWN WAY — AND THE CLIENT STILL NEVER CLASSIFIES.** The player
+starts the analyser with `classify: false` and `liveRange: false` (`engine.js`; the native analyser
+with `analyserSetClassify(h, false)`), and nothing on the device infers a genre. The served NAME
+selects an **analysis profile** (`style.js#profileOf` / `PROFILES`, appended to `familyTable()` and
+applied by `Analyzer::set_profile`): `genreOf(name)` → family → one of thirteen rows, `generic`
+when nothing was served. No audio selects or blends a row; a profile belongs to the track's verdict,
+so it is set on a track and never switched by a similarity reading mid-track. The family pin, the
+tempo lock, the evidence gate and the dynamics² freeze are unchanged. One row owns what genuinely
+differs by genre and is visible in an animation:
+
+- the bar model (`beat.rs`): the groove class, the METER (4/4 by construction for club, hard, bass,
+  urban, rock, metal, jazz and piano; auto for pop, where a waltz is a pop), and the **eight bar
+  cues themselves** — a house clap hidden under the kick, a one-drop kick on beat 3 and a
+  double-kick metal kit do not mark their bars with the same cues;
+- whether kicks are published at all, and the kick gate: score, level against the track's kicks,
+  beater dB and scale, landing Hz; the snare's flux floor and ratio;
+- the evidence allowed to move the grid: a one-drop's skank and hats must not pull the phase off
+  its kick (kick 1.0, low 0.1, snare 0.05, other 0.02), and the phase-fit tolerance widens to 0.20
+  beat so a sparse kick that sits 0.15 off the grid the skank built can still correct it;
+- the tempo policy: half-time (dubstep/trap/dnb, 70 → 140, 87 → 174) and double-time (a one-drop
+  tracked at 152 → 76). The policy only moves the level one octave TOWARD the served genre's band,
+  once, and never while a measured tempo is locked;
+- the arrangement (`pattern.rs`): the drop lull (a club drop vs a song form), the build gain and
+  threshold, the expected main-kick spacing (1.5 half-time, 2 one-drop) and the roll gain;
+- the eight genre-channel gains (`genre.rs`): a hard profile emphasises buzz/screech, a club one the
+  offbeat and the sub, an acoustic one the lead; the values stay 0..1.
+
+Measured on the eval's `genre` scenario (`node test/eval/rhythm-eval.mjs --engine wasm --scenario
+genre`), with the same instrument before (the old lull/kicks-only profile) and after: MEAN F70/F35
+94/94 → **98/97**, downbeat 30 → **70%**, kick P 87 → **91%**, main P 90 → **95%**. Per record:
+house down 38 → 79 (100 in `served`), trance 5 → 92, psytrance 4 → 98, techno 45 → 91, boombap
+5 → 90, metal 32 → 57; reggae F70 0 → **100**, down 0 → 88, kick precision 17 → 33; jazz down
+26 → 92 and kick precision 0 → 100 (the jazz profile publishes no kick), classical locked 79% → **0%**
+(the beatless row), ragtime piano down 33 → 51; dubstep F70 74 → 91, tempo 43 → 100, down 36 → 81;
+rock down 6 → 83. The `served` scenario (the verdict lands at 4 s, then the family is pinned and the
+tempo locked) F70/F35 95/94 → **98/98**, down 30 → 72, and reggae 0 → 100: a late verdict RE-PHASES the grid once
+on the new profile's evidence (`Grid::rephase`), keeping the beat numbers so the bars and phrase
+clocks move with the correction.
+
+Two faults in the bar reader itself were behind most of the weak downbeats, and both are fixed: the
+chroma change and the level measured for a beat were attributed to the NEXT beat (one beat late:
+house 6% right, trance 5%, psytrance 4%, jazz 0% even with the genre known), and the four offset
+hypotheses accumulated the same rotation of a periodic cue vector, so a loud backbeat or a second
+kick could win the bar. A phase class is now scored directly (`score4[b%4] += down - 0.5·back`),
+and the profile's eight cues decide what a downbeat looks like for that genre.
+
+What it does not fix yet: hardstyle 53 → 25 and trap 28 → 7 (their harmonic change sits off the
+bar's first beat; hardstyle's drums are symmetric, so the bar stays a 1-vs-3 ambiguity, and the
+profile now pins 4/4 instead of benefiting from an accidental 3/4 alignment), and trance loses one
+of its two drops (1/2 with one false) where the old club rule found both. These are the next rows to
+write, not a reason to re-open a local classifier. The reggae kick detector's remaining
+limit is stated: the bass note that sits ON a grid beat is still published as a kick (precision 33%);
+a pitch-sweep-only or f0-floor filter was measured and rejected, it lost true kicks (67 → 58%
+recall), so only the off-grid ones are gated (`kick_grid` 0.22 beat) and the grid/tempo keep every
+low event.
+
+The native path receives the same row: the page sends `{ t: "profile", id, lull, kicks }`,
+`rhythm-core.setProfile(id, lull, kicks)` forwards it, and `NativeAnalysis.kt` calls the new
+`analyserSetProfileId` JNI (nscore `ABI_VERSION` 2; the old two-field entry point remains for an
+older page).
+
 **THE SERVED TEMPO IS AN ANCHOR, NOT A HINT.** Somebody measured the whole track; an eight-second
 window deciding it disagrees is the single most common way this tracker was wrong, and the user's
 report of it was exact: *"it tries to overwrite the tempo the server sent it with nothing"*. Three
@@ -464,10 +527,11 @@ strike with no kick near it) never sees it, so four-on-the-floor reads the mid b
 beat against its neighbours (`KIND_MID`, bar evidence only — it never weighs on the beat's phase).
 Hard dance closes its bars and phrases on a ROLL, so the beat after one is a downbeat
 (`KIND_ROLL`); a broken beat and a live kit keep the kick on one and the snare on two and four. The
-model is the served genre's when that genre is believed (the same test as its tempo range), else the
-live one's once it sets the range, else the generic one. Measured: uptempo 59% to 99%, Krach 24%
-to 69% cold, dark uptempo 8% to 37%, techno 31% to 43% (seeded 45% to 57%), house with its genre
-known 6% to 38%; the whole eval 31% to 33% cold, 29% to 31% seeded, 25% to 30% with the genre known.
+model is the served genre's PROFILE's own eight cues (above) when one is served, the default row for
+a sub-genre groove with its own model, and the generic row otherwise. Measured on the `genre`
+scenario after the phase-class scoring and the profile rows: uptempo 100%, Krach 91%, dark uptempo
+87%, techno 96%, house 79%, frenchcore 81%, pieep 99%, gabber 91%; the whole eval's downbeat mean
+68% cold, 73% seeded, 70% with the genre known, 72% served (the one-model era read 31-33% cold).
 The clap cue speaks less in hard dance, where the lead's note attacks land in the mid band too
 (frenchcore 98% generic, 87% at four-on-the-floor's weight, 93% at its own). What it cannot do yet:
 an offbeat bass (pieep's tekk bass, techno's rumble) moves the harmonic change half a beat after the
